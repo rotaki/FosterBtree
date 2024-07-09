@@ -1,7 +1,6 @@
 mod inmem;
 mod txn_storage_trait;
 
-pub use crate::bp::prelude::{ContainerId, DatabaseId};
 pub use inmem::{InMemDummyTxnHandle, InMemIterator, InMemStorage};
 pub use txn_storage_trait::{
     ContainerOptions, ContainerType, DBOptions, ScanOptions, TxnOptions, TxnStorageStatus,
@@ -10,8 +9,8 @@ pub use txn_storage_trait::{
 
 pub mod prelude {
     pub use super::{
-        ContainerOptions, ContainerType, DBOptions, ScanOptions, TxnOptions, TxnStorageStatus,
-        TxnStorageTrait,
+        ContainerOptions, ContainerType, DBOptions, InMemDummyTxnHandle, InMemIterator,
+        InMemStorage, ScanOptions, TxnOptions, TxnStorageStatus, TxnStorageTrait,
     };
 }
 
@@ -19,6 +18,7 @@ pub mod prelude {
 mod tests {
     #[cfg(test)]
     use super::*;
+    use crate::bp::prelude::{ContainerId, DatabaseId};
     use std::{sync::Arc, thread};
 
     fn get_in_mem_storage() -> Arc<InMemStorage> {
