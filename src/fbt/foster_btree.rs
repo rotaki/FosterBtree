@@ -2147,13 +2147,13 @@ mod tests {
     ) {
         // check left and right are sorted and in the correct range
         assert!(left.iter().all(|&x| k0 <= x && x < k1));
-        if left.len() > 0 {
+        if !left.is_empty() {
             for i in 0..left.len() - 1 {
                 assert!(left[i] < left[i + 1]);
             }
         }
         assert!(right.iter().all(|&x| k1 <= x && x < k2));
-        if right.len() > 0 {
+        if !right.is_empty() {
             for i in 0..right.len() - 1 {
                 assert!(right[i] < right[i + 1]);
             }
@@ -2243,13 +2243,13 @@ mod tests {
     ) {
         // check left and right are sorted and in the correct range
         assert!(left.iter().all(|&x| k0 <= x && x < k1));
-        if left.len() > 0 {
+        if !left.is_empty() {
             for i in 0..left.len() - 1 {
                 assert!(left[i] < left[i + 1]);
             }
         }
         assert!(right.iter().all(|&x| k1 <= x && x < k2));
-        if right.len() > 0 {
+        if !right.is_empty() {
             for i in 0..right.len() - 1 {
                 assert!(right[i] < right[i + 1]);
             }
@@ -2356,13 +2356,13 @@ mod tests {
     ) {
         // check left and right are sorted and in the correct range
         assert!(left.iter().all(|&x| k0 <= x && x < k1));
-        if left.len() > 0 {
+        if !left.is_empty() {
             for i in 0..left.len() - 1 {
                 assert!(left[i] < left[i + 1]);
             }
         }
         assert!(right.iter().all(|&x| k1 <= x && x < k2));
-        if right.len() > 0 {
+        if !right.is_empty() {
             for i in 0..right.len() - 1 {
                 assert!(right[i] < right[i + 1]);
             }
@@ -2482,13 +2482,13 @@ mod tests {
     ) {
         // check left and right are sorted and in the correct range
         assert!(left.iter().all(|&x| k0 <= x && x < k1));
-        if left.len() > 0 {
+        if !left.is_empty() {
             for i in 0..left.len() - 1 {
                 assert!(left[i] < left[i + 1]);
             }
         }
         assert!(right.iter().all(|&x| k1 <= x && x < k2));
-        if right.len() > 0 {
+        if !right.is_empty() {
             for i in 0..right.len() - 1 {
                 assert!(right[i] < right[i + 1]);
             }
@@ -2650,7 +2650,7 @@ mod tests {
         child.run_consistency_checks(true);
         assert_eq!(root.active_slot_count(), 2);
         assert_eq!(root.level(), 1);
-        assert_eq!(root.has_foster_child(), false);
+        assert!(!root.has_foster_child());
         assert!(root.get_raw_key(1).is_empty());
         assert_eq!(deserialize_page_id(root.get_val(1)), Some(child.get_id()));
         assert_eq!(root.get_raw_key(2), &foster_key);
@@ -2660,8 +2660,8 @@ mod tests {
         );
         assert_eq!(child.active_slot_count(), 10);
         assert_eq!(child.level(), 0);
-        assert_eq!(child.has_foster_child(), false);
-        assert_eq!(child.is_left_most(), true);
+        assert!(!child.has_foster_child());
+        assert!(child.is_left_most());
         for i in 1..=child.active_slot_count() {
             let key = child.get_raw_key(i);
             let val = child.get_val(i);
@@ -2670,7 +2670,7 @@ mod tests {
         }
         assert_eq!(foster_child.active_slot_count(), 10);
         assert_eq!(foster_child.level(), 0);
-        assert_eq!(foster_child.has_foster_child(), false);
+        assert!(!foster_child.has_foster_child());
         for i in 1..=foster_child.active_slot_count() {
             let key = foster_child.get_raw_key(i);
             let val = foster_child.get_val(i);
@@ -2724,7 +2724,7 @@ mod tests {
         child.run_consistency_checks(false);
         assert_eq!(root.active_slot_count(), 10);
         assert_eq!(root.level(), 0);
-        assert_eq!(root.has_foster_child(), false);
+        assert!(!root.has_foster_child());
         assert!(child.empty());
         assert_eq!(child.active_slot_count(), 0);
         for i in 1..=root.active_slot_count() {
@@ -3190,8 +3190,8 @@ mod tests {
     fn setup_btree_empty<E: EvictionPolicy, T: MemPool<E>>(bp: Arc<T>) -> FosterBtree<E, T> {
         let (db_id, c_id) = (0, 0);
         let c_key = ContainerKey::new(db_id, c_id);
-        let btree = FosterBtree::new(c_key, bp.clone());
-        btree
+
+        FosterBtree::new(c_key, bp.clone())
     }
 
     #[rstest]
@@ -3417,9 +3417,9 @@ mod tests {
         }
         let start_key = to_bytes(2);
         let end_key = to_bytes(7);
-        let mut iter = btree.scan(&start_key, &end_key);
+        let iter = btree.scan(&start_key, &end_key);
         let mut count = 0;
-        while let Some((key, current_val)) = iter.next() {
+        for (key, current_val) in iter {
             let key = from_bytes(&key);
             println!(
                 "**************************** Scanning key {} **************************",
@@ -3432,9 +3432,9 @@ mod tests {
 
         let start_key = to_bytes(0);
         let end_key = to_bytes(10);
-        let mut iter = btree.scan(&start_key, &end_key);
+        let iter = btree.scan(&start_key, &end_key);
         let mut count = 0;
-        while let Some((key, current_val)) = iter.next() {
+        for (key, current_val) in iter {
             let key = from_bytes(&key);
             println!(
                 "**************************** Scanning key {} **************************",
@@ -3447,9 +3447,9 @@ mod tests {
 
         let start_key = [];
         let end_key = [];
-        let mut iter = btree.scan(&start_key, &end_key);
+        let iter = btree.scan(&start_key, &end_key);
         let mut count = 0;
-        while let Some((key, current_val)) = iter.next() {
+        for (key, current_val) in iter {
             let key = from_bytes(&key);
             println!(
                 "**************************** Scanning key {} **************************",
@@ -3484,11 +3484,7 @@ mod tests {
         }
         let filter1 = Box::new(|(_, value): (&[u8], &[u8])| -> bool {
             // Filter by value.
-            if value.len() == 512 {
-                true
-            } else {
-                false
-            }
+            value.len() == 512
         });
         let iter = btree.scan_with_filter(&[], &[], filter1);
         let mut count = 0;
@@ -3504,11 +3500,7 @@ mod tests {
         assert_eq!(count, 5);
         let filter2 = Box::new(|(key, _): (&[u8], &[u8])| -> bool {
             // Filter by key
-            if from_bytes(key) % 2 == 0 {
-                true
-            } else {
-                false
-            }
+            from_bytes(key) % 2 == 0
         });
         let iter = btree.scan_with_filter(&[], &[], filter2);
         let mut count = 0;
@@ -3549,12 +3541,12 @@ mod tests {
                 "**************************** Inserting {} key={:?} **************************",
                 i, key
             );
-            btree.insert(&key, val).unwrap();
+            btree.insert(key, val).unwrap();
         }
 
-        let mut iter = btree.scan(&[], &[]);
+        let iter = btree.scan(&[], &[]);
         let mut count = 0;
-        while let Some((key, current_val)) = iter.next() {
+        for (key, current_val) in iter {
             println!(
                 "**************************** Scanning key {:?} **************************",
                 key
@@ -3570,13 +3562,13 @@ mod tests {
                 "**************************** Getting key {:?} **************************",
                 key
             );
-            let current_val = btree.get(&key).unwrap();
+            let current_val = btree.get(key).unwrap();
             assert_eq!(current_val, *val);
         }
 
-        let mut iter = btree.scan(&[], &[]);
+        let iter = btree.scan(&[], &[]);
         let mut count = 0;
-        while let Some((key, current_val)) = iter.next() {
+        for (key, current_val) in iter {
             println!(
                 "**************************** Scanning key {:?} **************************",
                 key
@@ -3614,7 +3606,7 @@ mod tests {
                 "**************************** Inserting {} key={:?} **************************",
                 i, key
             );
-            btree.insert(&key, val).unwrap();
+            btree.insert(key, val).unwrap();
         }
 
         let (k, v) = &kvs[bug_occurred_at];
@@ -3622,7 +3614,7 @@ mod tests {
             "BUG INSERT ************** Inserting {} key={:?} **************************",
             bug_occurred_at, k
         );
-        btree.insert(&k, &v).unwrap();
+        btree.insert(k, v).unwrap();
 
         /*
         for (i, (key, val)) in kvs.iter().enumerate() {
@@ -3678,7 +3670,7 @@ mod tests {
                         log_trace!("Spawned");
                         for (key, val) in kvs_i.iter() {
                             log_trace!("Inserting key {:?}", key);
-                            btree.insert(&key, val).unwrap();
+                            btree.insert(key, val).unwrap();
                         }
                     });
                 }
@@ -3688,7 +3680,7 @@ mod tests {
         // Check if all keys have been inserted.
         for kvs_i in verify_kvs {
             for (key, val) in kvs_i.iter() {
-                let current_val = btree.get(&key).unwrap();
+                let current_val = btree.get(key).unwrap();
                 assert_eq!(current_val, *val);
             }
         }

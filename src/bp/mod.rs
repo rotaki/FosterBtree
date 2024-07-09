@@ -1,5 +1,4 @@
 mod buffer_frame;
-// mod buffer_pool;
 mod buffer_pool;
 mod eviction_policy;
 mod in_mem_pool;
@@ -7,12 +6,13 @@ mod mem_pool_trait;
 
 use std::sync::Arc;
 
-use eviction_policy::{DummyEvictionPolicy, EvictionPolicy};
-
-pub use buffer_frame::{FrameReadGuard, FrameWriteGuard};
+pub use buffer_frame::{BufferFrame, FrameReadGuard, FrameWriteGuard};
 pub use buffer_pool::BufferPool;
+pub use eviction_policy::{DummyEvictionPolicy, EvictionPolicy, LRUEvictionPolicy};
 pub use in_mem_pool::InMemPool;
-pub use mem_pool_trait::{ContainerKey, MemPool, MemPoolStatus, PageFrameKey};
+pub use mem_pool_trait::{
+    ContainerId, ContainerKey, DatabaseId, MemPool, MemPoolStatus, PageFrameKey,
+};
 use tempfile::TempDir;
 
 pub struct BufferPoolForTest<E: EvictionPolicy> {
@@ -73,9 +73,9 @@ pub fn get_in_mem_pool() -> Arc<InMemPool<DummyEvictionPolicy>> {
     Arc::new(InMemPool::new())
 }
 pub mod prelude {
-    pub use super::buffer_frame::{BufferFrame, FrameReadGuard, FrameWriteGuard};
-    pub use super::eviction_policy::{DummyEvictionPolicy, EvictionPolicy, LRUEvictionPolicy};
-    pub use super::mem_pool_trait::{ContainerKey, MemPool, MemPoolStatus, PageFrameKey};
-    pub use super::{get_in_mem_pool, get_test_bp, BufferPoolForTest};
-    pub use super::{BufferPool, InMemPool};
+    pub use super::{
+        get_in_mem_pool, get_test_bp, BufferFrame, BufferPool, BufferPoolForTest, ContainerId,
+        ContainerKey, DatabaseId, DummyEvictionPolicy, EvictionPolicy, FrameReadGuard,
+        FrameWriteGuard, InMemPool, LRUEvictionPolicy, MemPool, MemPoolStatus, PageFrameKey,
+    };
 }

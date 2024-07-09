@@ -265,7 +265,7 @@ mod tests {
     #[test]
     fn test_default_buffer_frame() {
         let buffer_frame = TestBufferFrame::new(0);
-        assert_eq!(buffer_frame.is_dirty.load(Ordering::Relaxed), false);
+        assert!(!buffer_frame.is_dirty.load(Ordering::Relaxed));
         assert!(unsafe { &*buffer_frame.key.get() }.is_none());
     }
 
@@ -274,7 +274,7 @@ mod tests {
         let buffer_frame = TestBufferFrame::new(0);
         let guard = buffer_frame.read();
         assert_eq!(guard.page_key(), &None);
-        assert_eq!(guard.dirty().load(Ordering::Relaxed), false);
+        assert!(!guard.dirty().load(Ordering::Relaxed));
         guard.iter().all(|&x| x == 0);
         assert!(!guard.dirty().load(Ordering::Relaxed));
     }
@@ -284,11 +284,11 @@ mod tests {
         let buffer_frame = TestBufferFrame::new(0);
         let mut guard = buffer_frame.write(true);
         assert_eq!(guard.page_key(), &None);
-        assert_eq!(guard.dirty().load(Ordering::Relaxed), true);
+        assert!(guard.dirty().load(Ordering::Relaxed));
         guard.iter().all(|&x| x == 0);
         guard[0] = 1;
         assert_eq!(guard[0], 1);
-        assert_eq!(guard.dirty().load(Ordering::Relaxed), true);
+        assert!(guard.dirty().load(Ordering::Relaxed));
     }
 
     #[test]
@@ -298,8 +298,8 @@ mod tests {
         let guard2 = buffer_frame.read();
         assert_eq!(guard1.page_key(), &None);
         assert_eq!(guard2.page_key(), &None);
-        assert_eq!(guard1.dirty().load(Ordering::Relaxed), false);
-        assert_eq!(guard2.dirty().load(Ordering::Relaxed), false);
+        assert!(!guard1.dirty().load(Ordering::Relaxed));
+        assert!(!guard2.dirty().load(Ordering::Relaxed));
         guard1.iter().all(|&x| x == 0);
         guard2.iter().all(|&x| x == 0);
         assert!(!guard1.dirty().load(Ordering::Relaxed));
@@ -353,15 +353,15 @@ mod tests {
             let guard = buffer_frame.read();
             let mut guard = guard.try_upgrade(true).unwrap();
             assert_eq!(guard.page_key(), &None);
-            assert_eq!(guard.dirty().load(Ordering::Relaxed), true);
+            assert!(guard.dirty().load(Ordering::Relaxed));
             guard.iter().all(|&x| x == 0);
             guard[0] = 1;
             assert_eq!(guard[0], 1);
-            assert_eq!(guard.dirty().load(Ordering::Relaxed), true);
+            assert!(guard.dirty().load(Ordering::Relaxed));
         }
         let guard = buffer_frame.read();
         assert_eq!(guard[0], 1);
-        assert_eq!(guard.dirty().load(Ordering::Relaxed), true);
+        assert!(guard.dirty().load(Ordering::Relaxed));
     }
 
     #[test]
@@ -371,7 +371,7 @@ mod tests {
         guard[0] = 1;
         let guard = guard.downgrade();
         assert_eq!(guard[0], 1);
-        assert_eq!(guard.dirty().load(Ordering::Relaxed), true);
+        assert!(guard.dirty().load(Ordering::Relaxed));
     }
 
     #[test]
@@ -379,18 +379,18 @@ mod tests {
         let buffer_frame = TestBufferFrame::new(0);
         // read -> write(dirty=false) -> read -> write(dirty=true) -> read
         let guard = buffer_frame.read();
-        assert_eq!(guard.dirty().load(Ordering::Relaxed), false);
+        assert!(!guard.dirty().load(Ordering::Relaxed));
         let mut guard = guard.try_upgrade(false).unwrap();
         guard[0] = 1;
-        assert_eq!(guard.dirty().load(Ordering::Relaxed), false);
+        assert!(!guard.dirty().load(Ordering::Relaxed));
         let guard = guard.downgrade();
-        assert_eq!(guard.dirty().load(Ordering::Relaxed), false);
+        assert!(!guard.dirty().load(Ordering::Relaxed));
         let mut guard = guard.try_upgrade(true).unwrap();
         guard[0] += 1;
-        assert_eq!(guard.dirty().load(Ordering::Relaxed), true);
+        assert!(guard.dirty().load(Ordering::Relaxed));
         let guard = guard.downgrade();
         assert_eq!(guard[0], 2);
-        assert_eq!(guard.dirty().load(Ordering::Relaxed), true);
+        assert!(guard.dirty().load(Ordering::Relaxed));
     }
 
     #[test]
