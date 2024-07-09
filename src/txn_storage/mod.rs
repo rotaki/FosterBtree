@@ -3,6 +3,7 @@ mod ondisk;
 mod txn_storage_trait;
 
 pub use inmem::{InMemDummyTxnHandle, InMemIterator, InMemStorage};
+pub use ondisk::{OnDiskDummyTxnHandle, OnDiskIterator, OnDiskStorage};
 pub use txn_storage_trait::{
     ContainerOptions, ContainerType, DBOptions, ScanOptions, TxnOptions, TxnStorageStatus,
     TxnStorageTrait,
@@ -11,7 +12,8 @@ pub use txn_storage_trait::{
 pub mod prelude {
     pub use super::{
         ContainerOptions, ContainerType, DBOptions, InMemDummyTxnHandle, InMemIterator,
-        InMemStorage, ScanOptions, TxnOptions, TxnStorageStatus, TxnStorageTrait,
+        InMemStorage, OnDiskDummyTxnHandle, OnDiskIterator, OnDiskStorage, ScanOptions, TxnOptions,
+        TxnStorageStatus, TxnStorageTrait,
     };
 }
 
