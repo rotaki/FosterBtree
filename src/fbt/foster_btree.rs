@@ -1684,12 +1684,12 @@ impl<E: EvictionPolicy, T: MemPool<E>> FosterBtree<E, T> {
         }
     }
 
-    pub fn scan(&self, l_key: &[u8], r_key: &[u8]) -> FosterBtreeRangeScanner<E, T> {
+    pub fn scan(self: &Arc<Self>, l_key: &[u8], r_key: &[u8]) -> FosterBtreeRangeScanner<E, T> {
         FosterBtreeRangeScanner::new(self, l_key, r_key)
     }
 
     pub fn scan_with_filter(
-        &self,
+        self: &Arc<Self>,
         l_key: &[u8],
         r_key: &[u8],
         filter: FilterFunc,
@@ -1703,8 +1703,8 @@ type FilterFunc = Box<dyn FnMut((&[u8], &[u8])) -> bool>;
 /// Scan the BTree in the range [l_key, r_key)
 /// To specify all keys, use an empty slice.
 /// (l_key, r_key) = (&[], &[]) means [-inf, +inf)
-pub struct FosterBtreeRangeScanner<'a, E: EvictionPolicy, T: MemPool<E>> {
-    btree: &'a FosterBtree<E, T>,
+pub struct FosterBtreeRangeScanner<E: EvictionPolicy + 'static, T: MemPool<E>> {
+    btree: Arc<FosterBtree<E, T>>, // Holds the reference to the btree
 
     // Scan parameters
     l_key: Vec<u8>,
@@ -1715,14 +1715,14 @@ pub struct FosterBtreeRangeScanner<'a, E: EvictionPolicy, T: MemPool<E>> {
     initialized: bool,
     finished: bool,
     prev_high_fence: Option<Vec<u8>>,
-    current_leaf_page: Option<FrameReadGuard<'a, E>>,
+    current_leaf_page: Option<FrameReadGuard<'static, E>>, // As long as btree is alive, bp is alive so the frame is alive
     current_slot_id: u16,
 }
 
-impl<'a, E: EvictionPolicy, T: MemPool<E>> FosterBtreeRangeScanner<'a, E, T> {
-    fn new(btree: &'a FosterBtree<E, T>, l_key: &[u8], r_key: &[u8]) -> Self {
+impl<E: EvictionPolicy, T: MemPool<E>> FosterBtreeRangeScanner<E, T> {
+    fn new(btree: &Arc<FosterBtree<E, T>>, l_key: &[u8], r_key: &[u8]) -> Self {
         Self {
-            btree,
+            btree: btree.clone(),
 
             l_key: l_key.to_vec(),
             r_key: r_key.to_vec(),
@@ -1737,13 +1737,13 @@ impl<'a, E: EvictionPolicy, T: MemPool<E>> FosterBtreeRangeScanner<'a, E, T> {
     }
 
     fn new_with_filter(
-        btree: &'a FosterBtree<E, T>,
+        btree: &Arc<FosterBtree<E, T>>,
         l_key: &[u8],
         r_key: &[u8],
         filter: FilterFunc,
     ) -> Self {
         Self {
-            btree,
+            btree: btree.clone(),
 
             l_key: l_key.to_vec(),
             r_key: r_key.to_vec(),
@@ -1789,6 +1789,9 @@ impl<'a, E: EvictionPolicy, T: MemPool<E>> FosterBtreeRangeScanner<'a, E, T> {
     fn initialize(&mut self) {
         // Traverse to the leaf page that contains the l_key
         let leaf_page = self.btree.traverse_to_leaf_for_read(self.l_key.as_slice());
+        let leaf_page = unsafe {
+            std::mem::transmute::<FrameReadGuard<E>, FrameReadGuard<'static, E>>(leaf_page)
+        };
         let mut slot = leaf_page.lower_bound_slot_id(&self.l_key());
         if slot == 0 {
             slot = 1; // Skip the lower fence
@@ -1803,12 +1806,15 @@ impl<'a, E: EvictionPolicy, T: MemPool<E>> FosterBtreeRangeScanner<'a, E, T> {
         let leaf_page = self
             .btree
             .traverse_to_leaf_for_read(self.prev_high_fence.as_ref().unwrap());
+        let leaf_page = unsafe {
+            std::mem::transmute::<FrameReadGuard<E>, FrameReadGuard<'static, E>>(leaf_page)
+        };
         self.current_leaf_page = Some(leaf_page);
         self.current_slot_id = 1; // Skip the lower fence
     }
 }
 
-impl<'a, E: EvictionPolicy, T: MemPool<E>> Iterator for FosterBtreeRangeScanner<'a, E, T> {
+impl<E: EvictionPolicy + 'static, T: MemPool<E>> Iterator for FosterBtreeRangeScanner<E, T> {
     type Item = (Vec<u8>, Vec<u8>);
 
     fn next(&mut self) -> Option<(Vec<u8>, Vec<u8>)> {
@@ -1855,6 +1861,11 @@ impl<'a, E: EvictionPolicy, T: MemPool<E>> Iterator for FosterBtreeRangeScanner<
                     .mem_pool
                     .get_page_for_read(foster_page_key)
                     .unwrap();
+                let foster_page = unsafe {
+                    std::mem::transmute::<FrameReadGuard<E>, FrameReadGuard<'static, E>>(
+                        foster_page,
+                    )
+                };
                 self.current_leaf_page = Some(foster_page);
                 self.current_slot_id = 1;
             } else {
@@ -3402,8 +3413,8 @@ mod tests {
     #[rstest]
     #[case::bp(get_test_bp::<LRUEvictionPolicy>(3))]
     #[case::in_mem(get_in_mem_pool())]
-    fn test_scan<E: EvictionPolicy, T: MemPool<E>>(#[case] bp: Arc<T>) {
-        let btree = setup_btree_empty(bp.clone());
+    fn test_scan<E: EvictionPolicy + 'static, T: MemPool<E>>(#[case] bp: Arc<T>) {
+        let btree = Arc::new(setup_btree_empty(bp.clone()));
         // Insert 1024 bytes
         let val = vec![3_u8; 1024];
         let order = [6, 3, 8, 1, 5, 7, 2, 4, 9, 0];
@@ -3464,8 +3475,8 @@ mod tests {
     #[rstest]
     #[case::bp(get_test_bp::<LRUEvictionPolicy>(3))]
     #[case::in_mem(get_in_mem_pool())]
-    fn test_scan_with_filter<E: EvictionPolicy, T: MemPool<E>>(#[case] bp: Arc<T>) {
-        let btree = setup_btree_empty(bp.clone());
+    fn test_scan_with_filter<E: EvictionPolicy + 'static, T: MemPool<E>>(#[case] bp: Arc<T>) {
+        let btree = Arc::new(setup_btree_empty(bp.clone()));
         // Insert 512 and 1024 bytes. Odd keys have 512 bytes and even keys have 1024 bytes.
         let val1 = vec![3_u8; 512];
         let val2 = vec![4_u8; 1024];
@@ -3519,7 +3530,7 @@ mod tests {
     #[rstest]
     #[case::bp(get_test_bp::<LRUEvictionPolicy>(100))]
     #[case::in_mem(get_in_mem_pool())]
-    fn test_insertion_stress<E: EvictionPolicy, T: MemPool<E>>(#[case] bp: Arc<T>) {
+    fn test_insertion_stress<E: EvictionPolicy + 'static, T: MemPool<E>>(#[case] bp: Arc<T>) {
         let num_keys = 10000;
         let key_size = 8;
         let val_min_size = 50;
@@ -3527,7 +3538,7 @@ mod tests {
         let mut kvs = RandomKVs::new(true, 1, num_keys, key_size, val_min_size, val_max_size);
         let kvs = kvs.pop().unwrap();
 
-        let btree = setup_btree_empty(bp.clone());
+        let btree = Arc::new(setup_btree_empty(bp.clone()));
 
         // Write kvs to file
         // let kvs_file = "kvs.dat";

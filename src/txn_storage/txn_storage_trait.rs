@@ -1,4 +1,7 @@
-use crate::bp::prelude::{ContainerId, DatabaseId};
+use crate::{
+    bp::prelude::{ContainerId, DatabaseId},
+    prelude::TreeStatus,
+};
 use std::collections::HashSet;
 
 #[derive(Debug, PartialEq)]
@@ -22,6 +25,9 @@ pub enum TxnStorageStatus {
 
     // Other errors
     Error,
+
+    // Access method errrors
+    AccessError(TreeStatus),
 }
 
 // To String conversion
@@ -38,6 +44,17 @@ impl From<TxnStorageStatus> for String {
             TxnStorageStatus::TxnConflict => "Txn conflict".to_string(),
             TxnStorageStatus::SystemAbort => "System abort".to_string(),
             TxnStorageStatus::Error => "Error".to_string(),
+            TxnStorageStatus::AccessError(status) => format!("Access error: {:?}", status),
+        }
+    }
+}
+
+impl From<TreeStatus> for TxnStorageStatus {
+    fn from(status: TreeStatus) -> TxnStorageStatus {
+        match status {
+            TreeStatus::NotFound => TxnStorageStatus::KeyNotFound,
+            TreeStatus::Duplicate => TxnStorageStatus::KeyExists,
+            other => TxnStorageStatus::AccessError(other),
         }
     }
 }
