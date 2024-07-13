@@ -60,6 +60,16 @@ impl<E: EvictionPolicy> MemPool<E> for BufferPoolForTest<E> {
     }
 
     #[inline]
+    fn stats(&self) -> String {
+        self.bp.stats()
+    }
+
+    #[inline]
+    fn reset_stats(&self) {
+        self.bp.reset_stats();
+    }
+
+    #[inline]
     fn reset(&self) {
         self.bp.reset();
     }

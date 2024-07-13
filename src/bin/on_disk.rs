@@ -1,5 +1,5 @@
 use clap::Parser;
-use fbtree::{bench_utils::*, random::RandomKVs};
+use fbtree::{bench_utils::*, bp::MemPool, random::RandomKVs};
 
 fn main() {
     let bench_params = BenchParams::parse();
@@ -30,4 +30,5 @@ fn main() {
         println!("Btree page stats: ");
         println!("{}", tree.page_stats(false));
     }
+    println!("{}", tree.mem_pool.stats());
 }

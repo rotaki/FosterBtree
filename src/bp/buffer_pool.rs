@@ -16,7 +16,7 @@ use std::{
     collections::HashMap,
     ops::{Deref, DerefMut},
     path::PathBuf,
-    sync::atomic::Ordering,
+    sync::atomic::{AtomicUsize, Ordering},
 };
 
 const EVICTION_SCAN_DEPTH: usize = 10;
@@ -197,6 +197,51 @@ mod stat {
 #[cfg(feature = "stat")]
 use stat::*;
 
+/// Statistics kept by the buffer pool.
+/// These statistics are used for decision making.
+pub struct RuntimeStats {
+    new_page: AtomicUsize,
+    read_count: AtomicUsize,
+    write_count: AtomicUsize,
+}
+
+impl RuntimeStats {
+    pub fn new() -> Self {
+        RuntimeStats {
+            new_page: AtomicUsize::new(0),
+            read_count: AtomicUsize::new(0),
+            write_count: AtomicUsize::new(0),
+        }
+    }
+
+    pub fn inc_new_page(&self) {
+        self.new_page.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn inc_read_count(&self) {
+        self.read_count.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn inc_write_count(&self) {
+        self.write_count.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn to_string(&self) -> String {
+        format!(
+            "New Page: {}\nRead Count: {}\nWrite Count: {}\n",
+            self.new_page.load(Ordering::Relaxed),
+            self.read_count.load(Ordering::Relaxed),
+            self.write_count.load(Ordering::Relaxed)
+        )
+    }
+
+    pub fn clear(&self) {
+        self.new_page.store(0, Ordering::Relaxed);
+        self.read_count.store(0, Ordering::Relaxed);
+        self.write_count.store(0, Ordering::Relaxed);
+    }
+}
+
 pub struct Frames<T: EvictionPolicy> {
     num_frames: usize,
     eviction_candidates: [usize; EVICTION_SCAN_DEPTH],
@@ -294,6 +339,7 @@ pub struct BufferPool<T: EvictionPolicy> {
     frames: UnsafeCell<Frames<T>>,
     id_to_index: UnsafeCell<HashMap<PageKey, usize>>, // (c_id, page_id) -> index
     container_to_file: UnsafeCell<HashMap<ContainerKey, FileManager>>,
+    runtime_stats: RuntimeStats,
 }
 
 impl<T> BufferPool<T>
@@ -333,6 +379,7 @@ where
             id_to_index: UnsafeCell::new(HashMap::new()),
             frames: UnsafeCell::new(Frames::new(num_frames)),
             container_to_file: UnsafeCell::new(container),
+            runtime_stats: RuntimeStats::new(),
         })
     }
 
@@ -409,6 +456,8 @@ where
                     let file = container_to_file
                         .get(&old_key.c_key)
                         .ok_or(MemPoolStatus::FileManagerNotFound)?;
+
+                    self.runtime_stats.inc_write_count();
                     file.write_page(old_key.page_id, &guard)?;
                 } else {
                     #[cfg(feature = "stat")]
@@ -428,6 +477,8 @@ where
                 let file = container_to_file
                     .get(&key.c_key)
                     .ok_or(MemPoolStatus::FileManagerNotFound)?;
+
+                self.runtime_stats.inc_read_count();
                 file.read_page(key.page_id, &mut guard)?;
             };
 
@@ -458,6 +509,7 @@ where
         c_key: ContainerKey,
     ) -> Result<FrameWriteGuard<T>, MemPoolStatus> {
         log_debug!("Page create: {}", c_key);
+        self.runtime_stats.inc_new_page();
 
         self.exclusive();
 
@@ -726,6 +778,7 @@ where
                 // swap is required to avoid concurrent flushes
                 let key = frame.page_key().unwrap();
                 if let Some(file) = container_to_file.get(&key.c_key) {
+                    self.runtime_stats.inc_write_count();
                     file.write_page(key.page_id, &frame)?;
                 } else {
                     self.release_shared();
@@ -736,6 +789,16 @@ where
 
         self.release_shared();
         Ok(())
+    }
+
+    // Just return the runtime stats
+    pub fn stats(&self) -> String {
+        self.runtime_stats.to_string()
+    }
+
+    // Reset the runtime stats
+    pub fn reset_stats(&self) {
+        self.runtime_stats.clear();
     }
 
     /// Reset the buffer pool to its initial state.
@@ -787,6 +850,14 @@ where
 
     fn get_page_for_read(&self, key: PageFrameKey) -> Result<FrameReadGuard<T>, MemPoolStatus> {
         BufferPool::get_page_for_read(self, key)
+    }
+
+    fn stats(&self) -> String {
+        BufferPool::stats(self)
+    }
+
+    fn reset_stats(&self) {
+        BufferPool::reset_stats(self);
     }
 
     fn reset(&self) {

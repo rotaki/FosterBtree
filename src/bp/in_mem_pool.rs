@@ -136,6 +136,20 @@ impl<T: EvictionPolicy> MemPool<T> for InMemPool<T> {
         }
     }
 
+    fn stats(&self) -> String {
+        "Num pages: ".to_string()
+            + &unsafe { &*self.frames.get() }.len().to_string()
+            + "\n"
+            + "Num containers: "
+            + &unsafe { &*self.container_page_count.get() }
+                .len()
+                .to_string()
+    }
+
+    fn reset_stats(&self) {
+        // Do nothing
+    }
+
     fn reset(&self) {
         self.exclusive();
         let frames = unsafe { &mut *self.frames.get() };
