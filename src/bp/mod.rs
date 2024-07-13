@@ -70,6 +70,11 @@ impl<E: EvictionPolicy> MemPool<E> for BufferPoolForTest<E> {
     }
 
     #[inline]
+    fn flush_all(&self) -> Result<(), MemPoolStatus> {
+        self.bp.flush_all()
+    }
+
+    #[inline]
     fn reset(&self) {
         self.bp.reset();
     }

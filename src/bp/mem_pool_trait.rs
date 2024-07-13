@@ -137,9 +137,14 @@ pub trait MemPool<T: EvictionPolicy>: Sync + Send {
     /// This function assumes that a page is already created and either in memory or on disk.
     fn get_page_for_read(&self, key: PageFrameKey) -> Result<FrameReadGuard<T>, MemPoolStatus>;
 
+    /// Return the runtime statistics of the memory pool.
     fn stats(&self) -> String;
 
+    /// Reset the runtime statistics of the memory pool.
     fn reset_stats(&self);
+
+    /// Persist all the dirty pages to disk.
+    fn flush_all(&self) -> Result<(), MemPoolStatus>;
 
     /// Reset the memory pool.
     /// This function will reset the memory pool to its initial state.

@@ -150,6 +150,10 @@ impl<T: EvictionPolicy> MemPool<T> for InMemPool<T> {
         // Do nothing
     }
 
+    fn flush_all(&self) -> Result<(), MemPoolStatus> {
+        Ok(())
+    }
+
     fn reset(&self) {
         self.exclusive();
         let frames = unsafe { &mut *self.frames.get() };

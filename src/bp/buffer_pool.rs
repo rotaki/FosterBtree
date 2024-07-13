@@ -860,6 +860,10 @@ where
         BufferPool::reset_stats(self);
     }
 
+    fn flush_all(&self) -> Result<(), MemPoolStatus> {
+        BufferPool::flush_all(self)
+    }
+
     fn reset(&self) {
         BufferPool::reset(self);
     }
