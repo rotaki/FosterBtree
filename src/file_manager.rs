@@ -50,6 +50,7 @@ pub mod sync_write {
         _path: String,
         file: Mutex<File>,
         num_pages: AtomicU32,
+        io_count: (AtomicU32, AtomicU32), // (Read, Write)
     }
 
     impl FileManager {
@@ -65,6 +66,7 @@ pub mod sync_write {
                 _path: path.as_ref().to_str().unwrap().to_string(),
                 file: Mutex::new(file),
                 num_pages: AtomicU32::new(num_pages as PageId),
+                io_count: (AtomicU32::new(0), AtomicU32::new(0)),
             })
         }
 
@@ -76,13 +78,25 @@ pub mod sync_write {
             self.num_pages.fetch_sub(1, Ordering::AcqRel)
         }
 
-        #[allow(dead_code)]
         pub fn get_stats(&self) -> String {
-            "Stat is disabled".to_string()
+            let _guard = self.file.lock().unwrap();
+            format!(
+                "Num pages: {}, Read count: {}, Write count: {}",
+                self.num_pages.load(Ordering::Acquire),
+                self.io_count.0.load(Ordering::Acquire),
+                self.io_count.1.load(Ordering::Acquire)
+            )
+        }
+
+        pub fn reset_stats(&self) {
+            let _guard = self.file.lock().unwrap();
+            self.io_count.0.store(0, Ordering::Release);
+            self.io_count.1.store(0, Ordering::Release);
         }
 
         pub fn read_page(&self, page_id: PageId, page: &mut Page) -> Result<(), FMError> {
             let mut file = self.file.lock().unwrap();
+            self.io_count.0.fetch_add(1, Ordering::AcqRel);
             log_trace!("Reading page: {} from file: {:?}", page_id, self.path);
             file.seek(SeekFrom::Start((page_id * PAGE_SIZE as PageId) as u64))
                 .map_err(|_| FMError::Seek)?;
@@ -95,6 +109,7 @@ pub mod sync_write {
         pub fn write_page(&self, page_id: PageId, page: &Page) -> Result<(), FMError> {
             let mut file = self.file.lock().unwrap();
             log_trace!("Writing page: {} to file: {:?}", page_id, self.path);
+            self.io_count.1.fetch_add(1, Ordering::AcqRel);
             debug_assert!(page.get_id() == page_id, "Page id mismatch");
             file.seek(SeekFrom::Start((page_id * PAGE_SIZE as PageId) as u64))
                 .map_err(|_| FMError::Seek)?;
