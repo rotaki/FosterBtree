@@ -529,7 +529,6 @@ where
                     log_debug!("Page fast path write latch failed: {}", key);
                     #[cfg(feature = "stat")]
                     inc_local_bp_latch_failures();
-                    return Err(MemPoolStatus::FrameWriteLatchGrantFailed);
                 }
             } else {
                 // The frame id is out of bounds.
@@ -638,7 +637,6 @@ where
                     log_debug!("Page fast path read latch failed: {}", key);
                     #[cfg(feature = "stat")]
                     inc_local_bp_latch_failures();
-                    return Err(MemPoolStatus::FrameReadLatchGrantFailed);
                 }
             } else {
                 // The frame id is out of bounds.
