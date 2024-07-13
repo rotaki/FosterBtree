@@ -37,5 +37,8 @@ jobs:
     - name: Check Formatting
       run: cargo fmt --all -- --check
 
-    - name: Run cargo test
+    - name: Run cargo test (sync io)
       run: cargo test --verbose
+
+    - name: Run cargo test (async io)
+      run: cargo test --verbose --features "async_write"
