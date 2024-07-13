@@ -29,25 +29,13 @@ impl From<io::Error> for FMError {
     }
 }
 
-#[cfg(any(
-    not(target_os = "linux"),
-    not(feature = "async_write"),
-    target_arch = "wasm32"
-))]
-pub type FileManager = not_linux::FileManager;
-#[cfg(all(
-    target_os = "linux",
-    feature = "async_write",
-    not(target_arch = "wasm32")
-))]
-pub type FileManager = linux::FileManager;
+#[cfg(any(not(feature = "async_write"), target_arch = "wasm32"))]
+pub type FileManager = sync_write::FileManager;
+#[cfg(all(feature = "async_write", not(target_arch = "wasm32")))]
+pub type FileManager = async_write::FileManager;
 
-#[cfg(any(
-    not(target_os = "linux"),
-    not(feature = "async_write"),
-    target_arch = "wasm32"
-))]
-pub mod not_linux {
+#[cfg(any(not(feature = "async_write"), target_arch = "wasm32"))]
+pub mod sync_write {
     use super::FMError;
     #[allow(unused_imports)]
     use crate::log;
@@ -123,12 +111,8 @@ pub mod not_linux {
     }
 }
 
-#[cfg(all(
-    target_os = "linux",
-    feature = "async_write",
-    not(target_arch = "wasm32")
-))]
-pub mod linux {
+#[cfg(all(feature = "async_write", not(target_arch = "wasm32")))]
+pub mod async_write {
     use super::FMError;
     #[allow(unused_imports)]
     use crate::log;
