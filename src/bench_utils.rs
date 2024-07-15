@@ -15,7 +15,7 @@ use crate::{
     random::{RandomKVs, RandomOp},
 };
 
-#[derive(Debug, Parser)]
+#[derive(Debug, Parser, Clone)]
 pub struct BenchParams {
     /// Number of threads.
     #[clap(short = 't', long = "num_threads", default_value = "1")]
