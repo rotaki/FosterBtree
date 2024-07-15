@@ -15,6 +15,7 @@ mod rwlatch;
 pub use logger::log;
 
 pub mod prelude {
+    pub use crate::append_only_store::prelude::*;
     pub use crate::bp::prelude::*;
     pub use crate::fbt::prelude::*;
     pub use crate::page::*;

@@ -14,6 +14,10 @@ use crate::{
     prelude::{ContainerKey, EvictionPolicy, MemPool, PageFrameKey},
 };
 
+pub mod prelude {
+    pub use super::{AccessMethodStatus, AppendOnlyStore, AppendOnlyStoreScanner};
+}
+
 #[derive(Debug, PartialEq)]
 pub enum AccessMethodStatus {
     PageFull,

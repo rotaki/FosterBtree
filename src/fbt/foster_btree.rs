@@ -3602,9 +3602,7 @@ mod tests {
     #[rstest]
     #[case::bp(get_test_bp::<LRUEvictionPolicy>(100))]
     #[case::in_mem(get_in_mem_pool())]
-    fn test_insertion_stress<E: EvictionPolicy + 'static, T: MemPool<E>>(
-        #[case] bp: Arc<T>,
-    ) {
+    fn test_insertion_stress<E: EvictionPolicy + 'static, T: MemPool<E>>(#[case] bp: Arc<T>) {
         let num_keys = 10000;
         let key_size = 8;
         let val_min_size = 50;
