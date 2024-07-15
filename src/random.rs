@@ -73,6 +73,7 @@ pub struct RandomKVs {
 impl RandomKVs {
     pub fn new(
         unique_keys: bool,
+        sorted: bool,
         partitions: usize,
         num_keys: usize,
         key_size: usize,
@@ -110,6 +111,9 @@ impl RandomKVs {
                     to_bytes(*key, key_size),
                     gen_random_byte_vec(val_min_size, val_max_size),
                 ));
+            }
+            if sorted {
+                kvs_i.sort_by(|(k1, _), (k2, _)| k1.cmp(k2));
             }
             kvs.push(Self { kvs: kvs_i });
         }

@@ -8,6 +8,7 @@ fn main() {
 
     let kvs = RandomKVs::new(
         bench_params.unique_keys,
+        false,
         bench_params.num_threads,
         bench_params.num_keys,
         bench_params.key_size,

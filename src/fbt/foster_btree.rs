@@ -702,7 +702,7 @@ fn fix_frame_id<'a, E: EvictionPolicy>(
 /// Split this page into two pages.
 /// The foster child will be the right page of this page after the split.
 /// Returns the foster key
-fn split<E: EvictionPolicy>(
+fn split_even<E: EvictionPolicy>(
     this: &mut FrameWriteGuard<E>,
     foster_child: &mut FrameWriteGuard<E>,
 ) -> Vec<u8> {
@@ -757,6 +757,46 @@ fn split<E: EvictionPolicy>(
     foster_key
 }
 
+/// Split this page into two pages with minimum moving slots
+/// from this to foster child.
+fn split_min_move<E: EvictionPolicy>(
+    this: &mut FrameWriteGuard<E>,
+    foster_child: &mut FrameWriteGuard<E>,
+) -> Vec<u8> {
+    #[cfg(feature = "stat")]
+    inc_local_stat_success(OpType::Split);
+
+    // Just move one slot from this to foster child.
+    if this.active_slot_count() == 0 {
+        panic!("Cannot split an empty page");
+    }
+
+    let moving_slot_id = this.high_fence_slot_id() - 1;
+    let moving_key = this.get_raw_key(moving_slot_id);
+    let moving_val = this.get_val(moving_slot_id);
+
+    foster_child.init();
+    foster_child.set_level(this.level());
+    foster_child.set_low_fence(&moving_key);
+    foster_child.set_high_fence(this.get_raw_key(this.high_fence_slot_id()));
+    foster_child.set_right_most(this.is_right_most());
+    let res = foster_child.insert(&moving_key, &moving_val, false);
+    assert!(res);
+    foster_child.set_has_foster_child(this.has_foster_child());
+
+    let foster_key = moving_key.to_vec();
+    // Remove the moved slot from this
+    this.remove_at(moving_slot_id);
+
+    let foster_child_id =
+        InnerVal::new_with_frame_id(foster_child.get_id(), foster_child.frame_id());
+    let res = this.insert(&foster_key, &foster_child_id.to_bytes(), false);
+    assert!(res);
+    this.set_has_foster_child(true);
+
+    foster_key
+}
+
 /// Splitting the page and insert the key-value pair in the appropriate page.
 ///
 /// We want to insert the key-value pair into the page.
@@ -771,7 +811,7 @@ fn split_insert<E: EvictionPolicy>(
     key: &[u8],
     value: &[u8],
 ) {
-    let foster_key = split(this, foster_child);
+    let foster_key = split_even(this, foster_child);
 
     // Now, we have two pages: this and foster_child.
     // We need to decide which page to insert the key-value pair.
@@ -1205,6 +1245,37 @@ impl<E: EvictionPolicy, T: MemPool<E>> FosterBtree<E, T> {
         }
     }
 
+    pub fn bulk_insert_create(
+        c_key: ContainerKey,
+        mem_pool: Arc<T>,
+        iter: impl Iterator<Item = (Vec<u8>, Vec<u8>)>,
+    ) -> Self {
+        let mut root = mem_pool.create_new_page_for_write(c_key).unwrap();
+        root.init_as_root();
+        let root_key = root.page_frame_key().unwrap();
+
+        // Keep iterating the iter and appending the key-value pairs to the root page.
+        let mut current_page = root;
+        for (key, value) in iter {
+            if !current_page.insert(&key, &value, false) {
+                // Create a new page and split the current page.
+                let mut new_page = mem_pool.create_new_page_for_write(c_key).unwrap();
+                let foster_key = split_min_move(&mut current_page, &mut new_page);
+                assert!(foster_key < key);
+                // Insert it into new page. If it fails, panic.
+                assert!(new_page.insert(&key, &value, false));
+                current_page = new_page;
+            }
+        }
+
+        FosterBtree {
+            c_key,
+            root_key,
+            mem_pool: mem_pool.clone(),
+            phantom: PhantomData,
+        }
+    }
+
     /// Thread-unsafe traversal of the BTree
     pub fn page_traverser(&self) -> FosterBTreePageTraversal<E, T> {
         FosterBTreePageTraversal::new(self)
@@ -1355,7 +1426,7 @@ impl<E: EvictionPolicy, T: MemPool<E>> FosterBtree<E, T> {
                 }
             };
             let mut foster_child = self.allocate_page();
-            split(&mut this, &mut foster_child);
+            split_even(&mut this, &mut foster_child);
             return (Some(OpType::Split), this.downgrade(), child);
         }
         let op = if is_foster_relationship {
@@ -2101,6 +2172,7 @@ impl PageVisitor for PageStatsGenerator {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
     use std::{fs::File, sync::Arc, thread};
 
     use crate::fbt::foster_btree::{deserialize_page_id, InnerVal};
@@ -3530,12 +3602,22 @@ mod tests {
     #[rstest]
     #[case::bp(get_test_bp::<LRUEvictionPolicy>(100))]
     #[case::in_mem(get_in_mem_pool())]
-    fn test_insertion_stress<E: EvictionPolicy + 'static, T: MemPool<E>>(#[case] bp: Arc<T>) {
+    fn test_insertion_stress<E: EvictionPolicy + 'static, T: MemPool<E>>(
+        #[case] bp: Arc<T>,
+    ) {
         let num_keys = 10000;
         let key_size = 8;
         let val_min_size = 50;
         let val_max_size = 100;
-        let mut kvs = RandomKVs::new(true, 1, num_keys, key_size, val_min_size, val_max_size);
+        let mut kvs = RandomKVs::new(
+            true,
+            false,
+            1,
+            num_keys,
+            key_size,
+            val_min_size,
+            val_max_size,
+        );
         let kvs = kvs.pop().unwrap();
 
         let btree = Arc::new(setup_btree_empty(bp.clone()));
@@ -3650,6 +3732,43 @@ mod tests {
     #[rstest]
     #[case::bp(get_test_bp::<LRUEvictionPolicy>(100))]
     #[case::in_mem(get_in_mem_pool())]
+    fn test_bulk_insert_create<E: EvictionPolicy, T: MemPool<E>>(#[case] bp: Arc<T>) {
+        let num_keys = 100000;
+        let key_size = 8;
+        let val_min_size = 50;
+        let val_max_size = 100;
+        let mut kvs = RandomKVs::new(
+            true,
+            true,
+            1,
+            num_keys,
+            key_size,
+            val_min_size,
+            val_max_size,
+        );
+        let kvs = kvs.pop().unwrap();
+
+        let btree = Arc::new(FosterBtree::bulk_insert_create(
+            ContainerKey::new(0, 0),
+            bp.clone(),
+            kvs.iter().map(|(k, v)| (k.clone(), v.clone())),
+        ));
+
+        // Print the page stats
+        println!("{}", btree.page_stats(false));
+
+        for (key, val) in kvs.iter() {
+            let current_val = btree.get(key).unwrap();
+            assert_eq!(current_val, *val);
+        }
+
+        // Print the page stats
+        println!("{}", btree.page_stats(false));
+    }
+
+    #[rstest]
+    #[case::bp(get_test_bp::<LRUEvictionPolicy>(100))]
+    #[case::in_mem(get_in_mem_pool())]
     fn test_parallel_insertion<E: EvictionPolicy, T: MemPool<E>>(#[case] bp: Arc<T>) {
         // init_test_logger();
         let btree = Arc::new(setup_btree_empty(bp.clone()));
@@ -3660,6 +3779,7 @@ mod tests {
         let num_threads = 3;
         let kvs = RandomKVs::new(
             true,
+            false,
             num_threads,
             num_keys,
             key_size,

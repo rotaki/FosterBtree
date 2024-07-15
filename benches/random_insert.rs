@@ -4,7 +4,7 @@ use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use fbtree::{bench_utils::*, random::RandomKVs};
 
 fn bench_random_insertion(c: &mut Criterion) {
-    let kvs = RandomKVs::new(true, 3, 500000, 100, 50, 100);
+    let kvs = RandomKVs::new(true, false, 3, 500000, 100, 50, 100);
     let bp_size = 10000;
 
     let mut group = c.benchmark_group("Random Insertion");
