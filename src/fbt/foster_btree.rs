@@ -1245,10 +1245,10 @@ impl<E: EvictionPolicy, T: MemPool<E>> FosterBtree<E, T> {
         }
     }
 
-    pub fn bulk_insert_create(
+    pub fn bulk_insert_create<K: AsRef<[u8]>, V: AsRef<[u8]>>(
         c_key: ContainerKey,
         mem_pool: Arc<T>,
-        iter: impl Iterator<Item = (Vec<u8>, Vec<u8>)>,
+        iter: impl Iterator<Item = (K, V)>,
     ) -> Self {
         let mut root = mem_pool.create_new_page_for_write(c_key).unwrap();
         root.init_as_root();
@@ -1257,13 +1257,13 @@ impl<E: EvictionPolicy, T: MemPool<E>> FosterBtree<E, T> {
         // Keep iterating the iter and appending the key-value pairs to the root page.
         let mut current_page = root;
         for (key, value) in iter {
-            if !current_page.insert(&key, &value, false) {
+            if !current_page.insert(key.as_ref(), value.as_ref(), false) {
                 // Create a new page and split the current page.
                 let mut new_page = mem_pool.create_new_page_for_write(c_key).unwrap();
                 let foster_key = split_min_move(&mut current_page, &mut new_page);
-                assert!(foster_key < key);
+                assert!(foster_key.as_slice() < key.as_ref());
                 // Insert it into new page. If it fails, panic.
-                assert!(new_page.insert(&key, &value, false));
+                assert!(new_page.insert(key.as_ref(), value.as_ref(), false));
                 current_page = new_page;
             }
         }
@@ -3749,7 +3749,7 @@ mod tests {
         let btree = Arc::new(FosterBtree::bulk_insert_create(
             ContainerKey::new(0, 0),
             bp.clone(),
-            kvs.iter().map(|(k, v)| (k.clone(), v.clone())),
+            kvs.iter(),
         ));
 
         // Print the page stats
