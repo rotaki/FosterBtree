@@ -4,6 +4,7 @@ pub mod fbt;
 pub mod txn_storage;
 pub mod write_ahead_log;
 
+mod append_only;
 mod file_manager;
 mod heap_page;
 mod logger;

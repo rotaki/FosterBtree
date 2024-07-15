@@ -127,13 +127,13 @@ pub trait MemPool<T: EvictionPolicy>: Sync + Send {
         c_key: ContainerKey,
     ) -> Result<FrameWriteGuard<T>, MemPoolStatus>;
 
-    /// Get a page for read.
-    /// This function will return a FrameReadGuard.
+    /// Get a page for write.
+    /// This function will return a FrameWriteGuard.
     /// This function assumes that a page is already created and either in memory or on disk.
     fn get_page_for_write(&self, key: PageFrameKey) -> Result<FrameWriteGuard<T>, MemPoolStatus>;
 
-    /// Get a page for write.
-    /// This function will return a FrameWriteGuard.
+    /// Get a page for read.
+    /// This function will return a FrameReadGuard.
     /// This function assumes that a page is already created and either in memory or on disk.
     fn get_page_for_read(&self, key: PageFrameKey) -> Result<FrameReadGuard<T>, MemPoolStatus>;
 

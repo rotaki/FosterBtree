@@ -167,3 +167,46 @@ impl<T> RandomOp<T> {
         self.weighted_choices[index].0.clone()
     }
 }
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct RandomVals {
+    vals: Vec<Vec<u8>>,
+}
+
+impl RandomVals {
+    pub fn new(num_vals: usize, partitions: usize, min_size: usize, max_size: usize) -> Vec<Self> {
+        let mut vals = Vec::with_capacity(partitions);
+        for _ in 0..partitions {
+            let mut vals_i = Vec::with_capacity(num_vals);
+            for _ in 0..num_vals {
+                vals_i.push(gen_random_byte_vec(min_size, max_size));
+            }
+            vals.push(Self { vals: vals_i });
+        }
+        vals
+    }
+
+    pub fn len(&self) -> usize {
+        self.vals.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.vals.is_empty()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &Vec<u8>> {
+        self.vals.iter()
+    }
+
+    pub fn get(&self, index: usize) -> Option<&Vec<u8>> {
+        self.vals.get(index)
+    }
+}
+
+impl Index<usize> for RandomVals {
+    type Output = Vec<u8>;
+
+    fn index(&self, index: usize) -> &Self::Output {
+        &self.vals[index]
+    }
+}

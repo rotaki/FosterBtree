@@ -21,6 +21,8 @@ pub struct BufferPoolForTest<E: EvictionPolicy> {
 }
 
 impl<E: EvictionPolicy> BufferPoolForTest<E> {
+    /// Create a new buffer pool in the temporary directory.
+    /// This will create a database directory whose database id is 0.
     pub fn new(num_frames: usize) -> Self {
         let temp_dir = TempDir::new().unwrap();
         std::fs::create_dir(temp_dir.path().join("0")).unwrap();
