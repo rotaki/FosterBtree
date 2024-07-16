@@ -20,7 +20,7 @@ fn main() {
 
     let kvs = RandomKVs::new(
         bench_params.unique_keys,
-        false, 
+        false,
         bench_params.num_threads,
         bench_params.num_keys,
         bench_params.key_size,
@@ -102,4 +102,3 @@ fn clear_cache() {
     let _ = Command::new("sync").status();
     let _ = Command::new("echo 3 > /proc/sys/vm/drop_caches").status();
 }
-

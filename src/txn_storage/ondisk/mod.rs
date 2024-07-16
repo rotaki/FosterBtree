@@ -11,8 +11,8 @@ use super::{
 };
 use crate::rwlatch::RwLatch;
 use crate::{
+    access_method::fbt::FosterBtreeRangeScanner,
     bp::prelude::{ContainerId, DatabaseId},
-    fbt::FosterBtreeRangeScanner,
     prelude::{BufferPool, ContainerKey, FosterBtree, LRUEvictionPolicy},
 };
 

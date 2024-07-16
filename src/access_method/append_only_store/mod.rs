@@ -15,11 +15,11 @@ use crate::{
 };
 
 pub mod prelude {
-    pub use super::{AccessMethodStatus, AppendOnlyStore, AppendOnlyStoreScanner};
+    pub use super::{AppendOnlyStore, AppendOnlyStoreError, AppendOnlyStoreScanner};
 }
 
 #[derive(Debug, PartialEq)]
-pub enum AccessMethodStatus {
+pub enum AppendOnlyStoreError {
     PageFull,
     PageNotFound,
     RecordTooLarge,
@@ -71,9 +71,9 @@ impl<E: EvictionPolicy, T: MemPool<E>> AppendOnlyStore<E, T> {
         }
     }
 
-    pub fn append(&self, data: &[u8]) -> Result<(), AccessMethodStatus> {
+    pub fn append(&self, data: &[u8]) -> Result<(), AppendOnlyStoreError> {
         if data.len() > <Page as AppendOnlyPage>::max_record_size() {
-            return Err(AccessMethodStatus::RecordTooLarge);
+            return Err(AppendOnlyStoreError::RecordTooLarge);
         }
 
         let mut last_key = self.last_key.lock().unwrap();
@@ -219,7 +219,10 @@ mod tests {
         let store = AppendOnlyStore::new(container_key, mem_pool);
 
         let data = gen_random_byte_vec(Page::max_record_size() + 1, Page::max_record_size() + 1);
-        assert_eq!(store.append(&data), Err(AccessMethodStatus::RecordTooLarge));
+        assert_eq!(
+            store.append(&data),
+            Err(AppendOnlyStoreError::RecordTooLarge)
+        );
     }
 
     #[test]

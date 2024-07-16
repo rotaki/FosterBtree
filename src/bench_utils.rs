@@ -3,6 +3,8 @@ use std::{collections::BTreeMap, sync::Arc, thread};
 use clap::Parser;
 
 use crate::{
+    access_method::fbt::FosterBtree,
+    access_method::hashindex::prelude::*,
     bp::{
         get_in_mem_pool, get_test_bp,
         prelude::{
@@ -11,8 +13,6 @@ use crate::{
         },
         BufferPoolForTest,
     },
-    fbt::FosterBtree,
-    hashindex::prelude::*,
     random::{RandomKVs, RandomOp},
 };
 
