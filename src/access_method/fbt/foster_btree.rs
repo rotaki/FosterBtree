@@ -2112,7 +2112,7 @@ impl PageStatsGenerator {
                 "----------------- Level {} -----------------\n",
                 level
             ));
-            result.push_str(&format!("Page count: {}\n", stats.count));
+            result.push_str(&format!("Page Created: {}\n", stats.count));
             result.push_str(&format!("Has foster count: {}\n", stats.has_foster_count));
             result.push_str(&format!("Min fillfactor: {:.4}\n", stats.min_fillfactor));
             result.push_str(&format!("Max fillfactor: {:.4}\n", stats.max_fillfactor));
