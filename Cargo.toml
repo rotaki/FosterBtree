@@ -22,6 +22,7 @@ serde = { version = "1.0", features = ["derive"] }
 chrono = "0.4"
 lazy_static = { version = "1.4" }
 clap = {version = "4.5", features = ["derive"]}
+statrs = "0.15"
 io-uring = {version = "0.6", optional = true}
 libc = {version = "0.2", optional = true}
 
@@ -43,5 +44,9 @@ codegen-units = 1
 debug = true # For perf
 
 [[bench]]
-name = "random_insert"
+name = "foster_btree_insert"
+harness = false
+
+[[bench]]
+name = "hash_index_insert"
 harness = false

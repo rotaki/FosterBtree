@@ -2,6 +2,7 @@ pub mod append_only_store;
 pub mod bench_utils;
 pub mod bp;
 pub mod fbt;
+pub mod hashindex;
 pub mod random;
 pub mod txn_storage;
 pub mod write_ahead_log;

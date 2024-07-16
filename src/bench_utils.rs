@@ -12,6 +12,7 @@ use crate::{
         BufferPoolForTest,
     },
     fbt::FosterBtree,
+    hashindex::prelude::*,
     random::{RandomKVs, RandomOp},
 };
 
@@ -197,4 +198,181 @@ pub fn run_bench<E: EvictionPolicy, M: MemPool<E>>(
             });
         }
     })
+}
+
+pub fn run_bench_for_paged_hash_map<E: EvictionPolicy, M: MemPool<E>>(
+    bench_params: BenchParams,
+    kvs: Vec<RandomKVs>,
+    phm: &Arc<PagedHashMap<E, M>>,
+) {
+    // simple function to merge two values, not Box
+    // let func = |old: &[u8], new: &[u8]| new.to_vec();
+
+    let ops_ratio = bench_params.parse_ops_ratio();
+    thread::scope(|s| {
+        for partition in kvs.iter() {
+            let phm = phm.clone();
+            let rand = RandomOp::new(ops_ratio.clone());
+            s.spawn(move || {
+                for (k, v) in partition.iter() {
+                    let op = rand.get();
+                    match op {
+                        TreeOperation::Insert => {
+                            // let _ = phm.upsert_with_merge(k, v, func);
+                            let _ = phm.insert(k, v);
+                        }
+                        TreeOperation::Update => {
+                            panic!("Update not supported")
+                            // let _ = phm.update(k, v);
+                        }
+                        TreeOperation::Delete => {
+                            panic!("Delete not supported")
+                            // let _ = phm.delete(k);
+                        }
+                        TreeOperation::Get => {
+                            let _ = phm.get(k);
+                        }
+                    };
+                }
+            });
+        }
+    })
+}
+
+pub fn run_bench_for_rust_hash_map(
+    bench_params: BenchParams,
+    kvs: Vec<RandomKVs>,
+    rhm: &Arc<RustHashMap>,
+) {
+    let ops_ratio = bench_params.parse_ops_ratio();
+    thread::scope(|s| {
+        for partition in kvs.iter() {
+            let mut rhm = rhm.clone();
+            let rand = RandomOp::new(ops_ratio.clone());
+            s.spawn(move || {
+                for (k, v) in partition.iter() {
+                    let op = rand.get();
+                    match op {
+                        TreeOperation::Insert => {
+                            let _ = rhm.insert(k.clone(), v.clone());
+                        }
+                        TreeOperation::Update => {
+                            panic!("Update not supported")
+                            // let _ = rhm.update(k, v);
+                        }
+                        TreeOperation::Delete => {
+                            panic!("Delete not supported")
+                            // let _ = rhm.delete(k);
+                        }
+                        TreeOperation::Get => {
+                            let _ = rhm.get(k);
+                        }
+                    };
+                }
+            });
+        }
+    })
+}
+
+pub fn gen_paged_hash_map_in_mem(
+) -> Arc<PagedHashMap<DummyEvictionPolicy, InMemPool<DummyEvictionPolicy>>> {
+    // let func = Box::new(|old: &[u8], new: &[u8]| {
+    //     old.iter().chain(new.iter()).copied().collect::<Vec<u8>>()
+    // });
+    // let func = Box::new(|old: &[u8], new: &[u8]| new.to_vec());
+    let c_key = ContainerKey::new(0, 0);
+    // let map = PagedHashMap::new(func, get_in_mem_pool(), c_key, false);
+    let map = PagedHashMap::new(get_in_mem_pool(), c_key, false);
+    Arc::new(map)
+}
+
+pub fn gen_paged_hash_map_on_disk(
+    bp_size: usize,
+) -> Arc<PagedHashMap<LRUEvictionPolicy, BufferPoolForTest<LRUEvictionPolicy>>> {
+    // let func = Box::new(|old: &[u8], new: &[u8]| {
+    //     old.iter().chain(new.iter()).copied().collect::<Vec<u8>>()
+    // });
+    // let func = Box::new(|old: &[u8], new: &[u8]| new.to_vec());
+    let c_key = ContainerKey::new(0, 0);
+    // let map = PagedHashMap::new(func, get_test_bp(bp_size), c_key, false);
+    let map = PagedHashMap::new(get_test_bp(bp_size), c_key, false);
+    Arc::new(map)
+}
+
+pub fn gen_rust_hash_map() -> Arc<RustHashMap> {
+    let map = RustHashMap::new();
+    Arc::new(map)
+}
+
+pub fn insert_into_paged_hash_map<E: EvictionPolicy, M: MemPool<E>>(
+    phm: &Arc<PagedHashMap<E, M>>,
+    kvs: &[RandomKVs],
+) {
+    // let func = |old: &[u8], new: &[u8]| new.to_vec();
+    for partition in kvs.iter() {
+        for (k, v) in partition.iter() {
+            // let _ = phm.upsert_with_merge(k, v, func);
+            let _ = phm.insert(k, v);
+        }
+    }
+}
+
+pub fn insert_into_rust_hash_map(rhm: &Arc<RustHashMap>, kvs: &[RandomKVs]) {
+    for partition in kvs.iter() {
+        for (k, v) in partition.iter() {
+            rhm.insert(k.clone(), v.clone());
+        }
+    }
+}
+
+pub fn get_from_paged_hash_map<E: EvictionPolicy, M: MemPool<E>>(
+    phm: &Arc<PagedHashMap<E, M>>,
+    kvs: &[RandomKVs],
+) {
+    thread::scope(|s| {
+        for partition in kvs.iter() {
+            let phm = phm.clone();
+            s.spawn(move || {
+                for (k, v) in partition.iter() {
+                    let val = phm.get(k);
+                    assert_eq!(val.unwrap(), *v);
+                }
+            });
+        }
+    });
+}
+
+pub fn get_from_paged_hash_map2<E: EvictionPolicy, M: MemPool<E>>(
+    phm: &Arc<PagedHashMap<E, M>>,
+    kvs: &[RandomKVs],
+) {
+    for partition in kvs.iter() {
+        for (k, v) in partition.iter() {
+            let val = phm.get(k);
+            assert_eq!(val.unwrap(), *v);
+        }
+    }
+}
+
+pub fn get_from_rust_hash_map(rhm: &Arc<RustHashMap>, kvs: &[RandomKVs]) {
+    thread::scope(|s| {
+        for partition in kvs.iter() {
+            let rhm = rhm.clone();
+            s.spawn(move || {
+                for (k, v) in partition.iter() {
+                    let val = rhm.get(k);
+                    assert_eq!(val.unwrap(), *v);
+                }
+            });
+        }
+    });
+}
+
+pub fn get_from_rust_hash_map2(rhm: &Arc<RustHashMap>, kvs: &[RandomKVs]) {
+    for partition in kvs.iter() {
+        for (k, v) in partition.iter() {
+            let val = rhm.get(k);
+            assert_eq!(val.unwrap(), *v);
+        }
+    }
 }

@@ -74,6 +74,10 @@ impl PageFrameKey {
     pub fn frame_id(&self) -> u32 {
         self.frame_id
     }
+
+    pub fn set_frame_id(&mut self, frame_id: u32) {
+        self.frame_id = frame_id;
+    }
 }
 
 impl std::fmt::Display for PageFrameKey {
