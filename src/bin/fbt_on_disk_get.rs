@@ -15,6 +15,7 @@ fn main() {
 
     let kvs = RandomKVs::new(
         insert_params.unique_keys,
+        false,
         insert_params.num_threads,
         insert_params.num_keys,
         insert_params.key_size,
@@ -44,6 +45,7 @@ fn main() {
 
     let kvs = RandomKVs::new(
         get_params.unique_keys,
+        false,
         get_params.num_threads,
         get_params.num_keys,
         get_params.key_size,
