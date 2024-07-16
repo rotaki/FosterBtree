@@ -58,37 +58,3 @@ fn clear_cache() {
     let _ = Command::new("sync").status();
     let _ = Command::new("echo 3 > /proc/sys/vm/drop_caches").status();
 }
-
-// group.bench_function("In memory Foster BTree Initial Allocation", |b| {
-//     b.iter(|| {
-//         let tree = gen_foster_btree_in_mem();
-//         black_box(tree);
-//     });
-// });
-
-// group.bench_function("In memory Foster BTree Insertion", |b| {
-//     b.iter(|| insert_into_foster_tree(gen_foster_btree_in_mem(), &kvs));
-// });
-
-// group.bench_function("In memory Foster BTree Insertion Parallel", |b| {
-//     b.iter(|| insert_into_foster_tree_parallel(gen_foster_btree_in_mem(), &kvs));
-// });
-
-// group.bench_function("On disk Foster BTree Initial Allocation", |b| {
-//     b.iter(|| {
-//         let tree = gen_foster_btree_on_disk(bp_size);
-//         black_box(tree);
-//     });
-// });
-
-// group.bench_function("On disk Foster BTree Insertion", |b| {
-//     b.iter(|| insert_into_foster_tree(gen_foster_btree_on_disk(bp_size), &kvs));
-// });
-
-// group.bench_function("On disk Foster BTree Insertion Parallel", |b| {
-//     b.iter(|| insert_into_foster_tree_parallel(gen_foster_btree_on_disk(bp_size), &kvs));
-// });
-
-// group.bench_function("BTreeMap Insertion", |b| {
-//     b.iter(|| insert_into_btree_map(BTreeMap::new(), &kvs));
-// });
