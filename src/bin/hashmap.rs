@@ -1,4 +1,4 @@
-use std::{fs::File, io, path::Path, time::Instant};
+use std::time::Instant;
 
 use clap::Parser;
 use fbtree::{bench_utils::*, random::RandomKVs};
@@ -15,7 +15,7 @@ fn main() {
     let bp_size = bench_params.bp_size;
     // let phm_in_mem = gen_paged_hash_map_in_mem();
     let phm_on_disk = gen_paged_hash_map_on_disk(bp_size);
-    let mut rhm = gen_rust_hash_map();
+    let rhm = gen_rust_hash_map();
     // let phm = gen_paged_hash_map_on_disk_with_hash_eviction_policy(bp_size);
 
     let kvs = RandomKVs::new(
