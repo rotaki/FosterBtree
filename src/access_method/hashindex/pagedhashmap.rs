@@ -1,3 +1,6 @@
+#![allow(unused_imports)]
+use crate::logger::log;
+
 use core::panic;
 use std::{
     collections::hash_map::DefaultHasher,

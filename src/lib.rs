@@ -11,7 +11,7 @@ mod logger;
 mod page;
 mod rwlatch;
 
-pub use logger::log;
+use logger::log;
 
 pub mod prelude {
     pub use crate::access_method::prelude::*;
