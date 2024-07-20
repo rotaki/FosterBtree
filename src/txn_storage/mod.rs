@@ -24,12 +24,9 @@ mod tests {
 
     #[cfg(test)]
     use super::*;
-    use crate::{
-        bp::{
-            prelude::{ContainerId, DatabaseId},
-            BufferPool, LRUEvictionPolicy,
-        },
-        random::gen_random_pathname,
+    use crate::bp::{
+        get_test_bp,
+        prelude::{ContainerId, DatabaseId},
     };
     use std::{sync::Arc, thread};
 
@@ -38,14 +35,7 @@ mod tests {
     }
 
     fn get_on_disk_storage() -> Arc<impl TxnStorageTrait> {
-        let bp = Arc::new(
-            BufferPool::<LRUEvictionPolicy>::new(
-                gen_random_pathname(Some("BP_TEST_DIR")),
-                1024,
-                true,
-            )
-            .unwrap(),
-        );
+        let bp = get_test_bp(1024);
         Arc::new(OnDiskStorage::new(&bp))
     }
 
