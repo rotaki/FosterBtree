@@ -16,7 +16,7 @@ pub use mem_pool_trait::{
 use tempfile::TempDir;
 
 pub struct BufferPoolForTest<E: EvictionPolicy> {
-    pub _temp_dir: TempDir,
+    pub temp_dir: TempDir,
     pub bp: BufferPool<E>,
 }
 
@@ -28,9 +28,13 @@ impl<E: EvictionPolicy> BufferPoolForTest<E> {
         std::fs::create_dir(temp_dir.path().join("0")).unwrap();
         let bp = BufferPool::new(temp_dir.path(), num_frames).unwrap();
         Self {
-            _temp_dir: temp_dir,
+            temp_dir: temp_dir,
             bp,
         }
+    }
+
+    pub fn path(&self) -> &std::path::Path {
+        self.temp_dir.path()
     }
 
     pub fn eviction_stats(&self) -> String {

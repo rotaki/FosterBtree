@@ -20,23 +20,50 @@ pub mod prelude {
 #[cfg(test)]
 mod tests {
     use ondisk::OnDiskStorage;
+    use rstest::rstest;
 
     #[cfg(test)]
     use super::*;
-    use crate::bp::prelude::{ContainerId, DatabaseId};
+    use crate::bp::{
+        prelude::{ContainerId, DatabaseId},
+        BufferPool, BufferPoolForTest, LRUEvictionPolicy,
+    };
     use std::{sync::Arc, thread};
 
-    fn get_in_mem_storage() -> Arc<InMemStorage> {
+    fn get_in_mem_storage() -> Arc<impl TxnStorageTrait> {
         Arc::new(InMemStorage::new())
     }
 
-    fn get_on_disk_storage() -> Arc<OnDiskStorage> {
-        Arc::new(OnDiskStorage::new(100))
+    fn get_on_disk_storage() -> Arc<impl TxnStorageTrait> {
+        let ts_in_nanoseconds = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir_name = "BP_TEST_DIR_".to_string() + &ts_in_nanoseconds.to_string();
+        // Create dir if it doesn't exist
+        if !std::path::Path::new(&dir_name).exists() {
+            println!(
+                "Buffer pool directory ({}) does not exist. Creating the directory.",
+                dir_name
+            );
+            std::fs::create_dir(&dir_name).unwrap();
+        } else {
+            println!(
+                "Buffer pool directory ({}) already exists. Clearing the directory.",
+                dir_name
+            );
+            // Clear the directory including folders
+            std::fs::remove_dir_all(&dir_name).unwrap();
+            std::fs::create_dir(&dir_name).unwrap();
+        }
+        let bp = Arc::new(BufferPool::<LRUEvictionPolicy>::new(&dir_name, 1024).unwrap());
+        Arc::new(OnDiskStorage::new(dir_name, &bp, true))
     }
 
-    #[test]
-    fn test_open_and_delete_db() {
-        let storage = get_on_disk_storage();
+    #[rstest]
+    #[case::in_mem(get_in_mem_storage())]
+    #[case::on_disk(get_on_disk_storage())]
+    fn test_open_and_delete_db(#[case] storage: Arc<impl TxnStorageTrait>) {
         let db_options = DBOptions::new("test_db");
         let db_id = storage.open_db(db_options).unwrap();
         assert!(storage.delete_db(&db_id).is_ok());
@@ -69,9 +96,10 @@ mod tests {
     }
     */
 
-    #[test]
-    fn test_insert_and_get_value() {
-        let storage = get_on_disk_storage();
+    #[rstest]
+    #[case::in_mem(get_in_mem_storage())]
+    #[case::on_disk(get_on_disk_storage())]
+    fn test_insert_and_get_value(#[case] storage: Arc<impl TxnStorageTrait>) {
         let (db_id, c_id) = setup_table(&storage, ContainerType::BTree);
         let key = vec![0];
         let value = vec![1, 2, 3, 4];
@@ -84,9 +112,10 @@ mod tests {
         storage.commit_txn(&txn, false).unwrap();
     }
 
-    #[test]
-    fn test_update_and_remove_value() {
-        let storage = get_on_disk_storage();
+    #[rstest]
+    #[case::in_mem(get_in_mem_storage())]
+    #[case::on_disk(get_on_disk_storage())]
+    fn test_update_and_remove_value(#[case] storage: Arc<impl TxnStorageTrait>) {
         let (db_id, c_id) = setup_table(&storage, ContainerType::BTree);
         let txn = storage.begin_txn(&db_id, TxnOptions::default()).unwrap();
         let key = vec![0];
@@ -109,9 +138,10 @@ mod tests {
         storage.commit_txn(&txn, false).unwrap();
     }
 
-    #[test]
-    fn test_scan_range() {
-        let storage = get_on_disk_storage();
+    #[rstest]
+    #[case::in_mem(get_in_mem_storage())]
+    #[case::on_disk(get_on_disk_storage())]
+    fn test_scan_range(#[case] storage: Arc<impl TxnStorageTrait>) {
         let (db_id, c_id) = setup_table(&storage, ContainerType::BTree);
 
         let txn = storage.begin_txn(&db_id, TxnOptions::default()).unwrap();
@@ -132,31 +162,32 @@ mod tests {
         storage.commit_txn(&txn, false).unwrap();
     }
 
-    #[test]
-    fn test_concurrent_insert() {
-        let storage = get_on_disk_storage();
+    #[rstest]
+    #[case::in_mem(get_in_mem_storage())]
+    #[case::on_disk(get_on_disk_storage())]
+    fn test_concurrent_insert(#[case] storage: Arc<impl TxnStorageTrait>) {
         let (db_id, c_id) = setup_table(&storage, ContainerType::BTree);
         let num_threads = 4;
         let num_keys_per_thread = 10000;
-        let mut threads = Vec::with_capacity(num_threads);
-        for i in 0..num_threads {
-            let storage = storage.clone();
-            threads.push(thread::spawn(move || {
-                for k in 0..num_keys_per_thread {
-                    let txn = storage.begin_txn(&db_id, TxnOptions::default()).unwrap();
-                    let key: usize = i * num_keys_per_thread + k;
-                    let key = key.to_be_bytes().to_vec();
-                    let value = key.clone();
-                    storage
-                        .insert_value(&txn, &c_id, key.clone(), value.clone())
-                        .unwrap();
-                    storage.commit_txn(&txn, false).unwrap();
-                }
-            }));
-        }
-        for t in threads {
-            t.join().unwrap();
-        }
+
+        // Use scoped threads to insert values
+        thread::scope(|scope| {
+            for i in 0..num_threads {
+                let storage = storage.clone();
+                scope.spawn(move || {
+                    for k in 0..num_keys_per_thread {
+                        let txn = storage.begin_txn(&db_id, TxnOptions::default()).unwrap();
+                        let key: usize = i * num_keys_per_thread + k;
+                        let key = key.to_be_bytes().to_vec();
+                        let value = key.clone();
+                        storage
+                            .insert_value(&txn, &c_id, key.clone(), value.clone())
+                            .unwrap();
+                        storage.commit_txn(&txn, false).unwrap();
+                    }
+                });
+            }
+        });
 
         // Check if all values are inserted
         let txn = storage.begin_txn(&db_id, TxnOptions::default()).unwrap();
