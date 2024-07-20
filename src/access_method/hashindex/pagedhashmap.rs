@@ -28,12 +28,11 @@ pub struct PagedHashMap<E: EvictionPolicy, T: MemPool<E>> {
     pub bp: Arc<T>,
     c_key: ContainerKey,
 
-    pub bucket_num: usize,         // number of hash header pages
-    
+    pub bucket_num: usize, // number of hash header pages
+
     pointer_swizzling_enabled: bool, // whether pointer swizzling is enabled
     frame_buckets: Option<Vec<AtomicU32>>, // vec of frame_id for each bucket
     // bucket_metas: Vec<BucketMeta>, // first_frame_id, last_page_id, last_frame_id, bloomfilter // no need to be page
-
     phantom: PhantomData<E>,
 }
 
@@ -100,7 +99,8 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
                 #[cfg(feature = "stat")]
                 inc_local_stat_total_page_count();
                 if let Some(ref frame_buckets) = frame_buckets {
-                    frame_buckets[i].store(new_page.frame_id(), std::sync::atomic::Ordering::Release);
+                    frame_buckets[i]
+                        .store(new_page.frame_id(), std::sync::atomic::Ordering::Release);
                 }
                 new_page.init();
                 assert_eq!(
@@ -121,7 +121,7 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
             }
         }
     }
-    
+
     fn hash<K: AsRef<[u8]> + Hash>(&self, key: &K) -> PageId {
         let mut hasher = DefaultHasher::new();
         key.hash(&mut hasher);
@@ -141,7 +141,8 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
 
         let hashed_key = self.hash(&key);
         let expect_frame_id = if self.pointer_swizzling_enabled {
-            self.frame_buckets.as_ref().unwrap()[hashed_key as usize].load(std::sync::atomic::Ordering::Acquire)
+            self.frame_buckets.as_ref().unwrap()[hashed_key as usize]
+                .load(std::sync::atomic::Ordering::Acquire)
         } else {
             u32::MAX
         };
@@ -294,7 +295,8 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
 
         let hashed_key = self.hash(&key);
         let expect_frame_id = if self.pointer_swizzling_enabled {
-            self.frame_buckets.as_ref().unwrap()[hashed_key as usize].load(std::sync::atomic::Ordering::Acquire)
+            self.frame_buckets.as_ref().unwrap()[hashed_key as usize]
+                .load(std::sync::atomic::Ordering::Acquire)
         } else {
             u32::MAX
         };
@@ -426,7 +428,8 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
 
         let hashed_key = self.hash(&key);
         let expect_frame_id = if self.pointer_swizzling_enabled {
-            self.frame_buckets.as_ref().unwrap()[hashed_key as usize].load(std::sync::atomic::Ordering::Acquire)
+            self.frame_buckets.as_ref().unwrap()[hashed_key as usize]
+                .load(std::sync::atomic::Ordering::Acquire)
         } else {
             u32::MAX
         };
@@ -500,7 +503,8 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
 
         let hashed_key = self.hash(&key);
         let expect_frame_id = if self.pointer_swizzling_enabled {
-            self.frame_buckets.as_ref().unwrap()[hashed_key as usize].load(std::sync::atomic::Ordering::Acquire)
+            self.frame_buckets.as_ref().unwrap()[hashed_key as usize]
+                .load(std::sync::atomic::Ordering::Acquire)
         } else {
             u32::MAX
         };
@@ -596,7 +600,8 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
 
         let hashed_key = self.hash(&key);
         let expect_frame_id = if self.pointer_swizzling_enabled {
-            self.frame_buckets.as_ref().unwrap()[hashed_key as usize].load(std::sync::atomic::Ordering::Acquire)
+            self.frame_buckets.as_ref().unwrap()[hashed_key as usize]
+                .load(std::sync::atomic::Ordering::Acquire)
         } else {
             u32::MAX
         };
@@ -614,7 +619,7 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
         loop {
             result = current_page.get(key.as_ref());
             let next_page_id = current_page.get_next_page_id();
-            let next_frame_id= if self.pointer_swizzling_enabled {
+            let next_frame_id = if self.pointer_swizzling_enabled {
                 current_page.get_next_frame_id()
             } else {
                 u32::MAX

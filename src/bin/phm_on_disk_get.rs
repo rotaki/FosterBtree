@@ -12,8 +12,7 @@ fn main() {
         insert_params.val_min_size,
         insert_params.val_max_size,
     );
-    
-    
+
     let mut get_params = insert_params.clone();
     get_params.ops_ratio = "0:0:0:1".to_string(); // Only gets are done in this snippet
     let get_kvs = RandomKVs::new(
@@ -25,7 +24,7 @@ fn main() {
         get_params.val_min_size,
         get_params.val_max_size,
     );
-    
+
     println!("Insert Params:\n{}", insert_params);
     println!("Get Params:\n{}", get_params);
 
