@@ -3,15 +3,14 @@ use std::{collections::BTreeMap, sync::Arc, thread};
 use clap::Parser;
 
 use crate::{
-    access_method::fbt::FosterBtree,
-    access_method::hashindex::prelude::*,
+    access_method::{fbt::FosterBtree, hashindex::prelude::*},
     bp::{
         get_in_mem_pool, get_test_bp,
         prelude::{
             ContainerKey, DummyEvictionPolicy, EvictionPolicy, InMemPool, LRUEvictionPolicy,
             MemPool,
         },
-        BufferPoolForTest,
+        BufferPool,
     },
     random::{RandomKVs, RandomOp},
 };
@@ -124,7 +123,7 @@ pub fn gen_foster_btree_in_mem(
 
 pub fn gen_foster_btree_on_disk(
     bp_size: usize,
-) -> Arc<FosterBtree<LRUEvictionPolicy, BufferPoolForTest<LRUEvictionPolicy>>> {
+) -> Arc<FosterBtree<LRUEvictionPolicy, BufferPool<LRUEvictionPolicy>>> {
     let (db_id, c_id) = (0, 0);
     let c_key = ContainerKey::new(db_id, c_id);
     let btree = FosterBtree::new(c_key, get_test_bp(bp_size));

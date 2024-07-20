@@ -1,7 +1,6 @@
 use std::{
     cell::UnsafeCell,
-    collections::{BTreeMap, HashMap, HashSet},
-    path::PathBuf,
+    collections::HashSet,
     sync::{Arc, Mutex, RwLock},
 };
 
@@ -9,35 +8,27 @@ use super::{
     ContainerOptions, ContainerType, DBOptions, ScanOptions, TxnOptions, TxnStorageStatus,
     TxnStorageTrait,
 };
-use crate::rwlatch::RwLatch;
+use crate::bp::{EvictionPolicy, MemPool};
 use crate::{
     access_method::fbt::FosterBtreeRangeScanner,
     bp::prelude::{ContainerId, DatabaseId},
-    prelude::{BufferPool, ContainerKey, FosterBtree, LRUEvictionPolicy},
+    prelude::{ContainerKey, FosterBtree},
 };
 
-type BufferPoolType = BufferPool<LRUEvictionPolicy>;
-type FosterBtreeType = FosterBtree<LRUEvictionPolicy, BufferPoolType>;
-
-pub enum Storage {
+pub enum Storage<E: EvictionPolicy + 'static, M: MemPool<E>> {
     HashMap(),
-    BTreeMap(Arc<FosterBtreeType>),
+    BTreeMap(Arc<FosterBtree<E, M>>),
 }
 
-unsafe impl Sync for Storage {}
+unsafe impl<E: EvictionPolicy + 'static, M: MemPool<E>> Sync for Storage<E, M> {}
 
-impl Storage {
-    fn new(
-        db_id: DatabaseId,
-        c_id: ContainerId,
-        c_type: ContainerType,
-        bp: Arc<BufferPoolType>,
-    ) -> Self {
+impl<E: EvictionPolicy + 'static, M: MemPool<E>> Storage<E, M> {
+    fn new(db_id: DatabaseId, c_id: ContainerId, c_type: ContainerType, bp: Arc<M>) -> Self {
         match c_type {
             ContainerType::Hash => {
                 unimplemented!("Hash container not implemented")
             }
-            ContainerType::BTree => Storage::BTreeMap(Arc::new(FosterBtreeType::new(
+            ContainerType::BTree => Storage::BTreeMap(Arc::new(FosterBtree::<E, M>::new(
                 ContainerKey::new(db_id, c_id),
                 bp,
             ))),
@@ -49,13 +40,13 @@ impl Storage {
     }
 
     fn insert(&self, key: Vec<u8>, val: Vec<u8>) -> Result<(), TxnStorageStatus> {
-        let result = match self {
+        match self {
             Storage::HashMap() => {
                 unimplemented!("Hash container not implemented")
             }
             Storage::BTreeMap(b) => b.insert(&key, &val)?,
         };
-        Ok(result)
+        Ok(())
     }
 
     fn get(&self, key: &[u8]) -> Result<Vec<u8>, TxnStorageStatus> {
@@ -69,26 +60,26 @@ impl Storage {
     }
 
     fn update(&self, key: &[u8], val: Vec<u8>) -> Result<(), TxnStorageStatus> {
-        let result = match self {
+        match self {
             Storage::HashMap() => {
                 unimplemented!("Hash container not implemented")
             }
             Storage::BTreeMap(b) => b.update(key, &val)?,
         };
-        Ok(result)
+        Ok(())
     }
 
     fn remove(&self, key: &[u8]) -> Result<(), TxnStorageStatus> {
-        let result = match self {
+        match self {
             Storage::HashMap() => {
                 unimplemented!("Hash container not implemented")
             }
             Storage::BTreeMap(b) => b.delete(key)?,
         };
-        Ok(result)
+        Ok(())
     }
 
-    fn iter(self: &Arc<Self>) -> OnDiskIterator {
+    fn iter(self: &Arc<Self>) -> OnDiskIterator<E, M> {
         match self.as_ref() {
             Storage::HashMap() => {
                 unimplemented!("Hash container not implemented")
@@ -107,14 +98,14 @@ impl Storage {
     }
 }
 
-pub enum OnDiskIterator {
+pub enum OnDiskIterator<E: EvictionPolicy + 'static, M: MemPool<E>> {
     // Storage and the iterator
     Hash(),
-    BTree(Mutex<FosterBtreeRangeScanner<LRUEvictionPolicy, BufferPoolType>>),
+    BTree(Mutex<FosterBtreeRangeScanner<E, M>>),
 }
 
-impl OnDiskIterator {
-    fn btree(iter: FosterBtreeRangeScanner<LRUEvictionPolicy, BufferPoolType>) -> Self {
+impl<E: EvictionPolicy + 'static, M: MemPool<E>> OnDiskIterator<E, M> {
+    fn btree(iter: FosterBtreeRangeScanner<E, M>) -> Self {
         OnDiskIterator::BTree(Mutex::new(iter))
     }
 
@@ -148,52 +139,27 @@ impl OnDiskIterator {
 /// 5. The iterator next() must not be called using multiple threads. next() is not thread-safe with
 ///    respect to other next() calls of the same iterator. However, next() is thread-safe with respect
 ///    to other operations on the same container including next() of other iterators.
-pub struct OnDiskStorage {
-    bp_dir: PathBuf,
-    bp: Arc<BufferPoolType>,
+pub struct OnDiskStorage<E: EvictionPolicy + 'static, M: MemPool<E>> {
+    bp: Arc<M>,
     db_created: UnsafeCell<bool>,
     container_lock: RwLock<()>, // lock for container operations
-    containers: UnsafeCell<Vec<Arc<Storage>>>, // Storage is in a Box in order to prevent moving when resizing the vector
+    containers: UnsafeCell<Vec<Arc<Storage<E, M>>>>, // Storage is in a Box in order to prevent moving when resizing the vector
+    phantom: std::marker::PhantomData<(E, M)>,
 }
 
-impl Drop for OnDiskStorage {
-    fn drop(&mut self) {
-        // Clear the directory including folders
-        std::fs::remove_dir_all(&self.bp_dir).unwrap();
-    }
-}
+unsafe impl<E: EvictionPolicy + 'static, M: MemPool<E>> Sync for OnDiskStorage<E, M> {}
+unsafe impl<E: EvictionPolicy + 'static, M: MemPool<E>> Send for OnDiskStorage<E, M> {}
 
-unsafe impl Sync for OnDiskStorage {}
-
-impl OnDiskStorage {
-    pub fn new(num_frames: usize) -> Self {
-        let ts_in_nanoseconds = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let dir_name = "BP_TEST_DIR_".to_string() + &ts_in_nanoseconds.to_string();
-        // Create dir if it doesn't exist
-        if !std::path::Path::new(&dir_name).exists() {
-            println!(
-                "Buffer pool directory ({}) does not exist. Creating the directory.",
-                dir_name
-            );
-            std::fs::create_dir(&dir_name).unwrap();
-        } else {
-            println!(
-                "Buffer pool directory ({}) already exists. Clearing the directory.",
-                dir_name
-            );
-            // Clear the directory including folders
-            std::fs::remove_dir_all(&dir_name).unwrap();
-            std::fs::create_dir(&dir_name).unwrap();
-        }
+impl<E: EvictionPolicy + 'static, M: MemPool<E>> OnDiskStorage<E, M> {
+    /// Assumes bp_directory is already created.
+    /// Any database created will be created in the bp_directory.
+    pub fn new(bp: &Arc<M>) -> Self {
         OnDiskStorage {
-            bp_dir: PathBuf::from(&dir_name),
-            bp: Arc::new(BufferPoolType::new(&dir_name, num_frames).unwrap()),
+            bp: bp.clone(),
             db_created: UnsafeCell::new(false),
             container_lock: RwLock::new(()),
             containers: UnsafeCell::new(Vec::new()),
+            phantom: std::marker::PhantomData,
         }
     }
 }
@@ -212,9 +178,9 @@ impl OnDiskDummyTxnHandle {
     }
 }
 
-impl TxnStorageTrait for OnDiskStorage {
+impl<E: EvictionPolicy + 'static, M: MemPool<E>> TxnStorageTrait for OnDiskStorage<E, M> {
     type TxnHandle = OnDiskDummyTxnHandle;
-    type IteratorHandle = OnDiskIterator;
+    type IteratorHandle = OnDiskIterator<E, M>;
 
     // Open connection with the db
     fn open_db(&self, _options: DBOptions) -> Result<DatabaseId, TxnStorageStatus> {
@@ -222,10 +188,6 @@ impl TxnStorageTrait for OnDiskStorage {
         if *guard {
             return Err(TxnStorageStatus::DBExists);
         }
-        let db_id = 0;
-        // Create db folder
-        let db_path = self.bp_dir.join(db_id.to_string());
-        std::fs::create_dir(&db_path).unwrap();
         *guard = true;
         Ok(0)
     }

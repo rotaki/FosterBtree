@@ -285,6 +285,7 @@ pub struct InMemStorage {
 }
 
 unsafe impl Sync for InMemStorage {}
+unsafe impl Send for InMemStorage {}
 
 impl Default for InMemStorage {
     fn default() -> Self {

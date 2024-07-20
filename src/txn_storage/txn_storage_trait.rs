@@ -117,7 +117,7 @@ impl ScanOptions {
     }
 }
 
-pub trait TxnStorageTrait {
+pub trait TxnStorageTrait: Send + Sync {
     type TxnHandle;
     type IteratorHandle;
 
