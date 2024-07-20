@@ -282,7 +282,7 @@ pub fn gen_paged_hash_map_in_mem(
 
 pub fn gen_paged_hash_map_on_disk(
     bp_size: usize,
-) -> Arc<PagedHashMap<LRUEvictionPolicy, BufferPoolForTest<LRUEvictionPolicy>>> {
+) -> Arc<PagedHashMap<LRUEvictionPolicy, BufferPool<LRUEvictionPolicy>>> {
     let c_key = ContainerKey::new(0, 0);
     let map = PagedHashMap::new(get_test_bp(bp_size), c_key, false, true);
     Arc::new(map)
@@ -290,7 +290,7 @@ pub fn gen_paged_hash_map_on_disk(
 
 pub fn gen_paged_hash_map_on_disk_without_ponter_swizzling(
     bp_size: usize,
-) -> Arc<PagedHashMap<LRUEvictionPolicy, BufferPoolForTest<LRUEvictionPolicy>>> {
+) -> Arc<PagedHashMap<LRUEvictionPolicy, BufferPool<LRUEvictionPolicy>>> {
     let c_key = ContainerKey::new(0, 0);
     let map = PagedHashMap::new(get_test_bp(bp_size), c_key, false, false);
     Arc::new(map)
