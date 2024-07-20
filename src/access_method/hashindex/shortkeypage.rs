@@ -1,4 +1,4 @@
-use std::{char::MAX, mem::size_of};
+use std::{cmp::Ordering, mem::size_of};
 
 use crate::page::{Page, PageId, AVAILABLE_PAGE_SIZE};
 const PAGE_HEADER_SIZE: usize = 0;
@@ -35,21 +35,18 @@ pub trait ShortKeyPage {
     ) -> (bool, Option<Vec<u8>>)
     where
         F: Fn(&[u8], &[u8]) -> Vec<u8>;
+
     fn get(&self, key: &[u8]) -> Option<Vec<u8>>;
     fn remove(&mut self, key: &[u8]) -> Option<Vec<u8>>;
 
     fn encode_shortkey_header(&mut self, header: &ShortKeyHeader);
     fn decode_shortkey_header(&self) -> ShortKeyHeader;
+
     fn get_next_page_id(&self) -> PageId;
     fn set_next_page_id(&mut self, next_page_id: PageId);
-    fn get_next_frame_id(&self) -> u32 {
-        self.decode_shortkey_header().next_frame_id
-    }
-    fn set_next_frame_id(&mut self, next_frame_id: u32) {
-        let mut header = self.decode_shortkey_header();
-        header.next_frame_id = next_frame_id;
-        self.encode_shortkey_header(&header);
-    }
+
+    fn get_next_frame_id(&self) -> u32;
+    fn set_next_frame_id(&mut self, next_frame_id: u32);
 
     fn encode_shortkey_slot(&mut self, index: u16, slot: &ShortKeySlot);
     fn decode_shortkey_slot(&self, index: u16) -> ShortKeySlot;
@@ -57,51 +54,30 @@ pub trait ShortKeyPage {
 
     fn encode_shortkey_value(&mut self, offset: usize, entry: &ShortKeyValue);
     fn encode_shortkey_value_sample(&mut self, offset: usize, entry: &ShortKeyValueSample);
-    fn decode_shortkey_value(&self, offset: usize, remain_key_len: u16) -> ShortKeyValue;
-    fn decode_shortkey_value_by_id(&self, slot_id: u16) -> ShortKeyValue {
-        let slot = self.decode_shortkey_slot(slot_id);
-        self.decode_shortkey_value(slot.val_offset as usize, slot.key_len)
-    }
 
-    fn compare_key(&self, key: &[u8], slot_id: u16) -> std::cmp::Ordering;
-    fn binary_search<F>(&self, f: F) -> (bool, u16)
-    // return (found, index)
-    where
-        F: Fn(u16) -> std::cmp::Ordering;
-    fn interpolation_search(&self, key: &[u8]) -> (bool, u16);
+    fn decode_shortkey_value(&self, offset: usize, remain_key_len: u16) -> ShortKeyValue;
+    fn decode_shortkey_value_by_id(&self, slot_id: u16) -> ShortKeyValue;
+
     fn search_slot(&self, key: &[u8]) -> (bool, u16) {
         self.binary_search(|slot_id| self.compare_key(key, slot_id))
         // self.interpolation_search(key)
     }
-    // Convert key to a numeric value for interpolation search
-    fn key_to_u64(key: &[u8]) -> u64 {
-        let mut key_array = [0u8; 8];
-        let copy_len = std::cmp::min(8, key.len());
-        key_array[..copy_len].copy_from_slice(&key[..copy_len]);
-        u64::from_be_bytes(key_array)
-    }
-    fn is_exist(&self, key: &[u8]) -> (Option<u16>, usize) {
-        // return (Option(slot_id), vals_len)
-        let (found, slot_id) = self.binary_search(|slot_id| self.compare_key(key, slot_id));
-        if found {
-            (
-                Some(slot_id),
-                self.decode_shortkey_value_by_id(slot_id).vals_len as usize,
-            )
-        } else {
-            (None, 0)
-        }
-    }
+
+    fn compare_key(&self, key: &[u8], slot_id: u16) -> Ordering;
+    fn binary_search<F>(&self, f: F) -> (bool, u16)
+    // return (found, index)
+    where
+        F: Fn(u16) -> Ordering;
+
+    fn key_to_u64(key: &[u8]) -> u64; // Convert key to a numeric value for interpolation search
+    fn interpolation_search(&self, key: &[u8]) -> (bool, u16);
+
+    fn is_exist(&self, key: &[u8]) -> (Option<u16>, usize); // return (Option(slot_id), vals_len)
+
     fn slot_end_offset(&self) -> usize;
-    fn num_slots(&self) -> u16 {
-        self.decode_shortkey_header().slot_num
-    }
-    fn total_free_spcae(&self) -> usize {
-        self.decode_shortkey_header().val_start_offset as usize - self.slot_end_offset()
-    }
-    fn get_free_space(&self) -> usize {
-        self.decode_shortkey_header().val_start_offset as usize - self.slot_end_offset()
-    }
+    fn num_slots(&self) -> u16;
+    fn total_free_spcae(&self) -> usize;
+    fn get_free_space(&self) -> usize;
 }
 
 // define error type
@@ -169,7 +145,7 @@ impl ShortKeyPage for Page {
             + SHORT_KEY_SLOT_SIZE * self.decode_shortkey_header().slot_num as usize
     }
 
-    fn compare_key(&self, key: &[u8], slot_id: u16) -> std::cmp::Ordering {
+    fn compare_key(&self, key: &[u8], slot_id: u16) -> Ordering {
         let slot = self.decode_shortkey_slot(slot_id);
         let mut key_prefix = [0u8; 8];
         let copy_len = std::cmp::min(8, key.len());
@@ -178,9 +154,9 @@ impl ShortKeyPage for Page {
         let prefix_compare = slot.key_prefix.as_slice().cmp(&key_prefix);
 
         match prefix_compare {
-            std::cmp::Ordering::Equal => {
+            Ordering::Equal => {
                 if key.len() <= 8 {
-                    return std::cmp::Ordering::Equal;
+                    return Ordering::Equal;
                 }
                 let value_entry =
                     self.decode_shortkey_value(slot.val_offset as usize, slot.key_len);
@@ -199,7 +175,7 @@ impl ShortKeyPage for Page {
     // If all keys are lt, then return the len (i.e. slot_count)
     fn binary_search<F>(&self, f: F) -> (bool, u16)
     where
-        F: Fn(u16) -> std::cmp::Ordering,
+        F: Fn(u16) -> Ordering,
     {
         let header = self.decode_shortkey_header();
         if header.slot_num == 0 {
@@ -210,24 +186,24 @@ impl ShortKeyPage for Page {
         let mut high = header.slot_num - 1;
 
         match f(low) {
-            std::cmp::Ordering::Equal => return (true, low),
-            std::cmp::Ordering::Greater => return (false, 0),
-            std::cmp::Ordering::Less => {}
+            Ordering::Equal => return (true, low),
+            Ordering::Greater => return (false, 0),
+            Ordering::Less => {}
         }
 
         match f(high) {
-            std::cmp::Ordering::Equal => return (true, high),
-            std::cmp::Ordering::Less => return (false, high + 1),
-            std::cmp::Ordering::Greater => {}
+            Ordering::Equal => return (true, high),
+            Ordering::Less => return (false, high + 1),
+            Ordering::Greater => {}
         }
 
         // Invairant: f(high) = Gte
         while low < high {
             let mid = low + (high - low) / 2;
             match f(mid) {
-                std::cmp::Ordering::Equal => return (true, mid),
-                std::cmp::Ordering::Less => low = mid + 1,
-                std::cmp::Ordering::Greater => high = mid,
+                Ordering::Equal => return (true, mid),
+                Ordering::Less => low = mid + 1,
+                Ordering::Greater => high = mid,
             }
         }
 
@@ -247,17 +223,17 @@ impl ShortKeyPage for Page {
 
         while low <= high {
             let low_value = Self::key_to_u64(&self.decode_shortkey_slot(low).key_prefix);
-            if key_value == low_value {
-                return (true, low);
-            } else if key_value < low_value {
-                return (false, low);
+            match key_value.cmp(&low_value) {
+                Ordering::Equal => return (true, low),
+                Ordering::Less => return (false, low),
+                Ordering::Greater => {}
             }
 
             let high_value = Self::key_to_u64(&self.decode_shortkey_slot(high).key_prefix);
-            if key_value == high_value {
-                return (true, high);
-            } else if key_value > high_value {
-                return (false, high + 1);
+            match key_value.cmp(&high_value) {
+                Ordering::Equal => return (true, high),
+                Ordering::Greater => return (false, high + 1),
+                Ordering::Less => {}
             }
 
             // Estimate the position using interpolation
@@ -272,9 +248,9 @@ impl ShortKeyPage for Page {
             let pos_value = Self::key_to_u64(&self.decode_shortkey_slot(pos).key_prefix);
 
             match pos_value.cmp(&key_value) {
-                std::cmp::Ordering::Equal => return (true, pos),
-                std::cmp::Ordering::Less => low = pos + 1,
-                std::cmp::Ordering::Greater => high = pos,
+                Ordering::Equal => return (true, pos),
+                Ordering::Less => low = pos + 1,
+                Ordering::Greater => high = pos,
             }
         }
 
@@ -365,7 +341,7 @@ impl ShortKeyPage for Page {
             let old_vals = std::mem::replace(&mut old_value_entry.vals, val.to_vec());
             old_value_entry.vals_len = val.len() as u16;
             self.encode_shortkey_value(slot.val_offset as usize, &old_value_entry);
-            return Ok(old_vals);
+            Ok(old_vals)
         } else {
             let remain_key_len = key.len().saturating_sub(8);
             let required_space = remain_key_len + val.len() + 2;
@@ -392,7 +368,7 @@ impl ShortKeyPage for Page {
             header.val_start_offset = new_val_offset as u16;
             self.encode_shortkey_header(&header);
 
-            return Ok(old_value_entry.vals);
+            Ok(old_value_entry.vals)
         }
     }
 
@@ -405,7 +381,7 @@ impl ShortKeyPage for Page {
             let _old_vals = std::mem::replace(&mut old_value_entry.vals, val.to_vec());
             old_value_entry.vals_len = val.len() as u16;
             self.encode_shortkey_value(slot.val_offset as usize, &old_value_entry);
-            return Ok(());
+            Ok(())
         } else {
             let remain_key_len = slot.key_len.saturating_sub(8) as usize;
             let required_space = remain_key_len + val.len() + 2;
@@ -433,7 +409,7 @@ impl ShortKeyPage for Page {
             header.val_start_offset = new_val_offset as u16;
             self.encode_shortkey_header(&header);
 
-            return Ok(());
+            Ok(())
         }
     }
 
@@ -452,7 +428,7 @@ impl ShortKeyPage for Page {
                 let old_vals = std::mem::replace(&mut old_value_entry.vals, value.to_vec());
                 old_value_entry.vals_len = value.len() as u16;
                 self.encode_shortkey_value(slot.val_offset as usize, &old_value_entry);
-                return (true, Some(old_vals));
+                (true, Some(old_vals))
             } else {
                 let remain_key_len = key.len().saturating_sub(8);
                 let required_space = remain_key_len + value.len() + 2;
@@ -476,7 +452,7 @@ impl ShortKeyPage for Page {
                 header.val_start_offset = new_val_offset as u16;
                 self.encode_shortkey_header(&header);
 
-                return (true, Some(old_value_entry.vals.to_vec()));
+                (true, Some(old_value_entry.vals.to_vec()))
             }
         } else {
             let remain_key_len = key.len().saturating_sub(8);
@@ -525,7 +501,7 @@ impl ShortKeyPage for Page {
             header.val_start_offset = new_val_offset as u16;
             self.encode_shortkey_header(&header);
 
-            return (true, None);
+            (true, None)
         }
     }
 
@@ -553,7 +529,7 @@ impl ShortKeyPage for Page {
             if new_value.len() == old_value_entry.vals.len() {
                 let old_vals = std::mem::replace(&mut old_value_entry.vals, new_value);
                 self.encode_shortkey_value(slot.val_offset as usize, &old_value_entry);
-                return (true, Some(old_vals));
+                (true, Some(old_vals))
             } else {
                 let remain_key_len = key.len().saturating_sub(8);
                 let required_space = remain_key_len + new_value.len() + 2;
@@ -577,7 +553,7 @@ impl ShortKeyPage for Page {
                 header.val_start_offset = new_val_offset as u16;
                 self.encode_shortkey_header(&header);
 
-                return (true, Some(old_value_entry.vals.to_vec()));
+                (true, Some(old_value_entry.vals.to_vec()))
             }
         } else {
             let remain_key_len = key.len().saturating_sub(8);
@@ -626,7 +602,7 @@ impl ShortKeyPage for Page {
             header.val_start_offset = new_val_offset as u16;
             self.encode_shortkey_header(&header);
 
-            return (true, None);
+            (true, None)
         }
     }
 
@@ -706,6 +682,16 @@ impl ShortKeyPage for Page {
     fn set_next_page_id(&mut self, next_page_id: PageId) {
         let mut header = self.decode_shortkey_header();
         header.next_page_id = next_page_id;
+        self.encode_shortkey_header(&header);
+    }
+
+    fn get_next_frame_id(&self) -> u32 {
+        self.decode_shortkey_header().next_frame_id
+    }
+
+    fn set_next_frame_id(&mut self, next_frame_id: u32) {
+        let mut header = self.decode_shortkey_header();
+        header.next_frame_id = next_frame_id;
         self.encode_shortkey_header(&header);
     }
 
@@ -797,6 +783,43 @@ impl ShortKeyPage for Page {
             vals_len: vals_len as u16,
             vals,
         }
+    }
+
+    fn decode_shortkey_value_by_id(&self, slot_id: u16) -> ShortKeyValue {
+        let slot = self.decode_shortkey_slot(slot_id);
+        self.decode_shortkey_value(slot.val_offset as usize, slot.key_len)
+    }
+
+    fn key_to_u64(key: &[u8]) -> u64 {
+        let mut key_array = [0u8; 8];
+        let copy_len = std::cmp::min(8, key.len());
+        key_array[..copy_len].copy_from_slice(&key[..copy_len]);
+        u64::from_be_bytes(key_array)
+    }
+
+    fn is_exist(&self, key: &[u8]) -> (Option<u16>, usize) {
+        // let (found, index) = self.binary_search(|slot_id| self.compare_key(key, slot_id));
+        let (found, index) = self.search_slot(key);
+        if found {
+            (
+                Some(index),
+                self.decode_shortkey_value_by_id(index).vals_len as usize,
+            )
+        } else {
+            (None, 0)
+        }
+    }
+
+    fn num_slots(&self) -> u16 {
+        self.decode_shortkey_header().slot_num
+    }
+
+    fn total_free_spcae(&self) -> usize {
+        self.decode_shortkey_header().val_start_offset as usize - self.slot_end_offset()
+    }
+
+    fn get_free_space(&self) -> usize {
+        self.decode_shortkey_header().val_start_offset as usize - self.slot_end_offset()
     }
 }
 

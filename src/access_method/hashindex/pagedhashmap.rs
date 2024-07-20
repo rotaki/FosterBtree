@@ -1,4 +1,3 @@
-use crate::log;
 use core::panic;
 use std::{
     collections::hash_map::DefaultHasher,
@@ -8,14 +7,11 @@ use std::{
     time::Duration,
 };
 
-use clap::Error;
 #[cfg(feature = "stat")]
 use stat::*;
 
-use crate::{
-    bp::prelude::*,
-    page::{self, Page},
-};
+use crate::bp::prelude::*;
+
 use crate::{log_info, page::PageId};
 
 use super::shortkeypage::{ShortKeyPage, ShortKeyPageError, SHORT_KEY_PAGE_HEADER_SIZE};
@@ -23,7 +19,6 @@ use crate::page::AVAILABLE_PAGE_SIZE;
 
 // const DEFAULT_BUCKET_NUM: usize = 1024;
 const DEFAULT_BUCKET_NUM: usize = 1024 * 4;
-const PAGE_HEADER_SIZE: usize = 0;
 
 pub struct PagedHashMap<E: EvictionPolicy, T: MemPool<E>> {
     // func: Box<dyn Fn(&[u8], &[u8]) -> Vec<u8>>, // func(old_value, new_value) -> new_value
@@ -46,7 +41,7 @@ pub enum PagedHashMapError {
     Other(String),
 }
 
-struct BucketMeta {
+struct _BucketMeta {
     first_frame_id: u32,
     last_page_id: u32,
     last_frame_id: u32,
@@ -60,7 +55,7 @@ fn fix_frame_id<'a, E: EvictionPolicy>(
 ) -> FrameReadGuard<'a, E> {
     match this.try_upgrade(true) {
         Ok(mut write_guard) => {
-            let _res = write_guard.set_next_frame_id(new_frame_key.frame_id());
+            write_guard.set_next_frame_id(new_frame_key.frame_id());
             write_guard.downgrade()
         }
         Err(read_guard) => read_guard,
@@ -104,11 +99,16 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
             //root_page.frame_id();
 
             // SET HASH BUCKET PAGES
-            for i in 1..DEFAULT_BUCKET_NUM + 1 {
+            for (i, frame_bucket) in frame_buckets
+                .iter_mut()
+                .enumerate()
+                .skip(1)
+                .take(DEFAULT_BUCKET_NUM)
+            {
                 let mut new_page = bp.create_new_page_for_write(c_key).unwrap();
                 #[cfg(feature = "stat")]
                 inc_local_stat_total_page_count();
-                frame_buckets[i].store(new_page.frame_id(), std::sync::atomic::Ordering::Release);
+                frame_bucket.store(new_page.frame_id(), std::sync::atomic::Ordering::Release);
                 new_page.init();
                 assert_eq!(
                     new_page.get_id() as usize,
@@ -132,7 +132,7 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
     fn hash<K: AsRef<[u8]> + Hash>(&self, key: &K) -> PageId {
         let mut hasher = DefaultHasher::new();
         key.hash(&mut hasher);
-        (((hasher.finish() as usize) % self.bucket_num + 1) as usize) as PageId
+        ((hasher.finish() as usize) % self.bucket_num + 1) as PageId
     }
 
     /// Insert a new key-value pair into the index.
@@ -239,7 +239,7 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
             let next_page = self.read_page(next_page_key);
             if next_frame_id != next_page.frame_id() {
                 next_page_key.set_frame_id(next_page.frame_id());
-                current_page = fix_frame_id(current_page, &next_page_key);
+                let _ = fix_frame_id(current_page, &next_page_key);
             }
             current_page = next_page;
         }
@@ -303,8 +303,6 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
             self.frame_buckets[hashed_key as usize].load(std::sync::atomic::Ordering::Acquire);
 
         let page_key = PageFrameKey::new_with_frame_id(self.c_key, hashed_key, expect_frame_id);
-
-        let mut attempt = 0;
 
         let (mut updating_page, slot_id) =
             self.update_traverse_to_endofchain_for_write(page_key, key.as_ref())?;
@@ -406,7 +404,7 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
                     let next_page = self.read_page(next_page_key);
                     if next_frame_id != next_page.frame_id() {
                         next_page_key.set_frame_id(next_page.frame_id());
-                        current_page = fix_frame_id(current_page, &next_page_key);
+                        let _ = fix_frame_id(current_page, &next_page_key);
                     }
                     current_page = next_page;
                 }
@@ -448,7 +446,7 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
                 (true, old_value) => {
                     return Ok(old_value);
                 }
-                (false, old_value) => {
+                (false, _old_value) => {
                     let (next_page_id, next_frame_id) = (
                         current_page.get_next_page_id(),
                         current_page.get_next_frame_id(),
@@ -515,12 +513,12 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
             // self.frame_buckets[hashed_key as usize] = current_page.frame_id();
         }
 
-        let mut current_value: Option<Vec<u8>> = None;
+        let mut current_value;
 
         loop {
-            let mut inserted = false;
+            let inserted;
             (inserted, current_value) =
-                current_page.upsert_with_merge(key.as_ref(), value.as_ref(), &merge);
+                current_page.upsert_with_merge(key.as_ref(), value.as_ref(), merge);
             if inserted {
                 #[cfg(feature = "stat")]
                 return current_value;
@@ -609,7 +607,7 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
             );
         }
 
-        let mut result: Option<Vec<u8>> = None;
+        let mut result;
 
         loop {
             result = current_page.get(key.as_ref());
@@ -624,7 +622,7 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
             let next_page = self.read_page(page_key);
             if next_frame_id != next_page.frame_id() {
                 page_key.set_frame_id(next_page.frame_id());
-                current_page = fix_frame_id(current_page, &page_key);
+                let _ = fix_frame_id(current_page, &page_key);
             }
             current_page = next_page;
         }
@@ -641,7 +639,7 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
         }
 
         let mut page_key = PageFrameKey::new(self.c_key, self.hash(&key));
-        let mut result: Option<Vec<u8>> = None;
+        let mut result;
 
         loop {
             let mut current_page = self.bp.get_page_for_write(page_key).unwrap();
@@ -746,7 +744,7 @@ impl<'a, E: EvictionPolicy, T: MemPool<E>> Iterator for PagedHashMapIter<'a, E, 
 mod stat {
     use super::*;
     use lazy_static::lazy_static;
-    use std::{cell::UnsafeCell, os::unix::thread, sync::Mutex};
+    use std::{cell::UnsafeCell, sync::Mutex};
 
     pub struct PagedHashMapStat {
         pub insert_count: UnsafeCell<usize>,
@@ -823,7 +821,7 @@ mod stat {
             }
         }
 
-        pub fn update_chain_len(&self, bucket_id: usize, len: usize) {
+        pub fn _update_chain_len(&self, bucket_id: usize, len: usize) {
             unsafe {
                 let chain_len = &mut *self.chain_len.get();
                 if len > chain_len[bucket_id] {
@@ -991,9 +989,9 @@ mod stat {
         });
     }
 
-    pub fn update_local_stat_chain_len(bucket_id: usize, len: usize) {
+    pub fn _update_local_stat_chain_len(bucket_id: usize, len: usize) {
         LOCAL_STAT.with(|s| {
-            s.stat.update_chain_len(bucket_id, len);
+            s.stat._update_chain_len(bucket_id, len);
         });
     }
 }
@@ -1014,7 +1012,7 @@ mod tests {
     fn setup_paged_hash_map<E: EvictionPolicy, T: MemPool<E>>(bp: Arc<T>) -> PagedHashMap<E, T> {
         let (db_id, c_id) = (0, 0);
         let c_key = ContainerKey::new(db_id, c_id);
-        let func = Box::new(simple_hash_func);
+        // let func = Box::new(simple_hash_func);
         // PagedHashMap::new(func, bp, c_key, false)
         PagedHashMap::new(bp, c_key, false)
     }
@@ -1049,7 +1047,7 @@ mod tests {
 
     #[test]
     fn test_update_existing_key() {
-        let mut map = setup_paged_hash_map(get_in_mem_pool());
+        let map = setup_paged_hash_map(get_in_mem_pool());
         let key = "test_key".as_bytes();
         let value1 = "value1".as_bytes();
         let value2 = "value2".as_bytes();
@@ -1071,34 +1069,9 @@ mod tests {
         );
     }
 
-    /*
-    #[test]
-    fn test_remove_key() {
-        let mut map = setup_paged_hash_map(get_in_mem_pool());
-        let key = "test_key".as_bytes();
-        let value = "test_value".as_bytes();
-        let func = simple_hash_func;
-
-        map.upsert_with_merge(key, value, func);
-        let removed_value = map.remove(key);
-        assert_eq!(
-            removed_value,
-            Some(value.to_vec()),
-            "Remove should return the removed value"
-        );
-
-        let retrieved_value = map.get(key);
-        // check error
-        assert!(
-            retrieved_value.is_err(),
-            "Get should return an error after key is removed"
-        );
-    }
-    */
-
     #[test]
     fn test_page_overflow_and_chain_handling() {
-        let mut map = setup_paged_hash_map(get_in_mem_pool());
+        let map = setup_paged_hash_map(get_in_mem_pool());
         let key1 = "key1".as_bytes();
         let value1 = vec![0u8; AVAILABLE_PAGE_SIZE / 2]; // Half page size to simulate near-full page
         let key2 = "key2".as_bytes();
@@ -1120,11 +1093,9 @@ mod tests {
 
     #[test]
     fn test_edge_case_key_value_sizes() {
-        let mut map = setup_paged_hash_map(get_in_mem_pool());
+        let map = setup_paged_hash_map(get_in_mem_pool());
         let key = random_string(AVAILABLE_PAGE_SIZE / 4); // Large key
-        let value = random_string(
-            AVAILABLE_PAGE_SIZE / 2 - PAGE_HEADER_SIZE - SHORT_KEY_PAGE_HEADER_SIZE - 10,
-        ); // Large value
+        let value = random_string(AVAILABLE_PAGE_SIZE / 2 - SHORT_KEY_PAGE_HEADER_SIZE - 10); // Large value
 
         let func = simple_hash_func;
 
@@ -1139,79 +1110,9 @@ mod tests {
         );
     }
 
-    /*
-    #[test]
-    fn test_random_operations() {
-        // let mut map = Arc::new(setup_paged_hash_map(get_in_mem_pool()));
-        let mut map = setup_paged_hash_map(get_in_mem_pool());
-        let mut rng = rand::thread_rng();
-        let mut data = HashMap::new();
-        let mut inserted_keys = Vec::new(); // Track keys that are currently valid for removal
-
-        let func = simple_hash_func;
-
-        for _ in 0..1000 {
-            let operation: u8 = rng.gen_range(0..4);
-            let key = random_string(10);
-            let value = random_string(20);
-
-            match operation {
-                0 => {
-                    // upsert_with_merge
-                    map.upsert_with_merge(&key, &value, func);
-                    data.insert(key.clone(), value.clone());
-                    inserted_keys.push(key); // Add key to the list of valid removal candidates
-                }
-                1 => {
-                    // Update
-                    if let Some(v) = data.get_mut(&key) {
-                        *v = value.clone();
-                        map.upsert_with_merge(&key, &value, func);
-                    }
-                }
-                2 => {
-                    // Get
-                    let expected = data.get(&key);
-                    // if key is not in data, map.get is error
-                    match expected {
-                        Some(v) => {
-                            assert_eq!(
-                                map.get(&key).unwrap(),
-                                v.clone(),
-                                "Mismatched values on get"
-                            );
-                        }
-                        None => {
-                            assert!(
-                                map.get(&key).is_err(),
-                                "Get should return an error if key is not in data"
-                            );
-                        }
-                    }
-                }
-                3 if !inserted_keys.is_empty() => {
-                    // Remove
-                    let remove_index = rng.gen_range(0..inserted_keys.len());
-                    let remove_key = inserted_keys.remove(remove_index);
-                    assert!(
-                        map.remove(&remove_key).is_some(),
-                        "Remove should return Some for existing key"
-                    );
-                    assert!(
-                        map.get(&remove_key).is_err(),
-                        "Get should return None after remove"
-                    );
-                    data.remove(&remove_key);
-                }
-                _ => {} // Skip remove if no keys are available
-            }
-        }
-    }
-    */
-
     #[test]
     fn test_sequential_upsert_with_merge_multiple_pages() {
-        let mut map = setup_paged_hash_map(get_in_mem_pool());
+        let map = setup_paged_hash_map(get_in_mem_pool());
         let mut last_key = vec![];
 
         let func = simple_hash_func;
@@ -1241,7 +1142,7 @@ mod tests {
     #[test]
     fn test_random_operations_without_remove() {
         // let mut map = Arc::new(setup_paged_hash_map(get_in_mem_pool()));
-        let mut map = setup_paged_hash_map(get_in_mem_pool());
+        let map = setup_paged_hash_map(get_in_mem_pool());
         let mut rng = rand::thread_rng();
         let mut data = HashMap::new();
         let mut inserted_keys = Vec::new(); // Track keys that are currently valid for removal
@@ -1308,7 +1209,7 @@ mod tests {
 
     #[test]
     fn test_iterator_basic() {
-        let mut map = setup_paged_hash_map(get_in_mem_pool());
+        let map = setup_paged_hash_map(get_in_mem_pool());
         let mut expected_data = HashMap::new();
 
         let func = simple_hash_func;
@@ -1336,7 +1237,7 @@ mod tests {
 
     #[test]
     fn test_iterator_across_pages() {
-        let mut map = setup_paged_hash_map(get_in_mem_pool());
+        let map = setup_paged_hash_map(get_in_mem_pool());
         let mut expected_data = HashMap::new();
 
         let func = simple_hash_func;
@@ -1445,6 +1346,37 @@ mod tests {
     }
 
     #[test]
+    fn test_remove_key() {
+        let map = setup_paged_hash_map(get_in_mem_pool());
+        let key = "test_key".as_bytes();
+        let value = "test_value".as_bytes();
+        // let func = simple_hash_func;
+
+        // map.upsert_with_merge(key, value, func);
+        map.insert(key, value).unwrap();
+        assert_eq!(
+            map.get(key).unwrap(),
+            value.to_vec(),
+            "Key should be retrievable after insert"
+        );
+
+        let removed_value = map.remove(key);
+        assert_eq!(
+            removed_value,
+            Some(value.to_vec()),
+            "Remove should return the removed value"
+        );
+
+        let retrieved_value = map.get(key);
+        print!("retrieved_value: {:?}", retrieved_value);
+        // check error
+        assert!(
+            retrieved_value.is_err(),
+            "Get should return an error after key is removed"
+        );
+    }
+
+    #[test]
     fn test_remove_key2() {
         let map = setup_paged_hash_map(get_in_mem_pool());
         let key = "test_key".as_bytes();
@@ -1489,9 +1421,7 @@ mod tests {
     fn test_edge_case_key_value_sizes2() {
         let map = setup_paged_hash_map(get_in_mem_pool());
         let key = random_string(AVAILABLE_PAGE_SIZE / 4); // Large key
-        let value = random_string(
-            AVAILABLE_PAGE_SIZE / 2 - PAGE_HEADER_SIZE - SHORT_KEY_PAGE_HEADER_SIZE - 10,
-        ); // Large value
+        let value = random_string(AVAILABLE_PAGE_SIZE / 2 - SHORT_KEY_PAGE_HEADER_SIZE - 10); // Large value
 
         assert!(
             map.upsert(&key, &value).is_ok(),
@@ -1502,6 +1432,74 @@ mod tests {
             value,
             "Should retrieve large value correctly"
         );
+    }
+
+    #[test]
+    fn test_random_operations() {
+        // let mut map = Arc::new(setup_paged_hash_map(get_in_mem_pool()));
+        let map = setup_paged_hash_map(get_in_mem_pool());
+        let mut rng = rand::thread_rng();
+        let mut data = HashMap::new();
+        let mut inserted_keys = Vec::new(); // Track keys that are currently valid for removal
+
+        let func = simple_hash_func;
+
+        for _ in 0..1000 {
+            let operation: u8 = rng.gen_range(0..4);
+            let key = random_string(10);
+            let value = random_string(20);
+
+            match operation {
+                0 => {
+                    // upsert_with_merge
+                    map.insert(&key, &value).unwrap();
+                    data.insert(key.clone(), value.clone());
+                    inserted_keys.push(key); // Add key to the list of valid removal candidates
+                }
+                1 => {
+                    // Update
+                    if let Some(v) = data.get_mut(&key) {
+                        *v = value.clone();
+                        map.upsert_with_merge(&key, &value, func);
+                    }
+                }
+                2 => {
+                    // Get
+                    let expected = data.get(&key);
+                    // if key is not in data, map.get is error
+                    match expected {
+                        Some(v) => {
+                            assert_eq!(
+                                map.get(&key).unwrap(),
+                                v.clone(),
+                                "Mismatched values on get"
+                            );
+                        }
+                        None => {
+                            assert!(
+                                map.get(&key).is_err(),
+                                "Get should return an error if key is not in data"
+                            );
+                        }
+                    }
+                }
+                3 if !inserted_keys.is_empty() => {
+                    // Remove
+                    let remove_index = rng.gen_range(0..inserted_keys.len());
+                    let remove_key = inserted_keys.remove(remove_index);
+                    assert!(
+                        map.remove(&remove_key).is_some(),
+                        "Remove should return Some for existing key"
+                    );
+                    assert!(
+                        map.get(&remove_key).is_err(),
+                        "Get should return None after remove"
+                    );
+                    data.remove(&remove_key);
+                }
+                _ => {} // Skip remove if no keys are available
+            }
+        }
     }
 
     #[test]
@@ -1599,18 +1597,18 @@ mod tests {
     // #[test]
     // fn test_concurrent_inserts_and_gets() {
     //     let map = Arc::new(setup_paged_hash_map(get_in_mem_pool()));
-    //     let barrier = Arc::new(Barrier::new(10));
+    //     let barrier = Arc::new(std::sync::Barrier::new(10));
     //     let mut handles = vec![];
 
     //     for _ in 0..10 {
     //         let map_clone = map.clone();
     //         let barrier_clone = barrier.clone();
-    //         handles.push(thread::spawn(move || {
+    //         handles.push(std::thread::spawn(move || {
     //             barrier_clone.wait();
     //             let key = random_string(10);
     //             let value = random_string(20);
-    //             map_clone.insert(&key, &value);
-    //             assert_eq!(map_clone.get(&key), Some(value));
+    //             map_clone.insert(&key, &value).unwrap();
+    //             assert_eq!(map_clone.get(&key).unwrap(), value);
     //         }));
     //     }
 
