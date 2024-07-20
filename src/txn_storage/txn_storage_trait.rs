@@ -173,6 +173,12 @@ pub trait TxnStorageTrait {
     // Drop a transaction handle
     fn drop_txn(&self, txn: Self::TxnHandle) -> Result<(), TxnStorageStatus>;
 
+    fn num_values(
+        &self,
+        txn: &Self::TxnHandle,
+        c_id: &ContainerId,
+    ) -> Result<usize, TxnStorageStatus>;
+
     // Check if value exists
     fn check_value<K: AsRef<[u8]>>(
         &self,

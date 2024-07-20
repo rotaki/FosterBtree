@@ -3,7 +3,10 @@ mod append_only_page;
 use append_only_page::AppendOnlyPage;
 use std::{
     marker::PhantomData,
-    sync::{atomic::AtomicU64, Arc, Mutex},
+    sync::{
+        atomic::{AtomicU64, AtomicUsize},
+        Arc, Mutex,
+    },
     thread::current,
     time::Duration,
 };
@@ -26,13 +29,13 @@ pub enum AppendOnlyStoreError {
 }
 
 struct RuntimeStats {
-    num_recs: AtomicU64,
+    num_recs: AtomicUsize,
 }
 
 impl RuntimeStats {
     fn new() -> Self {
         RuntimeStats {
-            num_recs: AtomicU64::new(0),
+            num_recs: AtomicUsize::new(0),
         }
     }
 
@@ -41,7 +44,7 @@ impl RuntimeStats {
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
-    fn get_num_recs(&self) -> u64 {
+    fn get_num_recs(&self) -> usize {
         self.num_recs.load(std::sync::atomic::Ordering::Relaxed)
     }
 }
@@ -94,7 +97,7 @@ impl<E: EvictionPolicy, T: MemPool<E>> AppendOnlyStore<E, T> {
         }
     }
 
-    pub fn num_kvs(&self) -> u64 {
+    pub fn num_kvs(&self) -> usize {
         self.stats.get_num_recs()
     }
 
@@ -310,7 +313,7 @@ mod tests {
             store.append(val).unwrap();
         }
 
-        assert_eq!(store.num_kvs(), num_vals as u64);
+        assert_eq!(store.num_kvs(), num_vals);
 
         let mut scanner = store.scan();
         for (i, val) in vals.iter().enumerate() {
@@ -353,7 +356,7 @@ mod tests {
             }
         });
 
-        assert_eq!(store.num_kvs(), num_vals as u64);
+        assert_eq!(store.num_kvs(), num_vals);
 
         // Check if all values are appended.
         let scanner = store.scan();

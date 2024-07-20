@@ -96,6 +96,15 @@ impl Storage {
             Storage::BTreeMap(b) => OnDiskIterator::btree(b.scan(&[], &[])),
         }
     }
+
+    fn num_values(&self) -> usize {
+        match self {
+            Storage::HashMap() => {
+                unimplemented!("Hash container not implemented")
+            }
+            Storage::BTreeMap(b) => b.num_kvs(),
+        }
+    }
 }
 
 pub enum OnDiskIterator {
@@ -327,6 +336,16 @@ impl TxnStorageTrait for OnDiskStorage {
     // Drop a transaction handle
     fn drop_txn(&self, _txn: Self::TxnHandle) -> Result<(), TxnStorageStatus> {
         Ok(())
+    }
+
+    fn num_values(
+        &self,
+        _txn: &Self::TxnHandle,
+        c_id: &ContainerId,
+    ) -> Result<usize, TxnStorageStatus> {
+        let containers = unsafe { &*self.containers.get() };
+        let storage = containers[*c_id as usize].as_ref();
+        Ok(storage.num_values())
     }
 
     // Check if value exists
