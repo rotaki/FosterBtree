@@ -36,7 +36,8 @@ pub trait ShortKeyPage {
     where
         F: Fn(&[u8], &[u8]) -> Vec<u8>;
 
-    fn get(&self, key: &[u8]) -> Option<Vec<u8>>;
+    fn get_old(&self, key: &[u8]) -> Option<Vec<u8>>;
+    fn get(&self, key: &[u8]) -> Result<Vec<u8>, ShortKeyPageError>;
     fn remove(&mut self, key: &[u8]) -> Option<Vec<u8>>;
 
     fn encode_shortkey_header(&mut self, header: &ShortKeyHeader);
@@ -606,7 +607,7 @@ impl ShortKeyPage for Page {
         }
     }
 
-    fn get(&self, key: &[u8]) -> Option<Vec<u8>> {
+    fn get_old(&self, key: &[u8]) -> Option<Vec<u8>> {
         // let (found, index) = self.binary_search(|slot_id| self.compare_key(key, slot_id));
         // let (found, index) = self.interpolation_search(key);
         let (found, index) = self.search_slot(key);
@@ -617,6 +618,18 @@ impl ShortKeyPage for Page {
             return Some(value_entry.vals.to_vec());
         }
         None
+    }
+
+    fn get(&self, key: &[u8]) -> Result<Vec<u8>, ShortKeyPageError> {
+        let (found, index) = self.search_slot(key);
+
+        if found {
+            let slot = self.decode_shortkey_slot(index);
+            let value_entry = self.decode_shortkey_value(slot.val_offset as usize, slot.key_len);
+            Ok(value_entry.vals)
+        } else {
+            Err(ShortKeyPageError::KeyNotFound)
+        }
     }
 
     fn remove(&mut self, key: &[u8]) -> Option<Vec<u8>> {
@@ -850,7 +863,7 @@ mod tests {
         assert_eq!(page.upsert(key, value), (true, None));
 
         // Verify the upserted key and value
-        let retrieved_value = page.get(key);
+        let retrieved_value = page.get_old(key);
         assert_eq!(retrieved_value, Some(value.to_vec()));
     }
 
@@ -870,7 +883,7 @@ mod tests {
         assert_eq!(old_value, (true, Some(value1.to_vec())));
 
         // Verify the updated value
-        let retrieved_value = page.get(key);
+        let retrieved_value = page.get_old(key);
         assert_eq!(retrieved_value, Some(value2.to_vec()));
     }
 
@@ -884,7 +897,7 @@ mod tests {
         assert_eq!(page.upsert(key, &value), (false, None));
 
         // Ensure the key was not upserted
-        let retrieved_value = page.get(key);
+        let retrieved_value = page.get_old(key);
         assert!(retrieved_value.is_none());
     }
 
@@ -903,9 +916,9 @@ mod tests {
         }
 
         // Check if keys are retrieved in sorted order
-        assert_eq!(page.get(b"alpha"), Some(b"value_alpha".to_vec()));
-        assert_eq!(page.get(b"betaa"), Some(b"value_betaa".to_vec()));
-        assert_eq!(page.get(b"gamma"), Some(b"value_gamma".to_vec()));
+        assert_eq!(page.get_old(b"alpha"), Some(b"value_alpha".to_vec()));
+        assert_eq!(page.get_old(b"betaa"), Some(b"value_betaa".to_vec()));
+        assert_eq!(page.get_old(b"gamma"), Some(b"value_gamma".to_vec()));
     }
 
     #[test]
@@ -918,8 +931,8 @@ mod tests {
         assert_eq!(page.upsert(min_key, value), (true, None));
         assert_eq!(page.upsert(max_key, value), (true, None));
 
-        assert_eq!(page.get(min_key), Some(value.to_vec()));
-        assert_eq!(page.get(max_key), Some(value.to_vec()));
+        assert_eq!(page.get_old(min_key), Some(value.to_vec()));
+        assert_eq!(page.get_old(max_key), Some(value.to_vec()));
     }
 
     #[test]
@@ -939,7 +952,7 @@ mod tests {
 
         // Check deletions
         for key in &keys {
-            assert!(page.get(key).is_none());
+            assert!(page.get_old(key).is_none());
         }
 
         // Re-upsert same keys
@@ -949,7 +962,7 @@ mod tests {
 
         // Verify re-upsertions
         for key in &keys {
-            assert_eq!(page.get(key), Some(b"new_value".to_vec()));
+            assert_eq!(page.get_old(key), Some(b"new_value".to_vec()));
         }
     }
 
@@ -965,14 +978,14 @@ mod tests {
             page.upsert(key, large_value),
             (true, Some(small_value.to_vec()))
         );
-        assert_eq!(page.get(key), Some(large_value.to_vec()));
+        assert_eq!(page.get_old(key), Some(large_value.to_vec()));
 
         // Update back to a smaller value
         assert_eq!(
             page.upsert(key, small_value),
             (true, Some(large_value.to_vec()))
         );
-        assert_eq!(page.get(key), Some(small_value.to_vec()));
+        assert_eq!(page.get_old(key), Some(small_value.to_vec()));
     }
 
     #[test]
@@ -991,7 +1004,7 @@ mod tests {
 
         // Verify all keys and values
         for (key, value) in keys_and_values {
-            assert_eq!(page.get(&key), Some(value));
+            assert_eq!(page.get_old(&key), Some(value));
         }
     }
 
@@ -1014,7 +1027,7 @@ mod tests {
 
         // Verify all keys and values in sorted order
         for (key, expected_value) in keys_and_values.iter() {
-            assert_eq!(page.get(key), Some(expected_value.clone()));
+            assert_eq!(page.get_old(key), Some(expected_value.clone()));
         }
 
         // Verify the order of keys directly from the page
@@ -1070,7 +1083,7 @@ mod tests {
         let (success, old_value) = page.upsert_with_merge(key, value, update_fn);
         assert!(success);
         assert_eq!(old_value, None);
-        assert_eq!(page.get(key), Some(value.to_vec()));
+        assert_eq!(page.get_old(key), Some(value.to_vec()));
     }
 
     #[test]
@@ -1084,7 +1097,7 @@ mod tests {
         let (success, old_value) = page.upsert_with_merge(key, value2, update_fn);
         assert!(success);
         assert_eq!(old_value, Some(value1.to_vec()));
-        assert_eq!(page.get(key), Some(update_fn(value1, value2)));
+        assert_eq!(page.get_old(key), Some(update_fn(value1, value2)));
     }
 
     #[test]
@@ -1098,7 +1111,7 @@ mod tests {
         let (success, old_value) = page.upsert_with_merge(key, value2, update_fn);
         assert!(success);
         assert_eq!(old_value, Some(value1.to_vec()));
-        assert_eq!(page.get(key), Some(update_fn(value1, value2)));
+        assert_eq!(page.get_old(key), Some(update_fn(value1, value2)));
     }
 
     #[test]
@@ -1118,7 +1131,7 @@ mod tests {
         let value2 = b"value2";
         let (success, _) = page.upsert_with_merge(key2, value2, update_fn);
         assert!(!success);
-        assert_eq!(page.get(key2), None);
+        assert_eq!(page.get_old(key2), None);
     }
 
     #[test]
@@ -1132,7 +1145,7 @@ mod tests {
         let (success, old_value) = page.upsert_with_merge(key, value2, |_, new| new.to_vec());
         assert!(success);
         assert_eq!(old_value, Some(value1.to_vec()));
-        assert_eq!(page.get(key), Some(value2.to_vec()));
+        assert_eq!(page.get_old(key), Some(value2.to_vec()));
     }
 
     #[test]
@@ -1143,7 +1156,7 @@ mod tests {
 
         let (success, _) = page.upsert_with_merge(&large_key, value, update_fn);
         assert!(!success);
-        assert_eq!(page.get(&large_key), None);
+        assert_eq!(page.get_old(&large_key), None);
     }
 
     #[test]
@@ -1154,7 +1167,7 @@ mod tests {
 
         let (success, _) = page.upsert_with_merge(key, &large_value, update_fn);
         assert!(!success);
-        assert_eq!(page.get(key), None);
+        assert_eq!(page.get_old(key), None);
     }
 
     #[test]
@@ -1168,7 +1181,7 @@ mod tests {
         let (success, old_value) = page.upsert_with_merge(key, value2, |_, new| new.to_vec());
         assert!(success);
         assert_eq!(old_value, Some(value1.to_vec()));
-        assert_eq!(page.get(key), Some(value2.to_vec()));
+        assert_eq!(page.get_old(key), Some(value2.to_vec()));
     }
 
     #[test]
@@ -1190,7 +1203,7 @@ mod tests {
 
         // Verify all keys and values
         for (key, value) in keys_and_values {
-            assert_eq!(page.get(&key), Some(value));
+            assert_eq!(page.get_old(&key), Some(value));
         }
     }
 
@@ -1216,7 +1229,7 @@ mod tests {
 
         // Verify all keys and values in sorted order
         for (key, expected_value) in keys_and_values.iter() {
-            assert_eq!(page.get(key), Some(expected_value.clone()));
+            assert_eq!(page.get_old(key), Some(expected_value.clone()));
         }
 
         // Verify the order of keys directly from the page
@@ -1276,7 +1289,7 @@ mod tests {
         );
 
         // Verify the inserted key and value
-        let retrieved_value = page.get(key);
+        let retrieved_value = page.get_old(key);
         assert_eq!(
             retrieved_value,
             Some(value.to_vec()),
@@ -1303,7 +1316,7 @@ mod tests {
         );
 
         // Verify the updated value
-        let retrieved_value = page.get(key);
+        let retrieved_value = page.get_old(key);
         assert_eq!(
             retrieved_value,
             Some(updated_value.to_vec()),
@@ -1334,7 +1347,7 @@ mod tests {
         );
 
         // Verify that the value in the page is still the first one
-        let retrieved_value = page.get(key);
+        let retrieved_value = page.get_old(key);
         assert_eq!(
             retrieved_value,
             Some(value1.to_vec()),
@@ -1368,7 +1381,7 @@ mod tests {
 
         // Ensure key2 has been updated
         assert_eq!(
-            page.get(key2),
+            page.get_old(key2),
             Some(updated_value2.to_vec()),
             "Key2 should have the updated value"
         );
@@ -1382,13 +1395,13 @@ mod tests {
 
         // Ensure key1 is no longer present
         assert!(
-            page.get(key1).is_none(),
+            page.get_old(key1).is_none(),
             "Key1 should be removed and return None"
         );
 
         // Check that key3 is still intact
         assert_eq!(
-            page.get(key3),
+            page.get_old(key3),
             Some(value3.to_vec()),
             "Key3 should still have the original value"
         );
@@ -1433,7 +1446,7 @@ mod tests {
                             .iter()
                             .find(|(k, _)| k == key_to_get)
                             .map(|(_, v)| v.clone());
-                        assert_eq!(page.get(&key_to_get), expected_value);
+                        assert_eq!(page.get_old(&key_to_get), expected_value);
                     }
                 }
                 3 => {
@@ -1455,7 +1468,7 @@ mod tests {
 
         // Verify all remaining keys and values
         for (key, value) in keys_and_values {
-            assert_eq!(page.get(&key), Some(value));
+            assert_eq!(page.get_old(&key), Some(value));
         }
     }
 }

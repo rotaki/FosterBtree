@@ -247,7 +247,7 @@ pub fn run_bench_for_rust_hash_map(
     let ops_ratio = bench_params.parse_ops_ratio();
     thread::scope(|s| {
         for partition in kvs.iter() {
-            let mut rhm = rhm.clone();
+            let rhm = rhm.clone();
             let rand = RandomOp::new(ops_ratio.clone());
             s.spawn(move || {
                 for (k, v) in partition.iter() {
@@ -276,26 +276,24 @@ pub fn run_bench_for_rust_hash_map(
 
 pub fn gen_paged_hash_map_in_mem(
 ) -> Arc<PagedHashMap<DummyEvictionPolicy, InMemPool<DummyEvictionPolicy>>> {
-    // let func = Box::new(|old: &[u8], new: &[u8]| {
-    //     old.iter().chain(new.iter()).copied().collect::<Vec<u8>>()
-    // });
-    // let func = Box::new(|old: &[u8], new: &[u8]| new.to_vec());
     let c_key = ContainerKey::new(0, 0);
-    // let map = PagedHashMap::new(func, get_in_mem_pool(), c_key, false);
-    let map = PagedHashMap::new(get_in_mem_pool(), c_key, false);
+    let map = PagedHashMap::new(get_in_mem_pool(), c_key, false, true);
     Arc::new(map)
 }
 
 pub fn gen_paged_hash_map_on_disk(
     bp_size: usize,
 ) -> Arc<PagedHashMap<LRUEvictionPolicy, BufferPoolForTest<LRUEvictionPolicy>>> {
-    // let func = Box::new(|old: &[u8], new: &[u8]| {
-    //     old.iter().chain(new.iter()).copied().collect::<Vec<u8>>()
-    // });
-    // let func = Box::new(|old: &[u8], new: &[u8]| new.to_vec());
     let c_key = ContainerKey::new(0, 0);
-    // let map = PagedHashMap::new(func, get_test_bp(bp_size), c_key, false);
-    let map = PagedHashMap::new(get_test_bp(bp_size), c_key, false);
+    let map = PagedHashMap::new(get_test_bp(bp_size), c_key, false, true);
+    Arc::new(map)
+}
+
+pub fn gen_paged_hash_map_on_disk_without_ponter_swizzling(
+    bp_size: usize,
+) -> Arc<PagedHashMap<LRUEvictionPolicy, BufferPoolForTest<LRUEvictionPolicy>>> {
+    let c_key = ContainerKey::new(0, 0);
+    let map = PagedHashMap::new(get_test_bp(bp_size), c_key, false, false);
     Arc::new(map)
 }
 
