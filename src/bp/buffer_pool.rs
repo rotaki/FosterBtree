@@ -199,7 +199,7 @@ use stat::*;
 
 /// Statistics kept by the buffer pool.
 /// These statistics are used for decision making.
-pub struct RuntimeStats {
+struct RuntimeStats {
     new_page: AtomicUsize,
     read_count: AtomicUsize,
     write_count: AtomicUsize,

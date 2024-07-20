@@ -180,13 +180,23 @@ pub struct RandomVals {
 impl RandomVals {
     pub fn new(num_vals: usize, partitions: usize, min_size: usize, max_size: usize) -> Vec<Self> {
         let mut vals = Vec::with_capacity(partitions);
-        for _ in 0..partitions {
-            let mut vals_i = Vec::with_capacity(num_vals);
-            for _ in 0..num_vals {
+
+        // Total number is num_vals
+        // Each partition has num_vals/partitions values except the last one
+        for i in 0..partitions {
+            let start = i * num_vals / partitions;
+            let end = if i == partitions - 1 {
+                num_vals
+            } else {
+                (i + 1) * num_vals / partitions
+            };
+            let mut vals_i = Vec::with_capacity(end - start);
+            for _ in start..end {
                 vals_i.push(gen_random_byte_vec(min_size, max_size));
             }
             vals.push(Self { vals: vals_i });
         }
+
         vals
     }
 

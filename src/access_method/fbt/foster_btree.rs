@@ -4,7 +4,10 @@ use crate::log;
 use std::{
     collections::BTreeMap,
     marker::PhantomData,
-    sync::{atomic::Ordering, Arc},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
     time::Duration,
 };
 
@@ -1221,10 +1224,35 @@ fn print_page(p: &Page) {
     println!("----------------------------------------------");
 }
 
+struct RuntimeStats {
+    num_keys: AtomicUsize,
+}
+
+impl RuntimeStats {
+    fn new() -> Self {
+        RuntimeStats {
+            num_keys: AtomicUsize::new(0),
+        }
+    }
+
+    fn inc_num_keys(&self) {
+        self.num_keys.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn dec_num_keys(&self) {
+        self.num_keys.fetch_sub(1, Ordering::Relaxed);
+    }
+
+    fn get_num_keys(&self) -> usize {
+        self.num_keys.load(Ordering::Relaxed)
+    }
+}
+
 pub struct FosterBtree<E: EvictionPolicy, T: MemPool<E>> {
     pub c_key: ContainerKey,
     pub root_key: PageFrameKey,
     pub mem_pool: Arc<T>,
+    stats: RuntimeStats,
     phantom: PhantomData<E>,
     // pub wal_buffer: LogBufferRef,
 }
@@ -1241,6 +1269,7 @@ impl<E: EvictionPolicy, T: MemPool<E>> FosterBtree<E, T> {
             c_key,
             root_key,
             mem_pool: mem_pool.clone(),
+            stats: RuntimeStats::new(),
             phantom: PhantomData,
         }
     }
@@ -1250,6 +1279,8 @@ impl<E: EvictionPolicy, T: MemPool<E>> FosterBtree<E, T> {
         mem_pool: Arc<T>,
         iter: impl Iterator<Item = (K, V)>,
     ) -> Self {
+        let stats = RuntimeStats::new();
+
         let mut root = mem_pool.create_new_page_for_write(c_key).unwrap();
         root.init_as_root();
         let root_key = root.page_frame_key().unwrap();
@@ -1257,6 +1288,7 @@ impl<E: EvictionPolicy, T: MemPool<E>> FosterBtree<E, T> {
         // Keep iterating the iter and appending the key-value pairs to the root page.
         let mut current_page = root;
         for (key, value) in iter {
+            stats.inc_num_keys();
             if !current_page.insert(key.as_ref(), value.as_ref(), false) {
                 // Create a new page and split the current page.
                 let mut new_page = mem_pool.create_new_page_for_write(c_key).unwrap();
@@ -1272,8 +1304,13 @@ impl<E: EvictionPolicy, T: MemPool<E>> FosterBtree<E, T> {
             c_key,
             root_key,
             mem_pool: mem_pool.clone(),
+            stats,
             phantom: PhantomData,
         }
+    }
+
+    pub fn num_kvs(&self) -> usize {
+        self.stats.get_num_keys()
     }
 
     /// Thread-unsafe traversal of the BTree
@@ -1680,6 +1717,7 @@ impl<E: EvictionPolicy, T: MemPool<E>> FosterBtree<E, T> {
         let slot_id = leaf_page.upper_bound_slot_id(&BTreeKey::new(key)) - 1;
         if slot_id == 0 {
             // Lower fence so insert is ok. We insert the key-value at the next position of the lower fence.
+            self.stats.inc_num_keys();
             self.insert_at_slot_or_split(&mut leaf_page, slot_id + 1, key, value);
             Ok(())
         } else {
@@ -1688,6 +1726,7 @@ impl<E: EvictionPolicy, T: MemPool<E>> FosterBtree<E, T> {
                 // Exact match
                 Err(TreeStatus::Duplicate)
             } else {
+                self.stats.inc_num_keys();
                 self.insert_at_slot_or_split(&mut leaf_page, slot_id + 1, key, value);
                 Ok(())
             }
@@ -1720,6 +1759,7 @@ impl<E: EvictionPolicy, T: MemPool<E>> FosterBtree<E, T> {
         let slot_id = leaf_page.upper_bound_slot_id(&BTreeKey::new(key)) - 1;
         if slot_id == 0 {
             // Lower fence so insert is ok. We insert the key-value at the next position of the lower fence.
+            self.stats.inc_num_keys();
             self.insert_at_slot_or_split(&mut leaf_page, slot_id + 1, key, value);
         } else {
             // We can insert the key if it does not exist
@@ -1728,6 +1768,7 @@ impl<E: EvictionPolicy, T: MemPool<E>> FosterBtree<E, T> {
                 self.update_at_slot_or_split(&mut leaf_page, slot_id, key, value);
             } else {
                 // Non-existent key
+                self.stats.inc_num_keys();
                 self.insert_at_slot_or_split(&mut leaf_page, slot_id + 1, key, value);
             }
         }
@@ -1746,6 +1787,7 @@ impl<E: EvictionPolicy, T: MemPool<E>> FosterBtree<E, T> {
             // We can delete the key if it exists
             if leaf_page.get_raw_key(slot_id) == key {
                 // Exact match
+                self.stats.dec_num_keys();
                 leaf_page.remove_at(slot_id);
                 Ok(())
             } else {

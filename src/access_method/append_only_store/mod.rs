@@ -25,6 +25,27 @@ pub enum AppendOnlyStoreError {
     RecordTooLarge,
 }
 
+struct RuntimeStats {
+    num_recs: AtomicU64,
+}
+
+impl RuntimeStats {
+    fn new() -> Self {
+        RuntimeStats {
+            num_recs: AtomicU64::new(0),
+        }
+    }
+
+    fn inc_num_recs(&self) {
+        self.num_recs
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn get_num_recs(&self) -> u64 {
+        self.num_recs.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
 /// In the append-only store, the pages forms a one-way linked list which we call a chain.
 /// The first page is called the root page.
 /// The append operation always appends data to the last page of the chain.
@@ -34,6 +55,7 @@ pub struct AppendOnlyStore<E: EvictionPolicy, T: MemPool<E>> {
     pub root_key: PageFrameKey,        // Fixed.
     pub last_key: Mutex<PageFrameKey>, // Variable
     pub mem_pool: Arc<T>,
+    stats: RuntimeStats,
     phantom: PhantomData<E>,
 }
 
@@ -52,6 +74,7 @@ impl<E: EvictionPolicy, T: MemPool<E>> AppendOnlyStore<E, T> {
             root_key,
             last_key: Mutex::new(root_key.clone()),
             mem_pool: mem_pool.clone(),
+            stats: RuntimeStats::new(),
             phantom: PhantomData,
         }
     }
@@ -71,10 +94,15 @@ impl<E: EvictionPolicy, T: MemPool<E>> AppendOnlyStore<E, T> {
         }
     }
 
+    pub fn num_kvs(&self) -> u64 {
+        self.stats.get_num_recs()
+    }
+
     pub fn append(&self, data: &[u8]) -> Result<(), AppendOnlyStoreError> {
         if data.len() > <Page as AppendOnlyPage>::max_record_size() {
             return Err(AppendOnlyStoreError::RecordTooLarge);
         }
+        self.stats.inc_num_recs();
 
         let mut last_key = self.last_key.lock().unwrap();
         let mut last_page = self.write_page(&*last_key);
@@ -250,6 +278,8 @@ mod tests {
             store.append(data).unwrap();
         }
 
+        assert_eq!(store.num_kvs(), 3);
+
         let mut scanner = store.scan();
 
         for _ in 0..3 {
@@ -279,6 +309,8 @@ mod tests {
             );
             store.append(val).unwrap();
         }
+
+        assert_eq!(store.num_kvs(), num_vals as u64);
 
         let mut scanner = store.scan();
         for (i, val) in vals.iter().enumerate() {
@@ -320,6 +352,8 @@ mod tests {
                 });
             }
         });
+
+        assert_eq!(store.num_kvs(), num_vals as u64);
 
         // Check if all values are appended.
         let scanner = store.scan();
