@@ -247,7 +247,7 @@ pub fn run_bench_for_rust_hash_map(
     let ops_ratio = bench_params.parse_ops_ratio();
     thread::scope(|s| {
         for partition in kvs.iter() {
-            let mut rhm = rhm.clone();
+            let rhm = rhm.clone();
             let rand = RandomOp::new(ops_ratio.clone());
             s.spawn(move || {
                 for (k, v) in partition.iter() {

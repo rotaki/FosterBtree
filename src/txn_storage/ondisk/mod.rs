@@ -1,6 +1,6 @@
 use std::{
     cell::UnsafeCell,
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::HashSet,
     path::{Path, PathBuf},
     sync::{Arc, Mutex, RwLock},
 };
@@ -12,12 +12,9 @@ use super::{
 use crate::{
     access_method::fbt::FosterBtreeRangeScanner,
     bp::prelude::{ContainerId, DatabaseId},
-    prelude::{BufferPool, ContainerKey, FosterBtree, LRUEvictionPolicy},
+    prelude::{ContainerKey, FosterBtree},
 };
-use crate::{
-    bp::{EvictionPolicy, MemPool},
-    rwlatch::RwLatch,
-};
+use crate::bp::{EvictionPolicy, MemPool};
 
 pub enum Storage<E: EvictionPolicy + 'static, M: MemPool<E>> {
     HashMap(),
@@ -44,13 +41,13 @@ impl<E: EvictionPolicy + 'static, M: MemPool<E>> Storage<E, M> {
     }
 
     fn insert(&self, key: Vec<u8>, val: Vec<u8>) -> Result<(), TxnStorageStatus> {
-        let result = match self {
+        match self {
             Storage::HashMap() => {
                 unimplemented!("Hash container not implemented")
             }
             Storage::BTreeMap(b) => b.insert(&key, &val)?,
         };
-        Ok(result)
+        Ok(())
     }
 
     fn get(&self, key: &[u8]) -> Result<Vec<u8>, TxnStorageStatus> {
@@ -64,23 +61,23 @@ impl<E: EvictionPolicy + 'static, M: MemPool<E>> Storage<E, M> {
     }
 
     fn update(&self, key: &[u8], val: Vec<u8>) -> Result<(), TxnStorageStatus> {
-        let result = match self {
+        match self {
             Storage::HashMap() => {
                 unimplemented!("Hash container not implemented")
             }
             Storage::BTreeMap(b) => b.update(key, &val)?,
         };
-        Ok(result)
+        Ok(())
     }
 
     fn remove(&self, key: &[u8]) -> Result<(), TxnStorageStatus> {
-        let result = match self {
+        match self {
             Storage::HashMap() => {
                 unimplemented!("Hash container not implemented")
             }
             Storage::BTreeMap(b) => b.delete(key)?,
         };
-        Ok(result)
+        Ok(())
     }
 
     fn iter(self: &Arc<Self>) -> OnDiskIterator<E, M> {

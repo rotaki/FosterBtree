@@ -780,10 +780,10 @@ fn split_min_move<E: EvictionPolicy>(
 
     foster_child.init();
     foster_child.set_level(this.level());
-    foster_child.set_low_fence(&moving_key);
+    foster_child.set_low_fence(moving_key);
     foster_child.set_high_fence(this.get_raw_key(this.high_fence_slot_id()));
     foster_child.set_right_most(this.is_right_most());
-    let res = foster_child.insert(&moving_key, &moving_val, false);
+    let res = foster_child.insert(moving_key, moving_val, false);
     assert!(res);
     foster_child.set_has_foster_child(this.has_foster_child());
 

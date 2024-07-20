@@ -4,16 +4,15 @@ use append_only_page::AppendOnlyPage;
 use std::{
     marker::PhantomData,
     sync::{
-        atomic::{AtomicU64, AtomicUsize},
+        atomic::AtomicUsize,
         Arc, Mutex,
     },
-    thread::current,
     time::Duration,
 };
 
 use crate::{
     bp::{FrameReadGuard, FrameWriteGuard, MemPoolStatus},
-    page::{Page, PageId, PAGE_SIZE},
+    page::Page,
     prelude::{ContainerKey, EvictionPolicy, MemPool, PageFrameKey},
 };
 
@@ -75,7 +74,7 @@ impl<E: EvictionPolicy, T: MemPool<E>> AppendOnlyStore<E, T> {
         AppendOnlyStore {
             c_key,
             root_key,
-            last_key: Mutex::new(root_key.clone()),
+            last_key: Mutex::new(root_key),
             mem_pool: mem_pool.clone(),
             stats: RuntimeStats::new(),
             phantom: PhantomData,
@@ -86,7 +85,7 @@ impl<E: EvictionPolicy, T: MemPool<E>> AppendOnlyStore<E, T> {
         let base = Duration::from_micros(10);
         let mut attempts = 0;
         loop {
-            match self.mem_pool.get_page_for_write(page_key.clone()) {
+            match self.mem_pool.get_page_for_write(*page_key) {
                 Ok(page) => return page,
                 Err(MemPoolStatus::FrameWriteLatchGrantFailed) => {
                     attempts += 1;
@@ -108,7 +107,7 @@ impl<E: EvictionPolicy, T: MemPool<E>> AppendOnlyStore<E, T> {
         self.stats.inc_num_recs();
 
         let mut last_key = self.last_key.lock().unwrap();
-        let mut last_page = self.write_page(&*last_key);
+        let mut last_page = self.write_page(&last_key);
 
         // Try to insert into the last page. If the page is full, create a new page and append to it.
         if last_page.append(data) {
@@ -150,7 +149,7 @@ pub struct AppendOnlyStoreScanner<E: EvictionPolicy + 'static, T: MemPool<E>> {
 
 impl<E: EvictionPolicy + 'static, T: MemPool<E>> AppendOnlyStoreScanner<E, T> {
     pub fn initialize(&mut self) {
-        let root_key = self.storage.root_key.clone();
+        let root_key = self.storage.root_key;
         let root_page = self.storage.mem_pool.get_page_for_read(root_key).unwrap();
         let root_page = unsafe {
             std::mem::transmute::<FrameReadGuard<E>, FrameReadGuard<'static, E>>(root_page)
@@ -185,7 +184,7 @@ impl<E: EvictionPolicy + 'static, T: MemPool<E>> Iterator for AppendOnlyStoreSca
                 .unwrap()
                 .get(self.current_slot_id);
             self.current_slot_id += 1;
-            return Some(record.to_vec());
+            Some(record.to_vec())
         } else {
             let current_page = self.current_page.take().unwrap();
             let next_page = current_page.next_page();
@@ -201,11 +200,11 @@ impl<E: EvictionPolicy + 'static, T: MemPool<E>> Iterator for AppendOnlyStoreSca
                     };
                     self.current_page = Some(next_page);
                     self.current_slot_id = 0;
-                    return self.next();
+                    self.next()
                 }
                 None => {
                     self.finished = true;
-                    return None;
+                    None
                 }
             }
         }

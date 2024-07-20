@@ -28,7 +28,7 @@ impl<E: EvictionPolicy> BufferPoolForTest<E> {
         std::fs::create_dir(temp_dir.path().join("0")).unwrap();
         let bp = BufferPool::new(temp_dir.path(), num_frames).unwrap();
         Self {
-            temp_dir: temp_dir,
+            temp_dir,
             bp,
         }
     }
