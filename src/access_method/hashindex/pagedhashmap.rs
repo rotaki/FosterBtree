@@ -652,15 +652,8 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
         result
     }
 
-    pub fn iter(&self) -> PagedHashMapIter<E, T> {
-        let page_key = PageFrameKey::new(self.c_key, 1);
-        let current_page = self.bp.get_page_for_read(page_key).unwrap();
-        PagedHashMapIter {
-            map: self,
-            current_page: Some(current_page),
-            current_index: 0,
-            current_bucket: 1,
-        }
+    pub fn iter(self: &Arc<Self>) -> PagedHashMapIter<E, T> {
+        PagedHashMapIter::new(self.clone())
     }
 
     #[cfg(feature = "stat")]
@@ -677,17 +670,48 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
 unsafe impl<E: EvictionPolicy, T: MemPool<E>> Sync for PagedHashMap<E, T> {}
 unsafe impl<E: EvictionPolicy, T: MemPool<E>> Send for PagedHashMap<E, T> {}
 
-pub struct PagedHashMapIter<'a, E: EvictionPolicy, T: MemPool<E>> {
-    map: &'a PagedHashMap<E, T>,
-    current_page: Option<FrameReadGuard<'a, E>>,
+pub struct PagedHashMapIter<E: EvictionPolicy + 'static, T: MemPool<E>> {
+    map: Arc<PagedHashMap<E, T>>,
+    current_page: Option<FrameReadGuard<'static, E>>,
     current_index: usize,
     current_bucket: usize,
+    initialized: bool,
+    finished: bool,
 }
 
-impl<'a, E: EvictionPolicy, T: MemPool<E>> Iterator for PagedHashMapIter<'a, E, T> {
+impl<E: EvictionPolicy + 'static, T: MemPool<E>> PagedHashMapIter<E, T> {
+    fn new(map: Arc<PagedHashMap<E, T>>) -> Self {
+        PagedHashMapIter {
+            map,
+            current_page: None,
+            current_index: 0,
+            current_bucket: 1,
+            initialized: false,
+            finished: false,
+        }
+    }
+
+    fn initialize(&mut self) {
+        assert!(!self.initialized);
+        let page_key = PageFrameKey::new(self.map.c_key, 1);
+        let first_page = unsafe { std::mem::transmute(self.map.read_page(page_key)) };
+        self.current_page = Some(first_page);
+    }
+}
+
+impl<E: EvictionPolicy + 'static, T: MemPool<E>> Iterator for PagedHashMapIter<E, T> {
     type Item = (Vec<u8>, Vec<u8>); // Key and value types
 
     fn next(&mut self) -> Option<Self::Item> {
+        if self.finished {
+            return None;
+        }
+
+        if !self.initialized {
+            self.initialize();
+            self.initialized = true;
+        }
+
         while let Some(page) = &self.current_page {
             if self.current_index < (page.num_slots() as usize) {
                 let sks = page.decode_shortkey_slot(self.current_index as u16);
@@ -708,11 +732,13 @@ impl<'a, E: EvictionPolicy, T: MemPool<E>> Iterator for PagedHashMapIter<'a, E, 
 
             // If end of current page, fetch next
             if next_page_id != 0 {
-                self.current_page = self
-                    .map
-                    .bp
-                    .get_page_for_read(PageFrameKey::new(self.map.c_key, next_page_id))
-                    .ok();
+                let nex_page_key = PageFrameKey::new(self.map.c_key, next_page_id);
+                let next_page = unsafe {
+                    std::mem::transmute::<FrameReadGuard<'_, E>, FrameReadGuard<'static, E>>(
+                        self.map.read_page(nex_page_key),
+                    )
+                };
+                self.current_page = Some(next_page);
                 self.current_index = 0;
                 continue;
             }
@@ -720,14 +746,13 @@ impl<'a, E: EvictionPolicy, T: MemPool<E>> Iterator for PagedHashMapIter<'a, E, 
             // No more pages in the current bucket, move to next bucket
             self.current_bucket += 1;
             if self.current_bucket <= self.map.bucket_num {
-                self.current_page = self
-                    .map
-                    .bp
-                    .get_page_for_read(PageFrameKey::new(
-                        self.map.c_key,
-                        self.current_bucket as u32,
-                    ))
-                    .ok();
+                let next_page_key = PageFrameKey::new(self.map.c_key, self.current_bucket as u32);
+                let next_page = unsafe {
+                    std::mem::transmute::<FrameReadGuard<'_, E>, FrameReadGuard<'static, E>>(
+                        self.map.read_page(next_page_key),
+                    )
+                };
+                self.current_page = Some(next_page);
                 self.current_index = 0;
                 continue;
             }
@@ -736,6 +761,7 @@ impl<'a, E: EvictionPolicy, T: MemPool<E>> Iterator for PagedHashMapIter<'a, E, 
             break;
         }
 
+        self.finished = true;
         None
     }
 }
@@ -1209,7 +1235,7 @@ mod tests {
 
     #[test]
     fn test_iterator_basic() {
-        let map = setup_paged_hash_map(get_in_mem_pool());
+        let map = Arc::new(setup_paged_hash_map(get_in_mem_pool()));
         let mut expected_data = HashMap::new();
 
         let func = simple_hash_func;
@@ -1237,7 +1263,7 @@ mod tests {
 
     #[test]
     fn test_iterator_across_pages() {
-        let map = setup_paged_hash_map(get_in_mem_pool());
+        let map = Arc::new(setup_paged_hash_map(get_in_mem_pool()));
         let mut expected_data = HashMap::new();
 
         let func = simple_hash_func;

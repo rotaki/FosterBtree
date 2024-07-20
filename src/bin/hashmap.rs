@@ -2,7 +2,6 @@ use std::time::Instant;
 
 use clap::Parser;
 use fbtree::{bench_utils::*, random::RandomKVs};
-use statrs::statistics::Statistics;
 use std::process::Command;
 
 fn main() {
@@ -61,8 +60,17 @@ fn main() {
     }
 
     fn calculate_stats(times: &[u128]) -> (f64, f64, u128, u128) {
-        let mean = times.iter().map(|&x| x as f64).mean();
-        let stddev = times.iter().map(|&x| x as f64).std_dev();
+        let mean = {
+            let sum = times.iter().sum::<u128>() as f64;
+            sum / times.len() as f64
+        };
+        let stddev = {
+            let sum = times
+                .iter()
+                .map(|&time| (time as f64 - mean).powi(2))
+                .sum::<f64>();
+            (sum / times.len() as f64).sqrt()
+        };
         let min = *times.iter().min().unwrap();
         let max = *times.iter().max().unwrap();
         (mean, stddev, min, max)
