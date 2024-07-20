@@ -190,6 +190,22 @@ impl Storage {
             }
         }
     }
+
+    fn num_values(&self) -> usize {
+        self.shared();
+        let result = match self {
+            Storage::HashMap(_, h) => {
+                let h = unsafe { &*h.get() };
+                h.len()
+            }
+            Storage::BTreeMap(_, b) => {
+                let b = unsafe { &*b.get() };
+                b.len()
+            }
+        };
+        self.release_shared();
+        result
+    }
 }
 
 pub enum InMemIterator {
@@ -414,6 +430,18 @@ impl TxnStorageTrait for InMemStorage {
     // Drop a transaction handle
     fn drop_txn(&self, _txn: Self::TxnHandle) -> Result<(), TxnStorageStatus> {
         Ok(())
+    }
+
+    fn num_values(
+        &self,
+        txn: &Self::TxnHandle,
+        c_id: &ContainerId,
+    ) -> Result<usize, TxnStorageStatus> {
+        if txn.db_id() != 0 {
+            return Err(TxnStorageStatus::DBNotFound);
+        }
+        let containers = unsafe { &*self.containers.get() };
+        Ok(containers[*c_id as usize].num_values())
     }
 
     // Check if value exists
