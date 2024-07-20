@@ -1,7 +1,6 @@
 use std::{
     cell::UnsafeCell,
     collections::HashSet,
-    path::{Path, PathBuf},
     sync::{Arc, Mutex, RwLock},
 };
 
@@ -9,12 +8,12 @@ use super::{
     ContainerOptions, ContainerType, DBOptions, ScanOptions, TxnOptions, TxnStorageStatus,
     TxnStorageTrait,
 };
+use crate::bp::{EvictionPolicy, MemPool};
 use crate::{
     access_method::fbt::FosterBtreeRangeScanner,
     bp::prelude::{ContainerId, DatabaseId},
     prelude::{ContainerKey, FosterBtree},
 };
-use crate::bp::{EvictionPolicy, MemPool};
 
 pub enum Storage<E: EvictionPolicy + 'static, M: MemPool<E>> {
     HashMap(),
@@ -141,21 +140,11 @@ impl<E: EvictionPolicy + 'static, M: MemPool<E>> OnDiskIterator<E, M> {
 ///    respect to other next() calls of the same iterator. However, next() is thread-safe with respect
 ///    to other operations on the same container including next() of other iterators.
 pub struct OnDiskStorage<E: EvictionPolicy + 'static, M: MemPool<E>> {
-    remove_dir_on_drop: bool,
-    bp_dir: PathBuf,
     bp: Arc<M>,
     db_created: UnsafeCell<bool>,
     container_lock: RwLock<()>, // lock for container operations
     containers: UnsafeCell<Vec<Arc<Storage<E, M>>>>, // Storage is in a Box in order to prevent moving when resizing the vector
     phantom: std::marker::PhantomData<(E, M)>,
-}
-
-impl<E: EvictionPolicy + 'static, M: MemPool<E>> Drop for OnDiskStorage<E, M> {
-    fn drop(&mut self) {
-        if self.remove_dir_on_drop {
-            std::fs::remove_dir_all(&self.bp_dir).unwrap();
-        }
-    }
 }
 
 unsafe impl<E: EvictionPolicy + 'static, M: MemPool<E>> Sync for OnDiskStorage<E, M> {}
@@ -164,10 +153,8 @@ unsafe impl<E: EvictionPolicy + 'static, M: MemPool<E>> Send for OnDiskStorage<E
 impl<E: EvictionPolicy + 'static, M: MemPool<E>> OnDiskStorage<E, M> {
     /// Assumes bp_directory is already created.
     /// Any database created will be created in the bp_directory.
-    pub fn new<P: AsRef<Path>>(bp_dir: P, bp: &Arc<M>, remove_dir_on_drop: bool) -> Self {
+    pub fn new(bp: &Arc<M>) -> Self {
         OnDiskStorage {
-            remove_dir_on_drop,
-            bp_dir: bp_dir.as_ref().to_path_buf(),
             bp: bp.clone(),
             db_created: UnsafeCell::new(false),
             container_lock: RwLock::new(()),
@@ -201,10 +188,6 @@ impl<E: EvictionPolicy + 'static, M: MemPool<E>> TxnStorageTrait for OnDiskStora
         if *guard {
             return Err(TxnStorageStatus::DBExists);
         }
-        let db_id = 0;
-        // Create db folder
-        let db_path = self.bp_dir.join(db_id.to_string());
-        std::fs::create_dir(&db_path).unwrap();
         *guard = true;
         Ok(0)
     }

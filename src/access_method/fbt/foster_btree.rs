@@ -2248,7 +2248,7 @@ mod tests {
     use rstest::rstest;
 
     #[rstest]
-    #[case::bp(get_test_bp::<LRUEvictionPolicy>(1))]
+    #[case::bp(get_test_bp(1))]
     #[case::in_mem(get_in_mem_pool())]
     fn test_page_setup<E: EvictionPolicy, T: MemPool<E>>(#[case] mp: Arc<T>) {
         let c_key = ContainerKey::new(0, 0);
@@ -2349,7 +2349,7 @@ mod tests {
     }
 
     #[rstest]
-    #[case::bp(get_test_bp::<LRUEvictionPolicy>(2))]
+    #[case::bp(get_test_bp(2))]
     #[case::in_mem(get_in_mem_pool())]
     fn test_page_merge<E: EvictionPolicy, T: MemPool<E>>(#[case] bp: Arc<T>) {
         test_page_merge_detail(bp.clone(), 10, 20, 30, vec![], vec![]);
@@ -2455,7 +2455,7 @@ mod tests {
     }
 
     #[rstest]
-    #[case::bp(get_test_bp::<LRUEvictionPolicy>(2))]
+    #[case::bp(get_test_bp(2))]
     #[case::in_mem(get_in_mem_pool())]
     fn test_page_balance<E: EvictionPolicy, T: MemPool<E>>(#[case] bp: Arc<T>) {
         test_page_balance_detail(bp.clone(), 10, 20, 30, vec![], vec![]);
@@ -2588,7 +2588,7 @@ mod tests {
     }
 
     #[rstest]
-    #[case::bp(get_test_bp::<LRUEvictionPolicy>(3))]
+    #[case::bp(get_test_bp(3))]
     #[case::in_mem(get_in_mem_pool())]
     fn test_page_adopt<E: EvictionPolicy, T: MemPool<E>>(#[case] bp: Arc<T>) {
         test_page_adopt_detail(bp.clone(), 10, 20, 30, vec![], vec![]);
@@ -2710,7 +2710,7 @@ mod tests {
     }
 
     #[rstest]
-    #[case::bp(get_test_bp::<LRUEvictionPolicy>(3))]
+    #[case::bp(get_test_bp(3))]
     #[case::in_mem(get_in_mem_pool())]
     fn test_page_anti_adopt<E: EvictionPolicy, T: MemPool<E>>(#[case] bp: Arc<T>) {
         test_page_anti_adopt_detail(bp.clone(), 10, 20, 30, vec![], vec![]);
@@ -2720,7 +2720,7 @@ mod tests {
     }
 
     #[rstest]
-    #[case::bp(get_test_bp::<LRUEvictionPolicy>(3))]
+    #[case::bp(get_test_bp(3))]
     #[case::in_mem(get_in_mem_pool())]
     fn test_root_page_ascend<E: EvictionPolicy, T: MemPool<E>>(#[case] bp: Arc<T>) {
         let (db_id, c_id) = (0, 0);
@@ -2805,7 +2805,7 @@ mod tests {
     }
 
     #[rstest]
-    #[case::bp(get_test_bp::<LRUEvictionPolicy>(3))]
+    #[case::bp(get_test_bp(3))]
     #[case::in_mem(get_in_mem_pool())]
     fn test_root_page_descend<E: EvictionPolicy, T: MemPool<E>>(#[case] bp: Arc<T>) {
         let (db_id, c_id) = (0, 0);
@@ -2936,7 +2936,7 @@ mod tests {
     // NN, LN, NL, LL: Do nothing
     // Root ascend is allowed only when the foster page is the root page.
     #[rstest]
-    #[case::bp(get_test_bp::<LRUEvictionPolicy>(3))]
+    #[case::bp(get_test_bp(3))]
     #[case::in_mem(get_in_mem_pool())]
     fn test_foster_relationship_structure_modification_criteria<
         E: EvictionPolicy,
@@ -3228,7 +3228,7 @@ mod tests {
     // SN, SL, NN, NL: Adopt if child has foster child.
     // LN, LL: Nothing
     #[rstest]
-    #[case::bp(get_test_bp::<LRUEvictionPolicy>(3))]
+    #[case::bp(get_test_bp(3))]
     #[case::in_mem(get_in_mem_pool())]
     fn test_parent_child_relationship_structure_modification_criteria<
         E: EvictionPolicy,
@@ -3320,7 +3320,7 @@ mod tests {
     }
 
     #[rstest]
-    #[case::bp(get_test_bp::<LRUEvictionPolicy>(3))]
+    #[case::bp(get_test_bp(3))]
     #[case::in_mem(get_in_mem_pool())]
     fn test_sorted_insertion<E: EvictionPolicy, T: MemPool<E>>(#[case] bp: Arc<T>) {
         let btree = setup_btree_empty(bp.clone());
@@ -3346,7 +3346,7 @@ mod tests {
     }
 
     #[rstest]
-    #[case::bp(get_test_bp::<LRUEvictionPolicy>(3))]
+    #[case::bp(get_test_bp(3))]
     #[case::in_mem(get_in_mem_pool())]
     fn test_random_insertion<E: EvictionPolicy, T: MemPool<E>>(#[case] bp: Arc<T>) {
         let btree = setup_btree_empty(bp.clone());
@@ -3373,7 +3373,7 @@ mod tests {
     }
 
     #[rstest]
-    #[case::bp(get_test_bp::<LRUEvictionPolicy>(3))]
+    #[case::bp(get_test_bp(3))]
     #[case::in_mem(get_in_mem_pool())]
     fn test_random_updates<E: EvictionPolicy, T: MemPool<E>>(#[case] bp: Arc<T>) {
         let btree = setup_btree_empty(bp.clone());
@@ -3427,7 +3427,7 @@ mod tests {
     }
 
     #[rstest]
-    #[case::bp(get_test_bp::<LRUEvictionPolicy>(3))]
+    #[case::bp(get_test_bp(3))]
     #[case::in_mem(get_in_mem_pool())]
     fn test_random_deletion<E: EvictionPolicy, T: MemPool<E>>(#[case] bp: Arc<T>) {
         let btree = setup_btree_empty(bp.clone());
@@ -3462,7 +3462,7 @@ mod tests {
     }
 
     #[rstest]
-    #[case::bp(get_test_bp::<LRUEvictionPolicy>(3))]
+    #[case::bp(get_test_bp(3))]
     #[case::in_mem(get_in_mem_pool())]
     fn test_random_upserts<E: EvictionPolicy, T: MemPool<E>>(#[case] bp: Arc<T>) {
         let btree = setup_btree_empty(bp.clone());
@@ -3525,7 +3525,7 @@ mod tests {
     }
 
     #[rstest]
-    #[case::bp(get_test_bp::<LRUEvictionPolicy>(3))]
+    #[case::bp(get_test_bp(3))]
     #[case::in_mem(get_in_mem_pool())]
     fn test_scan<E: EvictionPolicy + 'static, T: MemPool<E>>(#[case] bp: Arc<T>) {
         let btree = Arc::new(setup_btree_empty(bp.clone()));
@@ -3587,7 +3587,7 @@ mod tests {
     }
 
     #[rstest]
-    #[case::bp(get_test_bp::<LRUEvictionPolicy>(3))]
+    #[case::bp(get_test_bp(3))]
     #[case::in_mem(get_in_mem_pool())]
     fn test_scan_with_filter<E: EvictionPolicy + 'static, T: MemPool<E>>(#[case] bp: Arc<T>) {
         let btree = Arc::new(setup_btree_empty(bp.clone()));
@@ -3642,7 +3642,7 @@ mod tests {
     }
 
     #[rstest]
-    #[case::bp(get_test_bp::<LRUEvictionPolicy>(100))]
+    #[case::bp(get_test_bp(100))]
     #[case::in_mem(get_in_mem_pool())]
     fn test_insertion_stress<E: EvictionPolicy + 'static, T: MemPool<E>>(#[case] bp: Arc<T>) {
         let num_keys = 10000;
@@ -3720,7 +3720,7 @@ mod tests {
 
     // skip default
     #[rstest]
-    #[case::bp(get_test_bp::<LRUEvictionPolicy>(100))]
+    #[case::bp(get_test_bp(100))]
     #[case::in_mem(get_in_mem_pool())]
     #[ignore]
     fn replay_stress<E: EvictionPolicy, T: MemPool<E>>(#[case] bp: Arc<T>) {
@@ -3770,7 +3770,7 @@ mod tests {
     }
 
     #[rstest]
-    #[case::bp(get_test_bp::<LRUEvictionPolicy>(100))]
+    #[case::bp(get_test_bp(100))]
     #[case::in_mem(get_in_mem_pool())]
     fn test_bulk_insert_create<E: EvictionPolicy, T: MemPool<E>>(#[case] bp: Arc<T>) {
         let num_keys = 100000;
@@ -3807,7 +3807,7 @@ mod tests {
     }
 
     #[rstest]
-    #[case::bp(get_test_bp::<LRUEvictionPolicy>(100))]
+    #[case::bp(get_test_bp(100))]
     #[case::in_mem(get_in_mem_pool())]
     fn test_parallel_insertion<E: EvictionPolicy, T: MemPool<E>>(#[case] bp: Arc<T>) {
         // init_test_logger();

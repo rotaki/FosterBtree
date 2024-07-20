@@ -8,6 +8,15 @@ use rand::{
     thread_rng, Rng,
 };
 
+pub fn gen_random_pathname(prefix: Option<&str>) -> String {
+    let ts_in_ns = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let dir_name = format!("{}_{}", prefix.unwrap_or("random_path"), ts_in_ns);
+    dir_name
+}
+
 /// Generates a random alphanumeric string of a specified length.
 ///
 /// # Arguments

@@ -3,10 +3,7 @@ mod append_only_page;
 use append_only_page::AppendOnlyPage;
 use std::{
     marker::PhantomData,
-    sync::{
-        atomic::AtomicUsize,
-        Arc, Mutex,
-    },
+    sync::{atomic::AtomicUsize, Arc, Mutex},
     time::Duration,
 };
 
@@ -213,7 +210,8 @@ impl<E: EvictionPolicy + 'static, T: MemPool<E>> Iterator for AppendOnlyStoreSca
 
 #[cfg(test)]
 mod tests {
-    use crate::bp::{BufferPoolForTest, LRUEvictionPolicy};
+    use crate::bp::{get_test_bp, BufferPool, LRUEvictionPolicy};
+    use crate::page::AVAILABLE_PAGE_SIZE;
     use crate::random::{gen_random_byte_vec, RandomVals};
 
     use super::*;
@@ -221,21 +219,15 @@ mod tests {
     use std::sync::Arc;
     use std::thread;
 
-    // Helper functions for setting up the memory pool and container key
-    fn initialize_memory_pool() -> Arc<BufferPoolForTest<LRUEvictionPolicy>> {
-        // Implementation of the memory pool setup
-        Arc::new(BufferPoolForTest::new(100))
-    }
-
-    fn create_container_key() -> ContainerKey {
+    fn get_c_key() -> ContainerKey {
         // Implementation of the container key creation
         ContainerKey::new(0, 0)
     }
 
     #[test]
     fn test_small_append() {
-        let mem_pool = initialize_memory_pool();
-        let container_key = create_container_key();
+        let mem_pool = get_test_bp(10);
+        let container_key = get_c_key();
         let store = AppendOnlyStore::new(container_key, mem_pool);
 
         let data = b"small data";
@@ -244,8 +236,8 @@ mod tests {
 
     #[test]
     fn test_large_append() {
-        let mem_pool = initialize_memory_pool();
-        let container_key = create_container_key();
+        let mem_pool = get_test_bp(10);
+        let container_key = get_c_key();
         let store = AppendOnlyStore::new(container_key, mem_pool);
 
         let data = gen_random_byte_vec(Page::max_record_size() + 1, Page::max_record_size() + 1);
@@ -257,12 +249,12 @@ mod tests {
 
     #[test]
     fn test_page_overflow() {
-        let mem_pool = initialize_memory_pool();
-        let container_key = create_container_key();
+        let mem_pool = get_test_bp(10);
+        let container_key = get_c_key();
         let store = AppendOnlyStore::new(container_key, mem_pool);
 
         let data = gen_random_byte_vec(1000, 1000);
-        let num_appends = (PAGE_SIZE / data.len()) + 1; // Ensure overflow
+        let num_appends = (AVAILABLE_PAGE_SIZE / data.len()) + 1; // Ensure overflow
 
         for _ in 0..num_appends {
             assert_eq!(store.append(&data), Ok(()));
@@ -271,8 +263,8 @@ mod tests {
 
     #[test]
     fn test_basic_scan() {
-        let mem_pool = initialize_memory_pool();
-        let container_key = create_container_key();
+        let mem_pool = get_test_bp(10);
+        let container_key = get_c_key();
         let store = Arc::new(AppendOnlyStore::new(container_key, mem_pool.clone()));
 
         let data = b"scanned data";
@@ -299,10 +291,7 @@ mod tests {
             .pop()
             .unwrap();
 
-        let store = Arc::new(AppendOnlyStore::new(
-            create_container_key(),
-            initialize_memory_pool(),
-        ));
+        let store = Arc::new(AppendOnlyStore::new(get_c_key(), get_test_bp(10)));
 
         for (i, val) in vals.iter().enumerate() {
             println!(
@@ -332,10 +321,7 @@ mod tests {
         let num_threads = 3;
         let vals = RandomVals::new(num_vals, num_threads, val_min_size, val_max_size);
 
-        let store = Arc::new(AppendOnlyStore::new(
-            create_container_key(),
-            initialize_memory_pool(),
-        ));
+        let store = Arc::new(AppendOnlyStore::new(get_c_key(), get_test_bp(10)));
 
         let mut verify_vals = HashSet::new();
         for val_i in vals.iter() {
@@ -367,8 +353,8 @@ mod tests {
 
     #[test]
     fn test_scan_finish_condition() {
-        let mem_pool = initialize_memory_pool();
-        let container_key = create_container_key();
+        let mem_pool = get_test_bp(10);
+        let container_key = get_c_key();
         let store = Arc::new(AppendOnlyStore::new(container_key, mem_pool.clone()));
 
         let mut scanner = store.scan();

@@ -14,6 +14,7 @@ use crate::file_manager::FileManager;
 use std::{
     cell::UnsafeCell,
     collections::HashMap,
+    fs::create_dir_all,
     ops::{Deref, DerefMut},
     path::PathBuf,
     sync::atomic::{AtomicUsize, Ordering},
@@ -332,8 +333,9 @@ impl<T: EvictionPolicy> DerefMut for Frames<T> {
     }
 }
 
-/// Read-after-write buffer pool.
+/// Buffer pool that manages the buffer frames.
 pub struct BufferPool<T: EvictionPolicy> {
+    remove_dir_on_drop: bool,
     path: PathBuf,
     latch: RwLatch,
     frames: UnsafeCell<Frames<T>>,
@@ -342,13 +344,35 @@ pub struct BufferPool<T: EvictionPolicy> {
     runtime_stats: RuntimeStats,
 }
 
+impl<T> Drop for BufferPool<T>
+where
+    T: EvictionPolicy,
+{
+    fn drop(&mut self) {
+        if self.remove_dir_on_drop {
+            std::fs::remove_dir_all(&self.path).unwrap();
+        }
+    }
+}
+
 impl<T> BufferPool<T>
 where
     T: EvictionPolicy,
 {
+    /// Create a new buffer pool with the given number of frames.
+    /// Directory structure
+    /// * bp_dir
+    ///    * db_dir
+    ///      * container_file
+    ///
+    /// The buffer pool will create the bp_dir if it does not exist.
+    /// The db_dir and container_file are lazily created when a page is evicted and
+    /// a file manager is constructed.
+    /// If remove_dir_on_drop is true, then the bp_dir will be removed when the buffer pool is dropped.
     pub fn new<P: AsRef<std::path::Path>>(
-        path: P,
+        bp_dir: P,
         num_frames: usize,
+        remove_dir_on_drop: bool,
     ) -> Result<Self, MemPoolStatus> {
         log_debug!("Buffer pool created: num_frames: {}", num_frames);
 
@@ -356,17 +380,30 @@ where
         // A file in the directory corresponds to a container.
         // Create a FileManager for each file and store it in the container.
         let mut container = HashMap::new();
-        for entry in std::fs::read_dir(&path).unwrap() {
+        create_dir_all(&bp_dir).unwrap();
+        for entry in std::fs::read_dir(&bp_dir).unwrap() {
             let entry = entry.unwrap();
-            let path = entry.path();
-            if path.is_dir() {
-                let db_id = path.file_name().unwrap().to_str().unwrap().parse().unwrap();
-                for entry in std::fs::read_dir(&path).unwrap() {
+            let db_path = entry.path();
+            if db_path.is_dir() {
+                let db_id = db_path
+                    .file_name()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .parse()
+                    .unwrap();
+                for entry in std::fs::read_dir(&db_path).unwrap() {
                     let entry = entry.unwrap();
-                    let path = entry.path();
-                    if path.is_file() {
-                        let c_id = path.file_name().unwrap().to_str().unwrap().parse().unwrap();
-                        let fm = FileManager::new(&path)?;
+                    let file_path = entry.path();
+                    if file_path.is_file() {
+                        let c_id = file_path
+                            .file_name()
+                            .unwrap()
+                            .to_str()
+                            .unwrap()
+                            .parse()
+                            .unwrap();
+                        let fm = FileManager::new(&db_path, c_id)?;
                         container.insert(ContainerKey::new(db_id, c_id), fm);
                     }
                 }
@@ -374,7 +411,8 @@ where
         }
 
         Ok(BufferPool {
-            path: path.as_ref().to_path_buf(),
+            remove_dir_on_drop,
+            path: bp_dir.as_ref().to_path_buf(),
             latch: RwLatch::default(),
             id_to_index: UnsafeCell::new(HashMap::new()),
             frames: UnsafeCell::new(Frames::new(num_frames)),
@@ -516,12 +554,7 @@ where
         let container_to_file = unsafe { &mut *self.container_to_file.get() };
 
         let fm = container_to_file.entry(c_key).or_insert_with(|| {
-            FileManager::new(
-                self.path
-                    .join(c_key.db_id.to_string())
-                    .join(c_key.c_id.to_string()),
-            )
-            .unwrap()
+            FileManager::new(self.path.join(c_key.db_id.to_string()), c_key.c_id).unwrap()
         });
 
         let page_id = fm.fetch_add_page_id();
@@ -933,17 +966,14 @@ mod tests {
     use std::thread;
     use tempfile::TempDir;
 
-    pub type TestRAWBufferPool = BufferPool<LRUEvictionPolicy>;
-
     #[test]
     fn test_bp_and_frame_latch() {
         let temp_dir = TempDir::new().unwrap();
         let db_id = 0;
-        // create a directory for the database
-        std::fs::create_dir(temp_dir.path().join(db_id.to_string())).unwrap();
         {
             let num_frames = 10;
-            let bp = TestRAWBufferPool::new(temp_dir.path(), num_frames).unwrap();
+            let bp =
+                BufferPool::<LRUEvictionPolicy>::new(temp_dir.path(), num_frames, false).unwrap();
             let c_key = ContainerKey::new(db_id, 0);
             let frame = bp.create_new_page_for_write(c_key).unwrap();
             let key = frame.page_frame_key().unwrap();
@@ -982,11 +1012,10 @@ mod tests {
     fn test_bp_write_back_simple() {
         let temp_dir = TempDir::new().unwrap();
         let db_id = 0;
-        // create a directory for the database
-        std::fs::create_dir(temp_dir.path().join(db_id.to_string())).unwrap();
         {
             let num_frames = 1;
-            let bp = TestRAWBufferPool::new(temp_dir.path(), num_frames).unwrap();
+            let bp =
+                BufferPool::<LRUEvictionPolicy>::new(temp_dir.path(), num_frames, false).unwrap();
             let c_key = ContainerKey::new(db_id, 0);
 
             let key1 = {
@@ -1018,12 +1047,11 @@ mod tests {
     fn test_bp_write_back_many() {
         let temp_dir = TempDir::new().unwrap();
         let db_id = 0;
-        // create a directory for the database
-        std::fs::create_dir(temp_dir.path().join(db_id.to_string())).unwrap();
         {
             let mut keys = Vec::new();
             let num_frames = 1;
-            let bp = TestRAWBufferPool::new(temp_dir.path(), num_frames).unwrap();
+            let bp =
+                BufferPool::<LRUEvictionPolicy>::new(temp_dir.path(), num_frames, false).unwrap();
             let c_key = ContainerKey::new(db_id, 0);
 
             for i in 0..100 {
@@ -1044,11 +1072,9 @@ mod tests {
     fn test_bp_create_new_page() {
         let temp_dir = TempDir::new().unwrap();
         let db_id = 0;
-        // create a directory for the database
-        std::fs::create_dir(temp_dir.path().join(db_id.to_string())).unwrap();
 
-        let num_pages = 2;
-        let bp = TestRAWBufferPool::new(temp_dir.path(), num_pages).unwrap();
+        let num_frames = 2;
+        let bp = BufferPool::<LRUEvictionPolicy>::new(temp_dir.path(), num_frames, false).unwrap();
         let c_key = ContainerKey::new(db_id, 0);
 
         let num_traversal = 100;
@@ -1085,11 +1111,9 @@ mod tests {
     fn test_bp_all_frames_latched() {
         let temp_dir = TempDir::new().unwrap();
         let db_id = 0;
-        // create a directory for the database
-        std::fs::create_dir(temp_dir.path().join(db_id.to_string())).unwrap();
 
-        let num_pages = 1;
-        let bp = TestRAWBufferPool::new(temp_dir.path(), num_pages).unwrap();
+        let num_frames = 1;
+        let bp = BufferPool::<LRUEvictionPolicy>::new(temp_dir.path(), num_frames, false).unwrap();
         let c_key = ContainerKey::new(db_id, 0);
 
         let mut guard1 = bp.create_new_page_for_write(c_key).unwrap();
@@ -1110,11 +1134,9 @@ mod tests {
     fn test_bp_stats() {
         let temp_dir = TempDir::new().unwrap();
         let db_id = 0;
-        // create a directory for the database
-        std::fs::create_dir(temp_dir.path().join(db_id.to_string())).unwrap();
 
-        let num_pages = 1;
-        let bp = TestRAWBufferPool::new(temp_dir.path(), num_pages).unwrap();
+        let num_frames = 1;
+        let bp = BufferPool::<LRUEvictionPolicy>::new(temp_dir.path(), num_frames, false).unwrap();
         let c_key = ContainerKey::new(db_id, 0);
 
         let key_1 = {

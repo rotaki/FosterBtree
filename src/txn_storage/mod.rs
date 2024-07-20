@@ -24,9 +24,12 @@ mod tests {
 
     #[cfg(test)]
     use super::*;
-    use crate::bp::{
-        prelude::{ContainerId, DatabaseId},
-        BufferPool, BufferPoolForTest, LRUEvictionPolicy,
+    use crate::{
+        bp::{
+            prelude::{ContainerId, DatabaseId},
+            BufferPool, LRUEvictionPolicy,
+        },
+        random::gen_random_pathname,
     };
     use std::{sync::Arc, thread};
 
@@ -35,29 +38,15 @@ mod tests {
     }
 
     fn get_on_disk_storage() -> Arc<impl TxnStorageTrait> {
-        let ts_in_nanoseconds = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let dir_name = "BP_TEST_DIR_".to_string() + &ts_in_nanoseconds.to_string();
-        // Create dir if it doesn't exist
-        if !std::path::Path::new(&dir_name).exists() {
-            println!(
-                "Buffer pool directory ({}) does not exist. Creating the directory.",
-                dir_name
-            );
-            std::fs::create_dir(&dir_name).unwrap();
-        } else {
-            println!(
-                "Buffer pool directory ({}) already exists. Clearing the directory.",
-                dir_name
-            );
-            // Clear the directory including folders
-            std::fs::remove_dir_all(&dir_name).unwrap();
-            std::fs::create_dir(&dir_name).unwrap();
-        }
-        let bp = Arc::new(BufferPool::<LRUEvictionPolicy>::new(&dir_name, 1024).unwrap());
-        Arc::new(OnDiskStorage::new(dir_name, &bp, true))
+        let bp = Arc::new(
+            BufferPool::<LRUEvictionPolicy>::new(
+                gen_random_pathname(Some("BP_TEST_DIR")),
+                1024,
+                true,
+            )
+            .unwrap(),
+        );
+        Arc::new(OnDiskStorage::new(&bp))
     }
 
     #[rstest]
