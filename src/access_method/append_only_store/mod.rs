@@ -78,6 +78,18 @@ impl<E: EvictionPolicy, T: MemPool<E>> AppendOnlyStore<E, T> {
         }
     }
 
+    pub fn bulk_insert_create<K: AsRef<[u8]>, V: AsRef<[u8]>>(
+        c_key: ContainerKey,
+        mem_pool: Arc<T>,
+        iter: impl Iterator<Item = (K, V)>,
+    ) -> Self {
+        let storage = Self::new(c_key, mem_pool);
+        for (k, v) in iter {
+            storage.append(k.as_ref(), v.as_ref()).unwrap();
+        }
+        storage
+    }
+
     fn write_page(&self, page_key: &PageFrameKey) -> FrameWriteGuard<E> {
         let base = Duration::from_micros(10);
         let mut attempts = 0;
@@ -225,8 +237,7 @@ impl<E: EvictionPolicy + 'static, T: MemPool<E>> Iterator for AppendOnlyStoreSca
 
 #[cfg(test)]
 mod tests {
-    use crate::bp::{get_test_bp, BufferPool, LRUEvictionPolicy};
-    use crate::page::AVAILABLE_PAGE_SIZE;
+    use crate::bp::get_test_bp;
     use crate::random::{gen_random_byte_vec, RandomKVs};
 
     use super::*;
@@ -400,5 +411,37 @@ mod tests {
 
         let mut scanner = store.scan();
         assert!(scanner.next().is_none());
+    }
+
+    #[test]
+    fn test_bulk_insert_create() {
+        let num_keys = 10000;
+        let key_size = 50;
+        let val_min_size = 50;
+        let val_max_size = 100;
+        let vals = RandomKVs::new(
+            false,
+            false,
+            1,
+            num_keys,
+            key_size,
+            val_min_size,
+            val_max_size,
+        )
+        .pop()
+        .unwrap();
+
+        let store = Arc::new(AppendOnlyStore::bulk_insert_create(
+            get_c_key(),
+            get_test_bp(10),
+            vals.iter(),
+        ));
+
+        assert_eq!(store.num_kvs(), num_keys);
+
+        let mut scanner = store.scan();
+        for val in vals.iter() {
+            assert_eq!(scanner.next().unwrap(), (val.0.to_vec(), val.1.to_vec()));
+        }
     }
 }
