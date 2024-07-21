@@ -1953,13 +1953,18 @@ impl<E: EvictionPolicy + 'static, T: MemPool<E>> Iterator for FosterBtreeRangeSc
             let leaf_page = self.current_leaf_page.as_ref().unwrap();
             let key = leaf_page.get_raw_key(self.current_slot_id);
             if BTreeKey::new(key) >= self.r_key() {
+                // Evict the page as soon as possible
+                let current_leaf_page = self.current_leaf_page.take().unwrap();
+                self.btree.mem_pool.fast_evict(current_leaf_page).unwrap();
                 self.finish();
                 return None;
             }
             if self.current_slot_id == leaf_page.high_fence_slot_id() {
                 // Reached the high fence. Move to the next leaf page.
                 self.prev_high_fence = Some(key.to_owned());
-                self.current_leaf_page = None;
+                // Evict the page as soon as possible
+                let current_leaf_page = self.current_leaf_page.take().unwrap();
+                self.btree.mem_pool.fast_evict(current_leaf_page).unwrap();
             } else if leaf_page.has_foster_child()
                 && self.current_slot_id == leaf_page.foster_child_slot_id()
             {
@@ -1979,6 +1984,9 @@ impl<E: EvictionPolicy + 'static, T: MemPool<E>> Iterator for FosterBtreeRangeSc
                         foster_page,
                     )
                 };
+                // Evict the current page as soon as possible
+                self.btree.mem_pool.fast_evict(current_page).unwrap();
+
                 self.current_leaf_page = Some(foster_page);
                 self.current_slot_id = 1;
             } else {

@@ -154,6 +154,10 @@ impl<T: EvictionPolicy> MemPool<T> for InMemPool<T> {
         Ok(())
     }
 
+    fn fast_evict(&self, frame: FrameReadGuard<T>) -> Result<(), MemPoolStatus> {
+        Ok(())
+    }
+
     fn reset(&self) {
         self.exclusive();
         let frames = unsafe { &mut *self.frames.get() };

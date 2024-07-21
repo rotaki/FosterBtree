@@ -13,7 +13,7 @@ use crate::file_manager::FileManager;
 
 use std::{
     cell::UnsafeCell,
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     fs::create_dir_all,
     ops::{Deref, DerefMut},
     path::PathBuf,
@@ -246,6 +246,7 @@ impl RuntimeStats {
 
 pub struct Frames<T: EvictionPolicy> {
     num_frames: usize,
+    fast_path_victims: VecDeque<usize>,
     eviction_candidates: [usize; EVICTION_SCAN_DEPTH],
     frames: Vec<BufferFrame<T>>, // The Vec<frames> is fixed size. If not fixed size, then Pin must be used to ensure that the frame does not move when the vector is resized.
 }
@@ -254,6 +255,7 @@ impl<T: EvictionPolicy> Frames<T> {
     pub fn new(num_frames: usize) -> Self {
         Frames {
             num_frames,
+            fast_path_victims: VecDeque::new(),
             eviction_candidates: [0; EVICTION_SCAN_DEPTH],
             frames: (0..num_frames)
                 .map(|i| BufferFrame::new(i as u32))
@@ -261,11 +263,28 @@ impl<T: EvictionPolicy> Frames<T> {
         }
     }
 
+    pub fn push_to_eviction_queue(&mut self, frame_id: usize) {
+        self.fast_path_victims.push_back(frame_id);
+    }
+
     /// Choose a victim frame to be evicted.
     /// Return the index of the frame and whether the frame is dirty (requires writing back to disk).
     /// If all the frames are locked, then return None.
     pub fn choose_victim(&mut self) -> Option<FrameWriteGuard<T>> {
         log_debug!("Choosing victim");
+
+        // First, try the fast path victims.
+        while let Some(victim) = self.fast_path_victims.pop_front() {
+            let frame = self.frames[victim].try_write(false);
+            if let Some(guard) = frame {
+                log_debug!("Fast path victim found @ frame({})", guard.frame_id());
+                return Some(guard);
+            } else {
+                // The frame is latched. Try the next frame.
+            }
+        }
+
+        // Next, randomly select a few frames and choose the one with the minimum eviction score
         for _ in 0..EVICTION_SCAN_TRIALS {
             // Initialize the eviction candidates with max
             for i in 0..EVICTION_SCAN_DEPTH {
@@ -828,6 +847,16 @@ where
         Ok(())
     }
 
+    pub fn fast_evict(&self, frame: FrameReadGuard<T>) -> Result<(), MemPoolStatus> {
+        self.exclusive();
+
+        let frames = unsafe { &mut *self.frames.get() };
+        frames.push_to_eviction_queue(frame.frame_id() as usize);
+
+        self.release_exclusive();
+        Ok(())
+    }
+
     // Just return the runtime stats
     pub fn stats(&self) -> String {
         self.runtime_stats.to_string()
@@ -899,6 +928,10 @@ where
 
     fn flush_all(&self) -> Result<(), MemPoolStatus> {
         BufferPool::flush_all(self)
+    }
+
+    fn fast_evict(&self, frame: FrameReadGuard<T>) -> Result<(), MemPoolStatus> {
+        BufferPool::fast_evict(self, frame)
     }
 
     fn reset(&self) {

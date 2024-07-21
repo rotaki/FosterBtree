@@ -195,11 +195,17 @@ impl<E: EvictionPolicy + 'static, T: MemPool<E>> Iterator for AppendOnlyStoreSca
                             next_page,
                         )
                     };
+                    // Fast path eviction
+                    self.storage.mem_pool.fast_evict(current_page).unwrap();
+
                     self.current_page = Some(next_page);
                     self.current_slot_id = 0;
                     self.next()
                 }
                 None => {
+                    // Fast path eviction
+                    self.storage.mem_pool.fast_evict(current_page).unwrap();
+
                     self.finished = true;
                     None
                 }
