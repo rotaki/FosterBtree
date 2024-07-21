@@ -375,6 +375,9 @@ where
     fn drop(&mut self) {
         if self.remove_dir_on_drop {
             std::fs::remove_dir_all(&self.path).unwrap();
+        } else {
+            // Persist all the pages to disk
+            self.clear_frames().unwrap();
         }
     }
 }
