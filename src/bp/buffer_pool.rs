@@ -869,15 +869,14 @@ where
     /// Reset the buffer pool to its initial state.
     /// This will not flush the dirty pages to disk.
     /// This also removes all the files in disk.
-    pub fn reset(&self) {
+    pub fn clear_frames(&self) -> Result<(), MemPoolStatus> {
         self.exclusive();
 
-        unsafe { &mut *self.id_to_index.get() }.clear();
-        unsafe { &mut *self.container_to_file.get() }.clear();
+        let frames = unsafe { &*self.frames.get() };
+        let id_to_index = unsafe { &mut *self.id_to_index.get() };
+        let container_to_file = unsafe { &mut *self.container_to_file.get() };
 
-        let frames = unsafe { &mut *self.frames.get() };
-
-        for frame in frames.iter_mut() {
+        for frame in frames.iter() {
             let mut frame = loop {
                 if let Some(guard) = frame.try_write(false) {
                     break guard;
@@ -885,16 +884,23 @@ where
                 // spin
                 std::hint::spin_loop();
             };
+            if frame.dirty().load(Ordering::Acquire) {
+                let key = frame.page_key().unwrap();
+                if let Some(file) = container_to_file.get(&key.c_key) {
+                    self.runtime_stats.inc_write_count();
+                    file.write_page(key.page_id, &frame)?;
+                } else {
+                    self.release_exclusive();
+                    return Err(MemPoolStatus::FileManagerNotFound);
+                }
+            }
             frame.clear();
         }
 
-        for entry in std::fs::read_dir(&self.path).unwrap() {
-            let entry = entry.unwrap();
-            let path = entry.path();
-            std::fs::remove_file(path).unwrap();
-        }
+        id_to_index.clear();
 
         self.release_exclusive();
+        Ok(())
     }
 }
 
@@ -933,8 +939,8 @@ where
         BufferPool::fast_evict(self, frame_id)
     }
 
-    fn reset(&self) {
-        BufferPool::reset(self);
+    fn clear_frames(&self) -> Result<(), MemPoolStatus> {
+        BufferPool::clear_frames(self)
     }
 }
 
@@ -1164,6 +1170,38 @@ mod tests {
         // Now, we should be able to get a new page for write.
         let guard2 = bp.create_new_page_for_write(c_key).unwrap();
         drop(guard2);
+    }
+
+    #[test]
+    fn test_bp_clear_frames() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_id = 0;
+
+        let num_frames = 10;
+        let bp = BufferPool::<LRUEvictionPolicy>::new(temp_dir.path(), num_frames, false).unwrap();
+        let c_key = ContainerKey::new(db_id, 0);
+
+        let mut keys = Vec::new();
+        for i in 0..num_frames * 2 {
+            let mut guard = bp.create_new_page_for_write(c_key).unwrap();
+            guard[0] = i as u8;
+            keys.push(guard.page_frame_key().unwrap());
+        }
+
+        bp.run_checks();
+
+        // Clear the buffer pool
+        bp.clear_frames().unwrap();
+
+        bp.run_checks();
+
+        // Check the contents of the pages
+        for (i, key) in keys.iter().enumerate() {
+            let guard = bp.get_page_for_read(*key).unwrap();
+            assert_eq!(guard[0], i as u8);
+        }
+
+        bp.run_checks();
     }
 
     #[test]

@@ -158,16 +158,8 @@ impl<T: EvictionPolicy> MemPool<T> for InMemPool<T> {
         Ok(())
     }
 
-    fn reset(&self) {
-        self.exclusive();
-        let frames = unsafe { &mut *self.frames.get() };
-        let id_to_index = unsafe { &mut *self.id_to_index.get() };
-        let container_page_count = unsafe { &mut *self.container_page_count.get() };
-
-        frames.clear();
-        id_to_index.clear();
-        container_page_count.clear();
-        self.release_exclusive();
+    fn clear_frames(&self) -> Result<(), MemPoolStatus> {
+        Ok(())
     }
 }
 
