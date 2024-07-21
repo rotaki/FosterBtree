@@ -1022,7 +1022,7 @@ mod tests {
         let db_id = 0;
         {
             let num_frames = 10;
-            let bp = BufferPool::<LRUEvictionPolicy>::new(temp_dir, num_frames, false).unwrap();
+            let bp = BufferPool::<LRUEvictionPolicy>::new(&temp_dir, num_frames, false).unwrap();
             let c_key = ContainerKey::new(db_id, 0);
             let frame = bp.create_new_page_for_write(c_key).unwrap();
             let key = frame.page_frame_key().unwrap();
@@ -1063,7 +1063,7 @@ mod tests {
         let db_id = 0;
         {
             let num_frames = 1;
-            let bp = BufferPool::<LRUEvictionPolicy>::new(temp_dir, num_frames, false).unwrap();
+            let bp = BufferPool::<LRUEvictionPolicy>::new(&temp_dir, num_frames, false).unwrap();
             let c_key = ContainerKey::new(db_id, 0);
 
             let key1 = {
@@ -1098,7 +1098,7 @@ mod tests {
         {
             let mut keys = Vec::new();
             let num_frames = 1;
-            let bp = BufferPool::<LRUEvictionPolicy>::new(temp_dir, num_frames, false).unwrap();
+            let bp = BufferPool::<LRUEvictionPolicy>::new(&temp_dir, num_frames, false).unwrap();
             let c_key = ContainerKey::new(db_id, 0);
 
             for i in 0..100 {
@@ -1121,7 +1121,7 @@ mod tests {
         let db_id = 0;
 
         let num_frames = 2;
-        let bp = BufferPool::<LRUEvictionPolicy>::new(temp_dir, num_frames, false).unwrap();
+        let bp = BufferPool::<LRUEvictionPolicy>::new(&temp_dir, num_frames, false).unwrap();
         let c_key = ContainerKey::new(db_id, 0);
 
         let num_traversal = 100;
@@ -1160,7 +1160,7 @@ mod tests {
         let db_id = 0;
 
         let num_frames = 1;
-        let bp = BufferPool::<LRUEvictionPolicy>::new(temp_dir, num_frames, false).unwrap();
+        let bp = BufferPool::<LRUEvictionPolicy>::new(&temp_dir, num_frames, false).unwrap();
         let c_key = ContainerKey::new(db_id, 0);
 
         let mut guard1 = bp.create_new_page_for_write(c_key).unwrap();
@@ -1183,7 +1183,7 @@ mod tests {
         let db_id = 0;
 
         let num_frames = 10;
-        let bp = BufferPool::<LRUEvictionPolicy>::new(temp_dir, num_frames, false).unwrap();
+        let bp = BufferPool::<LRUEvictionPolicy>::new(&temp_dir, num_frames, false).unwrap();
         let c_key = ContainerKey::new(db_id, 0);
 
         let mut keys = Vec::new();
@@ -1235,7 +1235,7 @@ mod tests {
         drop(bp1); // Drop will also clear the buffer pool
 
         // Create a new buffer pool
-        let bp2 = BufferPool::<LRUEvictionPolicy>::new(temp_dir, num_frames * 2, false).unwrap();
+        let bp2 = BufferPool::<LRUEvictionPolicy>::new(&temp_dir, num_frames * 2, false).unwrap();
 
         bp2.run_checks();
 
@@ -1254,7 +1254,7 @@ mod tests {
         let db_id = 0;
 
         let num_frames = 1;
-        let bp = BufferPool::<LRUEvictionPolicy>::new(temp_dir, num_frames, false).unwrap();
+        let bp = BufferPool::<LRUEvictionPolicy>::new(&temp_dir, num_frames, false).unwrap();
         let c_key = ContainerKey::new(db_id, 0);
 
         let key_1 = {
