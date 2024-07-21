@@ -20,6 +20,7 @@ use std::{
     sync::atomic::{AtomicUsize, Ordering},
 };
 
+const EVICTION_SCAN_TRIALS: usize = 5;
 const EVICTION_SCAN_DEPTH: usize = 10;
 
 #[cfg(feature = "stat")]
@@ -265,57 +266,60 @@ impl<T: EvictionPolicy> Frames<T> {
     /// If all the frames are locked, then return None.
     pub fn choose_victim(&mut self) -> Option<FrameWriteGuard<T>> {
         log_debug!("Choosing victim");
-        // Initialize the eviction candidates with max
-        for i in 0..EVICTION_SCAN_DEPTH {
-            self.eviction_candidates[i] = usize::MAX;
-        }
-        if self.num_frames > EVICTION_SCAN_DEPTH {
-            // Generate **distinct** random numbers.
-            for _ in 0..3 * EVICTION_SCAN_DEPTH {
-                let rand_idx = gen_random_int(0, self.num_frames - 1);
-                self.eviction_candidates[rand_idx % EVICTION_SCAN_DEPTH] = rand_idx;
-                // Use mod to avoid duplicates
+        for _ in 0..EVICTION_SCAN_TRIALS {
+            // Initialize the eviction candidates with max
+            for i in 0..EVICTION_SCAN_DEPTH {
+                self.eviction_candidates[i] = usize::MAX;
             }
-        } else {
-            // Use all the frames as candidates
-            for i in 0..self.num_frames {
-                self.eviction_candidates[i] = i;
-            }
-        }
-        log_debug!("Eviction candidates: {:?}", self.eviction_candidates);
-
-        let mut frame_with_min_score: Option<FrameWriteGuard<T>> = None;
-        for i in self.eviction_candidates.iter() {
-            if i == &usize::MAX {
-                // Skip the invalid index
-                continue;
-            }
-            let frame = self.frames[*i].try_write(false);
-            if let Some(guard) = frame {
-                if let Some(current_min_score) = frame_with_min_score.as_ref() {
-                    if guard.eviction_score() < current_min_score.eviction_score() {
-                        frame_with_min_score = Some(guard);
-                    } else {
-                        // No need to update the min frame
-                    }
-                } else {
-                    frame_with_min_score = Some(guard);
+            if self.num_frames > EVICTION_SCAN_DEPTH {
+                // Generate **distinct** random numbers.
+                for _ in 0..3 * EVICTION_SCAN_DEPTH {
+                    let rand_idx = gen_random_int(0, self.num_frames - 1);
+                    self.eviction_candidates[rand_idx % EVICTION_SCAN_DEPTH] = rand_idx;
+                    // Use mod to avoid duplicates
                 }
             } else {
-                // Could not acquire the lock. Do not consider this frame.
+                // Use all the frames as candidates
+                for i in 0..self.num_frames {
+                    self.eviction_candidates[i] = i;
+                }
+            }
+            log_debug!("Eviction candidates: {:?}", self.eviction_candidates);
+
+            let mut frame_with_min_score: Option<FrameWriteGuard<T>> = None;
+            for i in self.eviction_candidates.iter() {
+                if i == &usize::MAX {
+                    // Skip the invalid index
+                    continue;
+                }
+                let frame = self.frames[*i].try_write(false);
+                if let Some(guard) = frame {
+                    if let Some(current_min_score) = frame_with_min_score.as_ref() {
+                        if guard.eviction_score() < current_min_score.eviction_score() {
+                            frame_with_min_score = Some(guard);
+                        } else {
+                            // No need to update the min frame
+                        }
+                    } else {
+                        frame_with_min_score = Some(guard);
+                    }
+                } else {
+                    // Could not acquire the lock. Do not consider this frame.
+                }
+            }
+
+            log_debug!("Frame with min score: {:?}", frame_with_min_score);
+
+            #[allow(clippy::manual_map)]
+            if let Some(guard) = frame_with_min_score {
+                log_debug!("Victim found @ frame({})", guard.frame_id());
+                return Some(guard);
+            } else {
+                log_debug!("All latched");
+                continue;
             }
         }
-
-        log_debug!("Frame with min score: {:?}", frame_with_min_score);
-
-        #[allow(clippy::manual_map)]
-        if let Some(guard) = frame_with_min_score {
-            log_debug!("Victim found @ frame({})", guard.frame_id());
-            Some(guard)
-        } else {
-            log_debug!("All latched");
-            None
-        }
+        None
     }
 }
 
