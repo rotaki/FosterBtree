@@ -154,7 +154,7 @@ impl<T: EvictionPolicy> MemPool<T> for InMemPool<T> {
         Ok(())
     }
 
-    fn fast_evict(&self, frame: FrameReadGuard<T>) -> Result<(), MemPoolStatus> {
+    fn fast_evict(&self, _frame_id: u32) -> Result<(), MemPoolStatus> {
         Ok(())
     }
 

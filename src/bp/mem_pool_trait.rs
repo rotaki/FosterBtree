@@ -153,7 +153,7 @@ pub trait MemPool<T: EvictionPolicy>: Sync + Send {
     /// Tell the memory pool that a page in the frame should be evicted as soon as possible.
     /// This function will not evict the page immediately.
     /// This function is used as a hint to the memory pool to evict the page when possible.
-    fn fast_evict(&self, frame: FrameReadGuard<T>) -> Result<(), MemPoolStatus>;
+    fn fast_evict(&self, frame_id: u32) -> Result<(), MemPoolStatus>;
 
     /// Reset the memory pool.
     /// This function will reset the memory pool to its initial state.

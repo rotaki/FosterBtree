@@ -848,11 +848,11 @@ where
         Ok(())
     }
 
-    pub fn fast_evict(&self, frame: FrameReadGuard<T>) -> Result<(), MemPoolStatus> {
+    pub fn fast_evict(&self, frame_id: u32) -> Result<(), MemPoolStatus> {
+        // push_to_eviction_queue can be done without buffer pool latch
+        // because it is a lock-free operation
         let frames = unsafe { &*self.frames.get() };
-        // push_to_eviction_queue is safe because the queue is
-        // lock-free
-        frames.push_to_eviction_queue(frame.frame_id() as usize);
+        frames.push_to_eviction_queue(frame_id as usize);
         Ok(())
     }
 
@@ -929,8 +929,8 @@ where
         BufferPool::flush_all(self)
     }
 
-    fn fast_evict(&self, frame: FrameReadGuard<T>) -> Result<(), MemPoolStatus> {
-        BufferPool::fast_evict(self, frame)
+    fn fast_evict(&self, frame_id: u32) -> Result<(), MemPoolStatus> {
+        BufferPool::fast_evict(self, frame_id)
     }
 
     fn reset(&self) {

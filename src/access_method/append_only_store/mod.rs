@@ -196,7 +196,11 @@ impl<E: EvictionPolicy + 'static, T: MemPool<E>> Iterator for AppendOnlyStoreSca
                         )
                     };
                     // Fast path eviction
-                    self.storage.mem_pool.fast_evict(current_page).unwrap();
+                    self.storage
+                        .mem_pool
+                        .fast_evict(current_page.frame_id())
+                        .unwrap();
+                    drop(current_page);
 
                     self.current_page = Some(next_page);
                     self.current_slot_id = 0;
@@ -204,7 +208,11 @@ impl<E: EvictionPolicy + 'static, T: MemPool<E>> Iterator for AppendOnlyStoreSca
                 }
                 None => {
                     // Fast path eviction
-                    self.storage.mem_pool.fast_evict(current_page).unwrap();
+                    self.storage
+                        .mem_pool
+                        .fast_evict(current_page.frame_id())
+                        .unwrap();
+                    drop(current_page);
 
                     self.finished = true;
                     None

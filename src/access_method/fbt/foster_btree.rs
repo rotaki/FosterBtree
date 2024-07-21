@@ -1296,6 +1296,10 @@ impl<E: EvictionPolicy, T: MemPool<E>> FosterBtree<E, T> {
                 assert!(foster_key.as_slice() < key.as_ref());
                 // Insert it into new page. If it fails, panic.
                 assert!(new_page.insert(key.as_ref(), value.as_ref(), false));
+
+                mem_pool.fast_evict(current_page.frame_id()).unwrap();
+                drop(current_page);
+
                 current_page = new_page;
             }
         }
@@ -1955,7 +1959,12 @@ impl<E: EvictionPolicy + 'static, T: MemPool<E>> Iterator for FosterBtreeRangeSc
             if BTreeKey::new(key) >= self.r_key() {
                 // Evict the page as soon as possible
                 let current_leaf_page = self.current_leaf_page.take().unwrap();
-                self.btree.mem_pool.fast_evict(current_leaf_page).unwrap();
+                self.btree
+                    .mem_pool
+                    .fast_evict(current_leaf_page.frame_id())
+                    .unwrap();
+                drop(current_leaf_page);
+
                 self.finish();
                 return None;
             }
@@ -1964,7 +1973,11 @@ impl<E: EvictionPolicy + 'static, T: MemPool<E>> Iterator for FosterBtreeRangeSc
                 self.prev_high_fence = Some(key.to_owned());
                 // Evict the page as soon as possible
                 let current_leaf_page = self.current_leaf_page.take().unwrap();
-                self.btree.mem_pool.fast_evict(current_leaf_page).unwrap();
+                self.btree
+                    .mem_pool
+                    .fast_evict(current_leaf_page.frame_id())
+                    .unwrap();
+                drop(current_leaf_page);
             } else if leaf_page.has_foster_child()
                 && self.current_slot_id == leaf_page.foster_child_slot_id()
             {
@@ -1985,7 +1998,11 @@ impl<E: EvictionPolicy + 'static, T: MemPool<E>> Iterator for FosterBtreeRangeSc
                     )
                 };
                 // Evict the current page as soon as possible
-                self.btree.mem_pool.fast_evict(current_page).unwrap();
+                self.btree
+                    .mem_pool
+                    .fast_evict(current_page.frame_id())
+                    .unwrap();
+                drop(current_page);
 
                 self.current_leaf_page = Some(foster_page);
                 self.current_slot_id = 1;
