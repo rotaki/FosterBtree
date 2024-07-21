@@ -97,8 +97,9 @@ impl<E: EvictionPolicy, T: MemPool<E>> AppendOnlyStore<E, T> {
         self.stats.get_num_recs()
     }
 
-    pub fn append(&self, data: &[u8]) -> Result<(), AppendOnlyStoreError> {
-        if data.len() > <Page as AppendOnlyPage>::max_record_size() {
+    pub fn append(&self, key: &[u8], value: &[u8]) -> Result<(), AppendOnlyStoreError> {
+        let data_len = key.len() + value.len();
+        if data_len > <Page as AppendOnlyPage>::max_record_size() {
             return Err(AppendOnlyStoreError::RecordTooLarge);
         }
         self.stats.inc_num_recs();
@@ -107,7 +108,7 @@ impl<E: EvictionPolicy, T: MemPool<E>> AppendOnlyStore<E, T> {
         let mut last_page = self.write_page(&last_key);
 
         // Try to insert into the last page. If the page is full, create a new page and append to it.
-        if last_page.append(data) {
+        if last_page.append(key, value) {
             Ok(())
         } else {
             let mut new_page = self.mem_pool.create_new_page_for_write(self.c_key).unwrap();
@@ -119,7 +120,7 @@ impl<E: EvictionPolicy, T: MemPool<E>> AppendOnlyStore<E, T> {
             last_page.set_next_page(page_id, frame_id);
             *last_key = new_key;
 
-            assert!(new_page.append(data));
+            assert!(new_page.append(key, value));
             Ok(())
         }
     }
@@ -157,7 +158,7 @@ impl<E: EvictionPolicy + 'static, T: MemPool<E>> AppendOnlyStoreScanner<E, T> {
 }
 
 impl<E: EvictionPolicy + 'static, T: MemPool<E>> Iterator for AppendOnlyStoreScanner<E, T> {
-    type Item = Vec<u8>;
+    type Item = (Vec<u8>, Vec<u8>);
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.finished {
@@ -181,7 +182,7 @@ impl<E: EvictionPolicy + 'static, T: MemPool<E>> Iterator for AppendOnlyStoreSca
                 .unwrap()
                 .get(self.current_slot_id);
             self.current_slot_id += 1;
-            Some(record.to_vec())
+            Some((record.0.to_vec(), record.1.to_vec()))
         } else {
             let current_page = self.current_page.take().unwrap();
             let next_page = current_page.next_page();
@@ -226,7 +227,7 @@ impl<E: EvictionPolicy + 'static, T: MemPool<E>> Iterator for AppendOnlyStoreSca
 mod tests {
     use crate::bp::{get_test_bp, BufferPool, LRUEvictionPolicy};
     use crate::page::AVAILABLE_PAGE_SIZE;
-    use crate::random::{gen_random_byte_vec, RandomVals};
+    use crate::random::{gen_random_byte_vec, RandomKVs};
 
     use super::*;
     use std::collections::HashSet;
@@ -244,21 +245,27 @@ mod tests {
         let container_key = get_c_key();
         let store = AppendOnlyStore::new(container_key, mem_pool);
 
-        let data = b"small data";
-        assert_eq!(store.append(data), Ok(()));
+        let key = b"small key";
+        let value = b"small value";
+        assert_eq!(store.append(key, value), Ok(()));
     }
 
     #[test]
     fn test_large_append() {
         let mem_pool = get_test_bp(10);
         let container_key = get_c_key();
-        let store = AppendOnlyStore::new(container_key, mem_pool);
+        let store = Arc::new(AppendOnlyStore::new(container_key, mem_pool));
 
-        let data = gen_random_byte_vec(Page::max_record_size() + 1, Page::max_record_size() + 1);
+        let key = gen_random_byte_vec(Page::max_record_size() + 1, Page::max_record_size() + 1);
+        let value = gen_random_byte_vec(Page::max_record_size() + 1, Page::max_record_size() + 1);
         assert_eq!(
-            store.append(&data),
+            store.append(&key, &value),
             Err(AppendOnlyStoreError::RecordTooLarge)
         );
+
+        // Scan should return nothing
+        let mut scanner = store.scan();
+        assert!(scanner.next().is_none());
     }
 
     #[test]
@@ -267,11 +274,12 @@ mod tests {
         let container_key = get_c_key();
         let store = AppendOnlyStore::new(container_key, mem_pool);
 
-        let data = gen_random_byte_vec(1000, 1000);
-        let num_appends = (AVAILABLE_PAGE_SIZE / data.len()) + 1; // Ensure overflow
+        let key = gen_random_byte_vec(1000, 1000);
+        let value = gen_random_byte_vec(1000, 1000);
+        let num_appends = 100;
 
         for _ in 0..num_appends {
-            assert_eq!(store.append(&data), Ok(()));
+            assert_eq!(store.append(&key, &value), Ok(()));
         }
     }
 
@@ -281,9 +289,10 @@ mod tests {
         let container_key = get_c_key();
         let store = Arc::new(AppendOnlyStore::new(container_key, mem_pool.clone()));
 
-        let data = b"scanned data";
+        let key = b"scanned key";
+        let value = b"scanned value";
         for _ in 0..3 {
-            store.append(data).unwrap();
+            store.append(key, value).unwrap();
         }
 
         assert_eq!(store.num_kvs(), 3);
@@ -291,19 +300,28 @@ mod tests {
         let mut scanner = store.scan();
 
         for _ in 0..3 {
-            assert_eq!(scanner.next().unwrap(), data);
+            assert_eq!(scanner.next().unwrap(), (key.to_vec(), value.to_vec()));
         }
         assert!(scanner.next().is_none());
     }
 
     #[test]
     fn test_stress() {
-        let num_vals = 10000;
+        let num_keys = 10000;
+        let key_size = 50;
         let val_min_size = 50;
         let val_max_size = 100;
-        let vals = RandomVals::new(num_vals, 1, val_min_size, val_max_size)
-            .pop()
-            .unwrap();
+        let vals = RandomKVs::new(
+            false,
+            false,
+            1,
+            num_keys,
+            key_size,
+            val_min_size,
+            val_max_size,
+        )
+        .pop()
+        .unwrap();
 
         let store = Arc::new(AppendOnlyStore::new(get_c_key(), get_test_bp(10)));
 
@@ -312,10 +330,10 @@ mod tests {
                 "********************** Appending record {} **********************",
                 i
             );
-            store.append(val).unwrap();
+            store.append(val.0, val.1).unwrap();
         }
 
-        assert_eq!(store.num_kvs(), num_vals);
+        assert_eq!(store.num_kvs(), num_keys);
 
         let mut scanner = store.scan();
         for (i, val) in vals.iter().enumerate() {
@@ -323,24 +341,33 @@ mod tests {
                 "********************** Scanning record {} **********************",
                 i
             );
-            assert_eq!(&scanner.next().unwrap(), val);
+            assert_eq!(scanner.next().unwrap(), (val.0.to_vec(), val.1.to_vec()));
         }
     }
 
     #[test]
     fn test_concurrent_append() {
-        let num_vals = 10000;
+        let num_keys = 10000;
+        let key_size = 50;
         let val_min_size = 50;
         let val_max_size = 100;
         let num_threads = 3;
-        let vals = RandomVals::new(num_vals, num_threads, val_min_size, val_max_size);
+        let vals = RandomKVs::new(
+            false,
+            false,
+            num_threads,
+            num_keys,
+            key_size,
+            val_min_size,
+            val_max_size,
+        );
 
         let store = Arc::new(AppendOnlyStore::new(get_c_key(), get_test_bp(10)));
 
         let mut verify_vals = HashSet::new();
         for val_i in vals.iter() {
             for val in val_i.iter() {
-                verify_vals.insert(val.clone());
+                verify_vals.insert((val.0.to_vec(), val.1.to_vec()));
             }
         }
 
@@ -349,13 +376,13 @@ mod tests {
                 let store_clone = store.clone();
                 s.spawn(move || {
                     for val in val_i.iter() {
-                        store_clone.append(val).unwrap();
+                        store_clone.append(val.0, val.1).unwrap();
                     }
                 });
             }
         });
 
-        assert_eq!(store.num_kvs(), num_vals);
+        assert_eq!(store.num_kvs(), num_keys);
 
         // Check if all values are appended.
         let scanner = store.scan();

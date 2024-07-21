@@ -13,7 +13,7 @@ use crate::file_manager::FileManager;
 
 use std::{
     cell::UnsafeCell,
-    collections::{HashMap, VecDeque},
+    collections::HashMap,
     fs::create_dir_all,
     ops::{Deref, DerefMut},
     path::PathBuf,
