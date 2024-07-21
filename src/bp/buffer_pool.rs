@@ -1227,7 +1227,7 @@ mod tests {
 
         bp1.run_checks();
 
-        drop(bp1);
+        drop(bp1); // Drop will also clear the buffer pool
 
         // Create a new buffer pool
         let bp2 = BufferPool::<LRUEvictionPolicy>::new(temp_dir, num_frames * 2, false).unwrap();
