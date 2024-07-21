@@ -131,7 +131,7 @@ impl<E: EvictionPolicy + 'static, M: MemPool<E>> OnDiskIterator<E, M> {
     }
 }
 
-/// Assumptions of InMemStorage:
+/// Assumptions of OnDiskStorage:
 /// 1. Creation and deletion of the database is not thread-safe. This means, you can't create
 ///    or delete a database while other threads are accessing the database.
 /// 2. Creation and deletion of a container is thread-safe with respect to other containers.
@@ -151,11 +151,11 @@ impl<E: EvictionPolicy + 'static, M: MemPool<E>> OnDiskIterator<E, M> {
 /// 5. The iterator next() must not be called using multiple threads. next() is not thread-safe with
 ///    respect to other next() calls of the same iterator. However, next() is thread-safe with respect
 ///    to other operations on the same container including next() of other iterators.
+/// 6. Only a single database can be created. If you try to open_db() will always return DatabaseId 0.
 pub struct OnDiskStorage<E: EvictionPolicy + 'static, M: MemPool<E>> {
     bp: Arc<M>,
     metadata: Arc<FosterBtree<E, M>>, // Database metadata. Stored in DatabaseId::MAX, ContainerId::0
-    db_created: UnsafeCell<bool>,
-    container_lock: RwLock<()>, // lock for container operations
+    container_lock: RwLock<()>,       // lock for container operations
     containers: UnsafeCell<Vec<Arc<Storage<E, M>>>>, // Storage is in a Box in order to prevent moving when resizing the vector
     phantom: std::marker::PhantomData<(E, M)>,
 }
@@ -173,7 +173,6 @@ impl<E: EvictionPolicy + 'static, M: MemPool<E>> OnDiskStorage<E, M> {
                 ContainerKey::new(DatabaseId::MAX, 0),
                 bp.clone(),
             )),
-            db_created: UnsafeCell::new(false),
             container_lock: RwLock::new(()),
             containers: UnsafeCell::new(Vec::new()),
             phantom: std::marker::PhantomData,
@@ -198,7 +197,6 @@ impl<E: EvictionPolicy + 'static, M: MemPool<E>> OnDiskStorage<E, M> {
         OnDiskStorage {
             bp: bp.clone(),
             metadata,
-            db_created: UnsafeCell::new(true),
             container_lock: RwLock::new(()),
             containers: UnsafeCell::new(containers),
             phantom: std::marker::PhantomData,
@@ -226,11 +224,6 @@ impl<E: EvictionPolicy + 'static, M: MemPool<E>> TxnStorageTrait for OnDiskStora
 
     // Open connection with the db
     fn open_db(&self, _options: DBOptions) -> Result<DatabaseId, TxnStorageStatus> {
-        let guard = unsafe { &mut *self.db_created.get() };
-        if *guard {
-            return Err(TxnStorageStatus::DBExists);
-        }
-        *guard = true;
         Ok(0)
     }
 
@@ -241,12 +234,7 @@ impl<E: EvictionPolicy + 'static, M: MemPool<E>> TxnStorageTrait for OnDiskStora
     }
 
     // Delete the db
-    fn delete_db(&self, db_id: &DatabaseId) -> Result<(), TxnStorageStatus> {
-        if *db_id != 0 {
-            return Err(TxnStorageStatus::DBNotFound);
-        }
-        let guard = unsafe { &mut *self.db_created.get() };
-        *guard = false;
+    fn delete_db(&self, _db_id: &DatabaseId) -> Result<(), TxnStorageStatus> {
         // Clear all the containers
         let containers = unsafe { &mut *self.containers.get() };
         containers.clear();
