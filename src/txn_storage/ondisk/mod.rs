@@ -35,6 +35,18 @@ impl<E: EvictionPolicy + 'static, M: MemPool<E>> Storage<E, M> {
         }
     }
 
+    fn load(db_id: DatabaseId, c_id: ContainerId, c_type: ContainerType, bp: Arc<M>) -> Self {
+        match c_type {
+            ContainerType::Hash => {
+                unimplemented!("Hash container not implemented")
+            }
+            ContainerType::BTree => Storage::BTreeMap(Arc::new(FosterBtree::<E, M>::load(
+                ContainerKey::new(db_id, c_id),
+                bp,
+            ))),
+        }
+    }
+
     fn clear(&self) {
         unimplemented!("clear not implemented")
     }
@@ -141,6 +153,7 @@ impl<E: EvictionPolicy + 'static, M: MemPool<E>> OnDiskIterator<E, M> {
 ///    to other operations on the same container including next() of other iterators.
 pub struct OnDiskStorage<E: EvictionPolicy + 'static, M: MemPool<E>> {
     bp: Arc<M>,
+    metadata: Arc<FosterBtree<E, M>>, // Database metadata. Stored in DatabaseId::MAX, ContainerId::0
     db_created: UnsafeCell<bool>,
     container_lock: RwLock<()>, // lock for container operations
     containers: UnsafeCell<Vec<Arc<Storage<E, M>>>>, // Storage is in a Box in order to prevent moving when resizing the vector
@@ -156,9 +169,38 @@ impl<E: EvictionPolicy + 'static, M: MemPool<E>> OnDiskStorage<E, M> {
     pub fn new(bp: &Arc<M>) -> Self {
         OnDiskStorage {
             bp: bp.clone(),
+            metadata: Arc::new(FosterBtree::<E, M>::new(
+                ContainerKey::new(DatabaseId::MAX, 0),
+                bp.clone(),
+            )),
             db_created: UnsafeCell::new(false),
             container_lock: RwLock::new(()),
             containers: UnsafeCell::new(Vec::new()),
+            phantom: std::marker::PhantomData,
+        }
+    }
+
+    pub fn load(bp: &Arc<M>) -> Self {
+        let metadata = Arc::new(FosterBtree::<E, M>::load(
+            ContainerKey::new(DatabaseId::MAX, 0),
+            bp.clone(),
+        ));
+        // Scans the metadata to get all the containers
+        let mut containers = Vec::new();
+        let mut iter = metadata.scan(&[], &[]);
+        while let Some((k, v)) = iter.next() {
+            let c_id = ContainerId::from_be_bytes(k.try_into().unwrap());
+            let c_type = ContainerType::from_bytes(&v);
+            let storage = Storage::load(0, c_id, c_type, bp.clone());
+            containers.push(Arc::new(storage));
+        }
+
+        OnDiskStorage {
+            bp: bp.clone(),
+            metadata,
+            db_created: UnsafeCell::new(true),
+            container_lock: RwLock::new(()),
+            containers: UnsafeCell::new(containers),
             phantom: std::marker::PhantomData,
         }
     }
@@ -230,8 +272,14 @@ impl<E: EvictionPolicy + 'static, M: MemPool<E>> TxnStorageTrait for OnDiskStora
             options.get_type(),
             self.bp.clone(),
         ));
+        self.metadata
+            .insert(
+                &(c_id as ContainerId).to_be_bytes(),
+                &options.get_type().to_bytes(),
+            )
+            .unwrap();
         containers.push(storage);
-        Ok((containers.len() - 1) as ContainerId)
+        Ok(c_id as ContainerId)
     }
 
     // Delete a container from the db
@@ -249,6 +297,7 @@ impl<E: EvictionPolicy + 'static, M: MemPool<E>> TxnStorageTrait for OnDiskStora
         }
         let _guard = self.container_lock.write().unwrap();
         let containers = unsafe { &mut *self.containers.get() };
+        self.metadata.delete(&c_id.to_be_bytes()).unwrap();
         containers[*c_id as usize].clear();
         Ok(())
     }

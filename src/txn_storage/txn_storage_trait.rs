@@ -81,6 +81,23 @@ pub enum ContainerType {
     BTree,
 }
 
+impl ContainerType {
+    pub fn to_bytes(&self) -> Vec<u8> {
+        match self {
+            ContainerType::Hash => vec![0],
+            ContainerType::BTree => vec![1],
+        }
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Self {
+        match bytes[0] {
+            0 => ContainerType::Hash,
+            1 => ContainerType::BTree,
+            _ => panic!("Invalid container type"),
+        }
+    }
+}
+
 pub struct ContainerOptions {
     name: String,
     c_type: ContainerType,

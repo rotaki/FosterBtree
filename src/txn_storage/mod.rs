@@ -27,6 +27,7 @@ mod tests {
     use crate::bp::{
         get_test_bp,
         prelude::{ContainerId, DatabaseId},
+        BufferPool, LRUEvictionPolicy,
     };
     use std::{sync::Arc, thread};
 
@@ -179,6 +180,71 @@ mod tests {
             count += 1;
         }
         assert_eq!(count, num_threads * num_keys_per_thread);
+    }
+
+    #[test]
+    fn test_ondisk_durability() {
+        let tempdir = tempfile::tempdir().unwrap();
+
+        let (db_id, c_ids) = {
+            let bp1 = Arc::new(BufferPool::<LRUEvictionPolicy>::new(&tempdir, 10, false).unwrap());
+            let storage1 = OnDiskStorage::new(&bp1);
+
+            let db_options = DBOptions::new("test_db");
+            let db_id = storage1.open_db(db_options).unwrap();
+            // Create three containers and insert 10 values to each of them
+            let c_id1 = storage1
+                .create_container(
+                    &storage1.begin_txn(&db_id, TxnOptions::default()).unwrap(),
+                    &db_id,
+                    ContainerOptions::new("test_container1", ContainerType::BTree),
+                )
+                .unwrap();
+            let c_id2 = storage1
+                .create_container(
+                    &storage1.begin_txn(&db_id, TxnOptions::default()).unwrap(),
+                    &db_id,
+                    ContainerOptions::new("test_container2", ContainerType::BTree),
+                )
+                .unwrap();
+            let c_id3 = storage1
+                .create_container(
+                    &storage1.begin_txn(&db_id, TxnOptions::default()).unwrap(),
+                    &db_id,
+                    ContainerOptions::new("test_container3", ContainerType::BTree),
+                )
+                .unwrap();
+
+            for c_id in &[c_id1, c_id2, c_id3] {
+                let txn = storage1.begin_txn(&db_id, TxnOptions::default()).unwrap();
+                for i in 0..10 {
+                    let key = vec![i];
+                    let value = vec![*c_id as u8; 4];
+                    storage1.insert_value(&txn, c_id, key, value).unwrap();
+                }
+                storage1.commit_txn(&txn, false).unwrap();
+            }
+            bp1.clear_frames().unwrap();
+
+            (db_id, (c_id1, c_id2, c_id3))
+        };
+
+        let bp2 = Arc::new(BufferPool::<LRUEvictionPolicy>::new(tempdir, 10, false).unwrap());
+        let storage2 = OnDiskStorage::load(&bp2);
+
+        // Check if the values are still present after restarting the storage
+        for c_id in &[c_ids.0, c_ids.1, c_ids.2] {
+            let txn = storage2.begin_txn(&db_id, TxnOptions::default()).unwrap();
+            let iter_handle = storage2.scan_range(&txn, c_id, ScanOptions::new()).unwrap();
+            let mut count = 0;
+            while let Ok(Some((key, val))) = storage2.iter_next(&iter_handle) {
+                let key = u8::from_be_bytes(key.as_slice().try_into().unwrap());
+                assert_eq!(key, count);
+                assert_eq!(val, vec![*c_id as u8; 4]);
+                count += 1;
+            }
+            assert_eq!(count, 10);
+        }
     }
 
     /*

@@ -1274,6 +1274,17 @@ impl<E: EvictionPolicy, T: MemPool<E>> FosterBtree<E, T> {
         }
     }
 
+    pub fn load(c_key: ContainerKey, mem_pool: Arc<T>) -> Self {
+        // Assumes that the root page is the first page in this container.
+        FosterBtree {
+            c_key,
+            root_key: PageFrameKey::new(c_key, 0),
+            mem_pool: mem_pool.clone(),
+            stats: RuntimeStats::new(),
+            phantom: PhantomData,
+        }
+    }
+
     pub fn bulk_insert_create<K: AsRef<[u8]>, V: AsRef<[u8]>>(
         c_key: ContainerKey,
         mem_pool: Arc<T>,
