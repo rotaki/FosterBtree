@@ -196,6 +196,7 @@ mod stat {
     }
 }
 
+use concurrent_queue::ConcurrentQueue;
 #[cfg(feature = "stat")]
 use stat::*;
 
@@ -246,7 +247,7 @@ impl RuntimeStats {
 
 pub struct Frames<T: EvictionPolicy> {
     num_frames: usize,
-    fast_path_victims: VecDeque<usize>,
+    fast_path_victims: ConcurrentQueue<usize>,
     eviction_candidates: [usize; EVICTION_SCAN_DEPTH],
     frames: Vec<BufferFrame<T>>, // The Vec<frames> is fixed size. If not fixed size, then Pin must be used to ensure that the frame does not move when the vector is resized.
 }
@@ -255,7 +256,7 @@ impl<T: EvictionPolicy> Frames<T> {
     pub fn new(num_frames: usize) -> Self {
         Frames {
             num_frames,
-            fast_path_victims: VecDeque::new(),
+            fast_path_victims: ConcurrentQueue::unbounded(),
             eviction_candidates: [0; EVICTION_SCAN_DEPTH],
             frames: (0..num_frames)
                 .map(|i| BufferFrame::new(i as u32))
@@ -263,8 +264,8 @@ impl<T: EvictionPolicy> Frames<T> {
         }
     }
 
-    pub fn push_to_eviction_queue(&mut self, frame_id: usize) {
-        self.fast_path_victims.push_back(frame_id);
+    pub fn push_to_eviction_queue(&self, frame_id: usize) {
+        self.fast_path_victims.push(frame_id).unwrap();
     }
 
     /// Choose a victim frame to be evicted.
@@ -274,7 +275,7 @@ impl<T: EvictionPolicy> Frames<T> {
         log_debug!("Choosing victim");
 
         // First, try the fast path victims.
-        while let Some(victim) = self.fast_path_victims.pop_front() {
+        while let Ok(victim) = self.fast_path_victims.pop() {
             let frame = self.frames[victim].try_write(false);
             if let Some(guard) = frame {
                 log_debug!("Fast path victim found @ frame({})", guard.frame_id());
@@ -848,12 +849,10 @@ where
     }
 
     pub fn fast_evict(&self, frame: FrameReadGuard<T>) -> Result<(), MemPoolStatus> {
-        self.exclusive();
-
-        let frames = unsafe { &mut *self.frames.get() };
+        let frames = unsafe { &*self.frames.get() };
+        // push_to_eviction_queue is safe because the queue is
+        // lock-free
         frames.push_to_eviction_queue(frame.frame_id() as usize);
-
-        self.release_exclusive();
         Ok(())
     }
 
