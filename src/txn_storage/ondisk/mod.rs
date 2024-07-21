@@ -187,7 +187,7 @@ impl<E: EvictionPolicy + 'static, M: MemPool<E>> OnDiskStorage<E, M> {
         // Scans the metadata to get all the containers
         let mut containers = Vec::new();
         let mut iter = metadata.scan(&[], &[]);
-        while let Some((k, v)) = iter.next() {
+        for (k, v) in iter {
             let c_id = ContainerId::from_be_bytes(k.try_into().unwrap());
             let c_type = ContainerType::from_bytes(&v);
             let storage = Storage::load(0, c_id, c_type, bp.clone());

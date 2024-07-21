@@ -900,6 +900,11 @@ where
             frame.clear();
         }
 
+        // Call fsync on all the files
+        for file in container_to_file.values() {
+            file.flush()?;
+        }
+
         id_to_index.clear();
 
         self.release_exclusive();
@@ -1008,7 +1013,7 @@ mod tests {
     use crate::log_trace;
 
     use super::*;
-    use std::thread;
+    use std::thread::{self, sleep};
     use tempfile::TempDir;
 
     #[test]
