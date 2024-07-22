@@ -2,7 +2,15 @@ use std::ops::{Deref, DerefMut};
 
 use crate::write_ahead_log::prelude::{Lsn, LSN_SIZE};
 
+#[cfg(feature = "4k_page")]
 pub const PAGE_SIZE: usize = 4096;
+#[cfg(feature = "8k_page")]
+pub const PAGE_SIZE: usize = 8192;
+#[cfg(feature = "16k_page")]
+pub const PAGE_SIZE: usize = 16384;
+#[cfg(feature = "32k_page")]
+pub const PAGE_SIZE: usize = 32768;
+
 pub type PageId = u32;
 const BASE_PAGE_HEADER_SIZE: usize = 4 + LSN_SIZE;
 pub const AVAILABLE_PAGE_SIZE: usize = PAGE_SIZE - BASE_PAGE_HEADER_SIZE;
