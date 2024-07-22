@@ -27,6 +27,9 @@ impl Storage {
             ContainerType::BTree => {
                 Storage::BTreeMap(RwLatch::default(), UnsafeCell::new(BTreeMap::new()))
             }
+            ContainerType::AppendOnly => {
+                unimplemented!("Vec container type is not supported in InMemStorage");
+            }
         }
     }
 

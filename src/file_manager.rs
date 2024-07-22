@@ -808,7 +808,7 @@ mod tests {
             file_manager1.write_page(i, &page).unwrap();
         }
 
-        file_manager1.flush().unwrap(); // If we remove this file, the test is likely to fail.
+        file_manager1.flush().unwrap(); // If we remove this line, the test is likely to fail.
 
         // Read the page in random order
         for i in gen_random_permutation(page_id_vec) {

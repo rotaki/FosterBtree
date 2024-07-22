@@ -10,29 +10,40 @@
 use crate::prelude::{Page, PageId, AVAILABLE_PAGE_SIZE};
 
 mod slot {
-    pub const SLOT_SIZE: usize = 4;
+    pub const SLOT_SIZE: usize = 6;
 
     pub struct Slot {
         offset: u16,
-        size: u16,
+        key_size: u16,
+        val_size: u16,
     }
 
     impl Slot {
         pub fn from_bytes(bytes: &[u8; SLOT_SIZE]) -> Self {
             let offset = u16::from_be_bytes([bytes[0], bytes[1]]);
-            let size = u16::from_be_bytes([bytes[2], bytes[3]]);
-            Slot { offset, size }
+            let key_size = u16::from_be_bytes([bytes[2], bytes[3]]);
+            let val_size = u16::from_be_bytes([bytes[4], bytes[5]]);
+            Slot {
+                offset,
+                key_size,
+                val_size,
+            }
         }
 
         pub fn to_bytes(&self) -> [u8; SLOT_SIZE] {
             let mut bytes = [0; SLOT_SIZE];
             bytes[0..2].copy_from_slice(&self.offset.to_be_bytes());
-            bytes[2..4].copy_from_slice(&self.size.to_be_bytes());
+            bytes[2..4].copy_from_slice(&self.key_size.to_be_bytes());
+            bytes[4..6].copy_from_slice(&self.val_size.to_be_bytes());
             bytes
         }
 
-        pub fn new(offset: u16, size: u16) -> Self {
-            Slot { offset, size }
+        pub fn new(offset: u16, key_size: u16, val_size: u16) -> Self {
+            Slot {
+                offset,
+                key_size,
+                val_size,
+            }
         }
 
         pub fn offset(&self) -> u16 {
@@ -43,12 +54,20 @@ mod slot {
             self.offset = offset;
         }
 
-        pub fn size(&self) -> u16 {
-            self.size
+        pub fn key_size(&self) -> u16 {
+            self.key_size
         }
 
-        pub fn set_size(&mut self, size: u16) {
-            self.size = size;
+        pub fn set_key_size(&mut self, key_size: u16) {
+            self.key_size = key_size;
+        }
+
+        pub fn val_size(&self) -> u16 {
+            self.val_size
+        }
+
+        pub fn set_val_size(&mut self, val_size: u16) {
+            self.val_size = val_size;
         }
     }
 }
@@ -91,15 +110,21 @@ pub trait AppendOnlyPage {
     // Only call this function when there is enough space for the slot and record.
     fn append_slot(&mut self, slot: &Slot);
 
-    /// Try to append a record to the page.
-    /// If the record is too large to fit in the page, return false.
+    /// Try to append a key value pair to the page.
+    /// If the key value is too large to fit in the page, return false.
     /// When false is returned, the page is not modified.
-    /// Otherwise, the record is appended to the page and the page is modified.
-    fn append(&mut self, record: &[u8]) -> bool;
+    /// Otherwise, the key value is appended to the page and the page is modified.
+    fn append(&mut self, key: &[u8], value: &[u8]) -> bool;
 
     /// Get the record at the slot_id.
     /// If the slot_id is invalid, panic.
-    fn get(&self, slot_id: u16) -> &[u8];
+    fn get(&self, slot_id: u16) -> (&[u8], &[u8]);
+
+    /// Get the mutable val at the slot_id.
+    /// If the slot_id is invalid, panic.
+    /// This function is used for updating the val in place.
+    /// Updates of the record should not change the size of the val.
+    fn get_mut_val(&mut self, slot_id: u16) -> &mut [u8];
 }
 
 impl AppendOnlyPage for Page {
@@ -178,31 +203,43 @@ impl AppendOnlyPage for Page {
         self.set_rec_start_offset(offset);
     }
 
-    fn append(&mut self, record: &[u8]) -> bool {
+    fn append(&mut self, key: &[u8], value: &[u8]) -> bool {
+        let total_len = key.len() + value.len();
         // Check if the page has enough space for slot and the record
-        if self.total_free_space() < SLOT_SIZE as u16 + record.len() as u16 {
+        if self.total_free_space() < SLOT_SIZE as u16 + total_len as u16 {
             false
         } else {
             // Append the slot and the record
-            let rec_start_offset = self.rec_start_offset() - record.len() as u16;
-            self[rec_start_offset as usize..rec_start_offset as usize + record.len()]
-                .copy_from_slice(record);
-            let slot = Slot::new(rec_start_offset, record.len() as u16);
+            let rec_start_offset = self.rec_start_offset() - total_len as u16;
+            self[rec_start_offset as usize..rec_start_offset as usize + key.len()]
+                .copy_from_slice(key);
+            self[rec_start_offset as usize + key.len()..rec_start_offset as usize + total_len]
+                .copy_from_slice(value);
+            let slot = Slot::new(rec_start_offset, key.len() as u16, value.len() as u16);
             self.append_slot(&slot);
 
             // Update the total bytes used
             self.set_total_bytes_used(
-                self.total_bytes_used() + SLOT_SIZE as u16 + record.len() as u16,
+                self.total_bytes_used() + SLOT_SIZE as u16 + total_len as u16,
             );
             true
         }
     }
 
-    fn get(&self, slot_id: u16) -> &[u8] {
+    fn get(&self, slot_id: u16) -> (&[u8], &[u8]) {
         let slot = self.slot(slot_id).unwrap();
         let offset = slot.offset() as usize;
-        let size = slot.size() as usize;
-        &self[offset..offset + size]
+        let key = &self[offset..offset + slot.key_size() as usize];
+        let value = &self[offset + slot.key_size() as usize
+            ..offset + slot.key_size() as usize + slot.val_size() as usize];
+        (key, value)
+    }
+
+    fn get_mut_val(&mut self, slot_id: u16) -> &mut [u8] {
+        let slot = self.slot(slot_id).unwrap();
+        let offset = slot.offset() as usize;
+        &mut self[offset + slot.key_size() as usize
+            ..offset + slot.key_size() as usize + slot.val_size() as usize]
     }
 }
 
@@ -237,12 +274,13 @@ mod tests {
         let mut page = Page::new_empty();
         page.init();
 
-        let slot = Slot::new(100, 50);
+        let slot = Slot::new(100, 50, 200);
         page.append_slot(&slot);
 
         assert_eq!(page.slot_count(), 1);
         assert_eq!(page.slot(0).unwrap().offset(), 100);
-        assert_eq!(page.slot(0).unwrap().size(), 50);
+        assert_eq!(page.slot(0).unwrap().key_size(), 50);
+        assert_eq!(page.slot(0).unwrap().val_size(), 200);
     }
 
     #[test]
@@ -250,15 +288,16 @@ mod tests {
         let mut page = Page::new_empty();
         page.init();
 
-        let record = vec![1, 2, 3, 4, 5];
-        let success = page.append(&record);
+        let key = vec![1, 2, 3, 4, 5];
+        let value = vec![6, 7, 8, 9, 10];
+        let success = page.append(&key, &value);
 
         assert!(success);
-        assert_eq!(page.get(0), record.as_slice());
+        assert_eq!(page.get(0), (key.as_slice(), value.as_slice()));
         assert_eq!(page.slot_count(), 1);
         assert_eq!(
             page.total_bytes_used(),
-            (PAGE_HEADER_SIZE + SLOT_SIZE + record.len()) as u16
+            (PAGE_HEADER_SIZE + SLOT_SIZE + key.len() + value.len()) as u16
         );
     }
 
@@ -267,8 +306,9 @@ mod tests {
         let mut page = Page::new_empty();
         page.init();
 
-        let record = vec![0; AVAILABLE_PAGE_SIZE + 1]; // Exceeding available page size
-        let success = page.append(&record);
+        let key = vec![0; AVAILABLE_PAGE_SIZE + 1]; // Exceeding available page size
+        let value = vec![0; 1];
+        let success = page.append(&key, &value);
 
         assert!(!success);
         assert_eq!(page.slot_count(), 0); // No slots should have been added

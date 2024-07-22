@@ -1274,6 +1274,17 @@ impl<E: EvictionPolicy, T: MemPool<E>> FosterBtree<E, T> {
         }
     }
 
+    pub fn load(c_key: ContainerKey, mem_pool: Arc<T>) -> Self {
+        // Assumes that the root page is the first page in this container.
+        FosterBtree {
+            c_key,
+            root_key: PageFrameKey::new(c_key, 0),
+            mem_pool: mem_pool.clone(),
+            stats: RuntimeStats::new(),
+            phantom: PhantomData,
+        }
+    }
+
     pub fn bulk_insert_create<K: AsRef<[u8]>, V: AsRef<[u8]>>(
         c_key: ContainerKey,
         mem_pool: Arc<T>,
@@ -1296,6 +1307,10 @@ impl<E: EvictionPolicy, T: MemPool<E>> FosterBtree<E, T> {
                 assert!(foster_key.as_slice() < key.as_ref());
                 // Insert it into new page. If it fails, panic.
                 assert!(new_page.insert(key.as_ref(), value.as_ref(), false));
+
+                mem_pool.fast_evict(current_page.frame_id()).unwrap();
+                drop(current_page);
+
                 current_page = new_page;
             }
         }
@@ -1953,13 +1968,27 @@ impl<E: EvictionPolicy + 'static, T: MemPool<E>> Iterator for FosterBtreeRangeSc
             let leaf_page = self.current_leaf_page.as_ref().unwrap();
             let key = leaf_page.get_raw_key(self.current_slot_id);
             if BTreeKey::new(key) >= self.r_key() {
+                // Evict the page as soon as possible
+                let current_leaf_page = self.current_leaf_page.take().unwrap();
+                self.btree
+                    .mem_pool
+                    .fast_evict(current_leaf_page.frame_id())
+                    .unwrap();
+                drop(current_leaf_page);
+
                 self.finish();
                 return None;
             }
             if self.current_slot_id == leaf_page.high_fence_slot_id() {
                 // Reached the high fence. Move to the next leaf page.
                 self.prev_high_fence = Some(key.to_owned());
-                self.current_leaf_page = None;
+                // Evict the page as soon as possible
+                let current_leaf_page = self.current_leaf_page.take().unwrap();
+                self.btree
+                    .mem_pool
+                    .fast_evict(current_leaf_page.frame_id())
+                    .unwrap();
+                drop(current_leaf_page);
             } else if leaf_page.has_foster_child()
                 && self.current_slot_id == leaf_page.foster_child_slot_id()
             {
@@ -1979,6 +2008,13 @@ impl<E: EvictionPolicy + 'static, T: MemPool<E>> Iterator for FosterBtreeRangeSc
                         foster_page,
                     )
                 };
+                // Evict the current page as soon as possible
+                self.btree
+                    .mem_pool
+                    .fast_evict(current_page.frame_id())
+                    .unwrap();
+                drop(current_page);
+
                 self.current_leaf_page = Some(foster_page);
                 self.current_slot_id = 1;
             } else {

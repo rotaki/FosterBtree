@@ -5,13 +5,17 @@ edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [features]
-default = []
+default = ["32k_page"]
 log_trace = []
 log_debug = []
 log_info = []
 log_warn = []
 log_error = []
 stat = []
+4k_page = []
+8k_page = []
+16k_page = []
+32k_page = []
 async_write = ["io-uring", "libc"]
 
 [dependencies]
@@ -22,13 +26,14 @@ serde = { version = "1.0", features = ["derive"] }
 chrono = "0.4"
 lazy_static = { version = "1.4" }
 clap = {version = "4.5", features = ["derive"]}
+concurrent-queue = "2.5"
 io-uring = {version = "0.6", optional = true}
 libc = {version = "0.2", optional = true}
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"]}
 serde_cbor = "0.11"
-rstest = "0.19"
+rstest = "0.21"
 
 # For wasm (uncomment to use)
 # [lib]

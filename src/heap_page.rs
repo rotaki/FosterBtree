@@ -368,6 +368,8 @@ impl HeapPage<'_> {
 
 #[cfg(test)]
 mod tests {
+    use crate::page::AVAILABLE_PAGE_SIZE;
+
     use super::*;
 
     #[test]
@@ -447,9 +449,9 @@ mod tests {
         HeapPage::init(&mut page);
         let mut heap_page = HeapPage::new(&mut page);
 
-        let value1 = [1; 1300];
-        let value2 = [2; 1300];
-        let value3 = [3; 1300];
+        let value1 = [1; AVAILABLE_PAGE_SIZE / 4];
+        let value2 = [2; AVAILABLE_PAGE_SIZE / 4];
+        let value3 = [3; AVAILABLE_PAGE_SIZE / 4];
 
         let slot_id1 = heap_page.add_value(&value1).unwrap();
         let slot_id2 = heap_page.add_value(&value2).unwrap();
@@ -459,7 +461,7 @@ mod tests {
         assert_eq!(heap_page.get_value(slot_id2).unwrap(), value2);
         assert_eq!(heap_page.get_value(slot_id3).unwrap(), value3);
 
-        let value4 = [4; 1300];
+        let value4 = [4; AVAILABLE_PAGE_SIZE / 4];
         assert_eq!(heap_page.add_value(&value4), None);
 
         heap_page.delete_value(slot_id2).unwrap();

@@ -37,7 +37,7 @@ pub struct PagedHashMap<E: EvictionPolicy, T: MemPool<E>> {
     phantom: PhantomData<E>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum PagedHashMapError {
     KeyExists,
     KeyNotFound,
