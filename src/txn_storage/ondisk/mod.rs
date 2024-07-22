@@ -8,16 +8,20 @@ use super::{
     ContainerOptions, ContainerType, DBOptions, ScanOptions, TxnOptions, TxnStorageStatus,
     TxnStorageTrait,
 };
-use crate::bp::{EvictionPolicy, MemPool};
 use crate::{
     access_method::fbt::FosterBtreeRangeScanner,
     bp::prelude::{ContainerId, DatabaseId},
     prelude::{ContainerKey, FosterBtree},
 };
+use crate::{
+    access_method::prelude::{AppendOnlyStore, AppendOnlyStoreScanner},
+    bp::{EvictionPolicy, MemPool},
+};
 
 pub enum Storage<E: EvictionPolicy + 'static, M: MemPool<E>> {
     HashMap(),
     BTreeMap(Arc<FosterBtree<E, M>>),
+    Vec(Arc<AppendOnlyStore<E, M>>),
 }
 
 unsafe impl<E: EvictionPolicy + 'static, M: MemPool<E>> Sync for Storage<E, M> {}
@@ -32,6 +36,10 @@ impl<E: EvictionPolicy + 'static, M: MemPool<E>> Storage<E, M> {
                 ContainerKey::new(db_id, c_id),
                 bp,
             ))),
+            ContainerType::AppendOnly => Storage::Vec(Arc::new(AppendOnlyStore::<E, M>::new(
+                ContainerKey::new(db_id, c_id),
+                bp,
+            ))),
         }
     }
 
@@ -41,6 +49,10 @@ impl<E: EvictionPolicy + 'static, M: MemPool<E>> Storage<E, M> {
                 unimplemented!("Hash container not implemented")
             }
             ContainerType::BTree => Storage::BTreeMap(Arc::new(FosterBtree::<E, M>::load(
+                ContainerKey::new(db_id, c_id),
+                bp,
+            ))),
+            ContainerType::AppendOnly => Storage::Vec(Arc::new(AppendOnlyStore::<E, M>::load(
                 ContainerKey::new(db_id, c_id),
                 bp,
             ))),
@@ -57,6 +69,7 @@ impl<E: EvictionPolicy + 'static, M: MemPool<E>> Storage<E, M> {
                 unimplemented!("Hash container not implemented")
             }
             Storage::BTreeMap(b) => b.insert(&key, &val)?,
+            Storage::Vec(v) => v.append(&key, &val)?,
         };
         Ok(())
     }
@@ -67,6 +80,9 @@ impl<E: EvictionPolicy + 'static, M: MemPool<E>> Storage<E, M> {
                 unimplemented!("Hash container not implemented")
             }
             Storage::BTreeMap(b) => b.get(key)?,
+            Storage::Vec(v) => {
+                unimplemented!("get by key is not supported for append only container")
+            }
         };
         Ok(result)
     }
@@ -77,6 +93,9 @@ impl<E: EvictionPolicy + 'static, M: MemPool<E>> Storage<E, M> {
                 unimplemented!("Hash container not implemented")
             }
             Storage::BTreeMap(b) => b.update(key, &val)?,
+            Storage::Vec(v) => {
+                unimplemented!("update by key is not supported for append only container")
+            }
         };
         Ok(())
     }
@@ -87,6 +106,9 @@ impl<E: EvictionPolicy + 'static, M: MemPool<E>> Storage<E, M> {
                 unimplemented!("Hash container not implemented")
             }
             Storage::BTreeMap(b) => b.delete(key)?,
+            Storage::Vec(v) => {
+                unimplemented!("remove by key is not supported for append only container")
+            }
         };
         Ok(())
     }
@@ -97,6 +119,7 @@ impl<E: EvictionPolicy + 'static, M: MemPool<E>> Storage<E, M> {
                 unimplemented!("Hash container not implemented")
             }
             Storage::BTreeMap(b) => OnDiskIterator::btree(b.scan(&[], &[])),
+            Storage::Vec(v) => OnDiskIterator::vec(v.scan()),
         }
     }
 
@@ -106,6 +129,7 @@ impl<E: EvictionPolicy + 'static, M: MemPool<E>> Storage<E, M> {
                 unimplemented!("Hash container not implemented")
             }
             Storage::BTreeMap(b) => b.num_kvs(),
+            Storage::Vec(v) => v.num_kvs(),
         }
     }
 }
@@ -114,11 +138,16 @@ pub enum OnDiskIterator<E: EvictionPolicy + 'static, M: MemPool<E>> {
     // Storage and the iterator
     Hash(),
     BTree(Mutex<FosterBtreeRangeScanner<E, M>>),
+    Vec(Mutex<AppendOnlyStoreScanner<E, M>>),
 }
 
 impl<E: EvictionPolicy + 'static, M: MemPool<E>> OnDiskIterator<E, M> {
     fn btree(iter: FosterBtreeRangeScanner<E, M>) -> Self {
         OnDiskIterator::BTree(Mutex::new(iter))
+    }
+
+    fn vec(iter: AppendOnlyStoreScanner<E, M>) -> Self {
+        OnDiskIterator::Vec(Mutex::new(iter))
     }
 
     fn next(&self) -> Option<(Vec<u8>, Vec<u8>)> {
@@ -127,6 +156,7 @@ impl<E: EvictionPolicy + 'static, M: MemPool<E>> OnDiskIterator<E, M> {
                 unimplemented!("Hash container not implemented")
             }
             OnDiskIterator::BTree(iter) => iter.lock().unwrap().next(),
+            OnDiskIterator::Vec(iter) => iter.lock().unwrap().next(),
         }
     }
 }
@@ -186,7 +216,7 @@ impl<E: EvictionPolicy + 'static, M: MemPool<E>> OnDiskStorage<E, M> {
         ));
         // Scans the metadata to get all the containers
         let mut containers = Vec::new();
-        let mut iter = metadata.scan(&[], &[]);
+        let iter = metadata.scan(&[], &[]);
         for (k, v) in iter {
             let c_id = ContainerId::from_be_bytes(k.try_into().unwrap());
             let c_type = ContainerType::from_bytes(&v);

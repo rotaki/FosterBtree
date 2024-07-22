@@ -1,4 +1,5 @@
 use crate::{
+    access_method::{prelude::AppendOnlyStoreError, AccessMethodError},
     bp::prelude::{ContainerId, DatabaseId},
     prelude::TreeStatus,
 };
@@ -27,7 +28,7 @@ pub enum TxnStorageStatus {
     Error,
 
     // Access method errrors
-    AccessError(TreeStatus),
+    AccessError(AccessMethodError),
 }
 
 // To String conversion
@@ -54,8 +55,14 @@ impl From<TreeStatus> for TxnStorageStatus {
         match status {
             TreeStatus::NotFound => TxnStorageStatus::KeyNotFound,
             TreeStatus::Duplicate => TxnStorageStatus::KeyExists,
-            other => TxnStorageStatus::AccessError(other),
+            other => TxnStorageStatus::AccessError(other.into()),
         }
+    }
+}
+
+impl From<AppendOnlyStoreError> for TxnStorageStatus {
+    fn from(status: AppendOnlyStoreError) -> TxnStorageStatus {
+        TxnStorageStatus::AccessError(status.into())
     }
 }
 
@@ -79,6 +86,7 @@ impl DBOptions {
 pub enum ContainerType {
     Hash,
     BTree,
+    AppendOnly,
 }
 
 impl ContainerType {
@@ -86,6 +94,7 @@ impl ContainerType {
         match self {
             ContainerType::Hash => vec![0],
             ContainerType::BTree => vec![1],
+            ContainerType::AppendOnly => vec![2],
         }
     }
 
@@ -93,6 +102,7 @@ impl ContainerType {
         match bytes[0] {
             0 => ContainerType::Hash,
             1 => ContainerType::BTree,
+            2 => ContainerType::AppendOnly,
             _ => panic!("Invalid container type"),
         }
     }

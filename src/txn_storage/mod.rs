@@ -24,12 +24,15 @@ mod tests {
 
     #[cfg(test)]
     use super::*;
-    use crate::bp::{
-        get_test_bp,
-        prelude::{ContainerId, DatabaseId},
-        BufferPool, LRUEvictionPolicy,
+    use crate::{
+        bp::{
+            get_test_bp,
+            prelude::{ContainerId, DatabaseId},
+            BufferPool, LRUEvictionPolicy,
+        },
+        random::RandomKVs,
     };
-    use std::{sync::Arc, thread};
+    use std::{collections::HashSet, sync::Arc, thread};
 
     fn get_in_mem_storage() -> Arc<impl TxnStorageTrait> {
         Arc::new(InMemStorage::new())
@@ -77,10 +80,14 @@ mod tests {
     */
 
     #[rstest]
-    #[case::in_mem(get_in_mem_storage())]
-    #[case::on_disk(get_on_disk_storage())]
-    fn test_insert_and_get_value(#[case] storage: Arc<impl TxnStorageTrait>) {
-        let (db_id, c_id) = setup_table(&storage, ContainerType::BTree);
+    #[case::in_mem(get_in_mem_storage(), ContainerType::BTree)]
+    #[case::in_mem(get_in_mem_storage(), ContainerType::Hash)]
+    #[case::on_disk(get_on_disk_storage(), ContainerType::BTree)]
+    fn test_insert_and_get_value(
+        #[case] storage: Arc<impl TxnStorageTrait>,
+        #[case] c_type: ContainerType,
+    ) {
+        let (db_id, c_id) = setup_table(&storage, c_type);
         let key = vec![0];
         let value = vec![1, 2, 3, 4];
         let txn = storage.begin_txn(&db_id, TxnOptions::default()).unwrap();
@@ -93,10 +100,14 @@ mod tests {
     }
 
     #[rstest]
-    #[case::in_mem(get_in_mem_storage())]
-    #[case::on_disk(get_on_disk_storage())]
-    fn test_update_and_remove_value(#[case] storage: Arc<impl TxnStorageTrait>) {
-        let (db_id, c_id) = setup_table(&storage, ContainerType::BTree);
+    #[case::in_mem(get_in_mem_storage(), ContainerType::BTree)]
+    #[case::in_mem(get_in_mem_storage(), ContainerType::Hash)]
+    #[case::on_disk(get_on_disk_storage(), ContainerType::BTree)]
+    fn test_update_and_remove_value(
+        #[case] storage: Arc<impl TxnStorageTrait>,
+        #[case] c_type: ContainerType,
+    ) {
+        let (db_id, c_id) = setup_table(&storage, c_type);
         let txn = storage.begin_txn(&db_id, TxnOptions::default()).unwrap();
         let key = vec![0];
         let value = vec![1, 2, 3, 4];
@@ -119,47 +130,78 @@ mod tests {
     }
 
     #[rstest]
-    #[case::in_mem(get_in_mem_storage())]
-    #[case::on_disk(get_on_disk_storage())]
-    fn test_scan_range(#[case] storage: Arc<impl TxnStorageTrait>) {
-        let (db_id, c_id) = setup_table(&storage, ContainerType::BTree);
+    #[case::in_mem(get_in_mem_storage(), ContainerType::BTree)]
+    #[case::in_mem(get_in_mem_storage(), ContainerType::Hash)]
+    #[case::on_disk(get_on_disk_storage(), ContainerType::BTree)]
+    #[case::on_disk(get_on_disk_storage(), ContainerType::AppendOnly)]
+    fn test_insert_and_scan_range(
+        #[case] storage: Arc<impl TxnStorageTrait>,
+        #[case] c_type: ContainerType,
+    ) {
+        let (db_id, c_id) = setup_table(&storage, c_type);
 
         let txn = storage.begin_txn(&db_id, TxnOptions::default()).unwrap();
+
+        let mut kvs = HashSet::new();
+
         // Insert some values
         for i in 0..4 {
             let key = vec![i];
             let value = vec![i; 4];
+            kvs.insert((key.clone(), value.clone()));
             storage.insert_value(&txn, &c_id, key, value).unwrap();
         }
+
         let iter_handle = storage.scan_range(&txn, &c_id, ScanOptions::new()).unwrap();
-        let mut count = 0;
+
         while let Ok(Some((key, val))) = storage.iter_next(&iter_handle) {
-            assert_eq!(key, vec![count]);
-            assert_eq!(val, vec![count; 4]);
-            count += 1;
+            let key = key.to_vec();
+            let val = val.to_vec();
+            assert!(kvs.remove(&(key.clone(), val.clone())));
         }
-        assert_eq!(count, 4);
+        assert!(kvs.is_empty());
+
         storage.commit_txn(&txn, false).unwrap();
     }
 
     #[rstest]
-    #[case::in_mem(get_in_mem_storage())]
-    #[case::on_disk(get_on_disk_storage())]
-    fn test_concurrent_insert(#[case] storage: Arc<impl TxnStorageTrait>) {
-        let (db_id, c_id) = setup_table(&storage, ContainerType::BTree);
+    #[case::in_mem(get_in_mem_storage(), ContainerType::BTree)]
+    #[case::in_mem(get_in_mem_storage(), ContainerType::Hash)]
+    #[case::on_disk(get_on_disk_storage(), ContainerType::BTree)]
+    #[case::on_disk(get_on_disk_storage(), ContainerType::AppendOnly)]
+    fn test_concurrent_insert(
+        #[case] storage: Arc<impl TxnStorageTrait>,
+        #[case] c_type: ContainerType,
+    ) {
+        let (db_id, c_id) = setup_table(&storage, c_type);
         let num_threads = 4;
         let num_keys_per_thread = 10000;
 
+        let kvs = RandomKVs::new(
+            true,
+            false,
+            num_threads,
+            num_threads * num_keys_per_thread,
+            50,
+            50,
+            100,
+        );
+        let mut verify_kvs = HashSet::new();
+        for kv in kvs.iter() {
+            for (key, value) in kv.iter() {
+                verify_kvs.insert((key.clone(), value.clone()));
+            }
+        }
+
         // Use scoped threads to insert values
         thread::scope(|scope| {
-            for i in 0..num_threads {
+            for kv in kvs.iter() {
                 let storage = storage.clone();
+                let db_id = db_id.clone();
+                let c_id = c_id.clone();
                 scope.spawn(move || {
-                    for k in 0..num_keys_per_thread {
+                    for (key, value) in kv.iter() {
                         let txn = storage.begin_txn(&db_id, TxnOptions::default()).unwrap();
-                        let key: usize = i * num_keys_per_thread + k;
-                        let key = key.to_be_bytes().to_vec();
-                        let value = key.clone();
                         storage
                             .insert_value(&txn, &c_id, key.clone(), value.clone())
                             .unwrap();
@@ -172,14 +214,13 @@ mod tests {
         // Check if all values are inserted
         let txn = storage.begin_txn(&db_id, TxnOptions::default()).unwrap();
         let iter_handle = storage.scan_range(&txn, &c_id, ScanOptions::new()).unwrap();
-        let mut count = 0;
         while let Ok(Some((key, val))) = storage.iter_next(&iter_handle) {
-            let key = usize::from_be_bytes(key.as_slice().try_into().unwrap());
-            assert_eq!(key, count);
-            assert_eq!(val, key.to_be_bytes().to_vec());
-            count += 1;
+            let key = key.to_vec();
+            let val = val.to_vec();
+            assert!(verify_kvs.remove(&(key.clone(), val.clone())));
         }
-        assert_eq!(count, num_threads * num_keys_per_thread);
+        assert!(verify_kvs.is_empty());
+        storage.commit_txn(&txn, false).unwrap();
     }
 
     #[test]
@@ -204,7 +245,7 @@ mod tests {
                 .create_container(
                     &storage1.begin_txn(&db_id, TxnOptions::default()).unwrap(),
                     &db_id,
-                    ContainerOptions::new("test_container2", ContainerType::BTree),
+                    ContainerOptions::new("test_container2", ContainerType::AppendOnly),
                 )
                 .unwrap();
             let c_id3 = storage1

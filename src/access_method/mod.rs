@@ -6,6 +6,7 @@ pub mod append_only_store;
 pub mod fbt;
 pub mod hashindex;
 
+#[derive(Debug, PartialEq)]
 pub enum AccessMethodError {
     HashIdx(PagedHashMapError),
     BTreeIdx(TreeStatus),
