@@ -32,6 +32,7 @@ pub struct PagedHashMap<E: EvictionPolicy, T: MemPool<E>> {
 
     pointer_swizzling_enabled: bool, // whether pointer swizzling is enabled
     frame_buckets: Option<Vec<AtomicU32>>, // vec of frame_id for each bucket
+
     // bucket_metas: Vec<BucketMeta>, // first_frame_id, last_page_id, last_frame_id, bloomfilter // no need to be page
     phantom: PhantomData<E>,
 }
@@ -674,6 +675,13 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
             local_stat.stat.clear();
         });
         stats.to_string()
+    }
+
+    #[cfg(feature = "stat")]
+    pub fn reset_stats(&self) {
+        {
+            GLOBAL_STAT.lock().unwrap().clear();
+        }
     }
 }
 
