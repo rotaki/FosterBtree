@@ -231,7 +231,7 @@ impl RuntimeStats {
 
     pub fn to_string(&self) -> String {
         format!(
-            "New Page: {}\nRead Count: {}\nWrite Count: {}\n",
+            "New Page: {}\nRead Count: {}\nWrite Count: {}",
             self.new_page.load(Ordering::Relaxed),
             self.read_count.load(Ordering::Relaxed),
             self.write_count.load(Ordering::Relaxed)
@@ -254,9 +254,14 @@ pub struct Frames<T: EvictionPolicy> {
 
 impl<T: EvictionPolicy> Frames<T> {
     pub fn new(num_frames: usize) -> Self {
+        let fast_path_victims = ConcurrentQueue::unbounded();
+        for i in 0..num_frames {
+            fast_path_victims.push(i).unwrap();
+        }
+
         Frames {
             num_frames,
-            fast_path_victims: ConcurrentQueue::unbounded(),
+            fast_path_victims,
             eviction_candidates: [0; EVICTION_SCAN_DEPTH],
             frames: (0..num_frames)
                 .map(|i| BufferFrame::new(i as u32))

@@ -26,12 +26,14 @@ pub enum AppendOnlyStoreError {
 
 struct RuntimeStats {
     num_recs: AtomicUsize,
+    num_pages: AtomicUsize,
 }
 
 impl RuntimeStats {
     fn new() -> Self {
         RuntimeStats {
             num_recs: AtomicUsize::new(0),
+            num_pages: AtomicUsize::new(0),
         }
     }
 
@@ -42,6 +44,15 @@ impl RuntimeStats {
 
     fn get_num_recs(&self) -> usize {
         self.num_recs.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn inc_num_pages(&self) {
+        self.num_pages
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn get_num_pages(&self) -> usize {
+        self.num_pages.load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 
@@ -157,6 +168,10 @@ impl<E: EvictionPolicy, T: MemPool<E>> AppendOnlyStore<E, T> {
         self.stats.get_num_recs()
     }
 
+    pub fn num_pages(&self) -> usize {
+        self.stats.get_num_pages()
+    }
+
     pub fn append(&self, key: &[u8], value: &[u8]) -> Result<(), AppendOnlyStoreError> {
         let data_len = key.len() + value.len();
         if data_len > <Page as AppendOnlyPage>::max_record_size() {
@@ -193,6 +208,8 @@ impl<E: EvictionPolicy, T: MemPool<E>> AppendOnlyStore<E, T> {
             let mut root_page = self.get_page_for_write(&self.root_key);
             root_page.get_mut_val(0).copy_from_slice(&new_key_bytes);
             drop(root_page);
+
+            self.stats.inc_num_pages();
 
             // Set the in-memory last key to the new page.
             let new_key = PageFrameKey::new_with_frame_id(self.c_key, page_id, frame_id);
