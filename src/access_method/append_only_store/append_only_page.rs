@@ -119,6 +119,12 @@ pub trait AppendOnlyPage {
     /// Get the record at the slot_id.
     /// If the slot_id is invalid, panic.
     fn get(&self, slot_id: u16) -> (&[u8], &[u8]);
+
+    /// Get the mutable val at the slot_id.
+    /// If the slot_id is invalid, panic.
+    /// This function is used for updating the val in place.
+    /// Updates of the record should not change the size of the val.
+    fn get_mut_val(&mut self, slot_id: u16) -> &mut [u8];
 }
 
 impl AppendOnlyPage for Page {
@@ -227,6 +233,13 @@ impl AppendOnlyPage for Page {
         let value = &self[offset + slot.key_size() as usize
             ..offset + slot.key_size() as usize + slot.val_size() as usize];
         (key, value)
+    }
+
+    fn get_mut_val(&mut self, slot_id: u16) -> &mut [u8] {
+        let slot = self.slot(slot_id).unwrap();
+        let offset = slot.offset() as usize;
+        &mut self[offset + slot.key_size() as usize
+            ..offset + slot.key_size() as usize + slot.val_size() as usize]
     }
 }
 
