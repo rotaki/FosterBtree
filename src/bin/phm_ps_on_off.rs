@@ -33,11 +33,11 @@ fn main() {
     println!("Get Params:\n{}", get_params);
 
     println!("------------------------------------------------------- Pointer Swizzling OFF (disabled)\n");
-    let phm_no_ps = gen_paged_hash_map_on_disk_without_ponter_swizzling(bp_size);
+    let phm_no_ps = gen_paged_hash_map_on_disk_without_pointer_swizzling(bp_size);
 
     let ipc = insert_params.clone();
     let ikc = insert_kvs.clone();
-    clear_cache();
+    // clear_cache();
     // Measure insertion time without pointer swizzling
     let start_insert_no_ps = Instant::now();
     run_bench_for_paged_hash_map(ipc, ikc, &phm_no_ps);
@@ -64,7 +64,7 @@ fn main() {
 
     let gpc = get_params.clone();
     let gkc = get_kvs.clone();
-    clear_cache();
+    // clear_cache();
     // Measure get time without pointer swizzling
     let start_get_no_ps = Instant::now();
     run_bench_for_paged_hash_map(gpc, gkc, &phm_no_ps);
@@ -99,7 +99,7 @@ fn main() {
 
     let ipc = insert_params.clone();
     let ikc = insert_kvs.clone();
-    clear_cache();
+    // clear_cache();
     // Measure insertion time
     let start_insert = Instant::now();
     run_bench_for_paged_hash_map(ipc, ikc, &phm);
@@ -126,7 +126,7 @@ fn main() {
 
     let gpc = get_params.clone();
     let gkc = get_kvs.clone();
-    clear_cache();
+    // clear_cache();
     // Measure get time
     let start_get = Instant::now();
     run_bench_for_paged_hash_map(gpc, gkc, &phm);
@@ -168,10 +168,4 @@ fn main() {
         duration_get_no_ps
     );
     println!("Duration Get with Pointer Swizzling: {:?}", duration_get);
-}
-
-fn clear_cache() {
-    // Unix-based system cache clearing
-    let _ = Command::new("sync").status();
-    let _ = Command::new("echo 3 > /proc/sys/vm/drop_caches").status();
 }

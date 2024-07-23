@@ -288,7 +288,7 @@ pub fn gen_paged_hash_map_on_disk(
     Arc::new(map)
 }
 
-pub fn gen_paged_hash_map_on_disk_without_ponter_swizzling(
+pub fn gen_paged_hash_map_on_disk_without_pointer_swizzling(
     bp_size: usize,
 ) -> Arc<PagedHashMap<LRUEvictionPolicy, BufferPool<LRUEvictionPolicy>>> {
     let c_key = ContainerKey::new(0, 0);
