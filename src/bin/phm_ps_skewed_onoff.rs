@@ -15,22 +15,22 @@ fn main() {
         insert_params.val_max_size,
     );
 
-    let mut get_params = insert_params.clone();
-    get_params.ops_ratio = "0:0:0:1".to_string(); // Only gets are done in this snipp
-    let get_kvs = RandomKVs::new(
-        get_params.unique_keys,
+    let mut skewed_get_params = insert_params.clone();
+    skewed_get_params.ops_ratio = "0:0:0:1".to_string(); // Only gets are done in this snipp
+    let skewed_get_kvs = SkewedRandomKVs::new(
+        1.0,
         false,
-        get_params.num_threads,
-        get_params.num_keys,
-        get_params.key_size,
-        get_params.val_min_size,
-        get_params.val_max_size,
+        skewed_get_params.num_threads,
+        skewed_get_params.num_keys,
+        skewed_get_params.key_size,
+        skewed_get_params.val_min_size,
+        skewed_get_params.val_max_size,
     );
 
     let bp_size = insert_params.bp_size;
 
     println!("Insert Params:\n{}", insert_params);
-    println!("Get Params:\n{}", get_params);
+    println!("Get Params:\n{}", skewed_get_params);
 
     println!("------------------------------------------------------- Pointer Swizzling OFF (disabled)\n");
     let phm_no_ps = gen_paged_hash_map_on_disk_without_ponter_swizzling(bp_size);
@@ -62,8 +62,8 @@ fn main() {
     }
     // Done inserting
 
-    let gpc = get_params.clone();
-    let gkc = get_kvs.clone();
+    let gpc = skewed_get_params.clone();
+    let gkc = skewed_get_kvs.clone();
     clear_cache();
     // Measure get time without pointer swizzling
     let start_get_no_ps = Instant::now();
@@ -124,8 +124,8 @@ fn main() {
     }
     // Done inserting
 
-    let gpc = get_params.clone();
-    let gkc = get_kvs.clone();
+    let gpc = skewed_get_params.clone();
+    let gkc = skewed_get_kvs.clone();
     clear_cache();
     // Measure get time
     let start_get = Instant::now();

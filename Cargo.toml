@@ -29,6 +29,7 @@ clap = {version = "4.5", features = ["derive"]}
 concurrent-queue = "2.5"
 io-uring = {version = "0.6", optional = true}
 libc = {version = "0.2", optional = true}
+zipf = "7.0.1"
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"]}
