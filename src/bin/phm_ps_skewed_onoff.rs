@@ -1,5 +1,8 @@
 use clap::Parser;
-use fbtree::{bench_utils::*, random::{RandomKVs, SkewedRandomKVs}};
+use fbtree::{
+    bench_utils::*,
+    random::{RandomKVs, SkewedRandomKVs},
+};
 use std::{process::Command, time::Instant};
 
 fn main() {

@@ -254,7 +254,7 @@ impl SkewedRandomKVs {
         let keys = (0..num_keys)
             .map(|_| zipf.sample(&mut rng))
             .collect::<Vec<usize>>();
- 
+
         fn to_bytes(key: usize, key_size: usize) -> Vec<u8> {
             // Pad the key with 0s to make it key_size bytes long.
             let mut key_vec = vec![0u8; key_size];
