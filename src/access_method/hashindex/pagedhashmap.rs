@@ -190,7 +190,8 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
                 }
                 Err(PagedHashMapError::WriteLatchFailed) => {
                     attempts += 1;
-                    std::thread::sleep(base * attempts);
+                    // std::thread::sleep(base * attempts);
+                    std::hint::spin_loop();
                 }
                 Err(PagedHashMapError::KeyExists) => {
                     return Err(PagedHashMapError::KeyExists);
