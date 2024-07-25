@@ -31,12 +31,13 @@ fn main() {
     );
 
     let bp_size = insert_params.bp_size;
+    let bucket_num = insert_params.bucket_num;
 
     println!("Insert Params:\n{}", insert_params);
     println!("Get Params:\n{}", skewed_get_params);
 
     println!("------------------------------------------------------- Pointer Swizzling OFF (disabled)\n");
-    let phm_no_ps = gen_paged_hash_map_on_disk_without_pointer_swizzling(bp_size);
+    let phm_no_ps = gen_paged_hash_map_on_disk_without_pointer_swizzling(bp_size, bucket_num);
 
     let ipc = insert_params.clone();
     let ikc = insert_kvs.clone();
@@ -98,7 +99,7 @@ fn main() {
     println!(
         "------------------------------------------------------- Pointer swizzling ON (enabled)\n"
     );
-    let phm = gen_paged_hash_map_on_disk(bp_size);
+    let phm = gen_paged_hash_map_on_disk(bp_size, bucket_num);
 
     let ipc = insert_params.clone();
     let ikc = insert_kvs.clone();

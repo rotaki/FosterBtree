@@ -21,7 +21,7 @@ use super::shortkeypage::{ShortKeyPage, ShortKeyPageError, SHORT_KEY_PAGE_HEADER
 use crate::page::AVAILABLE_PAGE_SIZE;
 
 // const DEFAULT_BUCKET_NUM: usize = 1024;
-const DEFAULT_BUCKET_NUM: usize = 1024 * 4;
+const DEFAULT_BUCKET_NUM: usize = 1024 * 8;
 
 pub struct PagedHashMap<E: EvictionPolicy, T: MemPool<E>> {
     // func: Box<dyn Fn(&[u8], &[u8]) -> Vec<u8>>, // func(old_value, new_value) -> new_value
@@ -72,6 +72,7 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
     pub fn new(
         bp: Arc<T>,
         c_key: ContainerKey,
+        bucket_num: usize,
         from_container: bool,
         pointer_swizzling_enabled: bool,
     ) -> Self {
@@ -85,7 +86,7 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
             assert_eq!(root_page.get_id(), 0, "root page id should be 0");
 
             let frame_buckets = if pointer_swizzling_enabled {
-                let buckets = (0..DEFAULT_BUCKET_NUM + 1)
+                let buckets = (0..bucket_num + 1)
                     .map(|_| AtomicU32::new(u32::MAX))
                     .collect::<Vec<AtomicU32>>();
                 buckets[0].store(root_page.frame_id(), std::sync::atomic::Ordering::Release);
@@ -95,7 +96,7 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
             };
 
             // SET HASH BUCKET PAGES
-            for i in 1..=DEFAULT_BUCKET_NUM {
+            for i in 1..=bucket_num {
                 let mut new_page = bp.create_new_page_for_write(c_key).unwrap();
                 #[cfg(feature = "stat")]
                 inc_local_stat_total_page_count();
@@ -115,7 +116,7 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
             PagedHashMap {
                 bp: bp.clone(),
                 c_key,
-                bucket_num: DEFAULT_BUCKET_NUM,
+                bucket_num,
                 pointer_swizzling_enabled,
                 frame_buckets,
                 phantom: PhantomData,
@@ -180,7 +181,7 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
         page_key: PageFrameKey,
         key: &[u8],
     ) -> Result<FrameWriteGuard<E>, PagedHashMapError> {
-        let base = Duration::from_millis(1);
+        let base = Duration::from_nanos(1);
         let mut attempts = 0;
         loop {
             let page = self.try_insert_traverse_to_endofchain_for_write(page_key, key);
@@ -190,8 +191,10 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
                 }
                 Err(PagedHashMapError::WriteLatchFailed) => {
                     attempts += 1;
+                    // println!("thread {:?} sleeping for {:?}", std::thread::current().id(), base * attempts);
                     // std::thread::sleep(base * attempts);
-                    std::hint::spin_loop();
+                    // std::hint::spin_loop();
+                    std::thread::yield_now();
                 }
                 Err(PagedHashMapError::KeyExists) => {
                     return Err(PagedHashMapError::KeyExists);
@@ -1059,7 +1062,7 @@ mod tests {
         let c_key = ContainerKey::new(db_id, c_id);
         // let func = Box::new(simple_hash_func);
         // PagedHashMap::new(func, bp, c_key, false)
-        PagedHashMap::new(bp, c_key, false, true)
+        PagedHashMap::new(bp, c_key, DEFAULT_BUCKET_NUM, false, true)
     }
 
     /// Helper function to generate random strings of a given length

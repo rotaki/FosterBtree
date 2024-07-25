@@ -7,13 +7,14 @@ use std::process::Command;
 fn main() {
     let mut bench_params = BenchParams::parse();
     bench_params.bp_size = 100_000;
+    bench_params.bucket_num = 100_000;
     bench_params.ops_ratio = "0:0:0:1".to_string();
     bench_params.num_keys = 200_000;
     println!("{}", bench_params);
 
     let bp_size = bench_params.bp_size;
     // let phm_in_mem = gen_paged_hash_map_in_mem();
-    let phm_on_disk = gen_paged_hash_map_on_disk(bp_size);
+    let phm_on_disk = gen_paged_hash_map_on_disk(bp_size, bench_params.bucket_num);
     let rhm = gen_rust_hash_map();
     // let phm = gen_paged_hash_map_on_disk_with_hash_eviction_policy(bp_size);
 

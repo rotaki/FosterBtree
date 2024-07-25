@@ -41,6 +41,9 @@ pub struct BenchParams {
     /// Operations ratio: insert:update:delete:get
     #[clap(short = 'r', long = "ops_ratio", default_value = "1:0:0:0")]
     pub ops_ratio: String,
+    /// Bucket number for hash index.
+    #[clap(short = 'c', long = "bucket_num", default_value = "10000")]
+    pub bucket_num: usize,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -84,6 +87,7 @@ impl BenchParams {
         val_max_size: usize,
         bp_size: usize,
         ops_ratio: String,
+        bucket_num: usize,
     ) -> Self {
         Self {
             num_threads,
@@ -94,6 +98,7 @@ impl BenchParams {
             val_max_size,
             bp_size,
             ops_ratio,
+            bucket_num,
         }
     }
 }
@@ -274,25 +279,28 @@ pub fn run_bench_for_rust_hash_map(
 }
 
 pub fn gen_paged_hash_map_in_mem(
+    bucket_num: usize,
 ) -> Arc<PagedHashMap<DummyEvictionPolicy, InMemPool<DummyEvictionPolicy>>> {
     let c_key = ContainerKey::new(0, 0);
-    let map = PagedHashMap::new(get_in_mem_pool(), c_key, false, true);
+    let map = PagedHashMap::new(get_in_mem_pool(), c_key, bucket_num, false, true);
     Arc::new(map)
 }
 
 pub fn gen_paged_hash_map_on_disk(
     bp_size: usize,
+    bucket_num: usize,
 ) -> Arc<PagedHashMap<LRUEvictionPolicy, BufferPool<LRUEvictionPolicy>>> {
     let c_key = ContainerKey::new(0, 0);
-    let map = PagedHashMap::new(get_test_bp(bp_size), c_key, false, true);
+    let map = PagedHashMap::new(get_test_bp(bp_size), c_key, bucket_num, false, true);
     Arc::new(map)
 }
 
 pub fn gen_paged_hash_map_on_disk_without_pointer_swizzling(
     bp_size: usize,
+    bucket_num: usize,
 ) -> Arc<PagedHashMap<LRUEvictionPolicy, BufferPool<LRUEvictionPolicy>>> {
     let c_key = ContainerKey::new(0, 0);
-    let map = PagedHashMap::new(get_test_bp(bp_size), c_key, false, false);
+    let map = PagedHashMap::new(get_test_bp(bp_size), c_key, bucket_num, false, false);
     Arc::new(map)
 }
 
