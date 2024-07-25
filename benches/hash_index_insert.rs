@@ -6,13 +6,14 @@ use fbtree::{bench_utils::*, random::RandomKVs};
 fn bench_random_insertion(c: &mut Criterion) {
     let kvs = RandomKVs::new(true, false, 1, 200_000, 100, 50, 100);
     let bp_size = 200_000;
+    let bucket_num = bp_size;
 
     let mut group = c.benchmark_group("Random Insertion");
     group.sample_size(20);
 
     // Generate hash maps
-    let phm = gen_paged_hash_map_in_mem();
-    let phm2 = gen_paged_hash_map_on_disk(bp_size);
+    let phm = gen_paged_hash_map_in_mem(bucket_num);
+    let phm2 = gen_paged_hash_map_on_disk(bp_size, bucket_num);
     let mut rhm = gen_rust_hash_map();
 
     clear_cache();

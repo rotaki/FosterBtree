@@ -16,18 +16,20 @@ pub trait ShortKeyPage {
 
     /// Update the value of an existing key.
     /// If the key does not exist, it will return an error.
-    fn update(&mut self, key: &[u8], val: &[u8]) -> Result<Vec<u8>, ShortKeyPageError>;
+    fn update(&mut self, key: &[u8], val: &[u8]) -> Result<(), ShortKeyPageError>;
+    fn update_with_return(&mut self, key: &[u8], val: &[u8]) -> Result<Vec<u8>, ShortKeyPageError>;
     fn update_at_slot(&mut self, slot_id: u16, val: &[u8]) -> Result<(), ShortKeyPageError>;
 
     /// Upsert a key-value pair into the index.
     /// If the key already exists, it will update the value.
     /// If the key does not exist, it will insert a new key-value pair.
-    fn upsert(&mut self, key: &[u8], val: &[u8]) -> (bool, Option<Vec<u8>>); // return (success, old_value)
+    fn upsert_old(&mut self, key: &[u8], val: &[u8]) -> (bool, Option<Vec<u8>>); // return (success, old_value)
+    fn upsert(&mut self, key: &[u8], val: &[u8]) -> Result<(), ShortKeyPageError>;
 
     /// Upsert with a custom merge function.
     /// If the key already exists, it will update the value with the merge function.
     /// If the key does not exist, it will insert a new key-value pair.
-    fn upsert_with_merge<F>(
+    fn upsert_with_merge_old<F>(
         &mut self,
         key: &[u8],
         value: &[u8],
@@ -35,10 +37,20 @@ pub trait ShortKeyPage {
     ) -> (bool, Option<Vec<u8>>)
     where
         F: Fn(&[u8], &[u8]) -> Vec<u8>;
+    fn upsert_with_merge<F>(
+        &mut self,
+        key: &[u8],
+        value: &[u8],
+        update_fn: F,
+    ) -> Result<(), ShortKeyPageError>
+    where
+        F: Fn(&[u8], &[u8]) -> Vec<u8>;
 
     fn get_old(&self, key: &[u8]) -> Option<Vec<u8>>;
     fn get(&self, key: &[u8]) -> Result<Vec<u8>, ShortKeyPageError>;
-    fn remove(&mut self, key: &[u8]) -> Option<Vec<u8>>;
+
+    fn remove_old(&mut self, key: &[u8]) -> Option<Vec<u8>>;
+    fn remove(&mut self, key: &[u8]) -> Result<(), ShortKeyPageError>;
 
     fn encode_shortkey_header(&mut self, header: &ShortKeyHeader);
     fn decode_shortkey_header(&self) -> ShortKeyHeader;
@@ -79,6 +91,8 @@ pub trait ShortKeyPage {
     fn num_slots(&self) -> u16;
     fn total_free_spcae(&self) -> usize;
     fn get_free_space(&self) -> usize;
+
+    fn get_use_rate(&self) -> f64;
 }
 
 // define error type
@@ -138,6 +152,94 @@ impl ShortKeyPage for Page {
             val_start_offset: AVAILABLE_PAGE_SIZE as u16,
         };
         Self::encode_shortkey_header(self, &header);
+    }
+
+    fn insert(&mut self, key: &[u8], value: &[u8]) -> Result<(), ShortKeyPageError> {
+        let (found, index) = self.search_slot(key);
+
+        if found {
+            return Err(ShortKeyPageError::KeyExists);
+        }
+
+        let mut header = self.decode_shortkey_header();
+        let remain_key_len = key.len().saturating_sub(8);
+        let required_space = SHORT_KEY_SLOT_SIZE + (remain_key_len + 2 + value.len());
+        if required_space > header.val_start_offset as usize - self.slot_end_offset() {
+            return Err(ShortKeyPageError::OutOfSpace);
+        }
+
+        if index < header.slot_num {
+            let start_pos = PAGE_HEADER_SIZE
+                + SHORT_KEY_PAGE_HEADER_SIZE
+                + index as usize * SHORT_KEY_SLOT_SIZE;
+            let end_pos = PAGE_HEADER_SIZE
+                + SHORT_KEY_PAGE_HEADER_SIZE
+                + header.slot_num as usize * SHORT_KEY_SLOT_SIZE;
+            self.copy_within(start_pos..end_pos, start_pos + SHORT_KEY_SLOT_SIZE);
+        }
+
+        let new_val_offset = header.val_start_offset as usize - (value.len() + 2 + remain_key_len);
+
+        let new_slot = ShortKeySlot {
+            key_len: key.len() as u16,
+            key_prefix: {
+                let mut prefix = [0u8; 8];
+                let copy_len = std::cmp::min(8, key.len());
+                prefix[..copy_len].copy_from_slice(&key[..copy_len]);
+                prefix
+            },
+            val_offset: new_val_offset as u16,
+        };
+        self.encode_shortkey_slot(index, &new_slot);
+
+        let new_value_entry = ShortKeyValueSample {
+            remain_key: &key[key.len().min(8)..],
+            vals_len: value.len() as u16,
+            vals: value,
+        };
+        self.encode_shortkey_value_sample(new_val_offset, &new_value_entry);
+
+        header.slot_num += 1;
+        header.val_start_offset = new_val_offset as u16;
+        self.encode_shortkey_header(&header);
+
+        Ok(())
+    }
+
+    fn get(&self, key: &[u8]) -> Result<Vec<u8>, ShortKeyPageError> {
+        let (found, index) = self.search_slot(key);
+
+        if found {
+            let slot = self.decode_shortkey_slot(index);
+            let value_entry = self.decode_shortkey_value(slot.val_offset as usize, slot.key_len);
+            Ok(value_entry.vals)
+        } else {
+            Err(ShortKeyPageError::KeyNotFound)
+        }
+    }
+
+    fn update(&mut self, key: &[u8], val: &[u8]) -> Result<(), ShortKeyPageError> {
+        todo!()
+    }
+
+    fn upsert(&mut self, key: &[u8], val: &[u8]) -> Result<(), ShortKeyPageError> {
+        todo!()
+    }
+
+    fn upsert_with_merge<F>(
+        &mut self,
+        key: &[u8],
+        value: &[u8],
+        update_fn: F,
+    ) -> Result<(), ShortKeyPageError>
+    where
+        F: Fn(&[u8], &[u8]) -> Vec<u8>,
+    {
+        todo!()
+    }
+
+    fn remove(&mut self, key: &[u8]) -> Result<(), ShortKeyPageError> {
+        todo!()
     }
 
     fn slot_end_offset(&self) -> usize {
@@ -257,75 +359,9 @@ impl ShortKeyPage for Page {
 
         (false, low)
     }
-    fn insert(&mut self, key: &[u8], value: &[u8]) -> Result<(), ShortKeyPageError> {
-        // let (found, index) = self.binary_search(|slot_id| self.compare_key(key, slot_id));
-        // let (found, index) = self.interpolation_search(key);
-        let (found, index) = self.search_slot(key);
-
-        if found {
-            return Err(ShortKeyPageError::KeyExists);
-        }
-
-        let mut header = self.decode_shortkey_header();
-        let remain_key_len = key.len().saturating_sub(8);
-        let required_space = SHORT_KEY_SLOT_SIZE + (remain_key_len + 2 + value.len());
-        if required_space > header.val_start_offset as usize - self.slot_end_offset() {
-            return Err(ShortKeyPageError::OutOfSpace);
-        }
-
-        if index < header.slot_num {
-            let start_pos = PAGE_HEADER_SIZE
-                + SHORT_KEY_PAGE_HEADER_SIZE
-                + index as usize * SHORT_KEY_SLOT_SIZE;
-            let end_pos = PAGE_HEADER_SIZE
-                + SHORT_KEY_PAGE_HEADER_SIZE
-                + header.slot_num as usize * SHORT_KEY_SLOT_SIZE;
-            self.copy_within(start_pos..end_pos, start_pos + SHORT_KEY_SLOT_SIZE);
-        }
-
-        let new_val_offset = header.val_start_offset as usize - (value.len() + 2 + remain_key_len);
-
-        let new_slot = ShortKeySlot {
-            key_len: key.len() as u16,
-            key_prefix: {
-                let mut prefix = [0u8; 8];
-                let copy_len = std::cmp::min(8, key.len());
-                prefix[..copy_len].copy_from_slice(&key[..copy_len]);
-                prefix
-            },
-            val_offset: new_val_offset as u16,
-        };
-        self.encode_shortkey_slot(index, &new_slot);
-
-        /*
-        let remain_key = if key.len() > 8 {
-            key[8..].to_vec()
-        } else {
-            Vec::new()
-        };
-
-        let new_value_entry = ShortKeyValue {
-            remain_key,
-            vals_len: value.len() as u16,
-            vals: value.to_vec(),
-        };
-        */
-        let new_value_entry = ShortKeyValueSample {
-            remain_key: &key[key.len().min(8)..],
-            vals_len: value.len() as u16,
-            vals: value,
-        };
-        self.encode_shortkey_value_sample(new_val_offset, &new_value_entry);
-
-        header.slot_num += 1;
-        header.val_start_offset = new_val_offset as u16;
-        self.encode_shortkey_header(&header);
-
-        Ok(())
-    }
 
     // when update, if the new value is bigger so OutofSpace, then remove the slot
-    fn update(&mut self, key: &[u8], val: &[u8]) -> Result<Vec<u8>, ShortKeyPageError> {
+    fn update_with_return(&mut self, key: &[u8], val: &[u8]) -> Result<Vec<u8>, ShortKeyPageError> {
         // let (found, index) = self.binary_search(|slot_id| self.compare_key(key, slot_id));
         // let (found, index) = self.interpolation_search(key);
         let (found, index) = self.search_slot(key);
@@ -414,7 +450,7 @@ impl ShortKeyPage for Page {
         }
     }
 
-    fn upsert(&mut self, key: &[u8], value: &[u8]) -> (bool, Option<Vec<u8>>) {
+    fn upsert_old(&mut self, key: &[u8], value: &[u8]) -> (bool, Option<Vec<u8>>) {
         let mut header = self.decode_shortkey_header();
         // let (found, index) = self.binary_search(|slot_id| self.compare_key(key, slot_id));
         // let (found, index) = self.interpolation_search(key);
@@ -506,7 +542,7 @@ impl ShortKeyPage for Page {
         }
     }
 
-    fn upsert_with_merge<F>(
+    fn upsert_with_merge_old<F>(
         &mut self,
         key: &[u8],
         value: &[u8],
@@ -620,19 +656,7 @@ impl ShortKeyPage for Page {
         None
     }
 
-    fn get(&self, key: &[u8]) -> Result<Vec<u8>, ShortKeyPageError> {
-        let (found, index) = self.search_slot(key);
-
-        if found {
-            let slot = self.decode_shortkey_slot(index);
-            let value_entry = self.decode_shortkey_value(slot.val_offset as usize, slot.key_len);
-            Ok(value_entry.vals)
-        } else {
-            Err(ShortKeyPageError::KeyNotFound)
-        }
-    }
-
-    fn remove(&mut self, key: &[u8]) -> Option<Vec<u8>> {
+    fn remove_old(&mut self, key: &[u8]) -> Option<Vec<u8>> {
         // let (found, index) = self.binary_search(|slot_id| self.compare_key(key, slot_id));
         // let (found, index) = self.interpolation_search(key);
         let (found, index) = self.search_slot(key);
@@ -834,6 +858,10 @@ impl ShortKeyPage for Page {
     fn get_free_space(&self) -> usize {
         self.decode_shortkey_header().val_start_offset as usize - self.slot_end_offset()
     }
+
+    fn get_use_rate(&self) -> f64 {
+        1.0 - (self.get_free_space() as f64 / AVAILABLE_PAGE_SIZE as f64)
+    }
 }
 
 #[cfg(test)]
@@ -860,7 +888,7 @@ mod tests {
         let value = b"value_123";
 
         // Test upsertion of a new key
-        assert_eq!(page.upsert(key, value), (true, None));
+        assert_eq!(page.upsert_old(key, value), (true, None));
 
         // Verify the upserted key and value
         let retrieved_value = page.get_old(key);
@@ -876,10 +904,10 @@ mod tests {
 
         // Insert the key initially
         // assert!(page.upsert(key, value1).is_none());
-        assert_eq!(page.upsert(key, value1), (true, None));
+        assert_eq!(page.upsert_old(key, value1), (true, None));
 
         // Insert the same key with a new value
-        let old_value = page.upsert(key, value2);
+        let old_value = page.upsert_old(key, value2);
         assert_eq!(old_value, (true, Some(value1.to_vec())));
 
         // Verify the updated value
@@ -894,7 +922,7 @@ mod tests {
         let value = vec![0u8; AVAILABLE_PAGE_SIZE]; // Unrealistically large value to simulate out-of-space
 
         // Attempt to upsert a value that's too large for the page
-        assert_eq!(page.upsert(key, &value), (false, None));
+        assert_eq!(page.upsert_old(key, &value), (false, None));
 
         // Ensure the key was not upserted
         let retrieved_value = page.get_old(key);
@@ -912,7 +940,7 @@ mod tests {
 
         // Insert keys in a specific order
         for (key, value) in keys.iter() {
-            page.upsert(*key, *value);
+            page.upsert_old(*key, *value);
         }
 
         // Check if keys are retrieved in sorted order
@@ -928,8 +956,8 @@ mod tests {
         let max_key = b"zzzzzzz";
         let value = b"value";
 
-        assert_eq!(page.upsert(min_key, value), (true, None));
-        assert_eq!(page.upsert(max_key, value), (true, None));
+        assert_eq!(page.upsert_old(min_key, value), (true, None));
+        assert_eq!(page.upsert_old(max_key, value), (true, None));
 
         assert_eq!(page.get_old(min_key), Some(value.to_vec()));
         assert_eq!(page.get_old(max_key), Some(value.to_vec()));
@@ -942,12 +970,12 @@ mod tests {
 
         // Insert keys
         for key in &keys {
-            assert_eq!(page.upsert(key, b"value"), (true, None));
+            assert_eq!(page.upsert_old(key, b"value"), (true, None));
         }
 
         // Delete keys
         for key in &keys {
-            assert!(page.remove(key).is_some());
+            assert!(page.remove_old(key).is_some());
         }
 
         // Check deletions
@@ -957,7 +985,7 @@ mod tests {
 
         // Re-upsert same keys
         for key in &keys {
-            assert_eq!(page.upsert(key, b"new_value"), (true, None));
+            assert_eq!(page.upsert_old(key, b"new_value"), (true, None));
         }
 
         // Verify re-upsertions
@@ -973,16 +1001,16 @@ mod tests {
         let small_value = b"small";
         let large_value = b"this_is_a_much_larger_value_than_before";
 
-        assert_eq!(page.upsert(key, small_value), (true, None));
+        assert_eq!(page.upsert_old(key, small_value), (true, None));
         assert_eq!(
-            page.upsert(key, large_value),
+            page.upsert_old(key, large_value),
             (true, Some(small_value.to_vec()))
         );
         assert_eq!(page.get_old(key), Some(large_value.to_vec()));
 
         // Update back to a smaller value
         assert_eq!(
-            page.upsert(key, small_value),
+            page.upsert_old(key, small_value),
             (true, Some(large_value.to_vec()))
         );
         assert_eq!(page.get_old(key), Some(small_value.to_vec()));
@@ -999,7 +1027,7 @@ mod tests {
             let key: Vec<u8> = (0..8).map(|_| rng.gen_range(0x00..0xFF)).collect();
             let value: Vec<u8> = (0..50).map(|_| rng.gen_range(0x00..0xFF)).collect(); // Random length values
             keys_and_values.push((key.clone(), value.clone()));
-            assert_eq!(page.upsert(&key, &value), (true, None));
+            assert_eq!(page.upsert_old(&key, &value), (true, None));
         }
 
         // Verify all keys and values
@@ -1019,7 +1047,7 @@ mod tests {
             let key: Vec<u8> = (0..8).map(|_| rng.gen_range(0x00..0xFF)).collect();
             let value: Vec<u8> = (0..50).map(|_| rng.gen_range(0x00..0xFF)).collect(); // Random length values
             keys_and_values.push((key.clone(), value.clone()));
-            assert_eq!(page.upsert(&key, &value), (true, None));
+            assert_eq!(page.upsert_old(&key, &value), (true, None));
         }
 
         // Sort keys_and_values by keys to check the order after upsertion
@@ -1054,7 +1082,7 @@ mod tests {
         let keys: Vec<&[u8]> = vec![b"delta", b"alpha", b"echo", b"bravo", b"charlie"];
 
         for key in keys.iter() {
-            page.upsert(*key, b"value");
+            page.upsert_old(*key, b"value");
         }
 
         let mut retrieved_keys = vec![];
@@ -1080,7 +1108,7 @@ mod tests {
         let key = b"new_key";
         let value = b"value";
 
-        let (success, old_value) = page.upsert_with_merge(key, value, update_fn);
+        let (success, old_value) = page.upsert_with_merge_old(key, value, update_fn);
         assert!(success);
         assert_eq!(old_value, None);
         assert_eq!(page.get_old(key), Some(value.to_vec()));
@@ -1093,8 +1121,8 @@ mod tests {
         let value1 = b"value1";
         let value2 = b"value2";
 
-        page.upsert(key, value1);
-        let (success, old_value) = page.upsert_with_merge(key, value2, update_fn);
+        page.upsert_old(key, value1);
+        let (success, old_value) = page.upsert_with_merge_old(key, value2, update_fn);
         assert!(success);
         assert_eq!(old_value, Some(value1.to_vec()));
         assert_eq!(page.get_old(key), Some(update_fn(value1, value2)));
@@ -1107,8 +1135,8 @@ mod tests {
         let value1 = b"value1";
         let value2 = b"value2_longer";
 
-        page.upsert(key, value1);
-        let (success, old_value) = page.upsert_with_merge(key, value2, update_fn);
+        page.upsert_old(key, value1);
+        let (success, old_value) = page.upsert_with_merge_old(key, value2, update_fn);
         assert!(success);
         assert_eq!(old_value, Some(value1.to_vec()));
         assert_eq!(page.get_old(key), Some(update_fn(value1, value2)));
@@ -1123,13 +1151,13 @@ mod tests {
             vec![0u8; AVAILABLE_PAGE_SIZE - SHORT_KEY_PAGE_HEADER_SIZE - SHORT_KEY_SLOT_SIZE - 2];
 
         // Fill the page almost completely
-        let (success, _) = page.upsert(key, &large_value);
+        let (success, _) = page.upsert_old(key, &large_value);
         assert!(success);
 
         // Try to upsert another value which should fail due to lack of space
         let key2 = b"key2";
         let value2 = b"value2";
-        let (success, _) = page.upsert_with_merge(key2, value2, update_fn);
+        let (success, _) = page.upsert_with_merge_old(key2, value2, update_fn);
         assert!(!success);
         assert_eq!(page.get_old(key2), None);
     }
@@ -1141,8 +1169,8 @@ mod tests {
         let value1 = b"value1";
         let value2 = b"value2";
 
-        page.upsert(key, value1);
-        let (success, old_value) = page.upsert_with_merge(key, value2, |_, new| new.to_vec());
+        page.upsert_old(key, value1);
+        let (success, old_value) = page.upsert_with_merge_old(key, value2, |_, new| new.to_vec());
         assert!(success);
         assert_eq!(old_value, Some(value1.to_vec()));
         assert_eq!(page.get_old(key), Some(value2.to_vec()));
@@ -1154,7 +1182,7 @@ mod tests {
         let large_key = vec![0u8; AVAILABLE_PAGE_SIZE];
         let value = b"value";
 
-        let (success, _) = page.upsert_with_merge(&large_key, value, update_fn);
+        let (success, _) = page.upsert_with_merge_old(&large_key, value, update_fn);
         assert!(!success);
         assert_eq!(page.get_old(&large_key), None);
     }
@@ -1165,7 +1193,7 @@ mod tests {
         let key = b"key";
         let large_value = vec![0u8; AVAILABLE_PAGE_SIZE];
 
-        let (success, _) = page.upsert_with_merge(key, &large_value, update_fn);
+        let (success, _) = page.upsert_with_merge_old(key, &large_value, update_fn);
         assert!(!success);
         assert_eq!(page.get_old(key), None);
     }
@@ -1177,8 +1205,8 @@ mod tests {
         let value1 = b"old_value";
         let value2 = b"new_value";
 
-        page.upsert(key, value1);
-        let (success, old_value) = page.upsert_with_merge(key, value2, |_, new| new.to_vec());
+        page.upsert_old(key, value1);
+        let (success, old_value) = page.upsert_with_merge_old(key, value2, |_, new| new.to_vec());
         assert!(success);
         assert_eq!(old_value, Some(value1.to_vec()));
         assert_eq!(page.get_old(key), Some(value2.to_vec()));
@@ -1196,7 +1224,7 @@ mod tests {
             let value: Vec<u8> = (0..50).map(|_| rng.gen_range(0x00..0xFF)).collect(); // Random length values
             keys_and_values.push((key.clone(), value.clone()));
             assert_eq!(
-                page.upsert_with_merge(&key, &value, update_fn),
+                page.upsert_with_merge_old(&key, &value, update_fn),
                 (true, None)
             );
         }
@@ -1219,7 +1247,7 @@ mod tests {
             let value: Vec<u8> = (0..50).map(|_| rng.gen_range(0x00..0xFF)).collect(); // Random length values
             keys_and_values.push((key.clone(), value.clone()));
             assert_eq!(
-                page.upsert_with_merge(&key, &value, update_fn),
+                page.upsert_with_merge_old(&key, &value, update_fn),
                 (true, None)
             );
         }
@@ -1256,7 +1284,7 @@ mod tests {
         let keys: Vec<&[u8]> = vec![b"delta", b"alpha", b"echo", b"bravo", b"charlie"];
 
         for key in keys.iter() {
-            page.upsert_with_merge(*key, b"value", update_fn);
+            page.upsert_with_merge_old(*key, b"value", update_fn);
         }
 
         let mut retrieved_keys = vec![];
@@ -1308,7 +1336,7 @@ mod tests {
         page.insert(key, initial_value).unwrap();
 
         // Update the existing key
-        let old_value = page.update(key, updated_value);
+        let old_value = page.update_with_return(key, updated_value);
         assert_eq!(
             old_value.unwrap(),
             initial_value.to_vec(),
@@ -1374,7 +1402,7 @@ mod tests {
         // Update key2
         let updated_value2 = b"updated_value2";
         assert_eq!(
-            page.update(key2, updated_value2).unwrap(),
+            page.update_with_return(key2, updated_value2).unwrap(),
             value2.to_vec(),
             "Update for key2 failed"
         );
@@ -1388,7 +1416,7 @@ mod tests {
 
         // Delete key1
         assert_eq!(
-            page.remove(key1),
+            page.remove_old(key1),
             Some(value1.to_vec()),
             "Failed to remove key1"
         );
@@ -1432,7 +1460,7 @@ mod tests {
                     if !inserted_keys.is_empty() {
                         let key_to_update = &inserted_keys[rng.gen_range(0..inserted_keys.len())];
                         let new_value = random_string(20);
-                        if page.update(&key_to_update, &new_value).is_ok() {
+                        if page.update_with_return(&key_to_update, &new_value).is_ok() {
                             keys_and_values.retain(|(k, _)| k != key_to_update);
                             keys_and_values.push((key_to_update.clone(), new_value.clone()));
                         }
@@ -1458,7 +1486,7 @@ mod tests {
                             .iter()
                             .find(|(k, _)| *k == key_to_remove)
                             .map(|(_, v)| v.clone());
-                        assert_eq!(page.remove(&key_to_remove), expected_value);
+                        assert_eq!(page.remove_old(&key_to_remove), expected_value);
                         keys_and_values.retain(|(k, _)| *k != key_to_remove);
                     }
                 }

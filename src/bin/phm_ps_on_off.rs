@@ -44,15 +44,15 @@ fn main() {
     run_bench_for_paged_hash_map(ipc, ikc, &phm_no_ps);
     let duration_insert_no_ps = start_insert_no_ps.elapsed();
     println!(
-        "Insertion Time without Pointer Swizzling: {:?}",
+        "Insertion Time without Pointer Swizzling: {:?}\n",
         duration_insert_no_ps
     );
 
-    println!("After Insertion\n{}", phm_no_ps.bp.stats());
+    println!("After Insertion\n{}\n", phm_no_ps.bp.stats());
     phm_no_ps.bp.flush_all().unwrap();
-    println!("After Flushing\n{}", phm_no_ps.bp.stats());
+    println!("After Flushing\n{}\n", phm_no_ps.bp.stats());
     phm_no_ps.bp.reset_stats();
-    println!("After Resetting Stats\n{}", phm_no_ps.bp.stats());
+    println!("After Resetting Stats\n{}\n", phm_no_ps.bp.stats());
 
     #[cfg(feature = "stat")]
     {
@@ -71,15 +71,15 @@ fn main() {
     run_bench_for_paged_hash_map(gpc, gkc, &phm_no_ps);
     let duration_get_no_ps = start_get_no_ps.elapsed();
     println!(
-        "Get Time without Pointer Swizzling: {:?}",
+        "Get Time without Pointer Swizzling: {:?}\n",
         duration_get_no_ps
     );
 
-    println!("After Get\n{}", phm_no_ps.bp.stats());
+    println!("After Get\n{}\n", phm_no_ps.bp.stats());
     phm_no_ps.bp.flush_all().unwrap();
-    println!("After Flushing\n{}", phm_no_ps.bp.stats());
+    println!("After Flushing\n{}\n", phm_no_ps.bp.stats());
     phm_no_ps.bp.reset_stats();
-    println!("After Resetting Stats\n{}", phm_no_ps.bp.stats());
+    println!("After Resetting Stats\n{}\n", phm_no_ps.bp.stats());
     #[cfg(feature = "stat")]
     {
         println!("BP stats: ");
@@ -106,15 +106,15 @@ fn main() {
     run_bench_for_paged_hash_map(ipc, ikc, &phm);
     let duration_insert = start_insert.elapsed();
     println!(
-        "Insertion Time with Pointer Swizzling: {:?}",
+        "Insertion Time with Pointer Swizzling: {:?}\n",
         duration_insert
     );
 
-    println!("After Insertion\n{}", phm.bp.stats());
+    println!("After Insertion\n{}\n", phm.bp.stats());
     phm.bp.flush_all().unwrap();
-    println!("After Flushing\n{}", phm.bp.stats());
+    println!("After Flushing\n{}\n", phm.bp.stats());
     phm.bp.reset_stats();
-    println!("After Resetting Stats\n{}", phm.bp.stats());
+    println!("After Resetting Stats\n{}\n", phm.bp.stats());
 
     #[cfg(feature = "stat")]
     {
@@ -132,13 +132,13 @@ fn main() {
     let start_get = Instant::now();
     run_bench_for_paged_hash_map(gpc, gkc, &phm);
     let duration_get = start_get.elapsed();
-    println!("Get Time with Pointer Swizzling: {:?}", duration_get);
+    println!("Get Time with Pointer Swizzling: {:?}\n", duration_get);
 
-    println!("After Get\n{}", phm.bp.stats());
+    println!("After Get\n{}\n", phm.bp.stats());
     phm.bp.flush_all().unwrap();
-    println!("After Flushing\n{}", phm.bp.stats());
+    println!("After Flushing\n{}\n", phm.bp.stats());
     phm.bp.reset_stats();
-    println!("After Resetting Stats\n{}", phm.bp.stats());
+    println!("After Resetting Stats\n{}\n", phm.bp.stats());
     #[cfg(feature = "stat")]
     {
         println!("BP stats: ");
@@ -152,9 +152,13 @@ fn main() {
         // println!("{}", phm.stats());
     }
 
+    println!("------------------------------------------------------- Summary\n");
+
     println!("BufferPool size: {}", bp_size);
     println!("Bucket number: {}", bucket_num);
-    println!("Thread count: {}", insert_params.num_threads);
+    println!("Thread count: {}\n", insert_params.num_threads);
+
+    println!("Chain stats: {}", phm.get_chain_stats());
 
     println!(
         "Duration Insert without Pointer Swizzling: {:?}",

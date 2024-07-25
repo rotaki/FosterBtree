@@ -1,5 +1,5 @@
 #![allow(unused_imports)]
-use crate::logger::log;
+use crate::{logger::log, page};
 
 use core::panic;
 use std::{
@@ -449,7 +449,7 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
         }
 
         loop {
-            match current_page.upsert(key.as_ref(), value.as_ref()) {
+            match current_page.upsert_old(key.as_ref(), value.as_ref()) {
                 (true, old_value) => {
                     return Ok(old_value);
                 }
@@ -483,7 +483,7 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
         current_page.set_next_page_id(new_page.get_id());
         current_page.set_next_frame_id(new_page.frame_id());
 
-        match new_page.upsert(key.as_ref(), value.as_ref()) {
+        match new_page.upsert_old(key.as_ref(), value.as_ref()) {
             (true, old_value) => Ok(old_value),
             (false, _) => Err(PagedHashMapError::OutOfSpace),
         }
@@ -527,7 +527,7 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
         loop {
             let inserted;
             (inserted, current_value) =
-                current_page.upsert_with_merge(key.as_ref(), value.as_ref(), merge);
+                current_page.upsert_with_merge_old(key.as_ref(), value.as_ref(), merge);
             if inserted {
                 #[cfg(feature = "stat")]
                 return current_value;
@@ -574,7 +574,7 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
             }
             current_page = next_page;
 
-            let (inserted, _) = current_page.upsert(key.as_ref(), &new_value);
+            let (inserted, _) = current_page.upsert_old(key.as_ref(), &new_value);
             if inserted {
                 return current_value;
             }
@@ -593,7 +593,7 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
         current_page.set_next_page_id(new_page.get_id());
         current_page.set_next_frame_id(new_page.frame_id());
 
-        new_page.upsert(key.as_ref(), &new_value);
+        new_page.upsert_old(key.as_ref(), &new_value);
         current_value
     }
 
@@ -658,7 +658,7 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
 
         loop {
             let mut current_page = self.bp.get_page_for_write(page_key).unwrap();
-            result = current_page.remove(key.as_ref());
+            result = current_page.remove_old(key.as_ref());
             if result.is_some() || current_page.get_next_page_id() == 0 {
                 break;
             }
@@ -671,9 +671,16 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
         PagedHashMapIter::new(self.clone())
     }
 
-    pub fn get_chain_stat(&self) -> String {
+    pub fn get_chain_stats(&self) -> String {
         let mut chain_lengths = vec![0; self.bucket_num];
-        let mut total_chain_length = 0;
+        let mut total_page_count = 0;
+        let mut total_use_rate = 0.0;
+        let mut min_use_rate = 1.0;
+        let mut max_use_rate = 0.0;
+        let mut page_with_high_use_rate_9 = 0; // use rate > 0.9
+        let mut page_with_high_use_rate_8 = 0; // use rate > 0.8
+        let mut page_with_low_use_rate_1 = 0; // use rate < 0.1
+        let mut page_with_low_use_rate_2 = 0; // use rate < 0.2
 
         for bucket_id in 1..=self.bucket_num {
             let mut page_key = PageFrameKey::new(self.c_key, bucket_id as u32);
@@ -685,6 +692,30 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
             let mut chain_length = 0;
             loop {
                 chain_length += 1;
+
+                let use_rate = current_page.get_use_rate();
+                total_use_rate += current_page.get_use_rate();
+                if min_use_rate > use_rate {
+                    min_use_rate = use_rate;
+                }
+                if max_use_rate < use_rate {
+                    max_use_rate = use_rate;
+                }
+
+                if use_rate > 0.9 {
+                    page_with_high_use_rate_9 += 1;
+                    page_with_high_use_rate_8 += 1;
+                } else if use_rate > 0.8 {
+                    page_with_high_use_rate_8 += 1;
+                }
+
+                if use_rate < 0.1 {
+                    page_with_low_use_rate_1 += 1;
+                    page_with_low_use_rate_2 += 1;
+                } else if use_rate < 0.2 {
+                    page_with_low_use_rate_2 += 1;
+                }
+
                 let next_page_id = current_page.get_next_page_id();
                 if next_page_id == 0 {
                     break;
@@ -697,12 +728,13 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
                 };
             }
             chain_lengths[bucket_id - 1] = chain_length;
-            total_chain_length += chain_length;
+            total_page_count += chain_length;
         }
 
         let max_chain_len = chain_lengths.iter().max().unwrap_or(&0);
         let min_chain_len = chain_lengths.iter().min().unwrap_or(&0);
-        let avg_chain_len = total_chain_length as f64 / self.bucket_num as f64;
+        let avg_chain_len = total_page_count as f64 / self.bucket_num as f64;
+        let avg_use_rate = total_use_rate / total_page_count as f64;
 
         let mut distribution = std::collections::HashMap::new();
         for &len in chain_lengths.iter() {
@@ -718,11 +750,38 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
 
         format!(
             "Paged Hash Map Chain Statistics\n\
+            total_page_count: {}\n\n\
             max_chain_len: {}\n\
             min_chain_len: {}\n\
             avg_chain_len: {:.2}\n\n\
+            avg_use_rate: {:.2}\n\
+            max_use_rate: {:.2}\n\
+            min_use_rate: {:.2}\n\n\
+            page_with_use_high_use_rate (>0.9): {}\n\
+            rate_of_page_with_use_high_use_rate (>0.9): {:.2}\n\
+            page_with_use_high_use_rate (>0.8): {}\n\
+            rate_of_page_with_use_high_use_rate (>0.8): {:.2}\n\n\
+            page_with_use_low_use_rate (<0.1): {}\n\
+            rate_of_page_with_use_low_use_rate (<0.1): {:.2}\n\
+            page_with_use_low_use_rate (<0.2): {}\n\
+            rate_of_page_with_use_low_use_rate (<0.2): {:.2}\n\n\
             Chain length distribution:\n{}",
-            max_chain_len, min_chain_len, avg_chain_len, distribution_str
+            total_page_count,
+            max_chain_len,
+            min_chain_len,
+            avg_chain_len,
+            avg_use_rate,
+            max_use_rate,
+            min_use_rate,
+            page_with_high_use_rate_9,
+            page_with_high_use_rate_9 as f64 / total_page_count as f64,
+            page_with_high_use_rate_8,
+            page_with_high_use_rate_8 as f64 / total_page_count as f64,
+            page_with_low_use_rate_1,
+            page_with_low_use_rate_1 as f64 / total_page_count as f64,
+            page_with_low_use_rate_2,
+            page_with_low_use_rate_2 as f64 / total_page_count as f64,
+            distribution_str
         )
     }
 
