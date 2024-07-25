@@ -107,7 +107,7 @@ pub mod sync_write {
             let mut file = self.file.lock().unwrap();
             self.io_count.0.fetch_add(1, Ordering::AcqRel);
             log_trace!("Reading page: {} from file: {:?}", page_id, self.path);
-            file.seek(SeekFrom::Start((page_id * PAGE_SIZE as PageId) as u64))
+            file.seek(SeekFrom::Start(page_id as u64 * PAGE_SIZE as u64))
                 .map_err(|_| FMError::Seek)?;
             file.read_exact(page.get_raw_bytes_mut())
                 .map_err(|_| FMError::Read)?;
@@ -120,7 +120,7 @@ pub mod sync_write {
             log_trace!("Writing page: {} to file: {:?}", page_id, self.path);
             self.io_count.1.fetch_add(1, Ordering::AcqRel);
             debug_assert!(page.get_id() == page_id, "Page id mismatch");
-            file.seek(SeekFrom::Start((page_id * PAGE_SIZE as PageId) as u64))
+            file.seek(SeekFrom::Start(page_id as u64 * PAGE_SIZE as u64))
                 .map_err(|_| FMError::Seek)?;
             file.write_all(page.get_raw_bytes())
                 .map_err(|_| FMError::Write)?;
@@ -517,7 +517,7 @@ pub mod async_write {
                 // If the page is not in the buffer, read from the file.
                 let buf = page.get_raw_bytes_mut();
                 let entry = opcode::Read::new(types::Fixed(0), buf.as_mut_ptr(), buf.len() as _)
-                    .offset((page_id * PAGE_SIZE as PageId) as u64)
+                    .offset(page_id as u64 * PAGE_SIZE as u64)
                     .build()
                     .user_data(IOOpTag::new_read(page_id).as_u64());
                 unsafe {
@@ -578,7 +578,7 @@ pub mod async_write {
                         buf.len() as _,
                         hash as _,
                     )
-                    .offset((page_id * PAGE_SIZE as PageId) as u64)
+                    .offset(page_id as u64 * PAGE_SIZE as u64)
                     .build()
                     .user_data(IOOpTag::new_write(page_id).as_u64());
                     unsafe {
