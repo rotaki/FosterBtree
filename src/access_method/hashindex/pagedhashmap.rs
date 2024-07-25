@@ -671,6 +671,61 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
         PagedHashMapIter::new(self.clone())
     }
 
+    pub fn get_chain_stat(&self) -> String {
+        let mut chain_lengths = vec![0; self.bucket_num];
+        let mut total_chain_length = 0;
+
+        for bucket_id in 1..=self.bucket_num {
+            let mut page_key = PageFrameKey::new(self.c_key, bucket_id as u32);
+            let mut current_page = match self.bp.get_page_for_read(page_key) {
+                Ok(page) => page,
+                Err(_) => continue, // Skip empty buckets
+            };
+
+            let mut chain_length = 0;
+            loop {
+                chain_length += 1;
+                let next_page_id = current_page.get_next_page_id();
+                if next_page_id == 0 {
+                    break;
+                }
+                let next_frame_id = current_page.get_next_frame_id();
+                page_key = PageFrameKey::new_with_frame_id(self.c_key, next_page_id, next_frame_id);
+                current_page = match self.bp.get_page_for_read(page_key) {
+                    Ok(page) => page,
+                    Err(_) => break,
+                };
+            }
+            chain_lengths[bucket_id - 1] = chain_length;
+            total_chain_length += chain_length;
+        }
+
+        let max_chain_len = chain_lengths.iter().max().unwrap_or(&0);
+        let min_chain_len = chain_lengths.iter().min().unwrap_or(&0);
+        let avg_chain_len = total_chain_length as f64 / self.bucket_num as f64;
+
+        let mut distribution = std::collections::HashMap::new();
+        for &len in chain_lengths.iter() {
+            *distribution.entry(len).or_insert(0) += 1;
+        }
+
+        let mut distribution_vec: Vec<_> = distribution.iter().collect();
+        distribution_vec.sort();
+        let mut distribution_str = String::new();
+        for (len, count) in distribution_vec {
+            distribution_str.push_str(&format!("Chain length {}: {} buckets\n", len, count));
+        }
+
+        format!(
+            "Paged Hash Map Chain Statistics\n\
+            max_chain_len: {}\n\
+            min_chain_len: {}\n\
+            avg_chain_len: {:.2}\n\n\
+            Chain length distribution:\n{}",
+            max_chain_len, min_chain_len, avg_chain_len, distribution_str
+        )
+    }
+
     #[cfg(feature = "stat")]
     pub fn stats(&self) -> String {
         let stats = GLOBAL_STAT.lock().unwrap();
