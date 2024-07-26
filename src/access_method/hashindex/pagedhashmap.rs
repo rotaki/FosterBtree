@@ -3,7 +3,12 @@ use crate::{logger::log, page};
 
 use core::panic;
 use std::{
-    cell::UnsafeCell, collections::hash_map::DefaultHasher, hash::{Hash, Hasher}, marker::PhantomData, sync::{atomic::AtomicU32, Arc}, time::Duration
+    cell::UnsafeCell,
+    collections::hash_map::DefaultHasher,
+    hash::{Hash, Hasher},
+    marker::PhantomData,
+    sync::{atomic::AtomicU32, Arc},
+    time::Duration,
 };
 
 #[cfg(feature = "stat")]
@@ -39,9 +44,9 @@ impl FrameBuckets {
             FrameBuckets::Atomic(buckets) => {
                 buckets[index].store(value, std::sync::atomic::Ordering::Release);
             }
-            FrameBuckets::Unsafe(buckets) => {
-                unsafe { (*buckets.get())[index] = value; }
-            }
+            FrameBuckets::Unsafe(buckets) => unsafe {
+                (*buckets.get())[index] = value;
+            },
             FrameBuckets::ThreadLocal(buckets) => {
                 buckets.store(index, value);
             }
@@ -53,12 +58,8 @@ impl FrameBuckets {
             FrameBuckets::Atomic(buckets) => {
                 buckets[index].load(std::sync::atomic::Ordering::Acquire)
             }
-            FrameBuckets::Unsafe(buckets) => {
-                unsafe { (*buckets.get())[index] }
-            }
-            FrameBuckets::ThreadLocal(buckets) => {
-                buckets.load(index)
-            }
+            FrameBuckets::Unsafe(buckets) => unsafe { (*buckets.get())[index] },
+            FrameBuckets::ThreadLocal(buckets) => buckets.load(index),
         }
     }
 }
@@ -95,8 +96,8 @@ pub struct PagedHashMap<E: EvictionPolicy, T: MemPool<E>> {
     pub bucket_num: usize, // number of hash header pages
 
     pointer_swizzling_mode: PointerSwizzlingMode, // mode for pointer swizzling
-    frame_buckets: Option<FrameBuckets>, // frame buckets for different modes
-    
+    frame_buckets: Option<FrameBuckets>,          // frame buckets for different modes
+
     // bucket_metas: Vec<BucketMeta>, // first_frame_id, last_page_id, last_frame_id, bloomfilter // no need to be page
     phantom: PhantomData<E>,
 }
@@ -159,7 +160,9 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
                 }
                 PointerSwizzlingMode::UnsafeShared => {
                     let buckets = UnsafeCell::new([u32::MAX; 4096]);
-                    unsafe { (*buckets.get())[0] = root_page.frame_id(); }
+                    unsafe {
+                        (*buckets.get())[0] = root_page.frame_id();
+                    }
                     Some(FrameBuckets::Unsafe(buckets))
                 }
                 PointerSwizzlingMode::ThreadLocal => {
@@ -178,11 +181,12 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
                 if let Some(ref frame_buckets) = frame_buckets {
                     match frame_buckets {
                         FrameBuckets::Atomic(buckets) => {
-                            buckets[i].store(new_page.frame_id(), std::sync::atomic::Ordering::Release);
+                            buckets[i]
+                                .store(new_page.frame_id(), std::sync::atomic::Ordering::Release);
                         }
-                        FrameBuckets::Unsafe(buckets) => {
-                            unsafe { (*buckets.get())[i] = new_page.frame_id(); }
-                        }
+                        FrameBuckets::Unsafe(buckets) => unsafe {
+                            (*buckets.get())[i] = new_page.frame_id();
+                        },
                         FrameBuckets::ThreadLocal(buckets) => {
                             buckets.store(i, new_page.frame_id());
                         }
@@ -307,7 +311,9 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
         //         std::sync::atomic::Ordering::Release,
         //     );
         // }
-        if self.pointer_swizzling_mode != PointerSwizzlingMode::None && current_page.frame_id() != page_key.frame_id() {
+        if self.pointer_swizzling_mode != PointerSwizzlingMode::None
+            && current_page.frame_id() != page_key.frame_id()
+        {
             if let Some(ref frame_buckets) = self.frame_buckets {
                 frame_buckets.store(page_key.p_key().page_id as usize, current_page.frame_id());
             }
@@ -338,7 +344,7 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
                 current_page.get_next_frame_id()
             } else {
                 u32::MAX
-            };    
+            };
             let mut next_page_key =
                 PageFrameKey::new_with_frame_id(self.c_key, next_page_id, next_frame_id);
             let next_page = self.read_page(next_page_key);
@@ -346,7 +352,9 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
             //     next_page_key.set_frame_id(next_page.frame_id());
             //     let _ = fix_frame_id(current_page, &next_page_key);
             // }
-            if self.pointer_swizzling_mode != PointerSwizzlingMode::None && next_frame_id != next_page.frame_id() {
+            if self.pointer_swizzling_mode != PointerSwizzlingMode::None
+                && next_frame_id != next_page.frame_id()
+            {
                 next_page_key.set_frame_id(next_page.frame_id());
                 let _ = fix_frame_id(current_page, &next_page_key);
             }
@@ -554,7 +562,9 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
 
         let mut page_key = PageFrameKey::new_with_frame_id(self.c_key, hashed_key, expect_frame_id);
         let mut current_page = self.bp.get_page_for_write(page_key).unwrap();
-        if self.pointer_swizzling_mode != PointerSwizzlingMode::None && current_page.frame_id() != page_key.frame_id() {
+        if self.pointer_swizzling_mode != PointerSwizzlingMode::None
+            && current_page.frame_id() != page_key.frame_id()
+        {
             if let Some(ref frame_buckets) = self.frame_buckets {
                 frame_buckets.store(page_key.p_key().page_id as usize, current_page.frame_id());
             }
@@ -632,7 +642,9 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
         };
         let mut page_key = PageFrameKey::new_with_frame_id(self.c_key, hashed_key, expect_frame_id);
         let mut current_page = self.bp.get_page_for_write(page_key).unwrap();
-        if self.pointer_swizzling_mode != PointerSwizzlingMode::None && current_page.frame_id() != page_key.frame_id() {
+        if self.pointer_swizzling_mode != PointerSwizzlingMode::None
+            && current_page.frame_id() != page_key.frame_id()
+        {
             if let Some(ref frame_buckets) = self.frame_buckets {
                 frame_buckets.store(page_key.p_key().page_id as usize, current_page.frame_id());
             }
@@ -739,7 +751,9 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
         //         std::sync::atomic::Ordering::Release,
         //     );
         // }
-        if self.pointer_swizzling_mode != PointerSwizzlingMode::None && current_page.frame_id() != page_key.frame_id() {
+        if self.pointer_swizzling_mode != PointerSwizzlingMode::None
+            && current_page.frame_id() != page_key.frame_id()
+        {
             if let Some(ref frame_buckets) = self.frame_buckets {
                 frame_buckets.store(page_key.p_key().page_id as usize, current_page.frame_id());
             }
@@ -765,7 +779,9 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
             }
             page_key = PageFrameKey::new_with_frame_id(self.c_key, next_page_id, next_frame_id);
             let next_page = self.read_page(page_key);
-            if self.pointer_swizzling_mode != PointerSwizzlingMode::None && next_frame_id != next_page.frame_id() {
+            if self.pointer_swizzling_mode != PointerSwizzlingMode::None
+                && next_frame_id != next_page.frame_id()
+            {
                 page_key.set_frame_id(next_page.frame_id());
                 let _ = fix_frame_id(current_page, &page_key);
             }
@@ -1307,7 +1323,13 @@ mod tests {
         let c_key = ContainerKey::new(db_id, c_id);
         // let func = Box::new(simple_hash_func);
         // PagedHashMap::new(func, bp, c_key, false)
-        PagedHashMap::new(bp, c_key, DEFAULT_BUCKET_NUM, false, PointerSwizzlingMode::AtomicShared)
+        PagedHashMap::new(
+            bp,
+            c_key,
+            DEFAULT_BUCKET_NUM,
+            false,
+            PointerSwizzlingMode::AtomicShared,
+        )
     }
 
     /// Helper function to generate random strings of a given length
