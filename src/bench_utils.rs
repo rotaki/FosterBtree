@@ -3,7 +3,7 @@ use std::{collections::BTreeMap, sync::Arc, thread};
 use clap::Parser;
 
 use crate::{
-    access_method::{fbt::FosterBtree, hashindex::prelude::*},
+    access_method::{fbt::FosterBtree, hashindex::{pagedhashmap::PointerSwizzlingMode, prelude::*}},
     bp::{
         get_in_mem_pool, get_test_bp,
         prelude::{
@@ -282,7 +282,7 @@ pub fn gen_paged_hash_map_in_mem(
     bucket_num: usize,
 ) -> Arc<PagedHashMap<DummyEvictionPolicy, InMemPool<DummyEvictionPolicy>>> {
     let c_key = ContainerKey::new(0, 0);
-    let map = PagedHashMap::new(get_in_mem_pool(), c_key, bucket_num, false, true);
+    let map = PagedHashMap::new(get_in_mem_pool(), c_key, bucket_num, false, PointerSwizzlingMode::AtomicShared);
     Arc::new(map)
 }
 
@@ -291,7 +291,25 @@ pub fn gen_paged_hash_map_on_disk(
     bucket_num: usize,
 ) -> Arc<PagedHashMap<LRUEvictionPolicy, BufferPool<LRUEvictionPolicy>>> {
     let c_key = ContainerKey::new(0, 0);
-    let map = PagedHashMap::new(get_test_bp(bp_size), c_key, bucket_num, false, true);
+    let map = PagedHashMap::new(get_test_bp(bp_size), c_key, bucket_num, false, PointerSwizzlingMode::AtomicShared);
+    Arc::new(map)
+}
+
+pub fn gen_paged_hash_map_on_disk_with_unsafe_pointer_swizzling(
+    bp_size: usize,
+    bucket_num: usize,
+) -> Arc<PagedHashMap<LRUEvictionPolicy, BufferPool<LRUEvictionPolicy>>> {
+    let c_key = ContainerKey::new(0, 0);
+    let map = PagedHashMap::new(get_test_bp(bp_size), c_key, bucket_num, false, PointerSwizzlingMode::UnsafeShared);
+    Arc::new(map)
+}
+
+pub fn gen_paged_hash_map_on_disk_with_local_pointer_swizzling(
+    bp_size: usize,
+    bucket_num: usize,
+) -> Arc<PagedHashMap<LRUEvictionPolicy, BufferPool<LRUEvictionPolicy>>> {
+    let c_key = ContainerKey::new(0, 0);
+    let map = PagedHashMap::new(get_test_bp(bp_size), c_key, bucket_num, false, PointerSwizzlingMode::ThreadLocal);
     Arc::new(map)
 }
 
@@ -300,7 +318,7 @@ pub fn gen_paged_hash_map_on_disk_without_pointer_swizzling(
     bucket_num: usize,
 ) -> Arc<PagedHashMap<LRUEvictionPolicy, BufferPool<LRUEvictionPolicy>>> {
     let c_key = ContainerKey::new(0, 0);
-    let map = PagedHashMap::new(get_test_bp(bp_size), c_key, bucket_num, false, false);
+    let map = PagedHashMap::new(get_test_bp(bp_size), c_key, bucket_num, false, PointerSwizzlingMode::None);
     Arc::new(map)
 }
 

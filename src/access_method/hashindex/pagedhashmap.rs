@@ -3,11 +3,7 @@ use crate::{logger::log, page};
 
 use core::panic;
 use std::{
-    collections::hash_map::DefaultHasher,
-    hash::{Hash, Hasher},
-    marker::PhantomData,
-    sync::{atomic::AtomicU32, Arc},
-    time::Duration,
+    cell::UnsafeCell, collections::hash_map::DefaultHasher, hash::{Hash, Hasher}, marker::PhantomData, sync::{atomic::AtomicU32, Arc}, time::Duration
 };
 
 #[cfg(feature = "stat")]
@@ -23,16 +19,84 @@ use crate::page::AVAILABLE_PAGE_SIZE;
 // const DEFAULT_BUCKET_NUM: usize = 1024;
 const DEFAULT_BUCKET_NUM: usize = 1024 * 8;
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PointerSwizzlingMode {
+    None,
+    AtomicShared,
+    UnsafeShared,
+    ThreadLocal,
+}
+
+enum FrameBuckets {
+    Atomic(Vec<AtomicU32>),
+    Unsafe(UnsafeCell<[u32; 4096]>),
+    ThreadLocal(ThreadLocalBuckets),
+}
+
+impl FrameBuckets {
+    fn store(&self, index: usize, value: u32) {
+        match self {
+            FrameBuckets::Atomic(buckets) => {
+                buckets[index].store(value, std::sync::atomic::Ordering::Release);
+            }
+            FrameBuckets::Unsafe(buckets) => {
+                unsafe { (*buckets.get())[index] = value; }
+            }
+            FrameBuckets::ThreadLocal(buckets) => {
+                buckets.store(index, value);
+            }
+        }
+    }
+
+    fn load(&self, index: usize) -> u32 {
+        match self {
+            FrameBuckets::Atomic(buckets) => {
+                buckets[index].load(std::sync::atomic::Ordering::Acquire)
+            }
+            FrameBuckets::Unsafe(buckets) => {
+                unsafe { (*buckets.get())[index] }
+            }
+            FrameBuckets::ThreadLocal(buckets) => {
+                buckets.load(index)
+            }
+        }
+    }
+}
+
+struct ThreadLocalBuckets {
+    buckets: UnsafeCell<[u32; 4096]>,
+}
+
+unsafe impl Sync for FrameBuckets {}
+unsafe impl Sync for ThreadLocalBuckets {}
+
+impl ThreadLocalBuckets {
+    fn new() -> Self {
+        ThreadLocalBuckets {
+            buckets: UnsafeCell::new([u32::MAX; 4096]),
+        }
+    }
+
+    fn store(&self, index: usize, value: u32) {
+        unsafe {
+            (*self.buckets.get())[index] = value;
+        }
+    }
+
+    fn load(&self, index: usize) -> u32 {
+        unsafe { (*self.buckets.get())[index] }
+    }
+}
+
 pub struct PagedHashMap<E: EvictionPolicy, T: MemPool<E>> {
-    // func: Box<dyn Fn(&[u8], &[u8]) -> Vec<u8>>, // func(old_value, new_value) -> new_value
     pub bp: Arc<T>,
     c_key: ContainerKey,
 
     pub bucket_num: usize, // number of hash header pages
 
-    pointer_swizzling_enabled: bool, // whether pointer swizzling is enabled
-    frame_buckets: Option<Vec<AtomicU32>>, // vec of frame_id for each bucket
-
+    pointer_swizzling_mode: PointerSwizzlingMode, // mode for pointer swizzling
+    frame_buckets: Option<FrameBuckets>, // frame buckets for different modes
+    
     // bucket_metas: Vec<BucketMeta>, // first_frame_id, last_page_id, last_frame_id, bloomfilter // no need to be page
     phantom: PhantomData<E>,
 }
@@ -74,7 +138,7 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
         c_key: ContainerKey,
         bucket_num: usize,
         from_container: bool,
-        pointer_swizzling_enabled: bool,
+        pointer_swizzling_mode: PointerSwizzlingMode,
     ) -> Self {
         if from_container {
             todo!("Implement from container");
@@ -85,14 +149,25 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
             inc_local_stat_total_page_count();
             assert_eq!(root_page.get_id(), 0, "root page id should be 0");
 
-            let frame_buckets = if pointer_swizzling_enabled {
-                let buckets = (0..bucket_num + 1)
-                    .map(|_| AtomicU32::new(u32::MAX))
-                    .collect::<Vec<AtomicU32>>();
-                buckets[0].store(root_page.frame_id(), std::sync::atomic::Ordering::Release);
-                Some(buckets)
-            } else {
-                None
+            let frame_buckets = match pointer_swizzling_mode {
+                PointerSwizzlingMode::AtomicShared => {
+                    let buckets = (0..bucket_num + 1)
+                        .map(|_| AtomicU32::new(u32::MAX))
+                        .collect::<Vec<AtomicU32>>();
+                    buckets[0].store(root_page.frame_id(), std::sync::atomic::Ordering::Release);
+                    Some(FrameBuckets::Atomic(buckets))
+                }
+                PointerSwizzlingMode::UnsafeShared => {
+                    let buckets = UnsafeCell::new([u32::MAX; 4096]);
+                    unsafe { (*buckets.get())[0] = root_page.frame_id(); }
+                    Some(FrameBuckets::Unsafe(buckets))
+                }
+                PointerSwizzlingMode::ThreadLocal => {
+                    let buckets = ThreadLocalBuckets::new();
+                    buckets.store(0, root_page.frame_id());
+                    Some(FrameBuckets::ThreadLocal(buckets))
+                }
+                _ => None,
             };
 
             // SET HASH BUCKET PAGES
@@ -101,8 +176,17 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
                 #[cfg(feature = "stat")]
                 inc_local_stat_total_page_count();
                 if let Some(ref frame_buckets) = frame_buckets {
-                    frame_buckets[i]
-                        .store(new_page.frame_id(), std::sync::atomic::Ordering::Release);
+                    match frame_buckets {
+                        FrameBuckets::Atomic(buckets) => {
+                            buckets[i].store(new_page.frame_id(), std::sync::atomic::Ordering::Release);
+                        }
+                        FrameBuckets::Unsafe(buckets) => {
+                            unsafe { (*buckets.get())[i] = new_page.frame_id(); }
+                        }
+                        FrameBuckets::ThreadLocal(buckets) => {
+                            buckets.store(i, new_page.frame_id());
+                        }
+                    }
                 }
                 new_page.init();
                 assert_eq!(
@@ -117,7 +201,7 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
                 bp: bp.clone(),
                 c_key,
                 bucket_num,
-                pointer_swizzling_enabled,
+                pointer_swizzling_mode,
                 frame_buckets,
                 phantom: PhantomData,
             }
@@ -142,9 +226,14 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
         }
 
         let hashed_key = self.hash(&key);
-        let expect_frame_id = if self.pointer_swizzling_enabled {
-            self.frame_buckets.as_ref().unwrap()[hashed_key as usize]
-                .load(std::sync::atomic::Ordering::Acquire)
+        // let expect_frame_id = if self.pointer_swizzling_enabled {
+        //     self.frame_buckets.as_ref().unwrap()[hashed_key as usize]
+        //         .load(std::sync::atomic::Ordering::Acquire)
+        // } else {
+        //     u32::MAX
+        // };
+        let expect_frame_id = if let Some(ref frame_buckets) = self.frame_buckets {
+            frame_buckets.load(hashed_key as usize)
         } else {
             u32::MAX
         };
@@ -212,11 +301,16 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
         key: &[u8],
     ) -> Result<FrameWriteGuard<E>, PagedHashMapError> {
         let mut current_page = self.read_page(page_key);
-        if self.pointer_swizzling_enabled && current_page.frame_id() != page_key.frame_id() {
-            self.frame_buckets.as_ref().unwrap()[page_key.p_key().page_id as usize].store(
-                current_page.frame_id(),
-                std::sync::atomic::Ordering::Release,
-            );
+        // if self.pointer_swizzling_enabled && current_page.frame_id() != page_key.frame_id() {
+        //     self.frame_buckets.as_ref().unwrap()[page_key.p_key().page_id as usize].store(
+        //         current_page.frame_id(),
+        //         std::sync::atomic::Ordering::Release,
+        //     );
+        // }
+        if self.pointer_swizzling_mode != PointerSwizzlingMode::None && current_page.frame_id() != page_key.frame_id() {
+            if let Some(ref frame_buckets) = self.frame_buckets {
+                frame_buckets.store(page_key.p_key().page_id as usize, current_page.frame_id());
+            }
         }
         loop {
             let (slot_id, _) = current_page.is_exist(key);
@@ -235,15 +329,24 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
                     }
                 };
             }
-            let next_frame_id = if self.pointer_swizzling_enabled {
+            // let next_frame_id = if self.pointer_swizzling_enabled {
+            //     current_page.get_next_frame_id()
+            // } else {
+            //     u32::MAX
+            // };
+            let next_frame_id = if self.pointer_swizzling_mode != PointerSwizzlingMode::None {
                 current_page.get_next_frame_id()
             } else {
                 u32::MAX
-            };
+            };    
             let mut next_page_key =
                 PageFrameKey::new_with_frame_id(self.c_key, next_page_id, next_frame_id);
             let next_page = self.read_page(next_page_key);
-            if self.pointer_swizzling_enabled && next_frame_id != next_page.frame_id() {
+            // if self.pointer_swizzling_enabled && next_frame_id != next_page.frame_id() {
+            //     next_page_key.set_frame_id(next_page.frame_id());
+            //     let _ = fix_frame_id(current_page, &next_page_key);
+            // }
+            if self.pointer_swizzling_mode != PointerSwizzlingMode::None && next_frame_id != next_page.frame_id() {
                 next_page_key.set_frame_id(next_page.frame_id());
                 let _ = fix_frame_id(current_page, &next_page_key);
             }
@@ -299,9 +402,14 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
         inc_local_stat_update_count();
 
         let hashed_key = self.hash(&key);
-        let expect_frame_id = if self.pointer_swizzling_enabled {
-            self.frame_buckets.as_ref().unwrap()[hashed_key as usize]
-                .load(std::sync::atomic::Ordering::Acquire)
+        // let expect_frame_id = if self.pointer_swizzling_enabled {
+        //     self.frame_buckets.as_ref().unwrap()[hashed_key as usize]
+        //         .load(std::sync::atomic::Ordering::Acquire)
+        // } else {
+        //     u32::MAX
+        // };
+        let expect_frame_id = if let Some(ref frame_buckets) = self.frame_buckets {
+            frame_buckets.load(hashed_key as usize)
         } else {
             u32::MAX
         };
@@ -432,20 +540,24 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
         }
 
         let hashed_key = self.hash(&key);
-        let expect_frame_id = if self.pointer_swizzling_enabled {
-            self.frame_buckets.as_ref().unwrap()[hashed_key as usize]
-                .load(std::sync::atomic::Ordering::Acquire)
+        // let expect_frame_id = if self.pointer_swizzling_enabled {
+        //     self.frame_buckets.as_ref().unwrap()[hashed_key as usize]
+        //         .load(std::sync::atomic::Ordering::Acquire)
+        // } else {
+        //     u32::MAX
+        // };
+        let expect_frame_id = if let Some(ref frame_buckets) = self.frame_buckets {
+            frame_buckets.load(hashed_key as usize)
         } else {
             u32::MAX
         };
 
         let mut page_key = PageFrameKey::new_with_frame_id(self.c_key, hashed_key, expect_frame_id);
         let mut current_page = self.bp.get_page_for_write(page_key).unwrap();
-        if self.pointer_swizzling_enabled && current_page.frame_id() != page_key.frame_id() {
-            self.frame_buckets.as_ref().unwrap()[page_key.p_key().page_id as usize].store(
-                current_page.frame_id(),
-                std::sync::atomic::Ordering::Release,
-            );
+        if self.pointer_swizzling_mode != PointerSwizzlingMode::None && current_page.frame_id() != page_key.frame_id() {
+            if let Some(ref frame_buckets) = self.frame_buckets {
+                frame_buckets.store(page_key.p_key().page_id as usize, current_page.frame_id());
+            }
         }
 
         loop {
@@ -507,19 +619,23 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
         }
 
         let hashed_key = self.hash(&key);
-        let expect_frame_id = if self.pointer_swizzling_enabled {
-            self.frame_buckets.as_ref().unwrap()[hashed_key as usize]
-                .load(std::sync::atomic::Ordering::Acquire)
+        // let expect_frame_id = if self.pointer_swizzling_enabled {
+        //     self.frame_buckets.as_ref().unwrap()[hashed_key as usize]
+        //         .load(std::sync::atomic::Ordering::Acquire)
+        // } else {
+        //     u32::MAX
+        // };
+        let expect_frame_id = if let Some(ref frame_buckets) = self.frame_buckets {
+            frame_buckets.load(hashed_key as usize)
         } else {
             u32::MAX
         };
         let mut page_key = PageFrameKey::new_with_frame_id(self.c_key, hashed_key, expect_frame_id);
         let mut current_page = self.bp.get_page_for_write(page_key).unwrap();
-        if self.pointer_swizzling_enabled && current_page.frame_id() != page_key.frame_id() {
-            self.frame_buckets.as_ref().unwrap()[page_key.p_key().page_id as usize].store(
-                current_page.frame_id(),
-                std::sync::atomic::Ordering::Release,
-            );
+        if self.pointer_swizzling_mode != PointerSwizzlingMode::None && current_page.frame_id() != page_key.frame_id() {
+            if let Some(ref frame_buckets) = self.frame_buckets {
+                frame_buckets.store(page_key.p_key().page_id as usize, current_page.frame_id());
+            }
         }
 
         let mut current_value;
@@ -604,19 +720,29 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
         inc_local_stat_get_count();
 
         let hashed_key = self.hash(&key);
-        let expect_frame_id = if self.pointer_swizzling_enabled {
-            self.frame_buckets.as_ref().unwrap()[hashed_key as usize]
-                .load(std::sync::atomic::Ordering::Acquire)
+        // let expect_frame_id = if self.pointer_swizzling_enabled {
+        //     self.frame_buckets.as_ref().unwrap()[hashed_key as usize]
+        //         .load(std::sync::atomic::Ordering::Acquire)
+        // } else {
+        //     u32::MAX
+        // };
+        let expect_frame_id = if let Some(ref frame_buckets) = self.frame_buckets {
+            frame_buckets.load(hashed_key as usize)
         } else {
             u32::MAX
         };
         let mut page_key = PageFrameKey::new_with_frame_id(self.c_key, hashed_key, expect_frame_id);
         let mut current_page = self.read_page(page_key);
-        if self.pointer_swizzling_enabled && current_page.frame_id() != page_key.frame_id() {
-            self.frame_buckets.as_ref().unwrap()[page_key.p_key().page_id as usize].store(
-                current_page.frame_id(),
-                std::sync::atomic::Ordering::Release,
-            );
+        // if self.pointer_swizzling_enabled && current_page.frame_id() != page_key.frame_id() {
+        //     self.frame_buckets.as_ref().unwrap()[page_key.p_key().page_id as usize].store(
+        //         current_page.frame_id(),
+        //         std::sync::atomic::Ordering::Release,
+        //     );
+        // }
+        if self.pointer_swizzling_mode != PointerSwizzlingMode::None && current_page.frame_id() != page_key.frame_id() {
+            if let Some(ref frame_buckets) = self.frame_buckets {
+                frame_buckets.store(page_key.p_key().page_id as usize, current_page.frame_id());
+            }
         }
 
         let mut result;
@@ -624,7 +750,12 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
         loop {
             result = current_page.get(key.as_ref());
             let next_page_id = current_page.get_next_page_id();
-            let next_frame_id = if self.pointer_swizzling_enabled {
+            // let next_frame_id = if self.pointer_swizzling_enabled {
+            //     current_page.get_next_frame_id()
+            // } else {
+            //     u32::MAX
+            // };
+            let next_frame_id = if self.pointer_swizzling_mode != PointerSwizzlingMode::None {
                 current_page.get_next_frame_id()
             } else {
                 u32::MAX
@@ -634,7 +765,7 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
             }
             page_key = PageFrameKey::new_with_frame_id(self.c_key, next_page_id, next_frame_id);
             let next_page = self.read_page(page_key);
-            if self.pointer_swizzling_enabled && next_frame_id != next_page.frame_id() {
+            if self.pointer_swizzling_mode != PointerSwizzlingMode::None && next_frame_id != next_page.frame_id() {
                 page_key.set_frame_id(next_page.frame_id());
                 let _ = fix_frame_id(current_page, &page_key);
             }
@@ -1176,7 +1307,7 @@ mod tests {
         let c_key = ContainerKey::new(db_id, c_id);
         // let func = Box::new(simple_hash_func);
         // PagedHashMap::new(func, bp, c_key, false)
-        PagedHashMap::new(bp, c_key, DEFAULT_BUCKET_NUM, false, true)
+        PagedHashMap::new(bp, c_key, DEFAULT_BUCKET_NUM, false, PointerSwizzlingMode::AtomicShared)
     }
 
     /// Helper function to generate random strings of a given length
