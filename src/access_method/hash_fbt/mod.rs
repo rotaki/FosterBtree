@@ -385,6 +385,34 @@ mod tests {
     }
 
     #[rstest]
+    #[case::bp(get_test_bp(3))]
+    #[case::in_mem(get_in_mem_pool())]
+    fn test_upsert_with_merge<E: EvictionPolicy, T: MemPool<E>>(#[case] bp: Arc<T>) {
+        let btree = setup_hashbtree_empty(bp.clone());
+        // Insert 1024 bytes
+        let key = to_bytes(0);
+        let vals = [6, 3, 8, 1, 5, 7, 2, 4, 9, 0];
+        for i in vals.iter() {
+            println!(
+                "**************************** Upserting key {} **************************",
+                i
+            );
+            let val = to_bytes(*i);
+            btree
+                .upsert_with_merge(&key, &val, |old_val: &[u8], new_val: &[u8]| -> Vec<u8> {
+                    // Deserialize old_val and new_val and add them.
+                    let old_val = from_bytes(old_val);
+                    let new_val = from_bytes(new_val);
+                    to_bytes(old_val + new_val)
+                })
+                .unwrap();
+        }
+        let expected_val = vals.iter().sum::<usize>();
+        let current_val = btree.get(&key).unwrap();
+        assert_eq!(from_bytes(&current_val), expected_val);
+    }
+
+    #[rstest]
     #[case::bp(get_test_bp(20))]
     #[case::in_mem(get_in_mem_pool())]
     fn test_scan<E: EvictionPolicy + 'static, T: MemPool<E>>(#[case] bp: Arc<T>) {
