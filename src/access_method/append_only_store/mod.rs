@@ -9,7 +9,7 @@ use std::{
 
 use crate::{
     bp::{FrameReadGuard, FrameWriteGuard, MemPoolStatus},
-    page::Page,
+    page::{Page, PageId},
     prelude::{ContainerKey, EvictionPolicy, MemPool, PageFrameKey},
 };
 
@@ -116,9 +116,9 @@ impl<E: EvictionPolicy, T: MemPool<E>> AppendOnlyStore<E, T> {
         }
     }
 
-    pub fn load(c_key: ContainerKey, mem_pool: Arc<T>) -> Self {
+    pub fn load(c_key: ContainerKey, mem_pool: Arc<T>, root_id: PageId) -> Self {
         // Assumes that root page's page_id is 0.
-        let root_key = PageFrameKey::new(c_key, 0);
+        let root_key = PageFrameKey::new(c_key, root_id);
         let last_key = {
             let root_page = mem_pool.get_page_for_read(root_key).unwrap();
             let (_, val) = root_page.get(0);
@@ -570,7 +570,7 @@ mod tests {
 
         {
             let bp = Arc::new(BufferPool::<LRUEvictionPolicy>::new(&temp_dir, 10, false).unwrap());
-            let store = Arc::new(AppendOnlyStore::load(get_c_key(), bp.clone()));
+            let store = Arc::new(AppendOnlyStore::load(get_c_key(), bp.clone(), 0));
 
             let mut scanner = store.scan();
             for val in vals.iter() {

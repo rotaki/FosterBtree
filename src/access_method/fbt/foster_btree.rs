@@ -1274,11 +1274,11 @@ impl<E: EvictionPolicy, T: MemPool<E>> FosterBtree<E, T> {
         }
     }
 
-    pub fn load(c_key: ContainerKey, mem_pool: Arc<T>) -> Self {
+    pub fn load(c_key: ContainerKey, mem_pool: Arc<T>, root_page_id: PageId) -> Self {
         // Assumes that the root page is the first page in this container.
         FosterBtree {
             c_key,
-            root_key: PageFrameKey::new(c_key, 0),
+            root_key: PageFrameKey::new(c_key, root_page_id),
             mem_pool: mem_pool.clone(),
             stats: RuntimeStats::new(),
             phantom: PhantomData,
@@ -1781,6 +1781,34 @@ impl<E: EvictionPolicy, T: MemPool<E>> FosterBtree<E, T> {
             if leaf_page.get_raw_key(slot_id) == key {
                 // Exact match
                 self.update_at_slot_or_split(&mut leaf_page, slot_id, key, value);
+            } else {
+                // Non-existent key
+                self.stats.inc_num_keys();
+                self.insert_at_slot_or_split(&mut leaf_page, slot_id + 1, key, value);
+            }
+        }
+        Ok(())
+    }
+
+    pub fn upsert_with_merge(
+        &self,
+        key: &[u8],
+        value: &[u8],
+        merge_func: fn(&[u8], &[u8]) -> Vec<u8>,
+    ) -> Result<(), TreeStatus> {
+        let mut leaf_page = self.traverse_to_leaf_for_write(key);
+        log_trace!("Acquired write lock for page {}", leaf_page.get_id());
+        let slot_id = leaf_page.upper_bound_slot_id(&BTreeKey::new(key)) - 1;
+        if slot_id == 0 {
+            // Lower fence so insert is ok. We insert the key-value at the next position of the lower fence.
+            self.stats.inc_num_keys();
+            self.insert_at_slot_or_split(&mut leaf_page, slot_id + 1, key, value);
+        } else {
+            // We can insert the key if it does not exist
+            if leaf_page.get_raw_key(slot_id) == key {
+                // Exact match
+                let new_value = merge_func(leaf_page.get_val(slot_id), value);
+                self.update_at_slot_or_split(&mut leaf_page, slot_id, key, &new_value);
             } else {
                 // Non-existent key
                 self.stats.inc_num_keys();

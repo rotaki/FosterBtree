@@ -4,6 +4,7 @@ use prelude::PagedHashMapError;
 
 pub mod append_only_store;
 pub mod fbt;
+pub mod hash_fbt;
 pub mod hashindex;
 
 #[derive(Debug, PartialEq)]
