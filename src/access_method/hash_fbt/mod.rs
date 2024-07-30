@@ -11,6 +11,10 @@ use crate::{
 
 use super::fbt::{FosterBtree, FosterBtreeRangeScanner, TreeStatus};
 
+pub mod prelude {
+    pub use super::HashFosterBtree;
+}
+
 pub struct HashFosterBtree<E: EvictionPolicy, T: MemPool<E>> {
     pub mem_pool: Arc<T>,
     c_key: ContainerKey,
@@ -96,6 +100,10 @@ impl<E: EvictionPolicy, T: MemPool<E>> HashFosterBtree<E, T> {
         }
     }
 
+    pub fn num_kvs(&self) -> usize {
+        self.buckets.iter().map(|b| b.num_kvs()).sum()
+    }
+
     fn get_bucket(&self, key: &[u8]) -> &Arc<FosterBtree<E, T>> {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         key.hash(&mut hasher);
@@ -123,7 +131,7 @@ impl<E: EvictionPolicy, T: MemPool<E>> HashFosterBtree<E, T> {
         &self,
         key: &[u8],
         value: &[u8],
-        merge_fn: fn(&[u8], &[u8]) -> Vec<u8>,
+        merge_fn: impl Fn(&[u8], &[u8]) -> Vec<u8>,
     ) -> Result<(), TreeStatus> {
         self.get_bucket(key).upsert_with_merge(key, value, merge_fn)
     }

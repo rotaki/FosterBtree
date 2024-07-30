@@ -731,7 +731,9 @@ fn split_even<E: EvictionPolicy>(
         }
     }
     if moving_kvs.is_empty() {
-        panic!("Page is full but cannot split because the slots are too large");
+        // Print this page
+        // panic!("Page is full but cannot split because the slots are too large");
+        return split_min_move(this, foster_child);
     }
 
     // Reverse the moving slots
@@ -1454,8 +1456,13 @@ impl<E: EvictionPolicy, T: MemPool<E>> FosterBtree<E, T> {
             inc_local_stat_trigger(OpType::Split);
             // Remove the slot and split insert
             this.remove_at(slot);
-            let mut foster_child = self.allocate_page();
-            split_insert(this, &mut foster_child, key, value);
+            // Try inserting the key-value pair into this page again after removing the slot.
+            if this.insert(key, value, false) {
+                return;
+            } else {
+                let mut foster_child = self.allocate_page();
+                split_insert(this, &mut foster_child, key, value);
+            }
         }
     }
 
@@ -1794,7 +1801,7 @@ impl<E: EvictionPolicy, T: MemPool<E>> FosterBtree<E, T> {
         &self,
         key: &[u8],
         value: &[u8],
-        merge_func: fn(&[u8], &[u8]) -> Vec<u8>,
+        merge_func: impl Fn(&[u8], &[u8]) -> Vec<u8>,
     ) -> Result<(), TreeStatus> {
         let mut leaf_page = self.traverse_to_leaf_for_write(key);
         log_trace!("Acquired write lock for page {}", leaf_page.get_id());
