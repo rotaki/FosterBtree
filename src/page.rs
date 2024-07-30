@@ -10,6 +10,8 @@ pub const PAGE_SIZE: usize = 8192;
 pub const PAGE_SIZE: usize = 16384;
 #[cfg(feature = "32k_page")]
 pub const PAGE_SIZE: usize = 32768;
+#[cfg(feature = "56k_page")]
+pub const PAGE_SIZE: usize = 57344;
 
 pub type PageId = u32;
 const BASE_PAGE_HEADER_SIZE: usize = 4 + LSN_SIZE;

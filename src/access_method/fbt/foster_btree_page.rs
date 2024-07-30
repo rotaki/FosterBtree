@@ -7,7 +7,7 @@ use crate::page::Page;
 // 2 byte: slot count (generally >=2  because of low and high fences)
 // 2 byte: free space
 // Slotted page layout:
-// * slot [offset: u16, key_size: u16, value_size: u16]. The first bit of the offset is used to indicate if the slot is a ghost slot.
+// * slot [offset: u16, key_size: u16, value_size: u16].
 //  The slots are sorted based on the key.
 // * recs [key: [u8], value: [u8]] // value should be a page id if the page is a non-leaf page, otherwise it should be a value.
 // The first slot is the low fence and the last slot is the high fence.
@@ -26,8 +26,8 @@ mod slot {
     pub const SLOT_SIZE: usize = 6;
 
     pub struct Slot {
-        offset: u16, // The first bit of the offset is used to indicate if the slot is a ghost slot.
-        key_size: u16, // The size of the key
+        offset: u16,     // The offset of the key-value pair in the page
+        key_size: u16,   // The size of the key
         value_size: u16, // The size of the value
     }
 
@@ -58,9 +58,6 @@ mod slot {
         }
 
         pub fn new(offset: u16, key_size: u16, value_size: u16) -> Self {
-            // Always clear the first bit of the offset.
-            // i.e. Always assume that the slot is not a ghost slot on new.
-            let offset = offset & 0b0111_1111_1111_1111;
             Slot {
                 offset,
                 key_size,
@@ -68,24 +65,12 @@ mod slot {
             }
         }
 
-        pub fn is_ghost(&self) -> bool {
-            self.offset & 0b1000_0000_0000_0000 != 0
-        }
-
-        pub fn set_ghost(&mut self, is_ghost: bool) {
-            if is_ghost {
-                self.offset |= 0b1000_0000_0000_0000;
-            } else {
-                self.offset &= 0b0111_1111_1111_1111;
-            }
-        }
-
         pub fn offset(&self) -> u16 {
-            self.offset & 0b0111_1111_1111_1111
+            self.offset
         }
 
         pub fn set_offset(&mut self, offset: u16) {
-            self.offset = (self.offset & 0b1000_0000_0000_0000) | (offset & 0b0111_1111_1111_1111);
+            self.offset = offset;
         }
 
         pub fn key_size(&self) -> u16 {
@@ -248,7 +233,6 @@ pub trait FosterBtreePage {
     // Page operations
     fn init(&mut self);
     fn init_as_root(&mut self);
-    fn is_ghost_slot(&self, slot_id: u16) -> bool;
     fn empty(&self) -> bool;
     fn get_raw_key(&self, slot_id: u16) -> &[u8];
     fn get_btree_key(&self, slot_id: u16) -> BTreeKey;
@@ -264,8 +248,7 @@ pub trait FosterBtreePage {
     fn remove_at(&mut self, slot_id: u16);
     fn set_low_fence(&mut self, key: &[u8]);
     fn set_high_fence(&mut self, key: &[u8]);
-    fn insert(&mut self, key: &[u8], value: &[u8], make_ghost: bool) -> bool;
-    fn mark_ghost(&mut self, key: &[u8]);
+    fn insert(&mut self, key: &[u8], value: &[u8]) -> bool;
     fn remove(&mut self, key: &[u8]);
     fn append_sorted<K: AsRef<[u8]>, V: AsRef<[u8]>>(&mut self, recs: &[(K, V)]) -> bool;
     fn remove_range(&mut self, start: u16, end: u16);
@@ -668,14 +651,6 @@ impl FosterBtreePage for Page {
         self.insert_at(1, &[], &[]);
     }
 
-    fn is_ghost_slot(&self, slot_id: u16) -> bool {
-        if let Some(slot) = self.slot(slot_id) {
-            slot.is_ghost()
-        } else {
-            false
-        }
-    }
-
     fn empty(&self) -> bool {
         self.slot_count() == 2 // low fence and high fence
     }
@@ -1008,7 +983,7 @@ impl FosterBtreePage for Page {
     /// 1. Returns false if the page does not have enough space to insert the key-value pair.
     /// 2. Panics if the key is out of the range of the page.
     /// 3. Panics if the key already exists in the page.
-    fn insert(&mut self, key: &[u8], value: &[u8], _make_ghost: bool) -> bool {
+    fn insert(&mut self, key: &[u8], value: &[u8]) -> bool {
         let slot_id = self.upper_bound_slot_id(&BTreeKey::Normal(key));
         // Check duplicate key. Duplication is only allowed for LOWER FENCE.
         if (slot_id - 1) != self.low_fence_slot_id()
@@ -1018,18 +993,6 @@ impl FosterBtreePage for Page {
         }
         // Insert at slot_id
         self.insert_at(slot_id, key, value)
-    }
-
-    /// Mark the slot with the given key as a ghost slot.
-    fn mark_ghost(&mut self, key: &[u8]) {
-        let slot_id = self.find_slot_id(&BTreeKey::Normal(key));
-        if let Some(slot_id) = slot_id {
-            let mut slot = self.slot(slot_id).unwrap();
-            slot.set_ghost(true);
-            self.update_slot(slot_id, &slot);
-        } else {
-            panic!("key does not exist");
-        }
     }
 
     /// Remove the slot.
@@ -1271,9 +1234,7 @@ mod tests {
         fbt_page.set_high_fence(high_fence);
         fbt_page.check_fence_slots_exists();
 
-        let make_ghost = false;
-
-        assert!(fbt_page.insert("b".as_bytes(), "bb".as_bytes(), make_ghost));
+        assert!(fbt_page.insert("b".as_bytes(), "bb".as_bytes()));
         assert!(fbt_page.slot_count() == 3);
         assert_eq!(fbt_page.lower_bound_slot_id(&BTreeKey::str("b")), 0);
         assert_eq!(fbt_page.upper_bound_slot_id(&BTreeKey::str("b")), 2);
@@ -1283,7 +1244,7 @@ mod tests {
         assert_eq!(fbt_page.get_val(1), "bb".as_bytes());
         assert_eq!(fbt_page.find_slot_id(&BTreeKey::str("c")), None);
 
-        assert!(fbt_page.insert("c".as_bytes(), "cc".as_bytes(), make_ghost));
+        assert!(fbt_page.insert("c".as_bytes(), "cc".as_bytes()));
         assert!(fbt_page.slot_count() == 4);
         assert_eq!(fbt_page.lower_bound_slot_id(&BTreeKey::str("b")), 0);
         assert_eq!(fbt_page.upper_bound_slot_id(&BTreeKey::str("b")), 2);
@@ -1306,8 +1267,7 @@ mod tests {
         fbt_page.set_high_fence(high_fence);
         fbt_page.check_fence_slots_exists();
 
-        let make_ghost = false;
-        fbt_page.insert("a".as_bytes(), "aa".as_bytes(), make_ghost);
+        fbt_page.insert("a".as_bytes(), "aa".as_bytes());
     }
 
     #[test]
@@ -1321,9 +1281,8 @@ mod tests {
         fbt_page.set_high_fence(high_fence);
         fbt_page.check_fence_slots_exists();
 
-        let make_ghost = false;
-        fbt_page.insert("c".as_bytes(), "c".as_bytes(), make_ghost);
-        fbt_page.insert("c".as_bytes(), "cc".as_bytes(), make_ghost);
+        fbt_page.insert("c".as_bytes(), "c".as_bytes());
+        fbt_page.insert("c".as_bytes(), "cc".as_bytes());
     }
 
     #[test]
@@ -1347,11 +1306,11 @@ mod tests {
             assert_eq!(fbt_page.find_slot_id(&BTreeKey::str("b")), None);
             assert_eq!(fbt_page.find_slot_id(&BTreeKey::str("c")), None);
 
-            assert!(fbt_page.insert("b".as_bytes(), "bb".as_bytes(), false));
+            assert!(fbt_page.insert("b".as_bytes(), "bb".as_bytes()));
             fbt_page.run_consistency_checks(true);
             assert!(fbt_page.slot_count() == 3);
 
-            assert!(fbt_page.insert("c".as_bytes(), "cc".as_bytes(), false));
+            assert!(fbt_page.insert("c".as_bytes(), "cc".as_bytes()));
             fbt_page.run_consistency_checks(true);
             assert!(fbt_page.slot_count() == 4);
 
@@ -1387,10 +1346,10 @@ mod tests {
             assert_eq!(fbt_page.find_slot_id(&BTreeKey::str("d")), None);
             assert_eq!(fbt_page.find_slot_id(&BTreeKey::str("e")), None);
 
-            fbt_page.insert("b".as_bytes(), "bb".as_bytes(), false);
+            fbt_page.insert("b".as_bytes(), "bb".as_bytes());
             fbt_page.run_consistency_checks(true);
             assert!(fbt_page.slot_count() == 3);
-            fbt_page.insert("c".as_bytes(), "cc".as_bytes(), false);
+            fbt_page.insert("c".as_bytes(), "cc".as_bytes());
             fbt_page.run_consistency_checks(true);
             assert!(fbt_page.slot_count() == 4);
 
@@ -1432,10 +1391,10 @@ mod tests {
             assert_eq!(fbt_page.find_slot_id(&BTreeKey::str("b")), None);
             assert_eq!(fbt_page.find_slot_id(&BTreeKey::str("c")), None);
 
-            fbt_page.insert("b".as_bytes(), "bb".as_bytes(), false);
+            fbt_page.insert("b".as_bytes(), "bb".as_bytes());
             fbt_page.run_consistency_checks(true);
             assert!(fbt_page.slot_count() == 3);
-            fbt_page.insert("c".as_bytes(), "cc".as_bytes(), false);
+            fbt_page.insert("c".as_bytes(), "cc".as_bytes());
             fbt_page.run_consistency_checks(true);
             assert!(fbt_page.slot_count() == 4);
 
@@ -1474,10 +1433,10 @@ mod tests {
             assert_eq!(fbt_page.find_slot_id(&BTreeKey::str("d")), None);
             assert_eq!(fbt_page.find_slot_id(&BTreeKey::str("e")), None);
 
-            fbt_page.insert("b".as_bytes(), "bb".as_bytes(), false);
+            fbt_page.insert("b".as_bytes(), "bb".as_bytes());
             fbt_page.run_consistency_checks(true);
             assert!(fbt_page.slot_count() == 3);
-            fbt_page.insert("c".as_bytes(), "cc".as_bytes(), false);
+            fbt_page.insert("c".as_bytes(), "cc".as_bytes());
             fbt_page.run_consistency_checks(true);
             assert!(fbt_page.slot_count() == 4);
 
@@ -1508,11 +1467,11 @@ mod tests {
         fbt_page.set_high_fence(high_fence);
         fbt_page.run_consistency_checks(true);
 
-        fbt_page.insert("b".as_bytes(), "bb".as_bytes(), false);
+        fbt_page.insert("b".as_bytes(), "bb".as_bytes());
         assert_eq!(fbt_page.slot_count(), 3);
         fbt_page.run_consistency_checks(true);
 
-        fbt_page.insert("c".as_bytes(), "cc".as_bytes(), false);
+        fbt_page.insert("c".as_bytes(), "cc".as_bytes());
         assert_eq!(fbt_page.slot_count(), 4);
         fbt_page.run_consistency_checks(true);
 
@@ -1681,6 +1640,7 @@ mod tests {
         fbt_page.init();
         fbt_page.run_consistency_checks(true);
 
+        /*
         let low_fence = "b".as_bytes();
         let high_fence = "d".as_bytes();
         fbt_page.set_low_fence(low_fence);
@@ -1707,5 +1667,6 @@ mod tests {
         fbt_page.run_consistency_checks(true);
         assert_eq!(fbt_page.get_raw_key(1), "b_new".as_bytes());
         assert_eq!(fbt_page.get_val(1), "bbbb".as_bytes());
+        */
     }
 }

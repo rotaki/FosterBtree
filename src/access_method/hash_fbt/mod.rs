@@ -29,18 +29,18 @@ impl<E: EvictionPolicy, T: MemPool<E>> HashFosterBtree<E, T> {
         if num_buckets == 0 {
             panic!("Number of buckets cannot be 0");
         }
-        // If number of buckets does not fit in the root_of_root page, panic
+        // If number of buckets does not fit in the meta_page, panic
         if num_buckets * std::mem::size_of::<PageId>() + std::mem::size_of::<usize>()
             > AVAILABLE_PAGE_SIZE
         {
-            panic!("Number of buckets too large to fit in the root_of_root page");
+            panic!("Number of buckets too large to fit in the meta_page page");
         }
 
-        let mut root_of_root = mem_pool.create_new_page_for_write(c_key.clone()).unwrap();
+        let mut meta_page = mem_pool.create_new_page_for_write(c_key.clone()).unwrap();
 
         let mut offset = 0;
         let num_buckets_bytes = num_buckets.to_be_bytes();
-        root_of_root[offset..offset + num_buckets_bytes.len()].copy_from_slice(&num_buckets_bytes);
+        meta_page[offset..offset + num_buckets_bytes.len()].copy_from_slice(&num_buckets_bytes);
         offset += num_buckets_bytes.len();
 
         let mut buckets = Vec::with_capacity(num_buckets);
@@ -49,13 +49,13 @@ impl<E: EvictionPolicy, T: MemPool<E>> HashFosterBtree<E, T> {
             let tree = Arc::new(FosterBtree::new(c_key, mem_pool.clone()));
 
             let root_p_id = tree.root_key.p_key().page_id.to_be_bytes();
-            root_of_root[offset..offset + root_p_id.len()].copy_from_slice(&root_p_id);
+            meta_page[offset..offset + root_p_id.len()].copy_from_slice(&root_p_id);
             offset += root_p_id.len();
 
             buckets.push(tree);
         }
 
-        let meta_page_id = root_of_root.get_id();
+        let meta_page_id = meta_page.get_id();
 
         Self {
             mem_pool: mem_pool.clone(),
@@ -68,18 +68,18 @@ impl<E: EvictionPolicy, T: MemPool<E>> HashFosterBtree<E, T> {
     }
 
     pub fn load(c_key: ContainerKey, mem_pool: Arc<T>, meta_page_id: PageId) -> Self {
-        let root_of_root = mem_pool
+        let meta_page = mem_pool
             .get_page_for_read(PageFrameKey::new(c_key, meta_page_id))
             .unwrap();
 
         let mut offset = 0;
-        let num_buckets_bytes = &root_of_root[offset..offset + std::mem::size_of::<usize>()];
+        let num_buckets_bytes = &meta_page[offset..offset + std::mem::size_of::<usize>()];
         offset += num_buckets_bytes.len();
         let num_buckets = usize::from_be_bytes(num_buckets_bytes.try_into().unwrap());
 
         let mut buckets = Vec::with_capacity(num_buckets);
         for _ in 0..num_buckets {
-            let root_page_id_bytes = &root_of_root[offset..offset + std::mem::size_of::<PageId>()];
+            let root_page_id_bytes = &meta_page[offset..offset + std::mem::size_of::<PageId>()];
             offset += root_page_id_bytes.len();
             let root_page_id = PageId::from_be_bytes(root_page_id_bytes.try_into().unwrap());
             let tree = Arc::new(FosterBtree::load(
