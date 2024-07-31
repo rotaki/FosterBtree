@@ -5,7 +5,7 @@ edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [features]
-default = ["32k_page"]
+default = ["512k_page"]
 log_trace = []
 log_debug = []
 log_info = []
@@ -16,6 +16,12 @@ stat = []
 8k_page = []
 16k_page = []
 32k_page = []
+64k_page = []
+128k_page = []
+256k_page = []
+512k_page = ["heap_allocated_page"]
+1m_page = ["heap_allocated_page"]
+heap_allocated_page = []
 async_write = ["io-uring", "libc"]
 
 [dependencies]
