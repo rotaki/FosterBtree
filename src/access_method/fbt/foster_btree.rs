@@ -682,7 +682,7 @@ fn should_root_descend(this: &Page, child: &Page) -> bool {
 /// Opportunistically try to fix the child page frame id
 fn fix_frame_id<'a, E: EvictionPolicy>(
     this: FrameReadGuard<'a, E>,
-    slot_id: u16,
+    slot_id: u32,
     new_frame_key: &PageFrameKey,
 ) -> FrameReadGuard<'a, E> {
     match this.try_upgrade(true) {
@@ -1601,7 +1601,7 @@ impl<E: EvictionPolicy, T: MemPool<E>> FosterBtree<E, T> {
     fn insert_at_slot_or_split(
         &self,
         this: &mut FrameWriteGuard<E>,
-        slot: u16,
+        slot: u32,
         key: &[u8],
         value: &[u8],
     ) {
@@ -1645,7 +1645,7 @@ impl<E: EvictionPolicy, T: MemPool<E>> FosterBtree<E, T> {
     fn update_at_slot_or_split(
         &self,
         this: &mut FrameWriteGuard<E>,
-        slot: u16,
+        slot: u32,
         key: &[u8],
         value: &[u8],
     ) {
@@ -2113,7 +2113,7 @@ pub struct FosterBtreeRangeScanner<E: EvictionPolicy + 'static, T: MemPool<E>> {
     finished: bool,
     prev_high_fence: Option<Vec<u8>>,
     current_leaf_page: Option<FrameReadGuard<'static, E>>, // As long as btree is alive, bp is alive so the frame is alive
-    current_slot_id: u16,
+    current_slot_id: u32,
 }
 
 impl<E: EvictionPolicy, T: MemPool<E>> FosterBtreeRangeScanner<E, T> {
@@ -2636,15 +2636,15 @@ mod tests {
         // Check the contents of p0
         assert_eq!(p0.active_slot_count() as usize, left.len() + right.len());
         for i in 0..left.len() {
-            let key = p0.get_raw_key((i + 1) as u16);
+            let key = p0.get_raw_key((i + 1) as u32);
             assert_eq!(key, to_bytes(left[i]));
-            let val = p0.get_val((i + 1) as u16);
+            let val = p0.get_val((i + 1) as u32);
             assert_eq!(val, to_bytes(left[i]));
         }
         for i in 0..right.len() {
-            let key = p0.get_raw_key((i + 1 + left.len()) as u16);
+            let key = p0.get_raw_key((i + 1 + left.len()) as u32);
             assert_eq!(key, to_bytes(right[i]));
-            let val = p0.get_val((i + 1 + left.len()) as u16);
+            let val = p0.get_val((i + 1 + left.len()) as u32);
             assert_eq!(val, to_bytes(right[i]));
         }
         assert_eq!(p0.get_low_fence().as_ref(), k0);
@@ -2739,11 +2739,11 @@ mod tests {
 
         let all = left.iter().chain(right.iter()).collect::<Vec<_>>();
         for i in 0..p0.active_slot_count() as usize - 1 {
-            let key = p0.get_raw_key((i + 1) as u16);
+            let key = p0.get_raw_key((i + 1) as u32);
             assert_eq!(key, to_bytes(*all[i]));
         }
         for i in 0..p1.active_slot_count() as usize {
-            let key = p1.get_raw_key((i + 1) as u16);
+            let key = p1.get_raw_key((i + 1) as u32);
             assert_eq!(key, to_bytes(*all[i + p0.active_slot_count() as usize - 1]));
         }
         assert_eq!(p0.get_low_fence().as_ref(), k0);
@@ -2879,16 +2879,16 @@ mod tests {
         assert_eq!(child0.active_slot_count() as usize, left.len());
         assert!(!child0.has_foster_child());
         for i in 0..left.len() {
-            let key = child0.get_raw_key((i + 1) as u16);
+            let key = child0.get_raw_key((i + 1) as u32);
             assert_eq!(key, to_bytes(left[i]));
-            let val = child0.get_val((i + 1) as u16);
+            let val = child0.get_val((i + 1) as u32);
             assert_eq!(val, to_bytes(left[i]));
         }
         assert_eq!(child1.active_slot_count() as usize, right.len());
         for i in 0..right.len() {
-            let key = child1.get_raw_key((i + 1) as u16);
+            let key = child1.get_raw_key((i + 1) as u32);
             assert_eq!(key, to_bytes(right[i]));
-            let val = child1.get_val((i + 1) as u16);
+            let val = child1.get_val((i + 1) as u32);
             assert_eq!(val, to_bytes(right[i]));
         }
     }
@@ -2998,9 +2998,9 @@ mod tests {
             child1.get_id()
         );
         for i in 0..left.len() {
-            let key = child0.get_raw_key((i + 1) as u16);
+            let key = child0.get_raw_key((i + 1) as u32);
             assert_eq!(key, to_bytes(left[i]));
-            let val = child0.get_val((i + 1) as u16);
+            let val = child0.get_val((i + 1) as u32);
             assert_eq!(val, to_bytes(left[i]));
         }
 
@@ -3008,9 +3008,9 @@ mod tests {
         assert_eq!(child1.get_low_fence().as_ref(), k1);
         assert_eq!(child1.get_high_fence().as_ref(), k2);
         for i in 0..right.len() {
-            let key = child1.get_raw_key((i + 1) as u16);
+            let key = child1.get_raw_key((i + 1) as u32);
             assert_eq!(key, to_bytes(right[i]));
-            let val = child1.get_val((i + 1) as u16);
+            let val = child1.get_val((i + 1) as u32);
             assert_eq!(val, to_bytes(right[i]));
         }
     }
@@ -3175,8 +3175,8 @@ mod tests {
         this_size: usize,
         foster_size: usize,
     ) -> (PageFrameKey, PageFrameKey) {
-        let this_size = this_size as u16;
-        let foster_size = foster_size as u16;
+        let this_size = this_size as u32;
+        let foster_size = foster_size as u32;
         // Create a foster relationship between two pages.
         let (db_id, c_id) = (0, 0);
         let c_key = ContainerKey::new(db_id, c_id);
@@ -3356,7 +3356,7 @@ mod tests {
         bp: Arc<T>,
         child0_size: usize,
     ) -> (PageFrameKey, PageFrameKey) {
-        let child0_size = child0_size as u16;
+        let child0_size = child0_size as u32;
 
         // Create a parent with two children.
         let (db_id, c_id) = (0, 0);
@@ -3416,7 +3416,7 @@ mod tests {
         bp: Arc<T>,
         child0_size: usize,
     ) -> (PageFrameKey, PageFrameKey) {
-        let child0_size = child0_size as u16;
+        let child0_size = child0_size as u32;
 
         // Create a parent with a child and a foster child.
         let (db_id, c_id) = (0, 0);
@@ -3476,7 +3476,7 @@ mod tests {
         bp: Arc<T>,
         child0_size: usize,
     ) -> (PageFrameKey, PageFrameKey) {
-        let child0_size = child0_size as u16;
+        let child0_size = child0_size as u32;
 
         // Create a parent with a child.
         let (db_id, c_id) = (0, 0);

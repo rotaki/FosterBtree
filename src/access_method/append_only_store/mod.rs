@@ -237,7 +237,7 @@ pub struct AppendOnlyStoreScanner<E: EvictionPolicy + 'static, T: MemPool<E>> {
     initialized: bool,
     finished: bool,
     current_page: Option<FrameReadGuard<'static, E>>,
-    current_slot_id: u16,
+    current_slot_id: u32,
 }
 
 impl<E: EvictionPolicy + 'static, T: MemPool<E>> AppendOnlyStoreScanner<E, T> {
