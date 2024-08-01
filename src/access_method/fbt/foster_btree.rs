@@ -1476,7 +1476,7 @@ impl<E: EvictionPolicy, T: MemPool<E>> FosterBtree<E, T> {
                 return page;
             }
         }
-        let mut foster_page = loop {
+        let mut new_page = loop {
             let page = self.mem_pool.create_new_page_for_write(self.c_key);
             match page {
                 Ok(page) => break page,
@@ -1488,17 +1488,8 @@ impl<E: EvictionPolicy, T: MemPool<E>> FosterBtree<E, T> {
                 }
             }
         };
-        foster_page.init();
-        // Write log
-        // {
-        //     let log_record = LogRecord::SysTxnAllocPage {
-        //         txn_id: 0,
-        //         page_id: page_key.page_id,
-        //     };
-        //     let lsn = self.wal_buffer.append_log(&log_record.to_bytes());
-        //     foster_page.set_lsn(lsn);
-        // }
-        foster_page
+        new_page.init();
+        new_page
     }
 
     fn read_page(&self, page_key: PageFrameKey) -> FrameReadGuard<E> {
