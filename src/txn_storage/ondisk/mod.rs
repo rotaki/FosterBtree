@@ -21,7 +21,7 @@ use crate::{
 pub enum Storage<E: EvictionPolicy + 'static, M: MemPool<E>> {
     HashMap(),
     BTreeMap(Arc<FosterBtree<E, M>>),
-    Vec(Arc<AppendOnlyStore<E, M>>),
+    AppendOnly(Arc<AppendOnlyStore<E, M>>),
 }
 
 unsafe impl<E: EvictionPolicy + 'static, M: MemPool<E>> Sync for Storage<E, M> {}
@@ -36,10 +36,9 @@ impl<E: EvictionPolicy + 'static, M: MemPool<E>> Storage<E, M> {
                 ContainerKey::new(db_id, c_id),
                 bp,
             ))),
-            ContainerType::AppendOnly => Storage::Vec(Arc::new(AppendOnlyStore::<E, M>::new(
-                ContainerKey::new(db_id, c_id),
-                bp,
-            ))),
+            ContainerType::AppendOnly => Storage::AppendOnly(Arc::new(
+                AppendOnlyStore::<E, M>::new(ContainerKey::new(db_id, c_id), bp),
+            )),
         }
     }
 
@@ -51,11 +50,11 @@ impl<E: EvictionPolicy + 'static, M: MemPool<E>> Storage<E, M> {
             ContainerType::BTree => Storage::BTreeMap(Arc::new(FosterBtree::<E, M>::load(
                 ContainerKey::new(db_id, c_id),
                 bp,
+                0,
             ))),
-            ContainerType::AppendOnly => Storage::Vec(Arc::new(AppendOnlyStore::<E, M>::load(
-                ContainerKey::new(db_id, c_id),
-                bp,
-            ))),
+            ContainerType::AppendOnly => Storage::AppendOnly(Arc::new(
+                AppendOnlyStore::<E, M>::load(ContainerKey::new(db_id, c_id), bp, 0),
+            )),
         }
     }
 
@@ -69,7 +68,7 @@ impl<E: EvictionPolicy + 'static, M: MemPool<E>> Storage<E, M> {
                 unimplemented!("Hash container not implemented")
             }
             Storage::BTreeMap(b) => b.insert(&key, &val)?,
-            Storage::Vec(v) => v.append(&key, &val)?,
+            Storage::AppendOnly(v) => v.append(&key, &val)?,
         };
         Ok(())
     }
@@ -80,7 +79,7 @@ impl<E: EvictionPolicy + 'static, M: MemPool<E>> Storage<E, M> {
                 unimplemented!("Hash container not implemented")
             }
             Storage::BTreeMap(b) => b.get(key)?,
-            Storage::Vec(v) => {
+            Storage::AppendOnly(v) => {
                 unimplemented!("get by key is not supported for append only container")
             }
         };
@@ -93,7 +92,7 @@ impl<E: EvictionPolicy + 'static, M: MemPool<E>> Storage<E, M> {
                 unimplemented!("Hash container not implemented")
             }
             Storage::BTreeMap(b) => b.update(key, &val)?,
-            Storage::Vec(v) => {
+            Storage::AppendOnly(v) => {
                 unimplemented!("update by key is not supported for append only container")
             }
         };
@@ -106,7 +105,7 @@ impl<E: EvictionPolicy + 'static, M: MemPool<E>> Storage<E, M> {
                 unimplemented!("Hash container not implemented")
             }
             Storage::BTreeMap(b) => b.delete(key)?,
-            Storage::Vec(v) => {
+            Storage::AppendOnly(v) => {
                 unimplemented!("remove by key is not supported for append only container")
             }
         };
@@ -119,7 +118,7 @@ impl<E: EvictionPolicy + 'static, M: MemPool<E>> Storage<E, M> {
                 unimplemented!("Hash container not implemented")
             }
             Storage::BTreeMap(b) => OnDiskIterator::btree(b.scan(&[], &[])),
-            Storage::Vec(v) => OnDiskIterator::vec(v.scan()),
+            Storage::AppendOnly(v) => OnDiskIterator::vec(v.scan()),
         }
     }
 
@@ -129,7 +128,7 @@ impl<E: EvictionPolicy + 'static, M: MemPool<E>> Storage<E, M> {
                 unimplemented!("Hash container not implemented")
             }
             Storage::BTreeMap(b) => b.num_kvs(),
-            Storage::Vec(v) => v.num_kvs(),
+            Storage::AppendOnly(v) => v.num_kvs(),
         }
     }
 }
@@ -213,6 +212,7 @@ impl<E: EvictionPolicy + 'static, M: MemPool<E>> OnDiskStorage<E, M> {
         let metadata = Arc::new(FosterBtree::<E, M>::load(
             ContainerKey::new(DatabaseId::MAX, 0),
             bp.clone(),
+            0,
         ));
         // Scans the metadata to get all the containers
         let mut containers = Vec::new();

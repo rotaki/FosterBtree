@@ -132,6 +132,7 @@ mod tests {
     #[rstest]
     #[case::in_mem(get_in_mem_storage(), ContainerType::BTree)]
     #[case::in_mem(get_in_mem_storage(), ContainerType::Hash)]
+    #[case::in_mem(get_in_mem_storage(), ContainerType::AppendOnly)]
     #[case::on_disk(get_on_disk_storage(), ContainerType::BTree)]
     #[case::on_disk(get_on_disk_storage(), ContainerType::AppendOnly)]
     fn test_insert_and_scan_range(
@@ -167,6 +168,7 @@ mod tests {
     #[rstest]
     #[case::in_mem(get_in_mem_storage(), ContainerType::BTree)]
     #[case::in_mem(get_in_mem_storage(), ContainerType::Hash)]
+    #[case::in_mem(get_in_mem_storage(), ContainerType::AppendOnly)]
     #[case::on_disk(get_on_disk_storage(), ContainerType::BTree)]
     #[case::on_disk(get_on_disk_storage(), ContainerType::AppendOnly)]
     fn test_concurrent_insert(

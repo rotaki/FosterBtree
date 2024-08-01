@@ -4,6 +4,7 @@ use prelude::PagedHashMapError;
 
 pub mod append_only_store;
 pub mod fbt;
+pub mod hash_fbt;
 pub mod hashindex;
 
 #[derive(Debug, PartialEq)]
@@ -34,5 +35,6 @@ impl From<AppendOnlyStoreError> for AccessMethodError {
 pub mod prelude {
     pub use super::append_only_store::prelude::*;
     pub use super::fbt::prelude::*;
+    pub use super::hash_fbt::prelude::*;
     pub use super::hashindex::prelude::*;
 }

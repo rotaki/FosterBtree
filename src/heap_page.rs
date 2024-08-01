@@ -1,3 +1,7 @@
+/*
+Currently not maintained. Don't use heap page.
+ */
+
 #[allow(unused_imports)]
 use crate::log;
 use crate::log_trace;
@@ -373,6 +377,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[ignore]
     fn test_heap_page_simple() {
         let mut page = Page::new_empty();
         HeapPage::init(&mut page);
@@ -404,6 +409,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn test_heap_page_reuse_slot() {
         let mut page = Page::new_empty();
         HeapPage::init(&mut page);
@@ -444,6 +450,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn test_heap_page_no_space() {
         let mut page = Page::new_empty();
         HeapPage::init(&mut page);

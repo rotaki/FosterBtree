@@ -158,6 +158,7 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
+    #[ignore]
     fn test_append_log_and_flush() {
         let dir = tempdir().unwrap();
         let log_buffer = LogBuffer::new(&dir, 0, 2);

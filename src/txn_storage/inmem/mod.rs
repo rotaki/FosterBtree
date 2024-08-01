@@ -14,6 +14,7 @@ use crate::rwlatch::RwLatch;
 pub enum Storage {
     HashMap(RwLatch, UnsafeCell<HashMap<Vec<u8>, Vec<u8>>>),
     BTreeMap(RwLatch, UnsafeCell<BTreeMap<Vec<u8>, Vec<u8>>>),
+    AppendOnly(RwLatch, UnsafeCell<Vec<(Vec<u8>, Vec<u8>)>>),
 }
 
 unsafe impl Sync for Storage {}
@@ -28,7 +29,7 @@ impl Storage {
                 Storage::BTreeMap(RwLatch::default(), UnsafeCell::new(BTreeMap::new()))
             }
             ContainerType::AppendOnly => {
-                unimplemented!("Vec container type is not supported in InMemStorage");
+                Storage::AppendOnly(RwLatch::default(), UnsafeCell::new(Vec::new()))
             }
         }
     }
@@ -37,6 +38,7 @@ impl Storage {
         match self {
             Storage::HashMap(latch, _) => latch.shared(),
             Storage::BTreeMap(latch, _) => latch.shared(),
+            Storage::AppendOnly(latch, _) => latch.shared(),
         }
     }
 
@@ -44,6 +46,7 @@ impl Storage {
         match self {
             Storage::HashMap(latch, _) => latch.exclusive(),
             Storage::BTreeMap(latch, _) => latch.exclusive(),
+            Storage::AppendOnly(latch, _) => latch.exclusive(),
         }
     }
 
@@ -51,6 +54,7 @@ impl Storage {
         match self {
             Storage::HashMap(latch, _) => latch.release_shared(),
             Storage::BTreeMap(latch, _) => latch.release_shared(),
+            Storage::AppendOnly(latch, _) => latch.release_shared(),
         }
     }
 
@@ -58,6 +62,7 @@ impl Storage {
         match self {
             Storage::HashMap(latch, _) => latch.release_exclusive(),
             Storage::BTreeMap(latch, _) => latch.release_exclusive(),
+            Storage::AppendOnly(latch, _) => latch.release_exclusive(),
         }
     }
 
@@ -71,6 +76,10 @@ impl Storage {
             Storage::BTreeMap(_, b) => {
                 let b = unsafe { &mut *b.get() };
                 b.clear();
+            }
+            Storage::AppendOnly(_, v) => {
+                let v = unsafe { &mut *v.get() };
+                v.clear();
             }
         }
         self.release_exclusive();
@@ -103,6 +112,11 @@ impl Storage {
                     }
                 }
             }
+            Storage::AppendOnly(_, v) => {
+                let v = unsafe { &mut *v.get() };
+                v.push((key, val));
+                Ok(())
+            }
         };
         self.release_exclusive();
         result
@@ -124,6 +138,9 @@ impl Storage {
                     Some(val) => Ok(val.clone()),
                     None => Err(TxnStorageStatus::KeyNotFound),
                 }
+            }
+            Storage::AppendOnly(..) => {
+                unimplemented!("get() is not supported for AppendOnly storage");
             }
         };
         self.release_shared();
@@ -153,6 +170,9 @@ impl Storage {
                     None => Err(TxnStorageStatus::KeyNotFound),
                 }
             }
+            Storage::AppendOnly(..) => {
+                unimplemented!("update() is not supported for AppendOnly storage");
+            }
         };
         self.release_exclusive();
         result
@@ -175,6 +195,9 @@ impl Storage {
                     None => Err(TxnStorageStatus::KeyNotFound),
                 }
             }
+            Storage::AppendOnly(_, _) => {
+                unimplemented!("remove() is not supported for AppendOnly storage");
+            }
         };
         self.release_shared();
         result
@@ -191,6 +214,10 @@ impl Storage {
                 let b = unsafe { &*b.get() };
                 InMemIterator::btree(Arc::clone(self), b.iter())
             }
+            Storage::AppendOnly(_, v) => {
+                let v = unsafe { &*v.get() };
+                InMemIterator::vec(Arc::clone(self), v.iter())
+            }
         }
     }
 
@@ -204,6 +231,10 @@ impl Storage {
             Storage::BTreeMap(_, b) => {
                 let b = unsafe { &*b.get() };
                 b.len()
+            }
+            Storage::AppendOnly(_, v) => {
+                let v = unsafe { &*v.get() };
+                v.len()
             }
         };
         self.release_shared();
@@ -221,6 +252,10 @@ pub enum InMemIterator {
         Arc<Storage>,
         Mutex<std::collections::btree_map::Iter<'static, Vec<u8>, Vec<u8>>>,
     ),
+    AppendOnly(
+        Arc<Storage>,
+        Mutex<std::slice::Iter<'static, (Vec<u8>, Vec<u8>)>>,
+    ),
 }
 
 impl Drop for InMemIterator {
@@ -228,6 +263,7 @@ impl Drop for InMemIterator {
         match self {
             InMemIterator::Hash(storage, _) => storage.release_shared(),
             InMemIterator::BTree(storage, _) => storage.release_shared(),
+            InMemIterator::AppendOnly(storage, _) => storage.release_shared(),
         }
     }
 }
@@ -247,6 +283,10 @@ impl InMemIterator {
         InMemIterator::BTree(storage, Mutex::new(iter))
     }
 
+    fn vec(storage: Arc<Storage>, iter: std::slice::Iter<'static, (Vec<u8>, Vec<u8>)>) -> Self {
+        InMemIterator::AppendOnly(storage, Mutex::new(iter))
+    }
+
     fn next(&self) -> Option<(Vec<u8>, Vec<u8>)> {
         match self {
             InMemIterator::Hash(_, iter) => {
@@ -254,6 +294,10 @@ impl InMemIterator {
                 iter.next().map(|(k, v)| (k.clone(), v.clone()))
             }
             InMemIterator::BTree(_, iter) => {
+                let mut iter = iter.lock().unwrap();
+                iter.next().map(|(k, v)| (k.clone(), v.clone()))
+            }
+            InMemIterator::AppendOnly(_, iter) => {
                 let mut iter = iter.lock().unwrap();
                 iter.next().map(|(k, v)| (k.clone(), v.clone()))
             }
