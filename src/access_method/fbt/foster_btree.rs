@@ -855,7 +855,7 @@ fn split_insert<E: EvictionPolicy>(
 /// * However, the page does not have enough space to insert the key-value pair.
 /// * Before: this: [[xxx], [zzz]] and we insert [yyyy]
 /// * After: this: [[xxx]], new_page1: [[yyyy]], new_page2: [[zzz]]
-/// Returns weather the new_page2 is used or not.
+/// Returns whether the new_page2 is used or not.
 fn split_insert_triple<E: EvictionPolicy>(
     this: &mut FrameWriteGuard<E>,
     new_page1: &mut FrameWriteGuard<E>,
@@ -939,70 +939,6 @@ fn split_insert_triple<E: EvictionPolicy>(
         true
     }
 }
-
-/*
-// Moving kvs from this to new_page2
-let mut moving_slot_ids = Vec::new();
-let mut moving_kvs = Vec::new();
-for i in (1..this.high_fence_slot_id()).rev() {
-    let this_key = this.get_raw_key(i);
-    if this_key > key {
-        let this_val = this.get_val(i);
-        moving_slot_ids.push(i);
-        moving_kvs.push((this_key, this_val));
-    } else if this_key == key {
-        unreachable!("The key should not exist in the page");
-    } else {
-        break;
-    }
-}
-
-// Reverse the moving slots
-moving_kvs.reverse();
-moving_slot_ids.reverse();
-
-let foster_key1 = key; // Separation between this and new_page1
-let foster_key2 = moving_kvs[0].0; // Separation between new_page1 and new_page2
-
-// Initialize new_page1 and insert the key-value pair
-new_page1.init();
-new_page1.set_level(this.level());
-new_page1.set_low_fence(foster_key1);
-new_page1.set_high_fence(this.get_raw_key(this.high_fence_slot_id()));
-new_page1.set_right_most(this.is_right_most());
-let res = new_page1.insert(key, value);
-assert!(res);
-new_page1.set_has_foster_child(true); // Because this -> new_page1 -> new_page2 -> ...
-
-// Initialize new_page2 and insert the moving kvs
-new_page2.init();
-new_page2.set_level(this.level());
-new_page2.set_low_fence(foster_key2);
-new_page2.set_high_fence(this.get_raw_key(this.high_fence_slot_id()));
-new_page2.set_right_most(this.is_right_most());
-let res = new_page2.append_sorted(&moving_kvs);
-assert!(res);
-new_page2.set_has_foster_child(this.has_foster_child()); // Because this -> new_page1 -> new_page2 -> ...
-
-// Remove the moved slots from this
-let high_fence_slot_id = this.high_fence_slot_id();
-this.remove_range(moving_slot_ids[0], high_fence_slot_id);
-
-// Connect this to new_page1
-let foster_child_id =
-    InnerVal::new_with_frame_id(new_page1.get_id(), new_page1.frame_id());
-let res = this.insert(&foster_key1, &foster_child_id.to_bytes());
-assert!(res);
-this.set_has_foster_child(true);
-
-// Connect new_page1 to new_page2
-let foster_child_id =
-    InnerVal::new_with_frame_id(new_page2.get_id(), new_page2.frame_id());
-let res = new_page1.insert(&foster_key2, &foster_child_id.to_bytes());
-assert!(res);
-new_page1.set_has_foster_child(true);
-
-*/
 
 /// Merge the foster child page into this page.
 /// The foster child page will be deleted.
