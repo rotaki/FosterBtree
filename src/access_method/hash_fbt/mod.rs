@@ -2,6 +2,7 @@ use core::num;
 use std::{
     hash::{Hash, Hasher},
     sync::Arc,
+    u32,
 };
 
 use crate::{
@@ -147,6 +148,32 @@ impl<E: EvictionPolicy, T: MemPool<E>> HashFosterBtree<E, T> {
             scanners.push(bucket.scan(&[], &[]));
         }
         HashFosterBtreeIter::new(scanners)
+    }
+
+    // Functions for hash tables... Temporary use only
+    pub fn check_key(&self, key: &[u8]) -> bool {
+        let mut first_key = key.to_vec();
+        first_key.extend(0_u32.to_be_bytes());
+        if let Ok(_) = self.get_bucket(&key).get(&first_key) {
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn append(&self, key: &[u8], value: &[u8]) -> Result<(), TreeStatus> {
+        self.get_bucket(key).append(key, value)
+    }
+
+    pub fn scan_with_prefix(self: &Arc<Self>, prefix: &[u8]) -> HashFosterBtreeIter<E, T> {
+        let mut first_key = prefix.to_vec();
+        first_key.extend(0_u32.to_be_bytes());
+
+        let mut last_key = prefix.to_vec();
+        last_key.extend(u32::MAX.to_be_bytes());
+
+        // Find the bucket with the prefix
+        HashFosterBtreeIter::new(vec![self.get_bucket(prefix).scan(&first_key, &last_key)])
     }
 }
 
