@@ -277,6 +277,13 @@ impl<T: EvictionPolicy> Frames<T> {
         }
     }
 
+    pub fn reset_free_frames(&self) {
+        while let Ok(_) = self.fast_path_victims.pop() {}
+        for i in 0..self.num_frames {
+            self.fast_path_victims.push(i).unwrap();
+        }
+    }
+
     pub fn push_to_eviction_queue(&self, frame_id: usize) {
         self.fast_path_victims.push(frame_id).unwrap();
     }
@@ -928,7 +935,6 @@ where
         self.exclusive();
 
         let frames = unsafe { &*self.frames.get() };
-        let id_to_index = unsafe { &mut *self.id_to_index.get() };
         let container_to_file = unsafe { &mut *self.container_to_file.get() };
 
         for frame in frames.iter() {
@@ -947,12 +953,18 @@ where
             file.flush()?;
         }
 
-        id_to_index.clear();
         // container_to_file.clear();
         self.runtime_stats.clear();
 
         self.release_exclusive();
         Ok(())
+    }
+
+    pub fn reset_free_frames(&self) {
+        self.exclusive();
+        let frames = unsafe { &mut *self.frames.get() };
+        frames.reset_free_frames();
+        self.release_exclusive();
     }
 }
 
