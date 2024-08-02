@@ -229,6 +229,14 @@ impl RuntimeStats {
         self.write_count.fetch_add(1, Ordering::Relaxed);
     }
 
+    pub fn get(&self) -> (usize, usize, usize) {
+        (
+            self.new_page.load(Ordering::Relaxed),
+            self.read_count.load(Ordering::Relaxed),
+            self.write_count.load(Ordering::Relaxed),
+        )
+    }
+
     pub fn to_string(&self) -> String {
         format!(
             "New Page: {}\nRead Count: {}\nWrite Count: {}",
@@ -865,8 +873,8 @@ where
     }
 
     // Just return the runtime stats
-    pub fn stats(&self) -> String {
-        self.runtime_stats.to_string()
+    pub fn stats(&self) -> (usize, usize, usize) {
+        self.runtime_stats.get()
     }
 
     // Reset the runtime stats
@@ -915,6 +923,37 @@ where
         self.release_exclusive();
         Ok(())
     }
+
+    pub fn reset(&self) -> Result<(), MemPoolStatus> {
+        self.exclusive();
+
+        let frames = unsafe { &*self.frames.get() };
+        let id_to_index = unsafe { &mut *self.id_to_index.get() };
+        let container_to_file = unsafe { &mut *self.container_to_file.get() };
+
+        for frame in frames.iter() {
+            let frame = loop {
+                if let Some(guard) = frame.try_write(false) {
+                    break guard;
+                }
+                // spin
+                std::hint::spin_loop();
+            };
+            frame.dirty().store(false, Ordering::Release);
+        }
+
+        // Call fsync on all the files
+        for file in container_to_file.values() {
+            file.flush()?;
+        }
+
+        id_to_index.clear();
+        // container_to_file.clear();
+        self.runtime_stats.clear();
+
+        self.release_exclusive();
+        Ok(())
+    }
 }
 
 impl<T> MemPool<T> for BufferPool<T>
@@ -936,7 +975,7 @@ where
         BufferPool::get_page_for_read(self, key)
     }
 
-    fn stats(&self) -> String {
+    fn stats(&self) -> (usize, usize, usize) {
         BufferPool::stats(self)
     }
 
