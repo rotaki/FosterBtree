@@ -1424,7 +1424,7 @@ impl<E: EvictionPolicy + 'static, T: MemPool<E>> Iterator for PagedHashMapIterWi
                 }
             }
 
-            if self.current_index != -1 {
+            if self.current_index != -1 && self.current_index < (page.num_slots() as i64) {
                 let sks = page.decode_shortkey_slot(self.current_index as u32);
                 let skv = page.decode_shortkey_value_by_id(self.current_index as u32);
 
