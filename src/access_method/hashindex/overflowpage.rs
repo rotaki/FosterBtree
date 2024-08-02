@@ -8,6 +8,7 @@ pub trait OverflowPage {
     fn ofp_init(&mut self);
 
     fn ofp_insert(&mut self, val: &[u8]) -> Result<(), OverflowPageError>;
+    fn ofp_upsert(&mut self, val: &[u8]) -> Result<(), OverflowPageError>;
     fn ofp_get(&self) -> Result<Vec<u8>, OverflowPageError>;
 
     fn ofp_get_next_page_id(&self) -> PageId;
@@ -66,6 +67,24 @@ impl OverflowPage for Page {
         self[offset..offset + val.len()].copy_from_slice(val);
 
         header.val_len = val.len() as u32;
+        self.encode_overflow_header(&header);
+
+        Ok(())
+    }
+
+    fn ofp_upsert(&mut self, val: &[u8]) -> Result<(), OverflowPageError> {
+        let mut header = self.decode_overflow_header();
+        let available_space =
+            AVAILABLE_PAGE_SIZE - OVERFLOW_PAGE_HEADER_SIZE - header.val_len as usize;
+
+        if val.len() > available_space {
+            return Err(OverflowPageError::PageCapacityExceeded);
+        }
+
+        let offset = OVERFLOW_PAGE_HEADER_SIZE + header.val_len as usize;
+        self[offset..offset + val.len()].copy_from_slice(val);
+
+        header.val_len += val.len() as u32;
         self.encode_overflow_header(&header);
 
         Ok(())

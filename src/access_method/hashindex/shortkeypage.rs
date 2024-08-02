@@ -10,6 +10,8 @@ pub trait ShortKeyPage {
     fn new() -> Self;
     fn init(&mut self);
 
+    fn append(&mut self, key: &[u8], value: &[u8]) -> Result<(), ShortKeyPageError>;
+
     /// Insert a new key-value pair into the index.
     /// If the key already exists, it will return an error.
     fn insert(&mut self, key: &[u8], val: &[u8]) -> Result<(), ShortKeyPageError>;
@@ -157,6 +159,57 @@ impl ShortKeyPage for Page {
             val_start_offset: AVAILABLE_PAGE_SIZE as u32,
         };
         Self::encode_shortkey_header(self, &header);
+    }
+
+    fn append(&mut self, key: &[u8], value: &[u8]) -> Result<(), ShortKeyPageError> {
+        let (_found, index) = self.search_slot(key);
+
+        let mut header = self.decode_shortkey_header();
+        let remain_key_len = key.len().saturating_sub(8);
+        let required_space =
+            SHORT_KEY_SLOT_SIZE + (remain_key_len + size_of::<u32>() + value.len());
+
+        if required_space > self.get_free_space() {
+            return Err(ShortKeyPageError::OutOfSpace);
+        }
+
+        if index < header.slot_num {
+            let start_pos = PAGE_HEADER_SIZE
+                + SHORT_KEY_PAGE_HEADER_SIZE
+                + index as usize * SHORT_KEY_SLOT_SIZE;
+            let end_pos = PAGE_HEADER_SIZE
+                + SHORT_KEY_PAGE_HEADER_SIZE
+                + header.slot_num as usize * SHORT_KEY_SLOT_SIZE;
+            self.copy_within(start_pos..end_pos, start_pos + SHORT_KEY_SLOT_SIZE);
+        }
+
+        let new_val_offset =
+            header.val_start_offset as usize - (value.len() + size_of::<u32>() + remain_key_len);
+
+        let new_slot = ShortKeySlot {
+            key_len: key.len() as u32,
+            key_prefix: {
+                let mut prefix = [0u8; 8];
+                let copy_len = std::cmp::min(8, key.len());
+                prefix[..copy_len].copy_from_slice(&key[..copy_len]);
+                prefix
+            },
+            val_offset: new_val_offset as u32,
+        };
+        self.encode_shortkey_slot(index, &new_slot);
+
+        let new_value_entry = ShortKeyValueSample {
+            remain_key: &key[key.len().min(8)..],
+            vals_len: value.len() as u32,
+            vals: value,
+        };
+        self.encode_shortkey_value_sample(new_val_offset, &new_value_entry);
+
+        header.slot_num += 1;
+        header.val_start_offset = new_val_offset as u32;
+        self.encode_shortkey_header(&header);
+
+        Ok(())
     }
 
     fn insert(&mut self, key: &[u8], value: &[u8]) -> Result<(), ShortKeyPageError> {
@@ -440,22 +493,37 @@ impl ShortKeyPage for Page {
         let mut high = header.slot_num - 1;
 
         match f(low) {
-            Ordering::Equal => return (true, low),
+            Ordering::Equal => {
+                while f(low - 1) == Ordering::Equal {
+                    low -= 1;
+                }
+                return (true, low);
+            }
             Ordering::Greater => return (false, 0),
             Ordering::Less => {}
         }
 
         match f(high) {
-            Ordering::Equal => return (true, high),
+            Ordering::Equal => {
+                while f(high - 1) == Ordering::Equal {
+                    high -= 1;
+                }
+                return (true, high);
+            }
             Ordering::Less => return (false, high + 1),
             Ordering::Greater => {}
         }
 
         // Invairant: f(high) = Gte
         while low < high {
-            let mid = low + (high - low) / 2;
+            let mut mid = low + (high - low) / 2;
             match f(mid) {
-                Ordering::Equal => return (true, mid),
+                Ordering::Equal => {
+                    while f(mid - 1) == Ordering::Equal {
+                        mid -= 1;
+                    }
+                    return (true, mid);
+                }
                 Ordering::Less => low = mid + 1,
                 Ordering::Greater => high = mid,
             }
