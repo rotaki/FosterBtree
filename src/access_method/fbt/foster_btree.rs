@@ -855,7 +855,7 @@ fn split_insert<E: EvictionPolicy>(
 /// * However, the page does not have enough space to insert the key-value pair.
 /// * Before: this: [[xxx], [zzz]] and we insert [yyyy]
 /// * After: this: [[xxx]], new_page1: [[yyyy]], new_page2: [[zzz]]
-/// Returns weather the new_page2 is used or not.
+/// Returns whether the new_page2 is used or not.
 fn split_insert_triple<E: EvictionPolicy>(
     this: &mut FrameWriteGuard<E>,
     new_page1: &mut FrameWriteGuard<E>,
@@ -939,70 +939,6 @@ fn split_insert_triple<E: EvictionPolicy>(
         true
     }
 }
-
-/*
-// Moving kvs from this to new_page2
-let mut moving_slot_ids = Vec::new();
-let mut moving_kvs = Vec::new();
-for i in (1..this.high_fence_slot_id()).rev() {
-    let this_key = this.get_raw_key(i);
-    if this_key > key {
-        let this_val = this.get_val(i);
-        moving_slot_ids.push(i);
-        moving_kvs.push((this_key, this_val));
-    } else if this_key == key {
-        unreachable!("The key should not exist in the page");
-    } else {
-        break;
-    }
-}
-
-// Reverse the moving slots
-moving_kvs.reverse();
-moving_slot_ids.reverse();
-
-let foster_key1 = key; // Separation between this and new_page1
-let foster_key2 = moving_kvs[0].0; // Separation between new_page1 and new_page2
-
-// Initialize new_page1 and insert the key-value pair
-new_page1.init();
-new_page1.set_level(this.level());
-new_page1.set_low_fence(foster_key1);
-new_page1.set_high_fence(this.get_raw_key(this.high_fence_slot_id()));
-new_page1.set_right_most(this.is_right_most());
-let res = new_page1.insert(key, value);
-assert!(res);
-new_page1.set_has_foster_child(true); // Because this -> new_page1 -> new_page2 -> ...
-
-// Initialize new_page2 and insert the moving kvs
-new_page2.init();
-new_page2.set_level(this.level());
-new_page2.set_low_fence(foster_key2);
-new_page2.set_high_fence(this.get_raw_key(this.high_fence_slot_id()));
-new_page2.set_right_most(this.is_right_most());
-let res = new_page2.append_sorted(&moving_kvs);
-assert!(res);
-new_page2.set_has_foster_child(this.has_foster_child()); // Because this -> new_page1 -> new_page2 -> ...
-
-// Remove the moved slots from this
-let high_fence_slot_id = this.high_fence_slot_id();
-this.remove_range(moving_slot_ids[0], high_fence_slot_id);
-
-// Connect this to new_page1
-let foster_child_id =
-    InnerVal::new_with_frame_id(new_page1.get_id(), new_page1.frame_id());
-let res = this.insert(&foster_key1, &foster_child_id.to_bytes());
-assert!(res);
-this.set_has_foster_child(true);
-
-// Connect new_page1 to new_page2
-let foster_child_id =
-    InnerVal::new_with_frame_id(new_page2.get_id(), new_page2.frame_id());
-let res = new_page1.insert(&foster_key2, &foster_child_id.to_bytes());
-assert!(res);
-new_page1.set_has_foster_child(true);
-
-*/
 
 /// Merge the foster child page into this page.
 /// The foster child page will be deleted.
@@ -1540,7 +1476,7 @@ impl<E: EvictionPolicy, T: MemPool<E>> FosterBtree<E, T> {
                 return page;
             }
         }
-        let mut foster_page = loop {
+        let mut new_page = loop {
             let page = self.mem_pool.create_new_page_for_write(self.c_key);
             match page {
                 Ok(page) => break page,
@@ -1552,17 +1488,8 @@ impl<E: EvictionPolicy, T: MemPool<E>> FosterBtree<E, T> {
                 }
             }
         };
-        foster_page.init();
-        // Write log
-        // {
-        //     let log_record = LogRecord::SysTxnAllocPage {
-        //         txn_id: 0,
-        //         page_id: page_key.page_id,
-        //     };
-        //     let lsn = self.wal_buffer.append_log(&log_record.to_bytes());
-        //     foster_page.set_lsn(lsn);
-        // }
-        foster_page
+        new_page.init();
+        new_page
     }
 
     fn read_page(&self, page_key: PageFrameKey) -> FrameReadGuard<E> {
@@ -2079,6 +2006,35 @@ impl<E: EvictionPolicy, T: MemPool<E>> FosterBtree<E, T> {
                 Err(TreeStatus::NotFound)
             }
         }
+    }
+
+    pub fn append(&self, key: &[u8], value: &[u8]) -> Result<(), TreeStatus> {
+        // Adds a suffix to the key and insert the key-value pair.
+        let mut suffixed_key = key.to_vec();
+        let count = u32::MAX;
+        suffixed_key.extend_from_slice(&count.to_be_bytes());
+        // Search for the key
+        let mut leaf_page = self.traverse_to_leaf_for_write(&suffixed_key);
+        let slot_id = leaf_page.upper_bound_slot_id(&BTreeKey::new(&suffixed_key)) - 1;
+
+        // If value_before is prefixed with key, use lower_fence + 1
+        // If value_before is not prefixed with key, use key + "0000"
+        let value_before = leaf_page.get_raw_key(slot_id);
+        let new_suffix =
+            if value_before.len() == suffixed_key.len() && value_before.starts_with(&key) {
+                let old_suffix = u32::from_be_bytes(value_before[key.len()..].try_into().unwrap());
+                if old_suffix == u32::MAX {
+                    panic!("Key is already appended with the maximum count");
+                }
+                old_suffix + 1
+            } else {
+                0
+            };
+        // Modify the suffix of the key
+        suffixed_key[key.len()..].copy_from_slice(&new_suffix.to_be_bytes());
+        self.stats.inc_num_keys();
+        self.insert_at_slot_or_split(&mut leaf_page, slot_id + 1, &suffixed_key, value);
+        Ok(())
     }
 
     pub fn scan(self: &Arc<Self>, l_key: &[u8], r_key: &[u8]) -> FosterBtreeRangeScanner<E, T> {
@@ -4221,6 +4177,135 @@ mod tests {
 
         let current_val = btree.get(&key2).unwrap();
         assert_eq!(current_val, val2);
+    }
+
+    #[rstest]
+    #[case::bp(get_test_bp(100))]
+    #[case::in_mem(get_in_mem_pool())]
+    fn test_append<E: EvictionPolicy + 'static, T: MemPool<E>>(#[case] bp: Arc<T>) {
+        let btree = Arc::new(setup_btree_empty(bp.clone()));
+        // Insert 1024 bytes
+        let inserting_key = to_bytes(0);
+        for i in 0..10 {
+            println!(
+                "**************************** Appending key {} **************************",
+                i
+            );
+            btree.append(&inserting_key, &to_bytes(i)).unwrap();
+        }
+        // Scan the tree
+        let iter = btree.scan(&[], &[]);
+        let mut count = 0;
+        for (key, current_val) in iter {
+            println!(
+                "**************************** Scanning key {} **************************",
+                count
+            );
+            // Check the prefix of the keys
+            assert!(key.starts_with(&inserting_key));
+            assert_eq!(*key.last().unwrap(), count as u8);
+            assert_eq!(current_val, to_bytes(count));
+            count += 1;
+        }
+    }
+
+    #[rstest]
+    #[case::bp(get_test_bp(100))]
+    #[case::in_mem(get_in_mem_pool())]
+    fn test_append_large<E: EvictionPolicy + 'static, T: MemPool<E>>(#[case] bp: Arc<T>) {
+        let btree = Arc::new(setup_btree_empty(bp.clone()));
+        // Insert 1024 bytes
+        let inserting_key = to_bytes(0);
+        let val = vec![3_u8; 1024];
+        for i in 0..10 {
+            println!(
+                "**************************** Appending key {} **************************",
+                i
+            );
+            btree.append(&inserting_key, &val).unwrap();
+        }
+        // Scan the tree
+        let iter = btree.scan(&[], &[]);
+        let mut count = 0;
+        for (key, current_val) in iter {
+            println!(
+                "**************************** Scanning key {} **************************",
+                count
+            );
+            // Check the prefix of the keys
+            assert!(key.starts_with(&inserting_key));
+            assert_eq!(*key.last().unwrap(), count as u8);
+            assert_eq!(current_val, val);
+            count += 1;
+        }
+    }
+
+    #[rstest]
+    #[case::bp(get_test_bp(100))]
+    #[case::in_mem(get_in_mem_pool())]
+    fn test_concurrent_append<E: EvictionPolicy + 'static, T: MemPool<E>>(#[case] bp: Arc<T>) {
+        let btree = Arc::new(setup_btree_empty(bp.clone()));
+        let num_keys = 1000;
+        let key_size = 100;
+        let val_min_size = 50;
+        let val_max_size = 100;
+        let num_threads = 3;
+        let kvs = RandomKVs::new(
+            true,
+            false,
+            num_threads,
+            num_keys,
+            key_size,
+            val_min_size,
+            val_max_size,
+        );
+        let mut verify_kvs = HashSet::new();
+        for kvs_i in kvs.iter() {
+            for (_key, val) in kvs_i.iter() {
+                verify_kvs.insert(val.clone());
+            }
+        }
+
+        log_trace!("Number of keys: {}", num_keys);
+
+        let key = to_bytes(0);
+
+        // Use 3 threads to insert keys into the tree.
+        // Increment the counter for each key inserted and if the counter is equal to the number of keys, then all keys have been inserted.
+        thread::scope(
+            // issue three threads to insert keys into the tree
+            |s| {
+                for kvs_i in kvs.iter() {
+                    let btree = btree.clone();
+                    let key = key.clone();
+                    s.spawn(move || {
+                        log_trace!("Spawned");
+                        for (_, val) in kvs_i.iter() {
+                            log_trace!("Appending key {:?}", key);
+                            btree.append(&key, val).unwrap();
+                        }
+                    });
+                }
+            },
+        );
+
+        // Check if all keys have been inserted.
+        let mut first_key = key.clone();
+        first_key.push(0);
+        let mut last_key = key.clone();
+        last_key.push((num_keys) as u8);
+        let iter = btree.scan(&first_key, &last_key);
+        let mut count = 0;
+        for (key, current_val) in iter {
+            println!(
+                "**************************** Scanning key {:?} **************************",
+                key
+            );
+            assert!(verify_kvs.remove(&current_val));
+            count += 1;
+        }
+        assert_eq!(count, num_keys);
+        assert!(verify_kvs.is_empty());
     }
 
     #[test]
