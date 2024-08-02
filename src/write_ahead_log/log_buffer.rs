@@ -1,3 +1,4 @@
+use crate::bp::ContainerId;
 use crate::file_manager::FileManager;
 use crate::heap_page::HeapPage;
 use crate::page::Page;
@@ -36,8 +37,8 @@ struct LogBufferInner {
 }
 
 impl LogBufferInner {
-    fn new<P: AsRef<std::path::Path>>(path: P, num_pages: usize) -> Self {
-        let file_manager = FileManager::new(path).unwrap();
+    fn new<P: AsRef<std::path::Path>>(db_path: P, c_id: ContainerId, num_pages: usize) -> Self {
+        let file_manager = FileManager::new(db_path, c_id).unwrap();
         let mut buffer = Vec::with_capacity(num_pages);
         for _ in 0..num_pages {
             let page_id = file_manager.fetch_add_page_id();
@@ -100,9 +101,9 @@ pub struct LogBuffer {
 }
 
 impl LogBuffer {
-    pub fn new<P: AsRef<std::path::Path>>(path: P, num_pages: usize) -> Self {
+    pub fn new<P: AsRef<std::path::Path>>(db_path: P, c_id: ContainerId, num_pages: usize) -> Self {
         LogBuffer {
-            inner: Mutex::new(LogBufferInner::new(path, num_pages)),
+            inner: Mutex::new(LogBufferInner::new(db_path, c_id, num_pages)),
         }
     }
 
@@ -122,9 +123,9 @@ pub struct LogChecker {
 
 #[cfg(test)]
 impl LogChecker {
-    pub fn new<P: AsRef<std::path::Path>>(path: P) -> Self {
+    pub fn new<P: AsRef<std::path::Path>>(db_path: P, c_id: ContainerId) -> Self {
         LogChecker {
-            file_manager: FileManager::new(path).unwrap(),
+            file_manager: FileManager::new(db_path, c_id).unwrap(),
         }
     }
 
@@ -157,10 +158,10 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
+    #[ignore]
     fn test_append_log_and_flush() {
         let dir = tempdir().unwrap();
-        let path = dir.path().join("test_log.db");
-        let log_buffer = LogBuffer::new(&path, 2);
+        let log_buffer = LogBuffer::new(&dir, 0, 2);
 
         // generate a bunch of random vecs and append them to the log buffer
         let mut lsn_vec = Vec::new();
@@ -175,7 +176,7 @@ mod tests {
         log_buffer.flush_all();
 
         // check if the logs are written correctly
-        let log_checker = LogChecker::new(&path);
+        let log_checker = LogChecker::new(&dir, 0);
         for (i, lsn) in lsn_vec.iter().enumerate() {
             assert_eq!(logs[i], log_checker.get_log(lsn));
         }

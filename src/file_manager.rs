@@ -2,6 +2,7 @@ use std::io;
 
 #[derive(Debug, PartialEq)]
 pub enum FMError {
+    DirCreate,
     Open,
     Seek,
     Read,
@@ -13,6 +14,7 @@ pub enum FMError {
 impl std::fmt::Display for FMError {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
+            FMError::DirCreate => write!(f, "[FM] Error creating directory"),
             FMError::Open => write!(f, "[FM] Error opening file"),
             FMError::Seek => write!(f, "[FM] Error seeking in file"),
             FMError::Read => write!(f, "[FM] Error reading from file"),
@@ -37,24 +39,31 @@ pub type FileManager = async_write::FileManager;
 #[cfg(any(not(feature = "async_write"), target_arch = "wasm32"))]
 pub mod sync_write {
     use super::FMError;
+    use crate::bp::ContainerId;
     #[allow(unused_imports)]
     use crate::log;
     use crate::log_trace;
     use crate::page::{Page, PageId, PAGE_SIZE};
     use std::fs::{File, OpenOptions};
     use std::io::{Read, Seek, SeekFrom, Write};
+    use std::path::PathBuf;
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Mutex;
 
     pub struct FileManager {
-        _path: String,
+        _path: PathBuf,
         file: Mutex<File>,
         num_pages: AtomicU32,
         io_count: (AtomicU32, AtomicU32), // (Read, Write)
     }
 
     impl FileManager {
-        pub fn new<P: AsRef<std::path::Path>>(path: P) -> Result<Self, FMError> {
+        pub fn new<P: AsRef<std::path::Path>>(
+            db_dir: P,
+            c_id: ContainerId,
+        ) -> Result<Self, FMError> {
+            std::fs::create_dir_all(&db_dir).map_err(|_| FMError::DirCreate)?;
+            let path = db_dir.as_ref().join(format!("{}", c_id));
             let file = OpenOptions::new()
                 .read(true)
                 .write(true)
@@ -63,7 +72,7 @@ pub mod sync_write {
                 .map_err(|_| FMError::Open)?;
             let num_pages = file.metadata().unwrap().len() as usize / PAGE_SIZE;
             Ok(FileManager {
-                _path: path.as_ref().to_str().unwrap().to_string(),
+                _path: path,
                 file: Mutex::new(file),
                 num_pages: AtomicU32::new(num_pages as PageId),
                 io_count: (AtomicU32::new(0), AtomicU32::new(0)),
@@ -98,7 +107,7 @@ pub mod sync_write {
             let mut file = self.file.lock().unwrap();
             self.io_count.0.fetch_add(1, Ordering::AcqRel);
             log_trace!("Reading page: {} from file: {:?}", page_id, self.path);
-            file.seek(SeekFrom::Start((page_id * PAGE_SIZE as PageId) as u64))
+            file.seek(SeekFrom::Start(page_id as u64 * PAGE_SIZE as u64))
                 .map_err(|_| FMError::Seek)?;
             file.read_exact(page.get_raw_bytes_mut())
                 .map_err(|_| FMError::Read)?;
@@ -111,7 +120,7 @@ pub mod sync_write {
             log_trace!("Writing page: {} to file: {:?}", page_id, self.path);
             self.io_count.1.fetch_add(1, Ordering::AcqRel);
             debug_assert!(page.get_id() == page_id, "Page id mismatch");
-            file.seek(SeekFrom::Start((page_id * PAGE_SIZE as PageId) as u64))
+            file.seek(SeekFrom::Start(page_id as u64 * PAGE_SIZE as u64))
                 .map_err(|_| FMError::Seek)?;
             file.write_all(page.get_raw_bytes())
                 .map_err(|_| FMError::Write)?;
@@ -129,12 +138,14 @@ pub mod sync_write {
 #[cfg(all(feature = "async_write", not(target_arch = "wasm32")))]
 pub mod async_write {
     use super::FMError;
+    use crate::bp::ContainerId;
     #[allow(unused_imports)]
     use crate::log;
     use crate::page::{Page, PageId, PAGE_SIZE};
     use crate::{log_debug, log_trace};
     use std::cell::UnsafeCell;
     use std::fs::{File, OpenOptions};
+    use std::path::PathBuf;
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Mutex;
 
@@ -147,13 +158,18 @@ pub mod async_write {
 
     pub struct FileManager {
         #[allow(dead_code)]
-        path: String,
+        path: PathBuf,
         num_pages: AtomicU32,
         file_inner: Mutex<FileManagerInner>,
     }
 
     impl FileManager {
-        pub fn new<P: AsRef<std::path::Path>>(path: P) -> Result<Self, FMError> {
+        pub fn new<P: AsRef<std::path::Path>>(
+            db_dir: P,
+            c_id: ContainerId,
+        ) -> Result<Self, FMError> {
+            std::fs::create_dir_all(&db_dir).map_err(|_| FMError::DirCreate)?;
+            let path = db_dir.as_ref().join(format!("{}", c_id));
             let file = OpenOptions::new()
                 .read(true)
                 .write(true)
@@ -164,7 +180,7 @@ pub mod async_write {
             let num_pages = file.metadata().unwrap().len() as usize / PAGE_SIZE;
             let file_inner = FileManagerInner::new(file)?;
             Ok(FileManager {
-                path: path.as_ref().to_str().unwrap().to_string(),
+                path,
                 num_pages: AtomicU32::new(num_pages as PageId),
                 file_inner: Mutex::new(file_inner),
             })
@@ -501,7 +517,7 @@ pub mod async_write {
                 // If the page is not in the buffer, read from the file.
                 let buf = page.get_raw_bytes_mut();
                 let entry = opcode::Read::new(types::Fixed(0), buf.as_mut_ptr(), buf.len() as _)
-                    .offset((page_id * PAGE_SIZE as PageId) as u64)
+                    .offset(page_id as u64 * PAGE_SIZE as u64)
                     .build()
                     .user_data(IOOpTag::new_read(page_id).as_u64());
                 unsafe {
@@ -562,7 +578,7 @@ pub mod async_write {
                         buf.len() as _,
                         hash as _,
                     )
-                    .offset((page_id * PAGE_SIZE as PageId) as u64)
+                    .offset(page_id as u64 * PAGE_SIZE as u64)
                     .build()
                     .user_data(IOOpTag::new_write(page_id).as_u64());
                     unsafe {
@@ -671,8 +687,7 @@ mod tests {
     #[test]
     fn test_page_write_read() {
         let temp_path = tempfile::tempdir().unwrap();
-        let path = temp_path.path().join("test_page_write_read.db");
-        let file_manager = FileManager::new(path).unwrap();
+        let file_manager = FileManager::new(&temp_path, 0).unwrap();
         let mut page = Page::new_empty();
 
         let page_id = 0;
@@ -692,8 +707,7 @@ mod tests {
     #[test]
     fn test_page_write_read_sequential() {
         let temp_path = tempfile::tempdir().unwrap();
-        let path = temp_path.path().join("test_page_write_read.db");
-        let file_manager = FileManager::new(path).unwrap();
+        let file_manager = FileManager::new(&temp_path, 0).unwrap();
 
         let num_pages = 1000;
 
@@ -719,8 +733,7 @@ mod tests {
     #[test]
     fn test_page_write_read_random() {
         let temp_path = tempfile::tempdir().unwrap();
-        let path = temp_path.path().join("test_page_write_read.db");
-        let file_manager = FileManager::new(path).unwrap();
+        let file_manager = FileManager::new(&temp_path, 0).unwrap();
 
         let num_pages = 1000;
         let page_id_vec = (0..num_pages).collect::<Vec<PageId>>();
@@ -749,8 +762,7 @@ mod tests {
     #[test]
     fn test_page_write_read_interleave() {
         let temp_path = tempfile::tempdir().unwrap();
-        let path = temp_path.path().join("test_page_write_read.db");
-        let file_manager = FileManager::new(path).unwrap();
+        let file_manager = FileManager::new(&temp_path, 0).unwrap();
 
         let num_pages = 1000;
         let page_id_vec = (0..num_pages).collect::<Vec<PageId>>();
@@ -779,9 +791,8 @@ mod tests {
         // Check if the other file manager can read the pages.
 
         let temp_path = tempfile::tempdir().unwrap();
-        let path = temp_path.path().join("test_file_flush.db");
-        let file_manager1 = FileManager::new(path.clone()).unwrap();
-        let file_manager2 = FileManager::new(path).unwrap();
+        let file_manager1 = FileManager::new(&temp_path, 0).unwrap();
+        let file_manager2 = FileManager::new(&temp_path, 0).unwrap();
 
         let num_pages = 2;
         let page_id_vec = (0..num_pages).collect::<Vec<PageId>>();
@@ -797,7 +808,7 @@ mod tests {
             file_manager1.write_page(i, &page).unwrap();
         }
 
-        file_manager1.flush().unwrap(); // If we remove this file, the test is likely to fail.
+        file_manager1.flush().unwrap(); // If we remove this line, the test is likely to fail.
 
         // Read the page in random order
         for i in gen_random_permutation(page_id_vec) {

@@ -1,15 +1,13 @@
 use std::collections::HashMap;
-use std::sync::{Mutex, RwLock};
+use std::sync::RwLock;
 
 pub struct RustHashMap {
-    // func: Box<dyn Fn(&[u8], &[u8]) -> Vec<u8>>,
     pub hm: RwLock<HashMap<Vec<u8>, Vec<u8>>>,
 }
 
 impl RustHashMap {
     pub fn new() -> Self {
         RustHashMap {
-            // func,
             hm: RwLock::new(HashMap::new()),
         }
     }
@@ -31,5 +29,11 @@ impl RustHashMap {
 
     pub fn remove(&self, key: &Vec<u8>) -> Option<Vec<u8>> {
         self.hm.write().unwrap().remove(key)
+    }
+}
+
+impl Default for RustHashMap {
+    fn default() -> Self {
+        Self::new()
     }
 }

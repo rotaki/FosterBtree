@@ -1,26 +1,26 @@
-use std::{fs::File, io, path::Path, time::Instant};
+use std::time::Instant;
 
 use clap::Parser;
 use fbtree::{bench_utils::*, random::RandomKVs};
-use statrs::statistics::Statistics;
 use std::process::Command;
 
 fn main() {
     let mut bench_params = BenchParams::parse();
     bench_params.bp_size = 100_000;
+    bench_params.bucket_num = 100_000;
     bench_params.ops_ratio = "0:0:0:1".to_string();
     bench_params.num_keys = 200_000;
     println!("{}", bench_params);
 
     let bp_size = bench_params.bp_size;
     // let phm_in_mem = gen_paged_hash_map_in_mem();
-    let phm_on_disk = gen_paged_hash_map_on_disk(bp_size);
-    let mut rhm = gen_rust_hash_map();
+    let phm_on_disk = gen_paged_hash_map_on_disk(bp_size, bench_params.bucket_num);
+    let rhm = gen_rust_hash_map();
     // let phm = gen_paged_hash_map_on_disk_with_hash_eviction_policy(bp_size);
 
     let kvs = RandomKVs::new(
         bench_params.unique_keys,
-        false, 
+        false,
         bench_params.num_threads,
         bench_params.num_keys,
         bench_params.key_size,
@@ -61,8 +61,17 @@ fn main() {
     }
 
     fn calculate_stats(times: &[u128]) -> (f64, f64, u128, u128) {
-        let mean = times.iter().map(|&x| x as f64).mean();
-        let stddev = times.iter().map(|&x| x as f64).std_dev();
+        let mean = {
+            let sum = times.iter().sum::<u128>() as f64;
+            sum / times.len() as f64
+        };
+        let stddev = {
+            let sum = times
+                .iter()
+                .map(|&time| (time as f64 - mean).powi(2))
+                .sum::<f64>();
+            (sum / times.len() as f64).sqrt()
+        };
         let min = *times.iter().min().unwrap();
         let max = *times.iter().max().unwrap();
         (mean, stddev, min, max)
@@ -102,4 +111,3 @@ fn clear_cache() {
     let _ = Command::new("sync").status();
     let _ = Command::new("echo 3 > /proc/sys/vm/drop_caches").status();
 }
-

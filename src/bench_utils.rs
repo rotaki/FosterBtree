@@ -3,16 +3,18 @@ use std::{collections::BTreeMap, sync::Arc, thread};
 use clap::Parser;
 
 use crate::{
+    access_method::{
+        fbt::FosterBtree,
+        hashindex::{pagedhashmap::PointerSwizzlingMode, prelude::*},
+    },
     bp::{
         get_in_mem_pool, get_test_bp,
         prelude::{
             ContainerKey, DummyEvictionPolicy, EvictionPolicy, InMemPool, LRUEvictionPolicy,
             MemPool,
         },
-        BufferPoolForTest,
+        BufferPool,
     },
-    fbt::FosterBtree,
-    hashindex::prelude::*,
     random::{RandomKVs, RandomOp},
 };
 
@@ -42,6 +44,9 @@ pub struct BenchParams {
     /// Operations ratio: insert:update:delete:get
     #[clap(short = 'r', long = "ops_ratio", default_value = "1:0:0:0")]
     pub ops_ratio: String,
+    /// Bucket number for hash index.
+    #[clap(short = 'c', long = "bucket_num", default_value = "10000")]
+    pub bucket_num: usize,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -85,6 +90,7 @@ impl BenchParams {
         val_max_size: usize,
         bp_size: usize,
         ops_ratio: String,
+        bucket_num: usize,
     ) -> Self {
         Self {
             num_threads,
@@ -95,6 +101,7 @@ impl BenchParams {
             val_max_size,
             bp_size,
             ops_ratio,
+            bucket_num,
         }
     }
 }
@@ -124,7 +131,7 @@ pub fn gen_foster_btree_in_mem(
 
 pub fn gen_foster_btree_on_disk(
     bp_size: usize,
-) -> Arc<FosterBtree<LRUEvictionPolicy, BufferPoolForTest<LRUEvictionPolicy>>> {
+) -> Arc<FosterBtree<LRUEvictionPolicy, BufferPool<LRUEvictionPolicy>>> {
     let (db_id, c_id) = (0, 0);
     let c_key = ContainerKey::new(db_id, c_id);
     let btree = FosterBtree::new(c_key, get_test_bp(bp_size));
@@ -247,7 +254,7 @@ pub fn run_bench_for_rust_hash_map(
     let ops_ratio = bench_params.parse_ops_ratio();
     thread::scope(|s| {
         for partition in kvs.iter() {
-            let mut rhm = rhm.clone();
+            let rhm = rhm.clone();
             let rand = RandomOp::new(ops_ratio.clone());
             s.spawn(move || {
                 for (k, v) in partition.iter() {
@@ -275,27 +282,76 @@ pub fn run_bench_for_rust_hash_map(
 }
 
 pub fn gen_paged_hash_map_in_mem(
+    bucket_num: usize,
 ) -> Arc<PagedHashMap<DummyEvictionPolicy, InMemPool<DummyEvictionPolicy>>> {
-    // let func = Box::new(|old: &[u8], new: &[u8]| {
-    //     old.iter().chain(new.iter()).copied().collect::<Vec<u8>>()
-    // });
-    // let func = Box::new(|old: &[u8], new: &[u8]| new.to_vec());
     let c_key = ContainerKey::new(0, 0);
-    // let map = PagedHashMap::new(func, get_in_mem_pool(), c_key, false);
-    let map = PagedHashMap::new(get_in_mem_pool(), c_key, false);
+    let map = PagedHashMap::new(
+        get_in_mem_pool(),
+        c_key,
+        bucket_num,
+        false,
+        PointerSwizzlingMode::AtomicShared,
+    );
     Arc::new(map)
 }
 
 pub fn gen_paged_hash_map_on_disk(
     bp_size: usize,
-) -> Arc<PagedHashMap<LRUEvictionPolicy, BufferPoolForTest<LRUEvictionPolicy>>> {
-    // let func = Box::new(|old: &[u8], new: &[u8]| {
-    //     old.iter().chain(new.iter()).copied().collect::<Vec<u8>>()
-    // });
-    // let func = Box::new(|old: &[u8], new: &[u8]| new.to_vec());
+    bucket_num: usize,
+) -> Arc<PagedHashMap<LRUEvictionPolicy, BufferPool<LRUEvictionPolicy>>> {
     let c_key = ContainerKey::new(0, 0);
-    // let map = PagedHashMap::new(func, get_test_bp(bp_size), c_key, false);
-    let map = PagedHashMap::new(get_test_bp(bp_size), c_key, false);
+    let map = PagedHashMap::new(
+        get_test_bp(bp_size),
+        c_key,
+        bucket_num,
+        false,
+        PointerSwizzlingMode::AtomicShared,
+    );
+    Arc::new(map)
+}
+
+pub fn gen_paged_hash_map_on_disk_with_unsafe_pointer_swizzling(
+    bp_size: usize,
+    bucket_num: usize,
+) -> Arc<PagedHashMap<LRUEvictionPolicy, BufferPool<LRUEvictionPolicy>>> {
+    let c_key = ContainerKey::new(0, 0);
+    let map = PagedHashMap::new(
+        get_test_bp(bp_size),
+        c_key,
+        bucket_num,
+        false,
+        PointerSwizzlingMode::UnsafeShared,
+    );
+    Arc::new(map)
+}
+
+pub fn gen_paged_hash_map_on_disk_with_local_pointer_swizzling(
+    bp_size: usize,
+    bucket_num: usize,
+) -> Arc<PagedHashMap<LRUEvictionPolicy, BufferPool<LRUEvictionPolicy>>> {
+    let c_key = ContainerKey::new(0, 0);
+    let map = PagedHashMap::new(
+        get_test_bp(bp_size),
+        c_key,
+        bucket_num,
+        false,
+        PointerSwizzlingMode::ThreadLocal,
+    );
+    Arc::new(map)
+}
+
+pub fn gen_paged_hash_map_on_disk_without_pointer_swizzling(
+    bp_size: usize,
+    bucket_num: usize,
+) -> Arc<PagedHashMap<LRUEvictionPolicy, BufferPool<LRUEvictionPolicy>>> {
+    let c_key = ContainerKey::new(0, 0);
+    let map = PagedHashMap::new(
+        get_test_bp(bp_size),
+        c_key,
+        bucket_num,
+        false,
+        PointerSwizzlingMode::None,
+    );
     Arc::new(map)
 }
 

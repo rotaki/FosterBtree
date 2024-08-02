@@ -148,10 +148,15 @@ pub trait MemPool<T: EvictionPolicy>: Sync + Send {
     fn reset_stats(&self);
 
     /// Persist all the dirty pages to disk.
+    /// This does not clear out the frames in the memory pool.
     fn flush_all(&self) -> Result<(), MemPoolStatus>;
 
-    /// Reset the memory pool.
-    /// This function will reset the memory pool to its initial state.
-    /// This function is useful for testing purposes.
-    fn reset(&self);
+    /// Tell the memory pool that a page in the frame should be evicted as soon as possible.
+    /// This function will not evict the page immediately.
+    /// This function is used as a hint to the memory pool to evict the page when possible.
+    fn fast_evict(&self, frame_id: u32) -> Result<(), MemPoolStatus>;
+
+    /// Clear all the frames in the memory pool.
+    /// If there are any dirty pages, they will be written to disk.
+    fn clear_frames(&self) -> Result<(), MemPoolStatus>;
 }

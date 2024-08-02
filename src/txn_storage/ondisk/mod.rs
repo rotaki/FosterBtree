@@ -1,7 +1,6 @@
 use std::{
     cell::UnsafeCell,
-    collections::{BTreeMap, HashMap, HashSet},
-    path::PathBuf,
+    collections::HashSet,
     sync::{Arc, Mutex, RwLock},
 };
 
@@ -9,38 +8,53 @@ use super::{
     ContainerOptions, ContainerType, DBOptions, ScanOptions, TxnOptions, TxnStorageStatus,
     TxnStorageTrait,
 };
-use crate::rwlatch::RwLatch;
 use crate::{
+    access_method::fbt::FosterBtreeRangeScanner,
     bp::prelude::{ContainerId, DatabaseId},
-    fbt::FosterBtreeRangeScanner,
-    prelude::{BufferPool, ContainerKey, FosterBtree, LRUEvictionPolicy},
+    prelude::{ContainerKey, FosterBtree},
+};
+use crate::{
+    access_method::prelude::{AppendOnlyStore, AppendOnlyStoreScanner},
+    bp::{EvictionPolicy, MemPool},
 };
 
-type BufferPoolType = BufferPool<LRUEvictionPolicy>;
-type FosterBtreeType = FosterBtree<LRUEvictionPolicy, BufferPoolType>;
-
-pub enum Storage {
+pub enum Storage<E: EvictionPolicy + 'static, M: MemPool<E>> {
     HashMap(),
-    BTreeMap(Arc<FosterBtreeType>),
+    BTreeMap(Arc<FosterBtree<E, M>>),
+    AppendOnly(Arc<AppendOnlyStore<E, M>>),
 }
 
-unsafe impl Sync for Storage {}
+unsafe impl<E: EvictionPolicy + 'static, M: MemPool<E>> Sync for Storage<E, M> {}
 
-impl Storage {
-    fn new(
-        db_id: DatabaseId,
-        c_id: ContainerId,
-        c_type: ContainerType,
-        bp: Arc<BufferPoolType>,
-    ) -> Self {
+impl<E: EvictionPolicy + 'static, M: MemPool<E>> Storage<E, M> {
+    fn new(db_id: DatabaseId, c_id: ContainerId, c_type: ContainerType, bp: Arc<M>) -> Self {
         match c_type {
             ContainerType::Hash => {
                 unimplemented!("Hash container not implemented")
             }
-            ContainerType::BTree => Storage::BTreeMap(Arc::new(FosterBtreeType::new(
+            ContainerType::BTree => Storage::BTreeMap(Arc::new(FosterBtree::<E, M>::new(
                 ContainerKey::new(db_id, c_id),
                 bp,
             ))),
+            ContainerType::AppendOnly => Storage::AppendOnly(Arc::new(
+                AppendOnlyStore::<E, M>::new(ContainerKey::new(db_id, c_id), bp),
+            )),
+        }
+    }
+
+    fn load(db_id: DatabaseId, c_id: ContainerId, c_type: ContainerType, bp: Arc<M>) -> Self {
+        match c_type {
+            ContainerType::Hash => {
+                unimplemented!("Hash container not implemented")
+            }
+            ContainerType::BTree => Storage::BTreeMap(Arc::new(FosterBtree::<E, M>::load(
+                ContainerKey::new(db_id, c_id),
+                bp,
+                0,
+            ))),
+            ContainerType::AppendOnly => Storage::AppendOnly(Arc::new(
+                AppendOnlyStore::<E, M>::load(ContainerKey::new(db_id, c_id), bp, 0),
+            )),
         }
     }
 
@@ -49,13 +63,14 @@ impl Storage {
     }
 
     fn insert(&self, key: Vec<u8>, val: Vec<u8>) -> Result<(), TxnStorageStatus> {
-        let result = match self {
+        match self {
             Storage::HashMap() => {
                 unimplemented!("Hash container not implemented")
             }
             Storage::BTreeMap(b) => b.insert(&key, &val)?,
+            Storage::AppendOnly(v) => v.append(&key, &val)?,
         };
-        Ok(result)
+        Ok(())
     }
 
     fn get(&self, key: &[u8]) -> Result<Vec<u8>, TxnStorageStatus> {
@@ -64,49 +79,74 @@ impl Storage {
                 unimplemented!("Hash container not implemented")
             }
             Storage::BTreeMap(b) => b.get(key)?,
+            Storage::AppendOnly(v) => {
+                unimplemented!("get by key is not supported for append only container")
+            }
         };
         Ok(result)
     }
 
     fn update(&self, key: &[u8], val: Vec<u8>) -> Result<(), TxnStorageStatus> {
-        let result = match self {
+        match self {
             Storage::HashMap() => {
                 unimplemented!("Hash container not implemented")
             }
             Storage::BTreeMap(b) => b.update(key, &val)?,
+            Storage::AppendOnly(v) => {
+                unimplemented!("update by key is not supported for append only container")
+            }
         };
-        Ok(result)
+        Ok(())
     }
 
     fn remove(&self, key: &[u8]) -> Result<(), TxnStorageStatus> {
-        let result = match self {
+        match self {
             Storage::HashMap() => {
                 unimplemented!("Hash container not implemented")
             }
             Storage::BTreeMap(b) => b.delete(key)?,
+            Storage::AppendOnly(v) => {
+                unimplemented!("remove by key is not supported for append only container")
+            }
         };
-        Ok(result)
+        Ok(())
     }
 
-    fn iter(self: &Arc<Self>) -> OnDiskIterator {
+    fn iter(self: &Arc<Self>) -> OnDiskIterator<E, M> {
         match self.as_ref() {
             Storage::HashMap() => {
                 unimplemented!("Hash container not implemented")
             }
             Storage::BTreeMap(b) => OnDiskIterator::btree(b.scan(&[], &[])),
+            Storage::AppendOnly(v) => OnDiskIterator::vec(v.scan()),
+        }
+    }
+
+    fn num_values(&self) -> usize {
+        match self {
+            Storage::HashMap() => {
+                unimplemented!("Hash container not implemented")
+            }
+            Storage::BTreeMap(b) => b.num_kvs(),
+            Storage::AppendOnly(v) => v.num_kvs(),
         }
     }
 }
 
-pub enum OnDiskIterator {
+pub enum OnDiskIterator<E: EvictionPolicy + 'static, M: MemPool<E>> {
     // Storage and the iterator
     Hash(),
-    BTree(Mutex<FosterBtreeRangeScanner<LRUEvictionPolicy, BufferPoolType>>),
+    BTree(Mutex<FosterBtreeRangeScanner<E, M>>),
+    Vec(Mutex<AppendOnlyStoreScanner<E, M>>),
 }
 
-impl OnDiskIterator {
-    fn btree(iter: FosterBtreeRangeScanner<LRUEvictionPolicy, BufferPoolType>) -> Self {
+impl<E: EvictionPolicy + 'static, M: MemPool<E>> OnDiskIterator<E, M> {
+    fn btree(iter: FosterBtreeRangeScanner<E, M>) -> Self {
         OnDiskIterator::BTree(Mutex::new(iter))
+    }
+
+    fn vec(iter: AppendOnlyStoreScanner<E, M>) -> Self {
+        OnDiskIterator::Vec(Mutex::new(iter))
     }
 
     fn next(&self) -> Option<(Vec<u8>, Vec<u8>)> {
@@ -115,11 +155,12 @@ impl OnDiskIterator {
                 unimplemented!("Hash container not implemented")
             }
             OnDiskIterator::BTree(iter) => iter.lock().unwrap().next(),
+            OnDiskIterator::Vec(iter) => iter.lock().unwrap().next(),
         }
     }
 }
 
-/// Assumptions of InMemStorage:
+/// Assumptions of OnDiskStorage:
 /// 1. Creation and deletion of the database is not thread-safe. This means, you can't create
 ///    or delete a database while other threads are accessing the database.
 /// 2. Creation and deletion of a container is thread-safe with respect to other containers.
@@ -139,52 +180,56 @@ impl OnDiskIterator {
 /// 5. The iterator next() must not be called using multiple threads. next() is not thread-safe with
 ///    respect to other next() calls of the same iterator. However, next() is thread-safe with respect
 ///    to other operations on the same container including next() of other iterators.
-pub struct OnDiskStorage {
-    bp_dir: PathBuf,
-    bp: Arc<BufferPoolType>,
-    db_created: UnsafeCell<bool>,
-    container_lock: RwLock<()>, // lock for container operations
-    containers: UnsafeCell<Vec<Arc<Storage>>>, // Storage is in a Box in order to prevent moving when resizing the vector
+/// 6. Only a single database can be created. If you try to open_db() will always return DatabaseId 0.
+pub struct OnDiskStorage<E: EvictionPolicy + 'static, M: MemPool<E>> {
+    bp: Arc<M>,
+    metadata: Arc<FosterBtree<E, M>>, // Database metadata. Stored in DatabaseId::MAX, ContainerId::0
+    container_lock: RwLock<()>,       // lock for container operations
+    containers: UnsafeCell<Vec<Arc<Storage<E, M>>>>, // Storage is in a Box in order to prevent moving when resizing the vector
+    phantom: std::marker::PhantomData<(E, M)>,
 }
 
-impl Drop for OnDiskStorage {
-    fn drop(&mut self) {
-        // Clear the directory including folders
-        std::fs::remove_dir_all(&self.bp_dir).unwrap();
-    }
-}
+unsafe impl<E: EvictionPolicy + 'static, M: MemPool<E>> Sync for OnDiskStorage<E, M> {}
+unsafe impl<E: EvictionPolicy + 'static, M: MemPool<E>> Send for OnDiskStorage<E, M> {}
 
-unsafe impl Sync for OnDiskStorage {}
-
-impl OnDiskStorage {
-    pub fn new(num_frames: usize) -> Self {
-        let ts_in_nanoseconds = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let dir_name = "BP_TEST_DIR_".to_string() + &ts_in_nanoseconds.to_string();
-        // Create dir if it doesn't exist
-        if !std::path::Path::new(&dir_name).exists() {
-            println!(
-                "Buffer pool directory ({}) does not exist. Creating the directory.",
-                dir_name
-            );
-            std::fs::create_dir(&dir_name).unwrap();
-        } else {
-            println!(
-                "Buffer pool directory ({}) already exists. Clearing the directory.",
-                dir_name
-            );
-            // Clear the directory including folders
-            std::fs::remove_dir_all(&dir_name).unwrap();
-            std::fs::create_dir(&dir_name).unwrap();
-        }
+impl<E: EvictionPolicy + 'static, M: MemPool<E>> OnDiskStorage<E, M> {
+    /// Assumes bp_directory is already created.
+    /// Any database created will be created in the bp_directory.
+    pub fn new(bp: &Arc<M>) -> Self {
         OnDiskStorage {
-            bp_dir: PathBuf::from(&dir_name),
-            bp: Arc::new(BufferPoolType::new(&dir_name, num_frames).unwrap()),
-            db_created: UnsafeCell::new(false),
+            bp: bp.clone(),
+            metadata: Arc::new(FosterBtree::<E, M>::new(
+                ContainerKey::new(DatabaseId::MAX, 0),
+                bp.clone(),
+            )),
             container_lock: RwLock::new(()),
             containers: UnsafeCell::new(Vec::new()),
+            phantom: std::marker::PhantomData,
+        }
+    }
+
+    pub fn load(bp: &Arc<M>) -> Self {
+        let metadata = Arc::new(FosterBtree::<E, M>::load(
+            ContainerKey::new(DatabaseId::MAX, 0),
+            bp.clone(),
+            0,
+        ));
+        // Scans the metadata to get all the containers
+        let mut containers = Vec::new();
+        let iter = metadata.scan(&[], &[]);
+        for (k, v) in iter {
+            let c_id = ContainerId::from_be_bytes(k.try_into().unwrap());
+            let c_type = ContainerType::from_bytes(&v);
+            let storage = Storage::load(0, c_id, c_type, bp.clone());
+            containers.push(Arc::new(storage));
+        }
+
+        OnDiskStorage {
+            bp: bp.clone(),
+            metadata,
+            container_lock: RwLock::new(()),
+            containers: UnsafeCell::new(containers),
+            phantom: std::marker::PhantomData,
         }
     }
 }
@@ -203,21 +248,12 @@ impl OnDiskDummyTxnHandle {
     }
 }
 
-impl TxnStorageTrait for OnDiskStorage {
+impl<E: EvictionPolicy + 'static, M: MemPool<E>> TxnStorageTrait for OnDiskStorage<E, M> {
     type TxnHandle = OnDiskDummyTxnHandle;
-    type IteratorHandle = OnDiskIterator;
+    type IteratorHandle = OnDiskIterator<E, M>;
 
     // Open connection with the db
     fn open_db(&self, _options: DBOptions) -> Result<DatabaseId, TxnStorageStatus> {
-        let guard = unsafe { &mut *self.db_created.get() };
-        if *guard {
-            return Err(TxnStorageStatus::DBExists);
-        }
-        let db_id = 0;
-        // Create db folder
-        let db_path = self.bp_dir.join(db_id.to_string());
-        std::fs::create_dir(&db_path).unwrap();
-        *guard = true;
         Ok(0)
     }
 
@@ -228,12 +264,7 @@ impl TxnStorageTrait for OnDiskStorage {
     }
 
     // Delete the db
-    fn delete_db(&self, db_id: &DatabaseId) -> Result<(), TxnStorageStatus> {
-        if *db_id != 0 {
-            return Err(TxnStorageStatus::DBNotFound);
-        }
-        let guard = unsafe { &mut *self.db_created.get() };
-        *guard = false;
+    fn delete_db(&self, _db_id: &DatabaseId) -> Result<(), TxnStorageStatus> {
         // Clear all the containers
         let containers = unsafe { &mut *self.containers.get() };
         containers.clear();
@@ -259,8 +290,14 @@ impl TxnStorageTrait for OnDiskStorage {
             options.get_type(),
             self.bp.clone(),
         ));
+        self.metadata
+            .insert(
+                &(c_id as ContainerId).to_be_bytes(),
+                &options.get_type().to_bytes(),
+            )
+            .unwrap();
         containers.push(storage);
-        Ok((containers.len() - 1) as ContainerId)
+        Ok(c_id as ContainerId)
     }
 
     // Delete a container from the db
@@ -278,6 +315,7 @@ impl TxnStorageTrait for OnDiskStorage {
         }
         let _guard = self.container_lock.write().unwrap();
         let containers = unsafe { &mut *self.containers.get() };
+        self.metadata.delete(&c_id.to_be_bytes()).unwrap();
         containers[*c_id as usize].clear();
         Ok(())
     }
@@ -327,6 +365,16 @@ impl TxnStorageTrait for OnDiskStorage {
     // Drop a transaction handle
     fn drop_txn(&self, _txn: Self::TxnHandle) -> Result<(), TxnStorageStatus> {
         Ok(())
+    }
+
+    fn num_values(
+        &self,
+        _txn: &Self::TxnHandle,
+        c_id: &ContainerId,
+    ) -> Result<usize, TxnStorageStatus> {
+        let containers = unsafe { &*self.containers.get() };
+        let storage = containers[*c_id as usize].as_ref();
+        Ok(storage.num_values())
     }
 
     // Check if value exists
