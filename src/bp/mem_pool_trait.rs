@@ -142,7 +142,7 @@ pub trait MemPool<T: EvictionPolicy>: Sync + Send {
     fn get_page_for_read(&self, key: PageFrameKey) -> Result<FrameReadGuard<T>, MemPoolStatus>;
 
     /// Return the runtime statistics of the memory pool.
-    fn stats(&self) -> String;
+    fn stats(&self) -> (usize, usize, usize);
 
     /// Reset the runtime statistics of the memory pool.
     fn reset_stats(&self);

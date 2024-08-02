@@ -5,7 +5,7 @@ edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [features]
-default = ["32k_page"]
+default = ["256k_page"]
 log_trace = []
 log_debug = []
 log_info = []
