@@ -7,7 +7,8 @@ fn main() {
     get_params.ops_ratio = "0:0:0:1".to_string(); // Only gets are done in this snippet
     println!("{}", insert_params);
     let bp_size = insert_params.bp_size;
-    let phm = gen_paged_hash_map_on_disk(bp_size);
+    let bucket_num = insert_params.bucket_num;
+    let phm = gen_paged_hash_map_on_disk(bp_size, bucket_num);
     let kvs = RandomKVs::new(
         insert_params.unique_keys,
         false,

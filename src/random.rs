@@ -233,3 +233,57 @@ impl Index<usize> for RandomVals {
         &self.vals[index]
     }
 }
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct SkewedRandomKVs {
+    kvs: Vec<(Vec<u8>, Vec<u8>)>,
+}
+
+impl SkewedRandomKVs {
+    pub fn new(
+        zipf_skew: f64, // 0: uniform, higer values: more skewed
+        sorted: bool,
+        partitions: usize,
+        num_keys: usize,
+        key_size: usize,
+        val_min_size: usize,
+        val_max_size: usize,
+    ) -> Vec<RandomKVs> {
+        let mut rng = rand::thread_rng();
+        let zipf = zipf::ZipfDistribution::new(num_keys, zipf_skew).unwrap();
+        let keys = (0..num_keys)
+            .map(|_| zipf.sample(&mut rng))
+            .collect::<Vec<usize>>();
+
+        fn to_bytes(key: usize, key_size: usize) -> Vec<u8> {
+            // Pad the key with 0s to make it key_size bytes long.
+            let mut key_vec = vec![0u8; key_size];
+            let bytes = key.to_be_bytes().to_vec();
+            key_vec[..bytes.len()].copy_from_slice(&bytes);
+            key_vec
+        }
+
+        let mut kvs = Vec::with_capacity(partitions);
+        for i in 0..partitions {
+            let start = i * num_keys / partitions;
+            let end = if i == partitions - 1 {
+                num_keys
+            } else {
+                (i + 1) * num_keys / partitions
+            };
+            let mut kvs_i = Vec::with_capacity(end - start);
+            for key in &keys[start..end] {
+                kvs_i.push((
+                    to_bytes(*key, key_size),
+                    gen_random_byte_vec(val_min_size, val_max_size),
+                ));
+            }
+            if sorted {
+                kvs_i.sort_by(|(k1, _), (k2, _)| k1.cmp(k2));
+            }
+            kvs.push(RandomKVs { kvs: kvs_i });
+        }
+
+        kvs
+    }
+}

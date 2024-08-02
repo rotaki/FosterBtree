@@ -6,7 +6,8 @@ fn main() {
     println!("{}", bench_params);
 
     let bp_size = bench_params.bp_size;
-    let phm = gen_paged_hash_map_on_disk(bp_size);
+    let bucket_num = bench_params.bucket_num;
+    let phm = gen_paged_hash_map_on_disk(bp_size, bucket_num);
 
     let kvs = RandomKVs::new(
         bench_params.unique_keys,
