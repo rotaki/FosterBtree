@@ -494,7 +494,7 @@ impl ShortKeyPage for Page {
 
         match f(low) {
             Ordering::Equal => {
-                while f(low - 1) == Ordering::Equal {
+                while low > 0 && f(low - 1) == Ordering::Equal {
                     low -= 1;
                 }
                 return (true, low);
@@ -505,7 +505,7 @@ impl ShortKeyPage for Page {
 
         match f(high) {
             Ordering::Equal => {
-                while f(high - 1) == Ordering::Equal {
+                while high > 0 && f(high - 1) == Ordering::Equal {
                     high -= 1;
                 }
                 return (true, high);
@@ -519,7 +519,7 @@ impl ShortKeyPage for Page {
             let mut mid = low + (high - low) / 2;
             match f(mid) {
                 Ordering::Equal => {
-                    while f(mid - 1) == Ordering::Equal {
+                    while mid > 0 && f(mid - 1) == Ordering::Equal {
                         mid -= 1;
                     }
                     return (true, mid);

@@ -4,6 +4,7 @@ use crate::{logger::log, page};
 use core::panic;
 use std::{
     cell::UnsafeCell,
+    cmp::Ordering,
     collections::hash_map::DefaultHasher,
     hash::{Hash, Hasher},
     marker::PhantomData,
@@ -104,7 +105,7 @@ pub struct PagedHashMap<E: EvictionPolicy, T: MemPool<E>> {
 
     pointer_swizzling_mode: PointerSwizzlingMode, // mode for pointer swizzling
     frame_buckets: Option<FrameBuckets>,          // frame buckets for different modes
-    pub bucket_head: Vec<PageId>,                 // bucket head pages
+    pub bucket_head: Vec<AtomicU32>,              // bucket head pages
 
     // bucket_metas: Vec<BucketMeta>, // first_frame_id, last_page_id, last_frame_id, bloomfilter // no need to be page
     phantom: PhantomData<E>,
@@ -188,8 +189,10 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
                 _ => None,
             };
 
-            let mut bucket_head: Vec<PageId> = vec![0; bucket_num + 1];
-            bucket_head[0] = root_page.get_id();
+            let mut bucket_head: Vec<AtomicU32> =
+                (0..bucket_num + 1).map(|_| AtomicU32::new(0)).collect();
+            // bucket_head[0] = root_page.get_id();
+            bucket_head[0].store(root_page.get_id(), std::sync::atomic::Ordering::Release);
 
             // SET HASH BUCKET PAGES
             for i in 1..=bucket_num {
@@ -211,13 +214,8 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
                     }
                 }
                 <Page as ShortKeyPage>::init(&mut new_page);
-                bucket_head[i] = new_page.get_id();
-                // assert_eq!(
-                //     new_page.get_id() as usize,
-                //     i,
-                //     "Initial new page id should be {}",
-                //     i
-                // );
+                // bucket_head[i] = new_page.get_id();
+                bucket_head[i].store(new_page.get_id(), std::sync::atomic::Ordering::Release);
             }
 
             PagedHashMap {
@@ -255,7 +253,9 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
 
         // Regular insert logic for small key-value pairs
         let hashed_key = self.hash(&key);
-        let first_page_id = self.bucket_head[hashed_key as usize];
+        // let first_page_id = self.bucket_head[hashed_key as usize];
+        let first_page_id =
+            self.bucket_head[hashed_key as usize].load(std::sync::atomic::Ordering::Acquire);
         let expect_frame_id = if let Some(ref frame_buckets) = self.frame_buckets {
             frame_buckets.load(hashed_key as usize)
         } else {
@@ -296,6 +296,64 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
         }
     }
 
+    /// Insert a new key-value pair into the index.
+    /// If the key already exists, it will return an error.
+    pub fn append<K: AsRef<[u8]> + Hash>(&self, key: K, val: K) -> Result<(), PagedHashMapError> {
+        let key_ref = key.as_ref();
+        let val_ref = val.as_ref();
+        let required_space = key_ref.len() + val_ref.len() + 3 * size_of::<u32>();
+
+        if required_space > AVAILABLE_PAGE_SIZE - SHORT_KEY_PAGE_HEADER_SIZE {
+            // Handle large value insertion using overflow pages
+            return self.insert_large_value(key_ref, val_ref);
+        }
+
+        let hashed_key = self.hash(&key);
+        // let first_page_id = self.bucket_head[hashed_key as usize];
+        let first_page_id =
+            self.bucket_head[hashed_key as usize].load(std::sync::atomic::Ordering::Acquire);
+        let expect_frame_id = if let Some(ref frame_buckets) = self.frame_buckets {
+            frame_buckets.load(hashed_key as usize)
+        } else {
+            u32::MAX
+        };
+        let page_key = PageFrameKey::new_with_frame_id(self.c_key, first_page_id, expect_frame_id);
+        if self.pointer_swizzling_mode != PointerSwizzlingMode::None
+            && expect_frame_id != page_key.frame_id()
+        {
+            if let Some(ref frame_buckets) = self.frame_buckets {
+                frame_buckets.store(hashed_key as usize, page_key.frame_id());
+            }
+        }
+        let mut head_page = self.write_page(page_key);
+
+        match <Page as ShortKeyPage>::append(&mut head_page, key_ref, val_ref) {
+            Ok(_) => Ok(()),
+            Err(ShortKeyPageError::KeyExists) => {
+                panic!("Append sould not return KeyExists")
+            }
+            Err(ShortKeyPageError::OutOfSpace) => {
+                let mut new_page = self.bp.create_new_page_for_write(self.c_key).unwrap();
+                new_page.init();
+                <Page as ShortKeyPage>::set_next_page_id(&mut new_page, head_page.get_id());
+                <Page as ShortKeyPage>::set_next_frame_id(&mut new_page, head_page.frame_id());
+                // self.bucket_head[hashed_key as usize] = new_page.get_id();
+                self.bucket_head[hashed_key as usize]
+                    .store(new_page.get_id(), std::sync::atomic::Ordering::Release);
+                if self.pointer_swizzling_mode != PointerSwizzlingMode::None {
+                    if let Some(ref frame_buckets) = self.frame_buckets {
+                        frame_buckets.store(hashed_key as usize, new_page.frame_id());
+                    }
+                }
+                match <Page as ShortKeyPage>::append(&mut new_page, key_ref, val_ref) {
+                    Ok(_) => Ok(()),
+                    Err(err) => panic!("Inserting into a new page should succeed: {:?}", err),
+                }
+            }
+            Err(err) => Err(PagedHashMapError::Other(format!("Insert error: {:?}", err))),
+        }
+    }
+
     pub fn insert_large_value<K: AsRef<[u8]> + Hash>(
         &self,
         key: K,
@@ -306,7 +364,9 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
 
         // Hash the key to find the correct bucket
         let hashed_key = self.hash(&key);
-        let first_page_id = self.bucket_head[hashed_key as usize];
+        // let first_page_id = self.bucket_head[hashed_key as usize];
+        let first_page_id =
+            self.bucket_head[hashed_key as usize].load(std::sync::atomic::Ordering::Acquire);
 
         let expect_frame_id = if let Some(ref frame_buckets) = self.frame_buckets {
             frame_buckets.load(hashed_key as usize)
@@ -403,7 +463,9 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
         inc_local_stat_get_count();
 
         let hashed_key = self.hash(&key);
-        let first_page_id = self.bucket_head[hashed_key as usize];
+        // let first_page_id = self.bucket_head[hashed_key as usize];
+        let first_page_id =
+            self.bucket_head[hashed_key as usize].load(std::sync::atomic::Ordering::Acquire);
         let expect_frame_id = if let Some(ref frame_buckets) = self.frame_buckets {
             frame_buckets.load(hashed_key as usize)
         } else {
@@ -495,6 +557,10 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
 
     pub fn scan(self: &Arc<Self>) -> PagedHashMapIter<E, T> {
         PagedHashMapIter::new(self.clone())
+    }
+
+    pub fn scan_all_with_key(self: &Arc<Self>, key: &[u8]) -> PagedHashMapIterWithKey<E, T> {
+        PagedHashMapIterWithKey::new(self.clone(), key)
     }
 
     fn insert_traverse_to_endofchain_for_write(
@@ -615,7 +681,9 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
         inc_local_stat_update_count();
 
         let hashed_key = self.hash(&key);
-        let first_page_id = self.bucket_head[hashed_key as usize];
+        // let first_page_id = self.bucket_head[hashed_key as usize];
+        let first_page_id =
+            self.bucket_head[hashed_key as usize].load(std::sync::atomic::Ordering::Acquire);
         let expect_frame_id = if let Some(ref frame_buckets) = self.frame_buckets {
             frame_buckets.load(hashed_key as usize)
         } else {
@@ -741,7 +809,9 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
         }
 
         let hashed_key = self.hash(&key);
-        let first_page_id = self.bucket_head[hashed_key as usize];
+        // let first_page_id = self.bucket_head[hashed_key as usize];
+        let first_page_id =
+            self.bucket_head[hashed_key as usize].load(std::sync::atomic::Ordering::Acquire);
 
         let expect_frame_id = if let Some(ref frame_buckets) = self.frame_buckets {
             frame_buckets.load(hashed_key as usize)
@@ -815,7 +885,9 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
         }
 
         let hashed_key: u32 = self.hash(&key);
-        let first_page_id = self.bucket_head[hashed_key as usize];
+        // let first_page_id = self.bucket_head[hashed_key as usize];
+        let first_page_id =
+            self.bucket_head[hashed_key as usize].load(std::sync::atomic::Ordering::Acquire);
 
         let expect_frame_id = if let Some(ref frame_buckets) = self.frame_buckets {
             frame_buckets.load(hashed_key as usize)
@@ -920,7 +992,9 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
         }
 
         let hashed_key: u32 = self.hash(&key);
-        let first_page_id = self.bucket_head[hashed_key as usize];
+        // let first_page_id = self.bucket_head[hashed_key as usize];
+        let first_page_id =
+            self.bucket_head[hashed_key as usize].load(std::sync::atomic::Ordering::Acquire);
 
         let expect_frame_id = if let Some(ref frame_buckets) = self.frame_buckets {
             frame_buckets.load(hashed_key as usize)
@@ -1016,7 +1090,9 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
         inc_local_stat_remove_count();
 
         let hashed_key: u32 = self.hash(&key);
-        let first_page_id = self.bucket_head[hashed_key as usize];
+        // let first_page_id = self.bucket_head[hashed_key as usize];
+        let first_page_id =
+            self.bucket_head[hashed_key as usize].load(std::sync::atomic::Ordering::Acquire);
         let expect_frame_id = if let Some(ref frame_buckets) = self.frame_buckets {
             frame_buckets.load(hashed_key as usize)
         } else {
@@ -1205,7 +1281,10 @@ impl<E: EvictionPolicy + 'static, T: MemPool<E>> PagedHashMapIter<E, T> {
 
     fn initialize(&mut self) {
         assert!(!self.initialized);
-        let page_key = PageFrameKey::new(self.map.c_key, self.map.bucket_head[1]);
+        let page_key = PageFrameKey::new(
+            self.map.c_key,
+            self.map.bucket_head[1].load(std::sync::atomic::Ordering::Acquire) as u32,
+        );
         let first_page = unsafe { std::mem::transmute(self.map.read_page(page_key)) };
         self.current_page = Some(first_page);
     }
@@ -1260,7 +1339,8 @@ impl<E: EvictionPolicy + 'static, T: MemPool<E>> Iterator for PagedHashMapIter<E
             if self.current_bucket <= self.map.bucket_num {
                 let next_page_key = PageFrameKey::new(
                     self.map.c_key,
-                    self.map.bucket_head[self.current_bucket] as u32,
+                    self.map.bucket_head[self.current_bucket]
+                        .load(std::sync::atomic::Ordering::Acquire) as u32,
                 );
                 let next_page = unsafe {
                     std::mem::transmute::<FrameReadGuard<'_, E>, FrameReadGuard<'static, E>>(
@@ -1314,7 +1394,7 @@ impl<E: EvictionPolicy + 'static, T: MemPool<E>> PagedHashMapIterWithKey<E, T> {
         };
         let page_key = PageFrameKey::new_with_frame_id(
             self.map.c_key,
-            self.map.bucket_head[hashed_key as usize],
+            self.map.bucket_head[hashed_key as usize].load(std::sync::atomic::Ordering::Acquire),
             expected_frame_id,
         );
         let first_page = unsafe { std::mem::transmute(self.map.read_page(page_key)) };
@@ -1323,7 +1403,7 @@ impl<E: EvictionPolicy + 'static, T: MemPool<E>> PagedHashMapIterWithKey<E, T> {
 }
 
 impl<E: EvictionPolicy + 'static, T: MemPool<E>> Iterator for PagedHashMapIterWithKey<E, T> {
-    type Item = Vec<u8>; // value
+    type Item = (Vec<u8>, Vec<u8>); // value
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.finished {
@@ -1357,7 +1437,7 @@ impl<E: EvictionPolicy + 'static, T: MemPool<E>> Iterator for PagedHashMapIterWi
                     let value = skv.vals.to_vec();
 
                     self.current_index += 1;
-                    return Some(value);
+                    return Some((key, value));
                 }
             }
 
