@@ -21,16 +21,15 @@ pub mod prelude {
     pub use super::HashFosterBtreeIter;
 }
 
-pub struct HashFosterBtree<E: EvictionPolicy, T: MemPool<E>> {
+pub struct HashFosterBtree<T: MemPool> {
     pub mem_pool: Arc<T>,
     c_key: ContainerKey,
     num_buckets: usize,
     meta_page_id: PageId, // Stores the number of buckets and all the page ids of the root of the foster btrees
-    buckets: Vec<Arc<FosterBtree<E, T>>>,
-    phantom: std::marker::PhantomData<E>,
+    buckets: Vec<Arc<FosterBtree<T>>>,
 }
 
-impl<E: EvictionPolicy, T: MemPool<E>> HashFosterBtree<E, T> {
+impl<T: MemPool> HashFosterBtree<T> {
     pub fn new(c_key: ContainerKey, mem_pool: Arc<T>, num_buckets: usize) -> Self {
         if num_buckets == 0 {
             panic!("Number of buckets cannot be 0");
@@ -69,7 +68,6 @@ impl<E: EvictionPolicy, T: MemPool<E>> HashFosterBtree<E, T> {
             num_buckets,
             meta_page_id,
             buckets,
-            phantom: std::marker::PhantomData,
         }
     }
 
@@ -102,7 +100,6 @@ impl<E: EvictionPolicy, T: MemPool<E>> HashFosterBtree<E, T> {
             num_buckets,
             meta_page_id,
             buckets,
-            phantom: std::marker::PhantomData,
         }
     }
 
@@ -110,7 +107,7 @@ impl<E: EvictionPolicy, T: MemPool<E>> HashFosterBtree<E, T> {
         self.buckets.iter().map(|b| b.num_kvs()).sum()
     }
 
-    fn get_bucket(&self, key: &[u8]) -> &Arc<FosterBtree<E, T>> {
+    fn get_bucket(&self, key: &[u8]) -> &Arc<FosterBtree<T>> {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         key.hash(&mut hasher);
         let idx = hasher.finish() % self.num_buckets as u64;
@@ -146,7 +143,7 @@ impl<E: EvictionPolicy, T: MemPool<E>> HashFosterBtree<E, T> {
         self.get_bucket(key).delete(key)
     }
 
-    pub fn scan(self: &Arc<Self>) -> HashFosterBtreeIter<E, T> {
+    pub fn scan(self: &Arc<Self>) -> HashFosterBtreeIter<T> {
         // Chain the iterators from all the buckets
         let mut scanners = Vec::with_capacity(self.num_buckets);
         for bucket in self.buckets.iter() {
@@ -156,13 +153,13 @@ impl<E: EvictionPolicy, T: MemPool<E>> HashFosterBtree<E, T> {
     }
 }
 
-pub struct HashFosterBtreeIter<E: EvictionPolicy + 'static, T: MemPool<E>> {
-    scanners: Vec<FosterBtreeRangeScanner<E, T>>,
+pub struct HashFosterBtreeIter<T: MemPool> {
+    scanners: Vec<FosterBtreeRangeScanner<T>>,
     current: usize,
 }
 
-impl<E: EvictionPolicy, T: MemPool<E>> HashFosterBtreeIter<E, T> {
-    pub fn new(scanners: Vec<FosterBtreeRangeScanner<E, T>>) -> Self {
+impl<T: MemPool> HashFosterBtreeIter<T> {
+    pub fn new(scanners: Vec<FosterBtreeRangeScanner<T>>) -> Self {
         Self {
             scanners,
             current: 0,
@@ -170,7 +167,7 @@ impl<E: EvictionPolicy, T: MemPool<E>> HashFosterBtreeIter<E, T> {
     }
 }
 
-impl<E: EvictionPolicy, T: MemPool<E>> Iterator for HashFosterBtreeIter<E, T> {
+impl<T: MemPool> Iterator for HashFosterBtreeIter<T> {
     type Item = (Vec<u8>, Vec<u8>);
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -186,15 +183,15 @@ impl<E: EvictionPolicy, T: MemPool<E>> Iterator for HashFosterBtreeIter<E, T> {
     }
 }
 
-pub struct HashFosterBtreeAppendOnly<E: EvictionPolicy, T: MemPool<E>> {
+pub struct HashFosterBtreeAppendOnly<T: MemPool> {
     pub mem_pool: Arc<T>,
     c_key: ContainerKey,
     num_buckets: usize,
     meta_page_id: PageId, // Stores the number of buckets and all the page ids of the root of the foster btrees
-    buckets: Vec<Arc<FosterBtreeAppendOnly<E, T>>>,
+    buckets: Vec<Arc<FosterBtreeAppendOnly<T>>>,
 }
 
-impl<E: EvictionPolicy, T: MemPool<E>> HashFosterBtreeAppendOnly<E, T> {
+impl<T: MemPool> HashFosterBtreeAppendOnly<T> {
     pub fn new(c_key: ContainerKey, mem_pool: Arc<T>, num_buckets: usize) -> Self {
         if num_buckets == 0 {
             panic!("Number of buckets cannot be 0");
@@ -272,7 +269,7 @@ impl<E: EvictionPolicy, T: MemPool<E>> HashFosterBtreeAppendOnly<E, T> {
         self.buckets.iter().map(|b| b.num_kvs()).sum()
     }
 
-    fn get_bucket(&self, key: &[u8]) -> &Arc<FosterBtreeAppendOnly<E, T>> {
+    fn get_bucket(&self, key: &[u8]) -> &Arc<FosterBtreeAppendOnly<T>> {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         key.hash(&mut hasher);
         let idx = hasher.finish() % self.num_buckets as u64;
@@ -283,7 +280,7 @@ impl<E: EvictionPolicy, T: MemPool<E>> HashFosterBtreeAppendOnly<E, T> {
         self.get_bucket(key).append(key, value)
     }
 
-    pub fn scan_key(self: &Arc<Self>, key: &[u8]) -> FosterBtreeAppendOnlyRangeScanner<E, T> {
+    pub fn scan_key(self: &Arc<Self>, key: &[u8]) -> FosterBtreeAppendOnlyRangeScanner<T> {
         // Find the bucket with the prefix
         self.get_bucket(key).scan_key(&key)
     }
@@ -313,9 +310,7 @@ mod tests {
 
     use rstest::rstest;
 
-    fn setup_hashbtree_empty<E: EvictionPolicy, T: MemPool<E>>(
-        bp: Arc<T>,
-    ) -> HashFosterBtree<E, T> {
+    fn setup_hashbtree_empty<T: MemPool>(bp: Arc<T>) -> HashFosterBtree<T> {
         let (db_id, c_id) = (0, 0);
         let c_key = ContainerKey::new(db_id, c_id);
 
@@ -325,7 +320,7 @@ mod tests {
     #[rstest]
     #[case::bp(get_test_bp(20))]
     #[case::in_mem(get_in_mem_pool())]
-    fn test_random_insertion<E: EvictionPolicy, T: MemPool<E>>(#[case] bp: Arc<T>) {
+    fn test_random_insertion<T: MemPool>(#[case] bp: Arc<T>) {
         let btree = setup_hashbtree_empty(bp.clone());
         // Insert 1024 bytes
         let val = vec![3_u8; 1024];
@@ -352,7 +347,7 @@ mod tests {
     #[rstest]
     #[case::bp(get_test_bp(20))]
     #[case::in_mem(get_in_mem_pool())]
-    fn test_random_updates<E: EvictionPolicy, T: MemPool<E>>(#[case] bp: Arc<T>) {
+    fn test_random_updates<T: MemPool>(#[case] bp: Arc<T>) {
         let btree = setup_hashbtree_empty(bp.clone());
         // Insert 1024 bytes
         let val = vec![3_u8; 1024];
@@ -406,7 +401,7 @@ mod tests {
     #[rstest]
     #[case::bp(get_test_bp(20))]
     #[case::in_mem(get_in_mem_pool())]
-    fn test_random_deletion<E: EvictionPolicy, T: MemPool<E>>(#[case] bp: Arc<T>) {
+    fn test_random_deletion<T: MemPool>(#[case] bp: Arc<T>) {
         let btree = setup_hashbtree_empty(bp.clone());
         // Insert 1024 bytes
         let val = vec![3_u8; 1024];
@@ -441,7 +436,7 @@ mod tests {
     #[rstest]
     #[case::bp(get_test_bp(20))]
     #[case::in_mem(get_in_mem_pool())]
-    fn test_random_upserts<E: EvictionPolicy, T: MemPool<E>>(#[case] bp: Arc<T>) {
+    fn test_random_upserts<T: MemPool>(#[case] bp: Arc<T>) {
         let btree = setup_hashbtree_empty(bp.clone());
         // Insert 1024 bytes
         let val = vec![3_u8; 1024];
@@ -504,7 +499,7 @@ mod tests {
     #[rstest]
     #[case::bp(get_test_bp(3))]
     #[case::in_mem(get_in_mem_pool())]
-    fn test_upsert_with_merge<E: EvictionPolicy, T: MemPool<E>>(#[case] bp: Arc<T>) {
+    fn test_upsert_with_merge<T: MemPool>(#[case] bp: Arc<T>) {
         let btree = setup_hashbtree_empty(bp.clone());
         // Insert 1024 bytes
         let key = to_bytes(0);
@@ -532,7 +527,7 @@ mod tests {
     #[rstest]
     #[case::bp(get_test_bp(20))]
     #[case::in_mem(get_in_mem_pool())]
-    fn test_scan<E: EvictionPolicy + 'static, T: MemPool<E>>(#[case] bp: Arc<T>) {
+    fn test_scan<T: MemPool>(#[case] bp: Arc<T>) {
         let btree = Arc::new(setup_hashbtree_empty(bp.clone()));
         // Insert 1024 bytes
         let val = vec![3_u8; 1024];
@@ -563,7 +558,7 @@ mod tests {
     #[rstest]
     #[case::bp(get_test_bp(100))]
     #[case::in_mem(get_in_mem_pool())]
-    fn test_insertion_stress<E: EvictionPolicy + 'static, T: MemPool<E>>(#[case] bp: Arc<T>) {
+    fn test_insertion_stress<T: MemPool>(#[case] bp: Arc<T>) {
         let num_keys = 10000;
         let key_size = 8;
         let val_min_size = 50;
@@ -642,7 +637,7 @@ mod tests {
     #[case::bp(get_test_bp(100))]
     #[case::in_mem(get_in_mem_pool())]
     #[ignore]
-    fn replay_stress<E: EvictionPolicy, T: MemPool<E>>(#[case] bp: Arc<T>) {
+    fn replay_stress<T: MemPool>(#[case] bp: Arc<T>) {
         let btree = setup_hashbtree_empty(bp.clone());
 
         let kvs_file = "kvs.dat";
@@ -691,7 +686,7 @@ mod tests {
     #[rstest]
     #[case::bp(get_test_bp(100))]
     #[case::in_mem(get_in_mem_pool())]
-    fn test_parallel_insertion<E: EvictionPolicy, T: MemPool<E>>(#[case] bp: Arc<T>) {
+    fn test_parallel_insertion<T: MemPool>(#[case] bp: Arc<T>) {
         // init_test_logger();
         let btree = Arc::new(setup_hashbtree_empty(bp.clone()));
         let num_keys = 5000;
@@ -767,7 +762,7 @@ mod tests {
         // Create a store and insert some values.
         // Drop the store and buffer pool
         {
-            let bp = Arc::new(BufferPool::<LRUEvictionPolicy>::new(&temp_dir, 20, false).unwrap());
+            let bp = Arc::new(BufferPool::new(&temp_dir, 20, false).unwrap());
 
             let c_key = ContainerKey::new(0, 0);
             let store = Arc::new(HashFosterBtree::new(c_key, bp.clone(), 10));
@@ -781,7 +776,7 @@ mod tests {
         }
 
         {
-            let bp = Arc::new(BufferPool::<LRUEvictionPolicy>::new(&temp_dir, 10, false).unwrap());
+            let bp = Arc::new(BufferPool::new(&temp_dir, 10, false).unwrap());
 
             let c_key = ContainerKey::new(0, 0);
             let store = Arc::new(HashFosterBtree::load(c_key, bp.clone(), 0));

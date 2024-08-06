@@ -121,7 +121,7 @@ impl std::fmt::Display for MemPoolStatus {
     }
 }
 
-pub trait MemPool<T: EvictionPolicy>: Sync + Send {
+pub trait MemPool: Sync + Send {
     /// Create a new page for write.
     /// This function will allocate a new page in memory and return a FrameWriteGuard.
     /// In general, this function does not need to write the page to disk.
@@ -129,17 +129,17 @@ pub trait MemPool<T: EvictionPolicy>: Sync + Send {
     fn create_new_page_for_write(
         &self,
         c_key: ContainerKey,
-    ) -> Result<FrameWriteGuard<T>, MemPoolStatus>;
+    ) -> Result<FrameWriteGuard, MemPoolStatus>;
 
     /// Get a page for write.
     /// This function will return a FrameWriteGuard.
     /// This function assumes that a page is already created and either in memory or on disk.
-    fn get_page_for_write(&self, key: PageFrameKey) -> Result<FrameWriteGuard<T>, MemPoolStatus>;
+    fn get_page_for_write(&self, key: PageFrameKey) -> Result<FrameWriteGuard, MemPoolStatus>;
 
     /// Get a page for read.
     /// This function will return a FrameReadGuard.
     /// This function assumes that a page is already created and either in memory or on disk.
-    fn get_page_for_read(&self, key: PageFrameKey) -> Result<FrameReadGuard<T>, MemPoolStatus>;
+    fn get_page_for_read(&self, key: PageFrameKey) -> Result<FrameReadGuard, MemPoolStatus>;
 
     /// Return the runtime statistics of the memory pool.
     fn stats(&self) -> (usize, usize, usize);

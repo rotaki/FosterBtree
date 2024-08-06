@@ -23,15 +23,14 @@ use crate::page::AVAILABLE_PAGE_SIZE;
 // const DEFAULT_BUCKET_NUM: usize = 1024;
 const DEFAULT_BUCKET_NUM: usize = 1024 * 4;
 
-pub struct PagedHashMap<E: EvictionPolicy, T: MemPool<E>> {
+pub struct PagedHashMap<T: MemPool> {
     // func: Box<dyn Fn(&[u8], &[u8]) -> Vec<u8>>, // func(old_value, new_value) -> new_value
     pub bp: Arc<T>,
     c_key: ContainerKey,
 
-    pub bucket_num: usize,         // number of hash header pages
+    pub bucket_num: usize, // number of hash header pages
     frame_buckets: Vec<AtomicU32>, // vec of frame_id for each bucket
-    // bucket_metas: Vec<BucketMeta>, // first_frame_id, last_page_id, last_frame_id, bloomfilter // no need to be page
-    phantom: PhantomData<E>,
+                           // bucket_metas: Vec<BucketMeta>, // first_frame_id, last_page_id, last_frame_id, bloomfilter // no need to be page
 }
 
 #[derive(Debug, PartialEq)]
@@ -52,10 +51,7 @@ struct _BucketMeta {
 }
 
 /// Opportunistically try to fix the child page frame id
-fn fix_frame_id<'a, E: EvictionPolicy>(
-    this: FrameReadGuard<'a, E>,
-    new_frame_key: &PageFrameKey,
-) -> FrameReadGuard<'a, E> {
+fn fix_frame_id<'a>(this: FrameReadGuard<'a>, new_frame_key: &PageFrameKey) -> FrameReadGuard<'a> {
     match this.try_upgrade(true) {
         Ok(mut write_guard) => {
             write_guard.set_next_frame_id(new_frame_key.frame_id());
@@ -65,7 +61,7 @@ fn fix_frame_id<'a, E: EvictionPolicy>(
     }
 }
 
-impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
+impl<T: MemPool> PagedHashMap<T> {
     pub fn new(
         // func: Box<dyn Fn(&[u8], &[u8]) -> Vec<u8>>,
         bp: Arc<T>,
@@ -127,7 +123,6 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
                 c_key,
                 bucket_num: DEFAULT_BUCKET_NUM,
                 frame_buckets,
-                phantom: PhantomData,
             }
         }
     }
@@ -185,7 +180,7 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
         &self,
         page_key: PageFrameKey,
         key: &[u8],
-    ) -> Result<FrameWriteGuard<E>, PagedHashMapError> {
+    ) -> Result<FrameWriteGuard, PagedHashMapError> {
         let base = Duration::from_millis(1);
         let mut attempts = 0;
         loop {
@@ -212,7 +207,7 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
         &self,
         page_key: PageFrameKey,
         key: &[u8],
-    ) -> Result<FrameWriteGuard<E>, PagedHashMapError> {
+    ) -> Result<FrameWriteGuard, PagedHashMapError> {
         let mut current_page = self.read_page(page_key);
         if current_page.frame_id() != page_key.frame_id() {
             self.frame_buckets[page_key.p_key().page_id as usize].store(
@@ -249,7 +244,7 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
     }
 
     // read_page and update frame_buckets
-    fn read_page(&self, page_key: PageFrameKey) -> FrameReadGuard<E> {
+    fn read_page(&self, page_key: PageFrameKey) -> FrameReadGuard {
         loop {
             let page = self.bp.get_page_for_read(page_key);
             match page {
@@ -275,7 +270,7 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
         }
     }
 
-    fn write_page(&self, page_key: PageFrameKey) -> FrameWriteGuard<E> {
+    fn write_page(&self, page_key: PageFrameKey) -> FrameWriteGuard {
         loop {
             let page = self.bp.get_page_for_write(page_key);
             match page {
@@ -354,7 +349,7 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
         &self,
         page_key: PageFrameKey,
         key: &[u8],
-    ) -> Result<(FrameWriteGuard<E>, u16), PagedHashMapError> {
+    ) -> Result<(FrameWriteGuard, u16), PagedHashMapError> {
         let base = Duration::from_millis(1);
         let mut attempts = 0;
         loop {
@@ -381,7 +376,7 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
         &self,
         page_key: PageFrameKey,
         key: &[u8],
-    ) -> Result<(FrameWriteGuard<E>, u16), PagedHashMapError> {
+    ) -> Result<(FrameWriteGuard, u16), PagedHashMapError> {
         let mut current_page = self.read_page(page_key);
         loop {
             let (slot_id, _) = current_page.is_exist(key);
@@ -655,7 +650,7 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
         result
     }
 
-    pub fn iter(self: &Arc<Self>) -> PagedHashMapIter<E, T> {
+    pub fn iter(self: &Arc<Self>) -> PagedHashMapIter<T> {
         PagedHashMapIter::new(self.clone())
     }
 
@@ -670,20 +665,20 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
     }
 }
 
-unsafe impl<E: EvictionPolicy, T: MemPool<E>> Sync for PagedHashMap<E, T> {}
-unsafe impl<E: EvictionPolicy, T: MemPool<E>> Send for PagedHashMap<E, T> {}
+unsafe impl<T: MemPool> Sync for PagedHashMap<T> {}
+unsafe impl<T: MemPool> Send for PagedHashMap<T> {}
 
-pub struct PagedHashMapIter<E: EvictionPolicy + 'static, T: MemPool<E>> {
-    map: Arc<PagedHashMap<E, T>>,
-    current_page: Option<FrameReadGuard<'static, E>>,
+pub struct PagedHashMapIter<T: MemPool> {
+    map: Arc<PagedHashMap<T>>,
+    current_page: Option<FrameReadGuard<'static>>,
     current_index: usize,
     current_bucket: usize,
     initialized: bool,
     finished: bool,
 }
 
-impl<E: EvictionPolicy + 'static, T: MemPool<E>> PagedHashMapIter<E, T> {
-    fn new(map: Arc<PagedHashMap<E, T>>) -> Self {
+impl<T: MemPool> PagedHashMapIter<T> {
+    fn new(map: Arc<PagedHashMap<T>>) -> Self {
         PagedHashMapIter {
             map,
             current_page: None,
@@ -702,7 +697,7 @@ impl<E: EvictionPolicy + 'static, T: MemPool<E>> PagedHashMapIter<E, T> {
     }
 }
 
-impl<E: EvictionPolicy + 'static, T: MemPool<E>> Iterator for PagedHashMapIter<E, T> {
+impl<T: MemPool> Iterator for PagedHashMapIter<T> {
     type Item = (Vec<u8>, Vec<u8>); // Key and value types
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -737,7 +732,7 @@ impl<E: EvictionPolicy + 'static, T: MemPool<E>> Iterator for PagedHashMapIter<E
             if next_page_id != 0 {
                 let nex_page_key = PageFrameKey::new(self.map.c_key, next_page_id);
                 let next_page = unsafe {
-                    std::mem::transmute::<FrameReadGuard<'_, E>, FrameReadGuard<'static, E>>(
+                    std::mem::transmute::<FrameReadGuard, FrameReadGuard<'static>>(
                         self.map.read_page(nex_page_key),
                     )
                 };
@@ -751,7 +746,7 @@ impl<E: EvictionPolicy + 'static, T: MemPool<E>> Iterator for PagedHashMapIter<E
             if self.current_bucket <= self.map.bucket_num {
                 let next_page_key = PageFrameKey::new(self.map.c_key, self.current_bucket as u32);
                 let next_page = unsafe {
-                    std::mem::transmute::<FrameReadGuard<'_, E>, FrameReadGuard<'static, E>>(
+                    std::mem::transmute::<FrameReadGuard, FrameReadGuard<'static>>(
                         self.map.read_page(next_page_key),
                     )
                 };
@@ -1038,7 +1033,7 @@ mod tests {
     }
 
     // Initialize the PagedHashMap for testing
-    fn setup_paged_hash_map<E: EvictionPolicy, T: MemPool<E>>(bp: Arc<T>) -> PagedHashMap<E, T> {
+    fn setup_paged_hash_map<T: MemPool>(bp: Arc<T>) -> PagedHashMap<T> {
         let (db_id, c_id) = (0, 0);
         let c_key = ContainerKey::new(db_id, c_id);
         // let func = Box::new(simple_hash_func);

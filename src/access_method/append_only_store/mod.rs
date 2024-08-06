@@ -10,7 +10,7 @@ use std::{
 use crate::{
     bp::{FrameReadGuard, FrameWriteGuard, MemPoolStatus},
     page::{Page, PageId},
-    prelude::{ContainerKey, EvictionPolicy, MemPool, PageFrameKey},
+    prelude::{ContainerKey, MemPool, PageFrameKey},
 };
 
 pub mod prelude {
@@ -66,16 +66,15 @@ impl RuntimeStats {
 ///      |                                                        |
 ///      ----------------------------------------------------------
 ///
-pub struct AppendOnlyStore<E: EvictionPolicy, T: MemPool<E>> {
+pub struct AppendOnlyStore<T: MemPool> {
     pub c_key: ContainerKey,
     pub root_key: PageFrameKey,        // Fixed.
     pub last_key: Mutex<PageFrameKey>, // Variable
     pub mem_pool: Arc<T>,
     stats: RuntimeStats, // Stats are not durable
-    phantom: PhantomData<E>,
 }
 
-impl<E: EvictionPolicy, T: MemPool<E>> AppendOnlyStore<E, T> {
+impl<T: MemPool> AppendOnlyStore<T> {
     pub fn new(c_key: ContainerKey, mem_pool: Arc<T>) -> Self {
         // Root page contains the page id and frame id of the last page in the chain.
         let mut root_page = mem_pool.create_new_page_for_write(c_key).unwrap();
@@ -112,7 +111,6 @@ impl<E: EvictionPolicy, T: MemPool<E>> AppendOnlyStore<E, T> {
             last_key: Mutex::new(data_key),
             mem_pool: mem_pool.clone(),
             stats: RuntimeStats::new(),
-            phantom: PhantomData,
         }
     }
 
@@ -133,7 +131,6 @@ impl<E: EvictionPolicy, T: MemPool<E>> AppendOnlyStore<E, T> {
             last_key: Mutex::new(last_key),
             mem_pool: mem_pool.clone(),
             stats: RuntimeStats::new(),
-            phantom: PhantomData,
         }
     }
 
@@ -149,7 +146,7 @@ impl<E: EvictionPolicy, T: MemPool<E>> AppendOnlyStore<E, T> {
         storage
     }
 
-    fn get_page_for_write(&self, page_key: &PageFrameKey) -> FrameWriteGuard<E> {
+    fn get_page_for_write(&self, page_key: &PageFrameKey) -> FrameWriteGuard {
         let base = Duration::from_micros(10);
         let mut attempts = 0;
         loop {
@@ -220,7 +217,7 @@ impl<E: EvictionPolicy, T: MemPool<E>> AppendOnlyStore<E, T> {
         }
     }
 
-    pub fn scan(self: &Arc<Self>) -> AppendOnlyStoreScanner<E, T> {
+    pub fn scan(self: &Arc<Self>) -> AppendOnlyStoreScanner<T> {
         AppendOnlyStoreScanner {
             storage: self.clone(),
             initialized: false,
@@ -231,16 +228,16 @@ impl<E: EvictionPolicy, T: MemPool<E>> AppendOnlyStore<E, T> {
     }
 }
 
-pub struct AppendOnlyStoreScanner<E: EvictionPolicy + 'static, T: MemPool<E>> {
-    storage: Arc<AppendOnlyStore<E, T>>,
+pub struct AppendOnlyStoreScanner<T: MemPool> {
+    storage: Arc<AppendOnlyStore<T>>,
 
     initialized: bool,
     finished: bool,
-    current_page: Option<FrameReadGuard<'static, E>>,
+    current_page: Option<FrameReadGuard<'static>>,
     current_slot_id: u32,
 }
 
-impl<E: EvictionPolicy + 'static, T: MemPool<E>> AppendOnlyStoreScanner<E, T> {
+impl<T: MemPool> AppendOnlyStoreScanner<T> {
     pub fn initialize(&mut self) {
         let root_key = self.storage.root_key;
         let root_page = self.storage.mem_pool.get_page_for_read(root_key).unwrap();
@@ -249,15 +246,14 @@ impl<E: EvictionPolicy + 'static, T: MemPool<E>> AppendOnlyStoreScanner<E, T> {
         let data_key =
             PageFrameKey::new_with_frame_id(self.storage.c_key, data_page_id, data_frame_id);
         let data_page = self.storage.mem_pool.get_page_for_read(data_key).unwrap();
-        let data_page = unsafe {
-            std::mem::transmute::<FrameReadGuard<E>, FrameReadGuard<'static, E>>(data_page)
-        };
+        let data_page =
+            unsafe { std::mem::transmute::<FrameReadGuard, FrameReadGuard<'static>>(data_page) };
         self.current_page = Some(data_page);
         self.current_slot_id = 0;
     }
 }
 
-impl<E: EvictionPolicy + 'static, T: MemPool<E>> Iterator for AppendOnlyStoreScanner<E, T> {
+impl<T: MemPool> Iterator for AppendOnlyStoreScanner<T> {
     type Item = (Vec<u8>, Vec<u8>);
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -292,9 +288,7 @@ impl<E: EvictionPolicy + 'static, T: MemPool<E>> Iterator for AppendOnlyStoreSca
                         PageFrameKey::new_with_frame_id(self.storage.c_key, page_id, frame_id);
                     let next_page = self.storage.mem_pool.get_page_for_read(next_key).unwrap();
                     let next_page = unsafe {
-                        std::mem::transmute::<FrameReadGuard<E>, FrameReadGuard<'static, E>>(
-                            next_page,
-                        )
+                        std::mem::transmute::<FrameReadGuard, FrameReadGuard<'static>>(next_page)
                     };
                     // Fast path eviction
                     // self.storage
@@ -556,7 +550,7 @@ mod tests {
         // Create a store and insert some values.
         // Drop the store and buffer pool
         {
-            let bp = Arc::new(BufferPool::<LRUEvictionPolicy>::new(&temp_dir, 10, false).unwrap());
+            let bp = Arc::new(BufferPool::new(&temp_dir, 10, false).unwrap());
 
             let store = Arc::new(AppendOnlyStore::bulk_insert_create(
                 get_c_key(),
@@ -569,7 +563,7 @@ mod tests {
         }
 
         {
-            let bp = Arc::new(BufferPool::<LRUEvictionPolicy>::new(&temp_dir, 10, false).unwrap());
+            let bp = Arc::new(BufferPool::new(&temp_dir, 10, false).unwrap());
             let store = Arc::new(AppendOnlyStore::load(get_c_key(), bp.clone(), 0));
 
             let mut scanner = store.scan();

@@ -2,7 +2,7 @@
 pub mod inner {
     use wasm_bindgen::prelude::*;
 
-    use crate::bp::prelude::*;
+    use crate::bp::{prelude::*, InMemPool};
     use crate::fbt::foster_btree::{deserialize_page_id, FosterBtree, PageVisitor, MAX_BYTES_USED};
     use crate::fbt::FosterBtreePage;
     use crate::page::{Page, PageId};
@@ -12,7 +12,7 @@ pub mod inner {
 
     #[wasm_bindgen]
     pub struct FosterBtreeVisualizer {
-        bt: FosterBtree<DummyEvictionPolicy, InMemPool<DummyEvictionPolicy>>,
+        bt: FosterBtree<InMemPool>,
     }
 
     #[wasm_bindgen]

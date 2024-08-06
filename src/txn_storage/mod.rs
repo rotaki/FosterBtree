@@ -230,7 +230,7 @@ mod tests {
         let tempdir = tempfile::tempdir().unwrap();
 
         let (db_id, c_ids) = {
-            let bp1 = Arc::new(BufferPool::<LRUEvictionPolicy>::new(&tempdir, 10, false).unwrap());
+            let bp1 = Arc::new(BufferPool::new(&tempdir, 10, false).unwrap());
             let storage1 = OnDiskStorage::new(&bp1);
 
             let db_options = DBOptions::new("test_db");
@@ -272,7 +272,7 @@ mod tests {
             (db_id, (c_id1, c_id2, c_id3))
         };
 
-        let bp2 = Arc::new(BufferPool::<LRUEvictionPolicy>::new(tempdir, 10, false).unwrap());
+        let bp2 = Arc::new(BufferPool::new(tempdir, 10, false).unwrap());
         let storage2 = OnDiskStorage::load(&bp2);
 
         // Check if the values are still present after restarting the storage

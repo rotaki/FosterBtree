@@ -6,10 +6,7 @@ use crate::{
     access_method::{fbt::FosterBtree, hashindex::prelude::*},
     bp::{
         get_in_mem_pool, get_test_bp,
-        prelude::{
-            ContainerKey, DummyEvictionPolicy, EvictionPolicy, InMemPool, LRUEvictionPolicy,
-            MemPool,
-        },
+        prelude::{ContainerKey, InMemPool, MemPool},
         BufferPool,
     },
     random::{RandomKVs, RandomOp},
@@ -113,27 +110,21 @@ impl std::fmt::Display for BenchParams {
     }
 }
 
-pub fn gen_foster_btree_in_mem(
-) -> Arc<FosterBtree<DummyEvictionPolicy, InMemPool<DummyEvictionPolicy>>> {
+pub fn gen_foster_btree_in_mem() -> Arc<FosterBtree<InMemPool>> {
     let (db_id, c_id) = (0, 0);
     let c_key = ContainerKey::new(db_id, c_id);
     let btree = FosterBtree::new(c_key, get_in_mem_pool());
     Arc::new(btree)
 }
 
-pub fn gen_foster_btree_on_disk(
-    bp_size: usize,
-) -> Arc<FosterBtree<LRUEvictionPolicy, BufferPool<LRUEvictionPolicy>>> {
+pub fn gen_foster_btree_on_disk(bp_size: usize) -> Arc<FosterBtree<BufferPool>> {
     let (db_id, c_id) = (0, 0);
     let c_key = ContainerKey::new(db_id, c_id);
     let btree = FosterBtree::new(c_key, get_test_bp(bp_size));
     Arc::new(btree)
 }
 
-pub fn insert_into_foster_tree<E: EvictionPolicy, M: MemPool<E>>(
-    btree: Arc<FosterBtree<E, M>>,
-    kvs: &[RandomKVs],
-) {
+pub fn insert_into_foster_tree<M: MemPool>(btree: Arc<FosterBtree<M>>, kvs: &[RandomKVs]) {
     for partition in kvs.iter() {
         for (k, v) in partition.iter() {
             btree.insert(k, v).unwrap();
@@ -141,10 +132,7 @@ pub fn insert_into_foster_tree<E: EvictionPolicy, M: MemPool<E>>(
     }
 }
 
-pub fn insert_into_foster_tree_parallel<E: EvictionPolicy, M: MemPool<E>>(
-    btree: Arc<FosterBtree<E, M>>,
-    kvs: &[RandomKVs],
-) {
+pub fn insert_into_foster_tree_parallel<M: MemPool>(btree: Arc<FosterBtree<M>>, kvs: &[RandomKVs]) {
     // Scopeed threads
     thread::scope(|s| {
         for partition in kvs.iter() {
@@ -166,10 +154,10 @@ pub fn insert_into_btree_map(mut btree: BTreeMap<Vec<u8>, Vec<u8>>, kvs: &[Rando
     }
 }
 
-pub fn run_bench<E: EvictionPolicy, M: MemPool<E>>(
+pub fn run_bench<M: MemPool>(
     bench_params: BenchParams,
     kvs: Vec<RandomKVs>,
-    btree: Arc<FosterBtree<E, M>>,
+    btree: Arc<FosterBtree<M>>,
 ) {
     let ops_ratio = bench_params.parse_ops_ratio();
     thread::scope(|s| {
@@ -199,10 +187,10 @@ pub fn run_bench<E: EvictionPolicy, M: MemPool<E>>(
     })
 }
 
-pub fn run_bench_for_paged_hash_map<E: EvictionPolicy, M: MemPool<E>>(
+pub fn run_bench_for_paged_hash_map<M: MemPool>(
     bench_params: BenchParams,
     kvs: Vec<RandomKVs>,
-    phm: &Arc<PagedHashMap<E, M>>,
+    phm: &Arc<PagedHashMap<M>>,
 ) {
     // simple function to merge two values, not Box
     // let func = |old: &[u8], new: &[u8]| new.to_vec();
@@ -273,8 +261,7 @@ pub fn run_bench_for_rust_hash_map(
     })
 }
 
-pub fn gen_paged_hash_map_in_mem(
-) -> Arc<PagedHashMap<DummyEvictionPolicy, InMemPool<DummyEvictionPolicy>>> {
+pub fn gen_paged_hash_map_in_mem() -> Arc<PagedHashMap<InMemPool>> {
     // let func = Box::new(|old: &[u8], new: &[u8]| {
     //     old.iter().chain(new.iter()).copied().collect::<Vec<u8>>()
     // });
@@ -285,9 +272,7 @@ pub fn gen_paged_hash_map_in_mem(
     Arc::new(map)
 }
 
-pub fn gen_paged_hash_map_on_disk(
-    bp_size: usize,
-) -> Arc<PagedHashMap<LRUEvictionPolicy, BufferPool<LRUEvictionPolicy>>> {
+pub fn gen_paged_hash_map_on_disk(bp_size: usize) -> Arc<PagedHashMap<BufferPool>> {
     // let func = Box::new(|old: &[u8], new: &[u8]| {
     //     old.iter().chain(new.iter()).copied().collect::<Vec<u8>>()
     // });
@@ -303,10 +288,7 @@ pub fn gen_rust_hash_map() -> Arc<RustHashMap> {
     Arc::new(map)
 }
 
-pub fn insert_into_paged_hash_map<E: EvictionPolicy, M: MemPool<E>>(
-    phm: &Arc<PagedHashMap<E, M>>,
-    kvs: &[RandomKVs],
-) {
+pub fn insert_into_paged_hash_map<M: MemPool>(phm: &Arc<PagedHashMap<M>>, kvs: &[RandomKVs]) {
     // let func = |old: &[u8], new: &[u8]| new.to_vec();
     for partition in kvs.iter() {
         for (k, v) in partition.iter() {
@@ -324,10 +306,7 @@ pub fn insert_into_rust_hash_map(rhm: &Arc<RustHashMap>, kvs: &[RandomKVs]) {
     }
 }
 
-pub fn get_from_paged_hash_map<E: EvictionPolicy, M: MemPool<E>>(
-    phm: &Arc<PagedHashMap<E, M>>,
-    kvs: &[RandomKVs],
-) {
+pub fn get_from_paged_hash_map<M: MemPool>(phm: &Arc<PagedHashMap<M>>, kvs: &[RandomKVs]) {
     thread::scope(|s| {
         for partition in kvs.iter() {
             let phm = phm.clone();
@@ -341,10 +320,7 @@ pub fn get_from_paged_hash_map<E: EvictionPolicy, M: MemPool<E>>(
     });
 }
 
-pub fn get_from_paged_hash_map2<E: EvictionPolicy, M: MemPool<E>>(
-    phm: &Arc<PagedHashMap<E, M>>,
-    kvs: &[RandomKVs],
-) {
+pub fn get_from_paged_hash_map2<M: MemPool>(phm: &Arc<PagedHashMap<M>>, kvs: &[RandomKVs]) {
     for partition in kvs.iter() {
         for (k, v) in partition.iter() {
             let val = phm.get(k);

@@ -253,14 +253,14 @@ impl RuntimeStats {
     }
 }
 
-pub struct Frames<T: EvictionPolicy> {
+pub struct Frames {
     num_frames: usize,
     fast_path_victims: ConcurrentQueue<usize>,
     eviction_candidates: [usize; EVICTION_SCAN_DEPTH],
-    frames: Vec<BufferFrame<T>>, // The Vec<frames> is fixed size. If not fixed size, then Pin must be used to ensure that the frame does not move when the vector is resized.
+    frames: Vec<BufferFrame>, // The Vec<frames> is fixed size. If not fixed size, then Pin must be used to ensure that the frame does not move when the vector is resized.
 }
 
-impl<T: EvictionPolicy> Frames<T> {
+impl Frames {
     pub fn new(num_frames: usize) -> Self {
         let fast_path_victims = ConcurrentQueue::unbounded();
         for i in 0..num_frames {
@@ -291,7 +291,7 @@ impl<T: EvictionPolicy> Frames<T> {
     /// Choose a victim frame to be evicted.
     /// Return the index of the frame and whether the frame is dirty (requires writing back to disk).
     /// If all the frames are locked, then return None.
-    pub fn choose_victim(&mut self) -> Option<FrameWriteGuard<T>> {
+    pub fn choose_victim(&mut self) -> Option<FrameWriteGuard> {
         log_debug!("Choosing victim");
 
         // First, try the fast path victims.
@@ -326,7 +326,7 @@ impl<T: EvictionPolicy> Frames<T> {
             }
             log_debug!("Eviction candidates: {:?}", self.eviction_candidates);
 
-            let mut frame_with_min_score: Option<FrameWriteGuard<T>> = None;
+            let mut frame_with_min_score: Option<FrameWriteGuard> = None;
             for i in self.eviction_candidates.iter() {
                 if i == &usize::MAX {
                     // Skip the invalid index
@@ -363,35 +363,32 @@ impl<T: EvictionPolicy> Frames<T> {
     }
 }
 
-impl<T: EvictionPolicy> Deref for Frames<T> {
-    type Target = Vec<BufferFrame<T>>;
+impl Deref for Frames {
+    type Target = Vec<BufferFrame>;
 
     fn deref(&self) -> &Self::Target {
         &self.frames
     }
 }
 
-impl<T: EvictionPolicy> DerefMut for Frames<T> {
+impl DerefMut for Frames {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.frames
     }
 }
 
 /// Buffer pool that manages the buffer frames.
-pub struct BufferPool<T: EvictionPolicy> {
+pub struct BufferPool {
     remove_dir_on_drop: bool,
     path: PathBuf,
     latch: RwLatch,
-    frames: UnsafeCell<Frames<T>>,
+    frames: UnsafeCell<Frames>,
     id_to_index: UnsafeCell<HashMap<PageKey, usize>>, // (c_id, page_id) -> index
     container_to_file: UnsafeCell<HashMap<ContainerKey, FileManager>>,
     runtime_stats: RuntimeStats,
 }
 
-impl<T> Drop for BufferPool<T>
-where
-    T: EvictionPolicy,
-{
+impl Drop for BufferPool {
     fn drop(&mut self) {
         if self.remove_dir_on_drop {
             std::fs::remove_dir_all(&self.path).unwrap();
@@ -402,10 +399,7 @@ where
     }
 }
 
-impl<T> BufferPool<T>
-where
-    T: EvictionPolicy,
-{
+impl BufferPool {
     /// Create a new buffer pool with the given number of frames.
     /// Directory structure
     /// * bp_dir
@@ -523,7 +517,7 @@ where
         &self,
         key: PageKey,
         new_page: bool,
-    ) -> Result<FrameWriteGuard<T>, MemPoolStatus> {
+    ) -> Result<FrameWriteGuard, MemPoolStatus> {
         let frames = unsafe { &mut *self.frames.get() };
         let id_to_index = unsafe { &mut *self.id_to_index.get() };
         let container_to_file = unsafe { &mut *self.container_to_file.get() };
@@ -592,7 +586,7 @@ where
     pub fn create_new_page_for_write(
         &self,
         c_key: ContainerKey,
-    ) -> Result<FrameWriteGuard<T>, MemPoolStatus> {
+    ) -> Result<FrameWriteGuard, MemPoolStatus> {
         log_debug!("Page create: {}", c_key);
         self.runtime_stats.inc_new_page();
 
@@ -606,7 +600,7 @@ where
 
         let page_id = fm.fetch_add_page_id();
         let key = PageKey::new(c_key, page_id);
-        let res: Result<FrameWriteGuard<T>, MemPoolStatus> = self.handle_page_fault(key, true);
+        let res: Result<FrameWriteGuard, MemPoolStatus> = self.handle_page_fault(key, true);
         if let Ok(ref guard) = res {
             #[cfg(feature = "stat")]
             inc_local_bp_new_page();
@@ -621,10 +615,7 @@ where
         res
     }
 
-    pub fn get_page_for_write(
-        &self,
-        key: PageFrameKey,
-    ) -> Result<FrameWriteGuard<T>, MemPoolStatus> {
+    pub fn get_page_for_write(&self, key: PageFrameKey) -> Result<FrameWriteGuard, MemPoolStatus> {
         log_debug!("Page write: {}", key);
 
         {
@@ -734,7 +725,7 @@ where
         result
     }
 
-    pub fn get_page_for_read(&self, key: PageFrameKey) -> Result<FrameReadGuard<T>, MemPoolStatus> {
+    pub fn get_page_for_read(&self, key: PageFrameKey) -> Result<FrameReadGuard, MemPoolStatus> {
         log_debug!("Page read: {}", key);
 
         {
@@ -968,22 +959,19 @@ where
     }
 }
 
-impl<T> MemPool<T> for BufferPool<T>
-where
-    T: EvictionPolicy,
-{
+impl MemPool for BufferPool {
     fn create_new_page_for_write(
         &self,
         c_key: ContainerKey,
-    ) -> Result<FrameWriteGuard<T>, MemPoolStatus> {
+    ) -> Result<FrameWriteGuard, MemPoolStatus> {
         BufferPool::create_new_page_for_write(self, c_key)
     }
 
-    fn get_page_for_write(&self, key: PageFrameKey) -> Result<FrameWriteGuard<T>, MemPoolStatus> {
+    fn get_page_for_write(&self, key: PageFrameKey) -> Result<FrameWriteGuard, MemPoolStatus> {
         BufferPool::get_page_for_write(self, key)
     }
 
-    fn get_page_for_read(&self, key: PageFrameKey) -> Result<FrameReadGuard<T>, MemPoolStatus> {
+    fn get_page_for_read(&self, key: PageFrameKey) -> Result<FrameReadGuard, MemPoolStatus> {
         BufferPool::get_page_for_read(self, key)
     }
 
@@ -1009,7 +997,7 @@ where
 }
 
 #[cfg(test)]
-impl<T: EvictionPolicy> BufferPool<T> {
+impl BufferPool {
     pub fn run_checks(&self) {
         self.check_all_frames_unlatched();
         self.check_id_to_index();
@@ -1059,7 +1047,7 @@ impl<T: EvictionPolicy> BufferPool<T> {
     }
 }
 
-unsafe impl<T: EvictionPolicy> Sync for BufferPool<T> {}
+unsafe impl Sync for BufferPool {}
 
 #[cfg(test)]
 mod tests {
@@ -1078,7 +1066,7 @@ mod tests {
         let db_id = 0;
         {
             let num_frames = 10;
-            let bp = BufferPool::<LRUEvictionPolicy>::new(&temp_dir, num_frames, false).unwrap();
+            let bp = BufferPool::new(&temp_dir, num_frames, false).unwrap();
             let c_key = ContainerKey::new(db_id, 0);
             let frame = bp.create_new_page_for_write(c_key).unwrap();
             let key = frame.page_frame_key().unwrap();
@@ -1119,7 +1107,7 @@ mod tests {
         let db_id = 0;
         {
             let num_frames = 1;
-            let bp = BufferPool::<LRUEvictionPolicy>::new(&temp_dir, num_frames, false).unwrap();
+            let bp = BufferPool::new(&temp_dir, num_frames, false).unwrap();
             let c_key = ContainerKey::new(db_id, 0);
 
             let key1 = {
@@ -1154,7 +1142,7 @@ mod tests {
         {
             let mut keys = Vec::new();
             let num_frames = 1;
-            let bp = BufferPool::<LRUEvictionPolicy>::new(&temp_dir, num_frames, false).unwrap();
+            let bp = BufferPool::new(&temp_dir, num_frames, false).unwrap();
             let c_key = ContainerKey::new(db_id, 0);
 
             for i in 0..100 {
@@ -1177,7 +1165,7 @@ mod tests {
         let db_id = 0;
 
         let num_frames = 2;
-        let bp = BufferPool::<LRUEvictionPolicy>::new(&temp_dir, num_frames, false).unwrap();
+        let bp = BufferPool::new(&temp_dir, num_frames, false).unwrap();
         let c_key = ContainerKey::new(db_id, 0);
 
         let num_traversal = 100;
@@ -1216,7 +1204,7 @@ mod tests {
         let db_id = 0;
 
         let num_frames = 1;
-        let bp = BufferPool::<LRUEvictionPolicy>::new(&temp_dir, num_frames, false).unwrap();
+        let bp = BufferPool::new(&temp_dir, num_frames, false).unwrap();
         let c_key = ContainerKey::new(db_id, 0);
 
         let mut guard1 = bp.create_new_page_for_write(c_key).unwrap();
@@ -1239,7 +1227,7 @@ mod tests {
         let db_id = 0;
 
         let num_frames = 10;
-        let bp = BufferPool::<LRUEvictionPolicy>::new(&temp_dir, num_frames, false).unwrap();
+        let bp = BufferPool::new(&temp_dir, num_frames, false).unwrap();
         let c_key = ContainerKey::new(db_id, 0);
 
         let mut keys = Vec::new();
@@ -1271,7 +1259,7 @@ mod tests {
         let db_id = 0;
 
         let num_frames = 10;
-        let bp1 = BufferPool::<LRUEvictionPolicy>::new(&temp_dir, num_frames, false).unwrap();
+        let bp1 = BufferPool::new(&temp_dir, num_frames, false).unwrap();
         let c_key = ContainerKey::new(db_id, 0);
 
         let mut keys = Vec::new();
@@ -1291,7 +1279,7 @@ mod tests {
         drop(bp1); // Drop will also clear the buffer pool
 
         // Create a new buffer pool
-        let bp2 = BufferPool::<LRUEvictionPolicy>::new(&temp_dir, num_frames * 2, false).unwrap();
+        let bp2 = BufferPool::new(&temp_dir, num_frames * 2, false).unwrap();
 
         bp2.run_checks();
 
@@ -1310,7 +1298,7 @@ mod tests {
         let db_id = 0;
 
         let num_frames = 1;
-        let bp = BufferPool::<LRUEvictionPolicy>::new(&temp_dir, num_frames, false).unwrap();
+        let bp = BufferPool::new(&temp_dir, num_frames, false).unwrap();
         let c_key = ContainerKey::new(db_id, 0);
 
         let key_1 = {

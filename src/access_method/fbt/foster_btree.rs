@@ -3,7 +3,6 @@ use crate::log;
 
 use std::{
     collections::BTreeMap,
-    marker::PhantomData,
     sync::{
         atomic::{AtomicUsize, Ordering},
         Arc,
@@ -680,11 +679,11 @@ fn should_root_descend(this: &Page, child: &Page) -> bool {
 }
 
 /// Opportunistically try to fix the child page frame id
-fn fix_frame_id<'a, E: EvictionPolicy>(
-    this: FrameReadGuard<'a, E>,
+fn fix_frame_id<'a>(
+    this: FrameReadGuard<'a>,
     slot_id: u32,
     new_frame_key: &PageFrameKey,
-) -> FrameReadGuard<'a, E> {
+) -> FrameReadGuard<'a> {
     match this.try_upgrade(true) {
         Ok(mut write_guard) => {
             let val = InnerVal::new_with_frame_id(
@@ -706,10 +705,7 @@ fn fix_frame_id<'a, E: EvictionPolicy>(
 /// Split this page into two pages.
 /// The foster child will be the right page of this page after the split.
 /// Returns the foster key
-fn split_even<E: EvictionPolicy>(
-    this: &mut FrameWriteGuard<E>,
-    foster_child: &mut FrameWriteGuard<E>,
-) -> Vec<u8> {
+fn split_even(this: &mut FrameWriteGuard, foster_child: &mut FrameWriteGuard) -> Vec<u8> {
     #[cfg(feature = "stat")]
     inc_local_stat_success(OpType::Split);
 
@@ -765,10 +761,7 @@ fn split_even<E: EvictionPolicy>(
 
 /// Split this page into two pages with minimum moving slots
 /// from this to foster child.
-fn split_min_move<E: EvictionPolicy>(
-    this: &mut FrameWriteGuard<E>,
-    foster_child: &mut FrameWriteGuard<E>,
-) -> Vec<u8> {
+fn split_min_move(this: &mut FrameWriteGuard, foster_child: &mut FrameWriteGuard) -> Vec<u8> {
     #[cfg(feature = "stat")]
     inc_local_stat_success(OpType::Split);
 
@@ -811,9 +804,9 @@ fn split_min_move<E: EvictionPolicy>(
 /// Some assumptions:
 /// 1. Key must be in the range of the page.
 /// 2. The foster child is a unused page. It will be initialized in this function.
-fn split_insert<E: EvictionPolicy>(
-    this: &mut FrameWriteGuard<E>,
-    foster_child: &mut FrameWriteGuard<E>,
+fn split_insert(
+    this: &mut FrameWriteGuard,
+    foster_child: &mut FrameWriteGuard,
     key: &[u8],
     value: &[u8],
 ) -> bool {
@@ -856,10 +849,10 @@ fn split_insert<E: EvictionPolicy>(
 /// * Before: this: [[xxx], [zzz]] and we insert [yyyy]
 /// * After: this: [[xxx]], new_page1: [[yyyy]], new_page2: [[zzz]]
 /// Returns whether the new_page2 is used or not.
-fn split_insert_triple<E: EvictionPolicy>(
-    this: &mut FrameWriteGuard<E>,
-    new_page1: &mut FrameWriteGuard<E>,
-    new_page2: &mut FrameWriteGuard<E>,
+fn split_insert_triple(
+    this: &mut FrameWriteGuard,
+    new_page1: &mut FrameWriteGuard,
+    new_page2: &mut FrameWriteGuard,
     inserting_key: &[u8],
     inserting_value: &[u8],
 ) -> bool {
@@ -947,7 +940,7 @@ fn split_insert_triple<E: EvictionPolicy>(
 ///
 /// After:
 ///   this [k0, k2)
-fn merge<E: EvictionPolicy>(this: &mut FrameWriteGuard<E>, foster_child: &mut FrameWriteGuard<E>) {
+fn merge(this: &mut FrameWriteGuard, foster_child: &mut FrameWriteGuard) {
     #[cfg(feature = "stat")]
     inc_local_stat_success(OpType::Merge);
 
@@ -981,10 +974,7 @@ fn merge<E: EvictionPolicy>(this: &mut FrameWriteGuard<E>, foster_child: &mut Fr
 /// 2. The two pages are initialized. (have low fence and high fence)
 /// 3. Balancing does not move the foster key from one page to another.
 /// 4. Balancing does not move the low fence and high fence.
-fn balance<E: EvictionPolicy>(
-    this: &mut FrameWriteGuard<E>,
-    foster_child: &mut FrameWriteGuard<E>,
-) {
+fn balance(this: &mut FrameWriteGuard, foster_child: &mut FrameWriteGuard) {
     #[cfg(feature = "stat")]
     inc_local_stat_success(OpType::LoadBalance);
 
@@ -1115,7 +1105,7 @@ fn balance<E: EvictionPolicy>(
 ///    |                   |
 ///    v                   v
 ///   child0 [k0, k1)    child1 [k1, k2)
-fn adopt<E: EvictionPolicy>(parent: &mut FrameWriteGuard<E>, child: &mut FrameWriteGuard<E>) {
+fn adopt(parent: &mut FrameWriteGuard, child: &mut FrameWriteGuard) {
     #[cfg(feature = "stat")]
     inc_local_stat_success(OpType::Adopt);
 
@@ -1150,7 +1140,7 @@ fn adopt<E: EvictionPolicy>(parent: &mut FrameWriteGuard<E>, child: &mut FrameWr
 ///  |
 ///  v
 /// child1 [k0, k2) --> foster_child [k1, k2)
-fn anti_adopt<E: EvictionPolicy>(parent: &mut FrameWriteGuard<E>, child1: &mut FrameWriteGuard<E>) {
+fn anti_adopt(parent: &mut FrameWriteGuard, child1: &mut FrameWriteGuard) {
     #[cfg(feature = "stat")]
     inc_local_stat_success(OpType::AntiAdopt);
 
@@ -1191,7 +1181,7 @@ fn anti_adopt<E: EvictionPolicy>(parent: &mut FrameWriteGuard<E>, child1: &mut F
 ///
 /// After:
 /// root [-inf, +inf)
-fn descend_root<E: EvictionPolicy>(root: &mut FrameWriteGuard<E>, child: &mut FrameWriteGuard<E>) {
+fn descend_root(root: &mut FrameWriteGuard, child: &mut FrameWriteGuard) {
     #[cfg(feature = "stat")]
     inc_local_stat_success(OpType::DescendRoot);
 
@@ -1233,7 +1223,7 @@ fn descend_root<E: EvictionPolicy>(root: &mut FrameWriteGuard<E>, child: &mut Fr
 ///  |                   |
 ///  v                   v
 /// child [-inf, k0)    foster_child [k0, +inf)
-fn ascend_root<E: EvictionPolicy>(root: &mut FrameWriteGuard<E>, child: &mut FrameWriteGuard<E>) {
+fn ascend_root(root: &mut FrameWriteGuard, child: &mut FrameWriteGuard) {
     #[cfg(feature = "stat")]
     inc_local_stat_success(OpType::AscendRoot);
 
@@ -1343,17 +1333,16 @@ impl RuntimeStats {
     }
 }
 
-pub struct FosterBtree<E: EvictionPolicy, T: MemPool<E>> {
+pub struct FosterBtree<T: MemPool> {
     pub c_key: ContainerKey,
     pub root_key: PageFrameKey,
     pub mem_pool: Arc<T>,
     stats: RuntimeStats,
-    phantom: PhantomData<E>,
     unused_pages: ConcurrentQueue<PageId>,
     // pub wal_buffer: LogBufferRef,
 }
 
-impl<E: EvictionPolicy, T: MemPool<E>> FosterBtree<E, T> {
+impl<T: MemPool> FosterBtree<T> {
     pub fn new(c_key: ContainerKey, mem_pool: Arc<T>) -> Self {
         let root_key = {
             let mut root = mem_pool.create_new_page_for_write(c_key).unwrap();
@@ -1366,7 +1355,6 @@ impl<E: EvictionPolicy, T: MemPool<E>> FosterBtree<E, T> {
             root_key,
             mem_pool: mem_pool.clone(),
             stats: RuntimeStats::new(),
-            phantom: PhantomData,
             unused_pages: ConcurrentQueue::unbounded(),
         }
     }
@@ -1378,7 +1366,6 @@ impl<E: EvictionPolicy, T: MemPool<E>> FosterBtree<E, T> {
             root_key: PageFrameKey::new(c_key, root_page_id),
             mem_pool: mem_pool.clone(),
             stats: RuntimeStats::new(),
-            phantom: PhantomData,
             unused_pages: ConcurrentQueue::unbounded(),
         }
     }
@@ -1418,7 +1405,6 @@ impl<E: EvictionPolicy, T: MemPool<E>> FosterBtree<E, T> {
             root_key,
             mem_pool: mem_pool.clone(),
             stats,
-            phantom: PhantomData,
             unused_pages: ConcurrentQueue::unbounded(),
         }
     }
@@ -1428,7 +1414,7 @@ impl<E: EvictionPolicy, T: MemPool<E>> FosterBtree<E, T> {
     }
 
     /// Thread-unsafe traversal of the BTree
-    pub fn page_traverser(&self) -> FosterBTreePageTraversal<E, T> {
+    pub fn page_traverser(&self) -> FosterBTreePageTraversal<T> {
         FosterBTreePageTraversal::new(self)
     }
 
@@ -1466,7 +1452,7 @@ impl<E: EvictionPolicy, T: MemPool<E>> FosterBtree<E, T> {
     }
 
     /// System transaction that allocates a new page.
-    fn allocate_page(&self) -> FrameWriteGuard<E> {
+    fn allocate_page(&self) -> FrameWriteGuard {
         if let Ok(page_id) = self.unused_pages.pop() {
             let page = self
                 .mem_pool
@@ -1492,7 +1478,7 @@ impl<E: EvictionPolicy, T: MemPool<E>> FosterBtree<E, T> {
         new_page
     }
 
-    fn read_page(&self, page_key: PageFrameKey) -> FrameReadGuard<E> {
+    fn read_page(&self, page_key: PageFrameKey) -> FrameReadGuard {
         #[cfg(feature = "stat")]
         let mut attempts = 0;
         loop {
@@ -1527,7 +1513,7 @@ impl<E: EvictionPolicy, T: MemPool<E>> FosterBtree<E, T> {
 
     fn insert_at_slot_or_split(
         &self,
-        this: &mut FrameWriteGuard<E>,
+        this: &mut FrameWriteGuard,
         slot: u32,
         key: &[u8],
         value: &[u8],
@@ -1571,7 +1557,7 @@ impl<E: EvictionPolicy, T: MemPool<E>> FosterBtree<E, T> {
 
     fn update_at_slot_or_split(
         &self,
-        this: &mut FrameWriteGuard<E>,
+        this: &mut FrameWriteGuard,
         slot: u32,
         key: &[u8],
         value: &[u8],
@@ -1631,10 +1617,10 @@ impl<E: EvictionPolicy, T: MemPool<E>> FosterBtree<E, T> {
     fn modify_structure_if_needed_for_read<'a>(
         &self,
         is_foster_relationship: bool,
-        this: FrameReadGuard<'a, E>,
-        child: FrameReadGuard<'a, E>,
+        this: FrameReadGuard<'a>,
+        child: FrameReadGuard<'a>,
         op_byte: &mut OpByte,
-    ) -> (Option<OpType>, FrameReadGuard<'a, E>, FrameReadGuard<'a, E>) {
+    ) -> (Option<OpType>, FrameReadGuard<'a>, FrameReadGuard<'a>) {
         if should_split_this(&this, op_byte) {
             log_trace!("Should split this page: {}", this.get_id());
             #[cfg(feature = "stat")]
@@ -1696,8 +1682,8 @@ impl<E: EvictionPolicy, T: MemPool<E>> FosterBtree<E, T> {
     fn modify_structure(
         &self,
         op: OpType,
-        this: &mut FrameWriteGuard<E>,
-        child: &mut FrameWriteGuard<E>,
+        this: &mut FrameWriteGuard,
+        child: &mut FrameWriteGuard,
     ) {
         match op {
             OpType::Merge => {
@@ -1732,7 +1718,7 @@ impl<E: EvictionPolicy, T: MemPool<E>> FosterBtree<E, T> {
         }
     }
 
-    fn traverse_to_leaf_for_read(&self, key: &[u8]) -> FrameReadGuard<E> {
+    fn traverse_to_leaf_for_read(&self, key: &[u8]) -> FrameReadGuard {
         let mut current_page = self.read_page(self.root_key);
         let mut op_byte = OpByte::new();
         loop {
@@ -1834,7 +1820,7 @@ impl<E: EvictionPolicy, T: MemPool<E>> FosterBtree<E, T> {
         }
     }
 
-    fn try_traverse_to_leaf_for_write(&self, key: &[u8]) -> Result<FrameWriteGuard<E>, TreeStatus> {
+    fn try_traverse_to_leaf_for_write(&self, key: &[u8]) -> Result<FrameWriteGuard, TreeStatus> {
         let leaf_page = self.traverse_to_leaf_for_read(key);
         #[cfg(feature = "stat")]
         inc_exclusive_page_latch_count();
@@ -1848,7 +1834,7 @@ impl<E: EvictionPolicy, T: MemPool<E>> FosterBtree<E, T> {
         }
     }
 
-    fn traverse_to_leaf_for_write(&self, key: &[u8]) -> FrameWriteGuard<E> {
+    fn traverse_to_leaf_for_write(&self, key: &[u8]) -> FrameWriteGuard {
         let base = Duration::from_millis(1);
         let mut attempts = 0;
         let leaf_page = {
@@ -2008,7 +1994,7 @@ impl<E: EvictionPolicy, T: MemPool<E>> FosterBtree<E, T> {
         }
     }
 
-    pub fn scan(self: &Arc<Self>, l_key: &[u8], r_key: &[u8]) -> FosterBtreeRangeScanner<E, T> {
+    pub fn scan(self: &Arc<Self>, l_key: &[u8], r_key: &[u8]) -> FosterBtreeRangeScanner<T> {
         FosterBtreeRangeScanner::new(self, l_key, r_key)
     }
 
@@ -2017,7 +2003,7 @@ impl<E: EvictionPolicy, T: MemPool<E>> FosterBtree<E, T> {
         l_key: &[u8],
         r_key: &[u8],
         filter: FilterFunc,
-    ) -> FosterBtreeRangeScanner<E, T> {
+    ) -> FosterBtreeRangeScanner<T> {
         FosterBtreeRangeScanner::new_with_filter(self, l_key, r_key, filter)
     }
 }
@@ -2027,8 +2013,8 @@ type FilterFunc = Box<dyn FnMut((&[u8], &[u8])) -> bool>;
 /// Scan the BTree in the range [l_key, r_key)
 /// To specify all keys, use an empty slice.
 /// (l_key, r_key) = (&[], &[]) means [-inf, +inf)
-pub struct FosterBtreeRangeScanner<E: EvictionPolicy + 'static, T: MemPool<E>> {
-    btree: Arc<FosterBtree<E, T>>, // Holds the reference to the btree
+pub struct FosterBtreeRangeScanner<T: MemPool> {
+    btree: Arc<FosterBtree<T>>, // Holds the reference to the btree
 
     // Scan parameters
     l_key: Vec<u8>,
@@ -2039,12 +2025,12 @@ pub struct FosterBtreeRangeScanner<E: EvictionPolicy + 'static, T: MemPool<E>> {
     initialized: bool,
     finished: bool,
     prev_high_fence: Option<Vec<u8>>,
-    current_leaf_page: Option<FrameReadGuard<'static, E>>, // As long as btree is alive, bp is alive so the frame is alive
+    current_leaf_page: Option<FrameReadGuard<'static>>, // As long as btree is alive, bp is alive so the frame is alive
     current_slot_id: u32,
 }
 
-impl<E: EvictionPolicy, T: MemPool<E>> FosterBtreeRangeScanner<E, T> {
-    fn new(btree: &Arc<FosterBtree<E, T>>, l_key: &[u8], r_key: &[u8]) -> Self {
+impl<T: MemPool> FosterBtreeRangeScanner<T> {
+    fn new(btree: &Arc<FosterBtree<T>>, l_key: &[u8], r_key: &[u8]) -> Self {
         Self {
             btree: btree.clone(),
 
@@ -2061,7 +2047,7 @@ impl<E: EvictionPolicy, T: MemPool<E>> FosterBtreeRangeScanner<E, T> {
     }
 
     fn new_with_filter(
-        btree: &Arc<FosterBtree<E, T>>,
+        btree: &Arc<FosterBtree<T>>,
         l_key: &[u8],
         r_key: &[u8],
         filter: FilterFunc,
@@ -2113,9 +2099,8 @@ impl<E: EvictionPolicy, T: MemPool<E>> FosterBtreeRangeScanner<E, T> {
     fn initialize(&mut self) {
         // Traverse to the leaf page that contains the l_key
         let leaf_page = self.btree.traverse_to_leaf_for_read(self.l_key.as_slice());
-        let leaf_page = unsafe {
-            std::mem::transmute::<FrameReadGuard<E>, FrameReadGuard<'static, E>>(leaf_page)
-        };
+        let leaf_page =
+            unsafe { std::mem::transmute::<FrameReadGuard, FrameReadGuard<'static>>(leaf_page) };
         let mut slot = leaf_page.lower_bound_slot_id(&self.l_key());
         if slot == 0 {
             slot = 1; // Skip the lower fence
@@ -2130,15 +2115,14 @@ impl<E: EvictionPolicy, T: MemPool<E>> FosterBtreeRangeScanner<E, T> {
         let leaf_page = self
             .btree
             .traverse_to_leaf_for_read(self.prev_high_fence.as_ref().unwrap());
-        let leaf_page = unsafe {
-            std::mem::transmute::<FrameReadGuard<E>, FrameReadGuard<'static, E>>(leaf_page)
-        };
+        let leaf_page =
+            unsafe { std::mem::transmute::<FrameReadGuard, FrameReadGuard<'static>>(leaf_page) };
         self.current_leaf_page = Some(leaf_page);
         self.current_slot_id = 1; // Skip the lower fence
     }
 }
 
-impl<E: EvictionPolicy + 'static, T: MemPool<E>> Iterator for FosterBtreeRangeScanner<E, T> {
+impl<T: MemPool> Iterator for FosterBtreeRangeScanner<T> {
     type Item = (Vec<u8>, Vec<u8>);
 
     fn next(&mut self) -> Option<(Vec<u8>, Vec<u8>)> {
@@ -2200,9 +2184,7 @@ impl<E: EvictionPolicy + 'static, T: MemPool<E>> Iterator for FosterBtreeRangeSc
                     .get_page_for_read(foster_page_key)
                     .unwrap();
                 let foster_page = unsafe {
-                    std::mem::transmute::<FrameReadGuard<E>, FrameReadGuard<'static, E>>(
-                        foster_page,
-                    )
+                    std::mem::transmute::<FrameReadGuard, FrameReadGuard<'static>>(foster_page)
                 };
                 // Evict the current page as soon as possible
                 // self.btree
@@ -2242,11 +2224,11 @@ impl<E: EvictionPolicy + 'static, T: MemPool<E>> Iterator for FosterBtreeRangeSc
 /// The sort order: "a:0", "a:1", "a:2", "a:3", "a:3:0", "a:4".
 /// To prevent this, we panic when the user tries to append a key whose prefix key is already in the tree.
 /// This will not happen when the keys are of fixed length.
-pub struct FosterBtreeAppendOnly<E: EvictionPolicy, T: MemPool<E>> {
-    pub fbt: Arc<FosterBtree<E, T>>,
+pub struct FosterBtreeAppendOnly<T: MemPool> {
+    pub fbt: Arc<FosterBtree<T>>,
 }
 
-impl<E: EvictionPolicy, T: MemPool<E>> FosterBtreeAppendOnly<E, T> {
+impl<T: MemPool> FosterBtreeAppendOnly<T> {
     pub fn new(c_key: ContainerKey, mem_pool: Arc<T>) -> Self {
         FosterBtreeAppendOnly {
             fbt: Arc::new(FosterBtree::new(c_key, mem_pool)),
@@ -2295,7 +2277,7 @@ impl<E: EvictionPolicy, T: MemPool<E>> FosterBtreeAppendOnly<E, T> {
         Ok(())
     }
 
-    pub fn scan_key(self: &Arc<Self>, key: &[u8]) -> FosterBtreeAppendOnlyRangeScanner<E, T> {
+    pub fn scan_key(self: &Arc<Self>, key: &[u8]) -> FosterBtreeAppendOnlyRangeScanner<T> {
         let mut first_key = key.to_vec();
         first_key.extend(0_u32.to_be_bytes());
 
@@ -2316,7 +2298,7 @@ impl<E: EvictionPolicy, T: MemPool<E>> FosterBtreeAppendOnly<E, T> {
         self: &Arc<Self>,
         l_key: &[u8],
         r_key: &[u8],
-    ) -> FosterBtreeAppendOnlyRangeScanner<E, T> {
+    ) -> FosterBtreeAppendOnlyRangeScanner<T> {
         let mut first_key = l_key.to_vec();
         first_key.extend(0_u32.to_be_bytes());
 
@@ -2328,24 +2310,22 @@ impl<E: EvictionPolicy, T: MemPool<E>> FosterBtreeAppendOnly<E, T> {
         ))
     }
 
-    pub fn scan(self: &Arc<Self>) -> FosterBtreeAppendOnlyRangeScanner<E, T> {
+    pub fn scan(self: &Arc<Self>) -> FosterBtreeAppendOnlyRangeScanner<T> {
         FosterBtreeAppendOnlyRangeScanner::new(FosterBtreeRangeScanner::new(&self.fbt, &[], &[]))
     }
 }
 
-pub struct FosterBtreeAppendOnlyRangeScanner<E: EvictionPolicy + 'static, T: MemPool<E>> {
-    scanner: FosterBtreeRangeScanner<E, T>,
+pub struct FosterBtreeAppendOnlyRangeScanner<T: MemPool> {
+    scanner: FosterBtreeRangeScanner<T>,
 }
 
-impl<E: EvictionPolicy + 'static, T: MemPool<E>> FosterBtreeAppendOnlyRangeScanner<E, T> {
-    fn new(scanner: FosterBtreeRangeScanner<E, T>) -> Self {
+impl<T: MemPool> FosterBtreeAppendOnlyRangeScanner<T> {
+    fn new(scanner: FosterBtreeRangeScanner<T>) -> Self {
         Self { scanner }
     }
 }
 
-impl<E: EvictionPolicy + 'static, T: MemPool<E>> Iterator
-    for FosterBtreeAppendOnlyRangeScanner<E, T>
-{
+impl<T: MemPool> Iterator for FosterBtreeAppendOnlyRangeScanner<T> {
     type Item = (Vec<u8>, Vec<u8>);
 
     fn next(&mut self) -> Option<(Vec<u8>, Vec<u8>)> {
@@ -2358,26 +2338,24 @@ impl<E: EvictionPolicy + 'static, T: MemPool<E>> Iterator
 
 /// Thread-unsafe page traversal coordinator.
 /// This can used for debugging, visualization, and collecting statistics.
-pub struct FosterBTreePageTraversal<E: EvictionPolicy, T: MemPool<E>> {
+pub struct FosterBTreePageTraversal<T: MemPool> {
     // BTree parameters
     c_key: ContainerKey,
     root_key: PageFrameKey,
     mem_pool: Arc<T>,
-    phantom: PhantomData<E>,
 }
 
-impl<E: EvictionPolicy, T: MemPool<E>> FosterBTreePageTraversal<E, T> {
-    pub fn new(tree: &FosterBtree<E, T>) -> Self {
+impl<T: MemPool> FosterBTreePageTraversal<T> {
+    pub fn new(tree: &FosterBtree<T>) -> Self {
         Self {
             c_key: tree.c_key,
             root_key: tree.root_key,
             mem_pool: tree.mem_pool.clone(),
-            phantom: PhantomData,
         }
     }
 }
 
-impl<E: EvictionPolicy, T: MemPool<E>> FosterBTreePageTraversal<E, T> {
+impl<T: MemPool> FosterBTreePageTraversal<T> {
     // Return the children to visit in the order of the traversal
     fn get_children_page_ids(&self, page: &Page) -> Vec<InnerVal> {
         let mut children = Vec::new();
@@ -2596,8 +2574,8 @@ mod tests {
     };
 
     use super::{
-        ContainerKey, EvictionPolicy, FosterBtree, FosterBtreeAppendOnly, FosterBtreePage,
-        LRUEvictionPolicy, MemPool, PageFrameKey, MAX_BYTES_USED,
+        ContainerKey, FosterBtree, FosterBtreeAppendOnly, FosterBtreePage, MemPool, PageFrameKey,
+        MAX_BYTES_USED,
     };
 
     fn to_bytes(num: usize) -> Vec<u8> {
@@ -2613,7 +2591,7 @@ mod tests {
     #[rstest]
     #[case::bp(get_test_bp(1))]
     #[case::in_mem(get_in_mem_pool())]
-    fn test_page_setup<E: EvictionPolicy, T: MemPool<E>>(#[case] mp: Arc<T>) {
+    fn test_page_setup<T: MemPool>(#[case] mp: Arc<T>) {
         let c_key = ContainerKey::new(0, 0);
         let mut p = mp.create_new_page_for_write(c_key).unwrap();
         p.init();
@@ -2625,7 +2603,7 @@ mod tests {
         assert_eq!(p.get_high_fence().as_ref(), high_fence);
     }
 
-    fn test_page_merge_detail<E: EvictionPolicy, T: MemPool<E>>(
+    fn test_page_merge_detail<T: MemPool>(
         bp: Arc<T>,
         k0: usize,
         k1: usize,
@@ -2714,14 +2692,14 @@ mod tests {
     #[rstest]
     #[case::bp(get_test_bp(2))]
     #[case::in_mem(get_in_mem_pool())]
-    fn test_page_merge<E: EvictionPolicy, T: MemPool<E>>(#[case] bp: Arc<T>) {
+    fn test_page_merge<T: MemPool>(#[case] bp: Arc<T>) {
         test_page_merge_detail(bp.clone(), 10, 20, 30, vec![], vec![]);
         test_page_merge_detail(bp.clone(), 10, 20, 30, vec![10, 15], vec![20, 25, 29]);
         test_page_merge_detail(bp.clone(), 10, 20, 30, vec![], vec![20, 25]);
         test_page_merge_detail(bp, 10, 20, 30, vec![10, 15], vec![]);
     }
 
-    fn test_page_balance_detail<E: EvictionPolicy, T: MemPool<E>>(
+    fn test_page_balance_detail<T: MemPool>(
         bp: Arc<T>,
         k0: usize,
         k1: usize,
@@ -2820,7 +2798,7 @@ mod tests {
     #[rstest]
     #[case::bp(get_test_bp(2))]
     #[case::in_mem(get_in_mem_pool())]
-    fn test_page_balance<E: EvictionPolicy, T: MemPool<E>>(#[case] bp: Arc<T>) {
+    fn test_page_balance<T: MemPool>(#[case] bp: Arc<T>) {
         test_page_balance_detail(bp.clone(), 10, 20, 30, vec![], vec![]);
         test_page_balance_detail(bp.clone(), 10, 20, 30, vec![10, 15], vec![]);
         test_page_balance_detail(bp.clone(), 10, 20, 30, vec![], vec![20, 25, 29]);
@@ -2834,7 +2812,7 @@ mod tests {
         );
     }
 
-    fn test_page_adopt_detail<E: EvictionPolicy, T: MemPool<E>>(
+    fn test_page_adopt_detail<T: MemPool>(
         bp: Arc<T>,
         k0: usize,
         k1: usize,
@@ -2953,14 +2931,14 @@ mod tests {
     #[rstest]
     #[case::bp(get_test_bp(3))]
     #[case::in_mem(get_in_mem_pool())]
-    fn test_page_adopt<E: EvictionPolicy, T: MemPool<E>>(#[case] bp: Arc<T>) {
+    fn test_page_adopt<T: MemPool>(#[case] bp: Arc<T>) {
         test_page_adopt_detail(bp.clone(), 10, 20, 30, vec![], vec![]);
         test_page_adopt_detail(bp.clone(), 10, 20, 30, vec![10, 15], vec![20, 25, 29]);
         test_page_adopt_detail(bp.clone(), 10, 20, 30, vec![], vec![20, 25]);
         test_page_adopt_detail(bp.clone(), 10, 20, 30, vec![10, 15], vec![]);
     }
 
-    fn test_page_anti_adopt_detail<E: EvictionPolicy, T: MemPool<E>>(
+    fn test_page_anti_adopt_detail<T: MemPool>(
         bp: Arc<T>,
         k0: usize,
         k1: usize,
@@ -3075,7 +3053,7 @@ mod tests {
     #[rstest]
     #[case::bp(get_test_bp(3))]
     #[case::in_mem(get_in_mem_pool())]
-    fn test_page_anti_adopt<E: EvictionPolicy, T: MemPool<E>>(#[case] bp: Arc<T>) {
+    fn test_page_anti_adopt<T: MemPool>(#[case] bp: Arc<T>) {
         test_page_anti_adopt_detail(bp.clone(), 10, 20, 30, vec![], vec![]);
         test_page_anti_adopt_detail(bp.clone(), 10, 20, 30, vec![10, 15], vec![20, 25, 29]);
         test_page_anti_adopt_detail(bp.clone(), 10, 20, 30, vec![], vec![20, 25]);
@@ -3085,7 +3063,7 @@ mod tests {
     #[rstest]
     #[case::bp(get_test_bp(3))]
     #[case::in_mem(get_in_mem_pool())]
-    fn test_root_page_ascend<E: EvictionPolicy, T: MemPool<E>>(#[case] bp: Arc<T>) {
+    fn test_root_page_ascend<T: MemPool>(#[case] bp: Arc<T>) {
         let (db_id, c_id) = (0, 0);
         let c_key = ContainerKey::new(db_id, c_id);
         let mut root = bp.create_new_page_for_write(c_key).unwrap();
@@ -3170,7 +3148,7 @@ mod tests {
     #[rstest]
     #[case::bp(get_test_bp(3))]
     #[case::in_mem(get_in_mem_pool())]
-    fn test_root_page_descend<E: EvictionPolicy, T: MemPool<E>>(#[case] bp: Arc<T>) {
+    fn test_root_page_descend<T: MemPool>(#[case] bp: Arc<T>) {
         let (db_id, c_id) = (0, 0);
         let c_key = ContainerKey::new(db_id, c_id);
         let mut root = bp.create_new_page_for_write(c_key).unwrap();
@@ -3226,7 +3204,7 @@ mod tests {
     // Foster relationship between two pages.
     // Returns (this_page_key, foster_page_key)
     // If is_root is true, then this_page is a root page.
-    fn build_foster_relationship<E: EvictionPolicy, T: MemPool<E>>(
+    fn build_foster_relationship<T: MemPool>(
         bp: Arc<T>,
         is_root: bool,
         this_size: usize,
@@ -3301,12 +3279,7 @@ mod tests {
     #[rstest]
     #[case::bp(get_test_bp(3))]
     #[case::in_mem(get_in_mem_pool())]
-    fn test_foster_relationship_structure_modification_criteria<
-        E: EvictionPolicy,
-        T: MemPool<E>,
-    >(
-        #[case] bp: Arc<T>,
-    ) {
+    fn test_foster_relationship_structure_modification_criteria<T: MemPool>(#[case] bp: Arc<T>) {
         {
             // Should merge, root_ascend
             // Should not balance
@@ -3409,7 +3382,7 @@ mod tests {
         }
     }
 
-    fn build_two_children_tree<E: EvictionPolicy, T: MemPool<E>>(
+    fn build_two_children_tree<T: MemPool>(
         bp: Arc<T>,
         child0_size: usize,
     ) -> (PageFrameKey, PageFrameKey) {
@@ -3469,7 +3442,7 @@ mod tests {
         (parent_key, child0_key)
     }
 
-    fn build_single_child_with_foster_child_tree<E: EvictionPolicy, T: MemPool<E>>(
+    fn build_single_child_with_foster_child_tree<T: MemPool>(
         bp: Arc<T>,
         child0_size: usize,
     ) -> (PageFrameKey, PageFrameKey) {
@@ -3529,7 +3502,7 @@ mod tests {
         (parent_key, child0_key)
     }
 
-    fn build_single_child_tree<E: EvictionPolicy, T: MemPool<E>>(
+    fn build_single_child_tree<T: MemPool>(
         bp: Arc<T>,
         child0_size: usize,
     ) -> (PageFrameKey, PageFrameKey) {
@@ -3593,10 +3566,7 @@ mod tests {
     #[rstest]
     #[case::bp(get_test_bp(3))]
     #[case::in_mem(get_in_mem_pool())]
-    fn test_parent_child_relationship_structure_modification_criteria<
-        E: EvictionPolicy,
-        T: MemPool<E>,
-    >(
+    fn test_parent_child_relationship_structure_modification_criteria<T: MemPool>(
         #[case] bp: Arc<T>,
     ) {
         {
@@ -3675,7 +3645,7 @@ mod tests {
         }
     }
 
-    fn setup_btree_empty<E: EvictionPolicy, T: MemPool<E>>(bp: Arc<T>) -> FosterBtree<E, T> {
+    fn setup_btree_empty<T: MemPool>(bp: Arc<T>) -> FosterBtree<T> {
         let (db_id, c_id) = (0, 0);
         let c_key = ContainerKey::new(db_id, c_id);
 
@@ -3685,7 +3655,7 @@ mod tests {
     #[rstest]
     #[case::bp(get_test_bp(3))]
     #[case::in_mem(get_in_mem_pool())]
-    fn test_sorted_insertion<E: EvictionPolicy, T: MemPool<E>>(#[case] bp: Arc<T>) {
+    fn test_sorted_insertion<T: MemPool>(#[case] bp: Arc<T>) {
         let btree = setup_btree_empty(bp.clone());
         // Insert 1024 bytes
         let val = vec![2_u8; 1024];
@@ -3711,7 +3681,7 @@ mod tests {
     #[rstest]
     #[case::bp(get_test_bp(3))]
     #[case::in_mem(get_in_mem_pool())]
-    fn test_random_insertion<E: EvictionPolicy, T: MemPool<E>>(#[case] bp: Arc<T>) {
+    fn test_random_insertion<T: MemPool>(#[case] bp: Arc<T>) {
         let btree = setup_btree_empty(bp.clone());
         // Insert 1024 bytes
         let val = vec![3_u8; 1024];
@@ -3738,7 +3708,7 @@ mod tests {
     #[rstest]
     #[case::bp(get_test_bp(3))]
     #[case::in_mem(get_in_mem_pool())]
-    fn test_random_updates<E: EvictionPolicy, T: MemPool<E>>(#[case] bp: Arc<T>) {
+    fn test_random_updates<T: MemPool>(#[case] bp: Arc<T>) {
         let btree = setup_btree_empty(bp.clone());
         // Insert 1024 bytes
         let val = vec![3_u8; 1024];
@@ -3792,7 +3762,7 @@ mod tests {
     #[rstest]
     #[case::bp(get_test_bp(3))]
     #[case::in_mem(get_in_mem_pool())]
-    fn test_random_deletion<E: EvictionPolicy, T: MemPool<E>>(#[case] bp: Arc<T>) {
+    fn test_random_deletion<T: MemPool>(#[case] bp: Arc<T>) {
         let btree = setup_btree_empty(bp.clone());
         // Insert 1024 bytes
         let val = vec![3_u8; 1024];
@@ -3827,7 +3797,7 @@ mod tests {
     #[rstest]
     #[case::bp(get_test_bp(3))]
     #[case::in_mem(get_in_mem_pool())]
-    fn test_random_upserts<E: EvictionPolicy, T: MemPool<E>>(#[case] bp: Arc<T>) {
+    fn test_random_upserts<T: MemPool>(#[case] bp: Arc<T>) {
         let btree = setup_btree_empty(bp.clone());
         // Insert 1024 bytes
         let val = vec![3_u8; 1024];
@@ -3890,7 +3860,7 @@ mod tests {
     #[rstest]
     #[case::bp(get_test_bp(3))]
     #[case::in_mem(get_in_mem_pool())]
-    fn test_upsert_with_merge<E: EvictionPolicy, T: MemPool<E>>(#[case] bp: Arc<T>) {
+    fn test_upsert_with_merge<T: MemPool>(#[case] bp: Arc<T>) {
         let btree = setup_btree_empty(bp.clone());
         // Insert 1024 bytes
         let key = to_bytes(0);
@@ -3918,7 +3888,7 @@ mod tests {
     #[rstest]
     #[case::bp(get_test_bp(3))]
     #[case::in_mem(get_in_mem_pool())]
-    fn test_scan<E: EvictionPolicy + 'static, T: MemPool<E>>(#[case] bp: Arc<T>) {
+    fn test_scan<T: MemPool>(#[case] bp: Arc<T>) {
         let btree = Arc::new(setup_btree_empty(bp.clone()));
         // Insert 1024 bytes
         let val = vec![3_u8; 1024];
@@ -3980,7 +3950,7 @@ mod tests {
     #[rstest]
     #[case::bp(get_test_bp(3))]
     #[case::in_mem(get_in_mem_pool())]
-    fn test_scan_with_filter<E: EvictionPolicy + 'static, T: MemPool<E>>(#[case] bp: Arc<T>) {
+    fn test_scan_with_filter<T: MemPool>(#[case] bp: Arc<T>) {
         let btree = Arc::new(setup_btree_empty(bp.clone()));
         // Insert 512 and 1024 bytes. Odd keys have 512 bytes and even keys have 1024 bytes.
         let val1 = vec![3_u8; 512];
@@ -4035,7 +4005,7 @@ mod tests {
     #[rstest]
     #[case::bp(get_test_bp(100))]
     #[case::in_mem(get_in_mem_pool())]
-    fn test_insertion_stress<E: EvictionPolicy + 'static, T: MemPool<E>>(#[case] bp: Arc<T>) {
+    fn test_insertion_stress<T: MemPool>(#[case] bp: Arc<T>) {
         let num_keys = 10000;
         let key_size = 8;
         let val_min_size = 50;
@@ -4114,7 +4084,7 @@ mod tests {
     #[case::bp(get_test_bp(100))]
     #[case::in_mem(get_in_mem_pool())]
     #[ignore]
-    fn replay_stress<E: EvictionPolicy, T: MemPool<E>>(#[case] bp: Arc<T>) {
+    fn replay_stress<T: MemPool>(#[case] bp: Arc<T>) {
         let btree = setup_btree_empty(bp.clone());
 
         let kvs_file = "kvs.dat";
@@ -4163,7 +4133,7 @@ mod tests {
     #[rstest]
     #[case::bp(get_test_bp(100))]
     #[case::in_mem(get_in_mem_pool())]
-    fn test_bulk_insert_create<E: EvictionPolicy, T: MemPool<E>>(#[case] bp: Arc<T>) {
+    fn test_bulk_insert_create<T: MemPool>(#[case] bp: Arc<T>) {
         let num_keys = 100000;
         let key_size = 8;
         let val_min_size = 50;
@@ -4200,7 +4170,7 @@ mod tests {
     #[rstest]
     #[case::bp(get_test_bp(100))]
     #[case::in_mem(get_in_mem_pool())]
-    fn test_parallel_insertion<E: EvictionPolicy, T: MemPool<E>>(#[case] bp: Arc<T>) {
+    fn test_parallel_insertion<T: MemPool>(#[case] bp: Arc<T>) {
         // init_test_logger();
         let btree = Arc::new(setup_btree_empty(bp.clone()));
         let num_keys = 5000;
@@ -4251,7 +4221,7 @@ mod tests {
     #[rstest]
     #[case::bp(get_test_bp(100))]
     #[case::in_mem(get_in_mem_pool())]
-    fn test_page_split_triple<E: EvictionPolicy, T: MemPool<E>>(#[case] bp: Arc<T>) {
+    fn test_page_split_triple<T: MemPool>(#[case] bp: Arc<T>) {
         let btree = setup_btree_empty(bp.clone());
         let key0 = to_bytes(0);
         let val0 = vec![0; AVAILABLE_PAGE_SIZE * 2 / 5];
@@ -4280,9 +4250,7 @@ mod tests {
         assert_eq!(current_val, val2);
     }
 
-    fn setup_btree_append_only_empty<E: EvictionPolicy, T: MemPool<E>>(
-        bp: Arc<T>,
-    ) -> FosterBtreeAppendOnly<E, T> {
+    fn setup_btree_append_only_empty<T: MemPool>(bp: Arc<T>) -> FosterBtreeAppendOnly<T> {
         let (db_id, c_id) = (0, 0);
         let c_key = ContainerKey::new(db_id, c_id);
 
@@ -4292,7 +4260,7 @@ mod tests {
     #[rstest]
     #[case::bp(get_test_bp(100))]
     #[case::in_mem(get_in_mem_pool())]
-    fn test_append<E: EvictionPolicy + 'static, T: MemPool<E>>(#[case] bp: Arc<T>) {
+    fn test_append<T: MemPool>(#[case] bp: Arc<T>) {
         let btree = Arc::new(setup_btree_append_only_empty(bp.clone()));
         // Insert 1024 bytes
         let inserting_key = to_bytes(0);
@@ -4321,7 +4289,7 @@ mod tests {
     #[rstest]
     #[case::bp(get_test_bp(100))]
     #[case::in_mem(get_in_mem_pool())]
-    fn test_append_large<E: EvictionPolicy + 'static, T: MemPool<E>>(#[case] bp: Arc<T>) {
+    fn test_append_large<T: MemPool>(#[case] bp: Arc<T>) {
         let btree = Arc::new(setup_btree_append_only_empty(bp.clone()));
         // Insert 1024 bytes
         let inserting_key = to_bytes(0);
@@ -4351,7 +4319,7 @@ mod tests {
     #[rstest]
     #[case::bp(get_test_bp(100))]
     #[case::in_mem(get_in_mem_pool())]
-    fn test_concurrent_append<E: EvictionPolicy + 'static, T: MemPool<E>>(#[case] bp: Arc<T>) {
+    fn test_concurrent_append<T: MemPool>(#[case] bp: Arc<T>) {
         let btree = Arc::new(setup_btree_append_only_empty(bp.clone()));
         let num_keys = 1000;
         let key_size = 100;

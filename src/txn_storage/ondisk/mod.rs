@@ -18,27 +18,28 @@ use crate::{
     bp::{EvictionPolicy, MemPool},
 };
 
-pub enum Storage<E: EvictionPolicy + 'static, M: MemPool<E>> {
+pub enum Storage<M: MemPool> {
     HashMap(),
-    BTreeMap(Arc<FosterBtree<E, M>>),
-    AppendOnly(Arc<AppendOnlyStore<E, M>>),
+    BTreeMap(Arc<FosterBtree<M>>),
+    AppendOnly(Arc<AppendOnlyStore<M>>),
 }
 
-unsafe impl<E: EvictionPolicy + 'static, M: MemPool<E>> Sync for Storage<E, M> {}
+unsafe impl<M: MemPool> Sync for Storage<M> {}
 
-impl<E: EvictionPolicy + 'static, M: MemPool<E>> Storage<E, M> {
+impl<M: MemPool> Storage<M> {
     fn new(db_id: DatabaseId, c_id: ContainerId, c_type: ContainerType, bp: Arc<M>) -> Self {
         match c_type {
             ContainerType::Hash => {
                 unimplemented!("Hash container not implemented")
             }
-            ContainerType::BTree => Storage::BTreeMap(Arc::new(FosterBtree::<E, M>::new(
+            ContainerType::BTree => Storage::BTreeMap(Arc::new(FosterBtree::<M>::new(
                 ContainerKey::new(db_id, c_id),
                 bp,
             ))),
-            ContainerType::AppendOnly => Storage::AppendOnly(Arc::new(
-                AppendOnlyStore::<E, M>::new(ContainerKey::new(db_id, c_id), bp),
-            )),
+            ContainerType::AppendOnly => Storage::AppendOnly(Arc::new(AppendOnlyStore::<M>::new(
+                ContainerKey::new(db_id, c_id),
+                bp,
+            ))),
         }
     }
 
@@ -47,14 +48,16 @@ impl<E: EvictionPolicy + 'static, M: MemPool<E>> Storage<E, M> {
             ContainerType::Hash => {
                 unimplemented!("Hash container not implemented")
             }
-            ContainerType::BTree => Storage::BTreeMap(Arc::new(FosterBtree::<E, M>::load(
+            ContainerType::BTree => Storage::BTreeMap(Arc::new(FosterBtree::<M>::load(
                 ContainerKey::new(db_id, c_id),
                 bp,
                 0,
             ))),
-            ContainerType::AppendOnly => Storage::AppendOnly(Arc::new(
-                AppendOnlyStore::<E, M>::load(ContainerKey::new(db_id, c_id), bp, 0),
-            )),
+            ContainerType::AppendOnly => Storage::AppendOnly(Arc::new(AppendOnlyStore::<M>::load(
+                ContainerKey::new(db_id, c_id),
+                bp,
+                0,
+            ))),
         }
     }
 
@@ -112,7 +115,7 @@ impl<E: EvictionPolicy + 'static, M: MemPool<E>> Storage<E, M> {
         Ok(())
     }
 
-    fn iter(self: &Arc<Self>) -> OnDiskIterator<E, M> {
+    fn iter(self: &Arc<Self>) -> OnDiskIterator<M> {
         match self.as_ref() {
             Storage::HashMap() => {
                 unimplemented!("Hash container not implemented")
@@ -133,19 +136,19 @@ impl<E: EvictionPolicy + 'static, M: MemPool<E>> Storage<E, M> {
     }
 }
 
-pub enum OnDiskIterator<E: EvictionPolicy + 'static, M: MemPool<E>> {
+pub enum OnDiskIterator<M: MemPool> {
     // Storage and the iterator
     Hash(),
-    BTree(Mutex<FosterBtreeRangeScanner<E, M>>),
-    Vec(Mutex<AppendOnlyStoreScanner<E, M>>),
+    BTree(Mutex<FosterBtreeRangeScanner<M>>),
+    Vec(Mutex<AppendOnlyStoreScanner<M>>),
 }
 
-impl<E: EvictionPolicy + 'static, M: MemPool<E>> OnDiskIterator<E, M> {
-    fn btree(iter: FosterBtreeRangeScanner<E, M>) -> Self {
+impl<M: MemPool> OnDiskIterator<M> {
+    fn btree(iter: FosterBtreeRangeScanner<M>) -> Self {
         OnDiskIterator::BTree(Mutex::new(iter))
     }
 
-    fn vec(iter: AppendOnlyStoreScanner<E, M>) -> Self {
+    fn vec(iter: AppendOnlyStoreScanner<M>) -> Self {
         OnDiskIterator::Vec(Mutex::new(iter))
     }
 
@@ -181,35 +184,33 @@ impl<E: EvictionPolicy + 'static, M: MemPool<E>> OnDiskIterator<E, M> {
 ///    respect to other next() calls of the same iterator. However, next() is thread-safe with respect
 ///    to other operations on the same container including next() of other iterators.
 /// 6. Only a single database can be created. If you try to open_db() will always return DatabaseId 0.
-pub struct OnDiskStorage<E: EvictionPolicy + 'static, M: MemPool<E>> {
+pub struct OnDiskStorage<M: MemPool> {
     bp: Arc<M>,
-    metadata: Arc<FosterBtree<E, M>>, // Database metadata. Stored in DatabaseId::MAX, ContainerId::0
-    container_lock: RwLock<()>,       // lock for container operations
-    containers: UnsafeCell<Vec<Arc<Storage<E, M>>>>, // Storage is in a Box in order to prevent moving when resizing the vector
-    phantom: std::marker::PhantomData<(E, M)>,
+    metadata: Arc<FosterBtree<M>>, // Database metadata. Stored in DatabaseId::MAX, ContainerId::0
+    container_lock: RwLock<()>,    // lock for container operations
+    containers: UnsafeCell<Vec<Arc<Storage<M>>>>, // Storage is in a Box in order to prevent moving when resizing the vector
 }
 
-unsafe impl<E: EvictionPolicy + 'static, M: MemPool<E>> Sync for OnDiskStorage<E, M> {}
-unsafe impl<E: EvictionPolicy + 'static, M: MemPool<E>> Send for OnDiskStorage<E, M> {}
+unsafe impl<M: MemPool> Sync for OnDiskStorage<M> {}
+unsafe impl<M: MemPool> Send for OnDiskStorage<M> {}
 
-impl<E: EvictionPolicy + 'static, M: MemPool<E>> OnDiskStorage<E, M> {
+impl<M: MemPool> OnDiskStorage<M> {
     /// Assumes bp_directory is already created.
     /// Any database created will be created in the bp_directory.
     pub fn new(bp: &Arc<M>) -> Self {
         OnDiskStorage {
             bp: bp.clone(),
-            metadata: Arc::new(FosterBtree::<E, M>::new(
+            metadata: Arc::new(FosterBtree::<M>::new(
                 ContainerKey::new(DatabaseId::MAX, 0),
                 bp.clone(),
             )),
             container_lock: RwLock::new(()),
             containers: UnsafeCell::new(Vec::new()),
-            phantom: std::marker::PhantomData,
         }
     }
 
     pub fn load(bp: &Arc<M>) -> Self {
-        let metadata = Arc::new(FosterBtree::<E, M>::load(
+        let metadata = Arc::new(FosterBtree::<M>::load(
             ContainerKey::new(DatabaseId::MAX, 0),
             bp.clone(),
             0,
@@ -229,7 +230,6 @@ impl<E: EvictionPolicy + 'static, M: MemPool<E>> OnDiskStorage<E, M> {
             metadata,
             container_lock: RwLock::new(()),
             containers: UnsafeCell::new(containers),
-            phantom: std::marker::PhantomData,
         }
     }
 }
@@ -248,9 +248,9 @@ impl OnDiskDummyTxnHandle {
     }
 }
 
-impl<E: EvictionPolicy + 'static, M: MemPool<E>> TxnStorageTrait for OnDiskStorage<E, M> {
+impl<M: MemPool> TxnStorageTrait for OnDiskStorage<M> {
     type TxnHandle = OnDiskDummyTxnHandle;
-    type IteratorHandle = OnDiskIterator<E, M>;
+    type IteratorHandle = OnDiskIterator<M>;
 
     // Open connection with the db
     fn open_db(&self, _options: DBOptions) -> Result<DatabaseId, TxnStorageStatus> {

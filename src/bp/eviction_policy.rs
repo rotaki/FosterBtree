@@ -9,7 +9,7 @@ pub trait EvictionPolicy: Send + Sync {
     fn new() -> Self;
     /// Returns the eviction score of the buffer frame.
     /// The lower the score, the more likely the buffer frame is to be evicted.
-    fn score(&self, frame: &BufferFrame<Self>) -> u64
+    fn score(&self, frame: &BufferFrame) -> u64
     where
         Self: Sized;
     fn update(&mut self);
@@ -24,7 +24,7 @@ impl EvictionPolicy for DummyEvictionPolicy {
     }
 
     #[inline]
-    fn score(&self, _frame: &BufferFrame<Self>) -> u64 {
+    fn score(&self, _frame: &BufferFrame) -> u64 {
         0
     }
 
@@ -46,7 +46,7 @@ impl EvictionPolicy for LRUEvictionPolicy {
         }
     }
 
-    fn score(&self, _: &BufferFrame<Self>) -> u64
+    fn score(&self, _: &BufferFrame) -> u64
     where
         Self: Sized,
     {

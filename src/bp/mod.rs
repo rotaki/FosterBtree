@@ -16,17 +16,17 @@ pub use mem_pool_trait::{
 
 use crate::random::gen_random_pathname;
 
-pub fn get_test_bp(num_frames: usize) -> Arc<BufferPool<LRUEvictionPolicy>> {
+pub fn get_test_bp(num_frames: usize) -> Arc<BufferPool> {
     let dir = gen_random_pathname(Some("test_bp"));
     Arc::new(BufferPool::new(dir, num_frames, true).unwrap())
 }
-pub fn get_in_mem_pool() -> Arc<InMemPool<DummyEvictionPolicy>> {
+pub fn get_in_mem_pool() -> Arc<InMemPool> {
     Arc::new(InMemPool::new())
 }
 pub mod prelude {
     pub use super::{
         get_in_mem_pool, get_test_bp, BufferFrame, BufferPool, ContainerId, ContainerKey,
-        DatabaseId, DummyEvictionPolicy, EvictionPolicy, FrameReadGuard, FrameWriteGuard,
-        InMemPool, LRUEvictionPolicy, MemPool, MemPoolStatus, PageFrameKey,
+        DatabaseId, FrameReadGuard, FrameWriteGuard, InMemPool, MemPool, MemPoolStatus,
+        PageFrameKey,
     };
 }
