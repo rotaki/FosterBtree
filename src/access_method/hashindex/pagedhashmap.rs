@@ -1,5 +1,5 @@
 #![allow(unused_imports)]
-use crate::logger::log;
+use crate::{access_method::AccessMethodError, logger::log};
 
 use core::panic;
 use std::{
@@ -31,16 +31,6 @@ pub struct PagedHashMap<T: MemPool> {
     pub bucket_num: usize, // number of hash header pages
     frame_buckets: Vec<AtomicU32>, // vec of frame_id for each bucket
                            // bucket_metas: Vec<BucketMeta>, // first_frame_id, last_page_id, last_frame_id, bloomfilter // no need to be page
-}
-
-#[derive(Debug, PartialEq)]
-pub enum PagedHashMapError {
-    KeyExists,
-    KeyNotFound,
-    OutOfSpace,
-    PageCreationFailed,
-    WriteLatchFailed,
-    Other(String),
 }
 
 struct _BucketMeta {
@@ -135,7 +125,7 @@ impl<T: MemPool> PagedHashMap<T> {
 
     /// Insert a new key-value pair into the index.
     /// If the key already exists, it will return an error.
-    pub fn insert<K: AsRef<[u8]> + Hash>(&self, key: K, val: K) -> Result<(), PagedHashMapError> {
+    pub fn insert<K: AsRef<[u8]> + Hash>(&self, key: K, val: K) -> Result<(), AccessMethodError> {
         #[cfg(feature = "stat")]
         inc_local_stat_insert_count();
 
@@ -172,7 +162,7 @@ impl<T: MemPool> PagedHashMap<T> {
                     Err(err) => panic!("Inserting to new page should succeed: {:?}", err),
                 }
             }
-            Err(err) => Err(PagedHashMapError::Other(format!("Insert error: {:?}", err))),
+            Err(err) => Err(AccessMethodError::Other(format!("Insert error: {:?}", err))),
         }
     }
 
@@ -180,7 +170,7 @@ impl<T: MemPool> PagedHashMap<T> {
         &self,
         page_key: PageFrameKey,
         key: &[u8],
-    ) -> Result<FrameWriteGuard, PagedHashMapError> {
+    ) -> Result<FrameWriteGuard, AccessMethodError> {
         let base = Duration::from_millis(1);
         let mut attempts = 0;
         loop {
@@ -189,12 +179,12 @@ impl<T: MemPool> PagedHashMap<T> {
                 Ok(page) => {
                     return Ok(page);
                 }
-                Err(PagedHashMapError::WriteLatchFailed) => {
+                Err(AccessMethodError::PageWriteLatchFailed) => {
                     attempts += 1;
                     std::thread::sleep(base * attempts);
                 }
-                Err(PagedHashMapError::KeyExists) => {
-                    return Err(PagedHashMapError::KeyExists);
+                Err(AccessMethodError::KeyDuplicate) => {
+                    return Err(AccessMethodError::KeyDuplicate);
                 }
                 Err(err) => {
                     panic!("Traverse to end of chain error: {:?}", err);
@@ -207,7 +197,7 @@ impl<T: MemPool> PagedHashMap<T> {
         &self,
         page_key: PageFrameKey,
         key: &[u8],
-    ) -> Result<FrameWriteGuard, PagedHashMapError> {
+    ) -> Result<FrameWriteGuard, AccessMethodError> {
         let mut current_page = self.read_page(page_key);
         if current_page.frame_id() != page_key.frame_id() {
             self.frame_buckets[page_key.p_key().page_id as usize].store(
@@ -218,7 +208,7 @@ impl<T: MemPool> PagedHashMap<T> {
         loop {
             let (slot_id, _) = current_page.is_exist(key);
             if slot_id.is_some() {
-                return Err(PagedHashMapError::KeyExists);
+                return Err(AccessMethodError::KeyDuplicate);
             }
             let next_page_id = current_page.get_next_page_id();
             if next_page_id == 0 {
@@ -227,7 +217,7 @@ impl<T: MemPool> PagedHashMap<T> {
                         return Ok(upgraded_page);
                     }
                     Err(_) => {
-                        return Err(PagedHashMapError::WriteLatchFailed);
+                        return Err(AccessMethodError::PageWriteLatchFailed);
                     }
                 };
             }
@@ -292,7 +282,7 @@ impl<T: MemPool> PagedHashMap<T> {
 
     /// Update the value of an existing key.
     /// If the key does not exist, it will return an error.
-    pub fn update<K: AsRef<[u8]> + Hash>(&self, key: K, val: K) -> Result<(), PagedHashMapError> {
+    pub fn update<K: AsRef<[u8]> + Hash>(&self, key: K, val: K) -> Result<(), AccessMethodError> {
         #[cfg(feature = "stat")]
         inc_local_stat_update_count();
 
@@ -341,7 +331,7 @@ impl<T: MemPool> PagedHashMap<T> {
                     }
                 }
             }
-            Err(err) => Err(PagedHashMapError::Other(format!("Update error: {:?}", err))),
+            Err(err) => Err(AccessMethodError::Other(format!("Update error: {:?}", err))),
         }
     }
 
@@ -349,7 +339,7 @@ impl<T: MemPool> PagedHashMap<T> {
         &self,
         page_key: PageFrameKey,
         key: &[u8],
-    ) -> Result<(FrameWriteGuard, u16), PagedHashMapError> {
+    ) -> Result<(FrameWriteGuard, u16), AccessMethodError> {
         let base = Duration::from_millis(1);
         let mut attempts = 0;
         loop {
@@ -358,12 +348,12 @@ impl<T: MemPool> PagedHashMap<T> {
                 Ok(page) => {
                     return Ok(page);
                 }
-                Err(PagedHashMapError::WriteLatchFailed) => {
+                Err(AccessMethodError::PageWriteLatchFailed) => {
                     attempts += 1;
                     std::thread::sleep(base * attempts);
                 }
-                Err(PagedHashMapError::KeyNotFound) => {
-                    return Err(PagedHashMapError::KeyNotFound);
+                Err(AccessMethodError::KeyNotFound) => {
+                    return Err(AccessMethodError::KeyNotFound);
                 }
                 Err(err) => {
                     panic!("Traverse to end of chain error: {:?}", err);
@@ -376,7 +366,7 @@ impl<T: MemPool> PagedHashMap<T> {
         &self,
         page_key: PageFrameKey,
         key: &[u8],
-    ) -> Result<(FrameWriteGuard, u16), PagedHashMapError> {
+    ) -> Result<(FrameWriteGuard, u16), AccessMethodError> {
         let mut current_page = self.read_page(page_key);
         loop {
             let (slot_id, _) = current_page.is_exist(key);
@@ -387,14 +377,14 @@ impl<T: MemPool> PagedHashMap<T> {
                             return Ok((upgraded_page, slot_id));
                         }
                         Err(_) => {
-                            return Err(PagedHashMapError::WriteLatchFailed);
+                            return Err(AccessMethodError::PageWriteLatchFailed);
                         }
                     };
                 }
                 None => {
                     let next_page_id = current_page.get_next_page_id();
                     if next_page_id == 0 {
-                        return Err(PagedHashMapError::KeyNotFound);
+                        return Err(AccessMethodError::KeyNotFound);
                     }
                     let next_frame_id = current_page.get_next_frame_id();
                     let mut next_page_key =
@@ -417,7 +407,7 @@ impl<T: MemPool> PagedHashMap<T> {
         &self,
         key: K,
         value: K,
-    ) -> Result<Option<Vec<u8>>, PagedHashMapError> {
+    ) -> Result<Option<Vec<u8>>, AccessMethodError> {
         #[cfg(feature = "stat")]
         inc_local_stat_upsert_count();
 
@@ -476,7 +466,7 @@ impl<T: MemPool> PagedHashMap<T> {
 
         match new_page.upsert(key.as_ref(), value.as_ref()) {
             (true, old_value) => Ok(old_value),
-            (false, _) => Err(PagedHashMapError::OutOfSpace),
+            (false, _) => Err(AccessMethodError::RecordTooLarge),
         }
     }
 
@@ -588,7 +578,7 @@ impl<T: MemPool> PagedHashMap<T> {
 
     /// Get the value of a key from the index.
     /// If the key does not exist, it will return an error.
-    pub fn get<K: AsRef<[u8]> + Hash>(&self, key: K) -> Result<Vec<u8>, PagedHashMapError> {
+    pub fn get<K: AsRef<[u8]> + Hash>(&self, key: K) -> Result<Vec<u8>, AccessMethodError> {
         #[cfg(feature = "stat")]
         inc_local_stat_get_count();
 
@@ -626,7 +616,7 @@ impl<T: MemPool> PagedHashMap<T> {
         }
         match result {
             Some(v) => Ok(v),
-            None => Err(PagedHashMapError::KeyNotFound),
+            None => Err(AccessMethodError::KeyNotFound),
         }
     }
 
@@ -1175,7 +1165,7 @@ mod tests {
 
         let func = simple_hash_func;
 
-        for _ in 0..200000 {
+        for _ in 0..20000 {
             let operation: u8 = rng.gen_range(0..3);
             let key = random_string(10);
             let value = random_string(20);

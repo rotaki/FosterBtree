@@ -1,7 +1,6 @@
 use crate::{
-    access_method::{prelude::AppendOnlyStoreError, AccessMethodError},
+    access_method::AccessMethodError,
     bp::prelude::{ContainerId, DatabaseId},
-    prelude::TreeStatus,
 };
 use std::collections::HashSet;
 
@@ -50,19 +49,13 @@ impl From<TxnStorageStatus> for String {
     }
 }
 
-impl From<TreeStatus> for TxnStorageStatus {
-    fn from(status: TreeStatus) -> TxnStorageStatus {
+impl From<AccessMethodError> for TxnStorageStatus {
+    fn from(status: AccessMethodError) -> TxnStorageStatus {
         match status {
-            TreeStatus::NotFound => TxnStorageStatus::KeyNotFound,
-            TreeStatus::Duplicate => TxnStorageStatus::KeyExists,
-            other => TxnStorageStatus::AccessError(other.into()),
+            AccessMethodError::KeyNotFound => TxnStorageStatus::KeyNotFound,
+            AccessMethodError::KeyDuplicate => TxnStorageStatus::KeyExists,
+            _ => TxnStorageStatus::AccessError(status),
         }
-    }
-}
-
-impl From<AppendOnlyStoreError> for TxnStorageStatus {
-    fn from(status: AppendOnlyStoreError) -> TxnStorageStatus {
-        TxnStorageStatus::AccessError(status.into())
     }
 }
 

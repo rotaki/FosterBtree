@@ -11,45 +11,13 @@ use std::{
 };
 
 use crate::{
+    access_method::AccessMethodError,
     bp::prelude::*,
     log_debug, log_trace, log_warn,
     page::{Page, PageId, AVAILABLE_PAGE_SIZE},
 };
 
 use super::foster_btree_page::{BTreeKey, FosterBtreePage};
-
-#[derive(PartialEq)]
-pub enum TreeStatus {
-    Ok,
-    NotFound,
-    NotInPageRange,
-    Duplicate,
-    NotReadyForPhysicalDelete,
-    ReadLatchFailed,
-    WriteLatchFailed,
-    MemPoolStatus(MemPoolStatus),
-}
-
-impl From<MemPoolStatus> for TreeStatus {
-    fn from(status: MemPoolStatus) -> Self {
-        TreeStatus::MemPoolStatus(status)
-    }
-}
-
-impl std::fmt::Debug for TreeStatus {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            TreeStatus::Ok => write!(f, "Ok"),
-            TreeStatus::NotFound => write!(f, "NotFound"),
-            TreeStatus::NotInPageRange => write!(f, "NotInPageRange"),
-            TreeStatus::Duplicate => write!(f, "Duplicate"),
-            TreeStatus::NotReadyForPhysicalDelete => write!(f, "NotReadyForPhysicalDelete"),
-            TreeStatus::ReadLatchFailed => write!(f, "ReadLatchFailed"),
-            TreeStatus::WriteLatchFailed => write!(f, "WriteLatchFailed"),
-            TreeStatus::MemPoolStatus(status) => write!(f, "{:?}", status),
-        }
-    }
-}
 
 #[derive(Clone, Copy, Debug)]
 enum OpType {
@@ -1820,7 +1788,10 @@ impl<T: MemPool> FosterBtree<T> {
         }
     }
 
-    fn try_traverse_to_leaf_for_write(&self, key: &[u8]) -> Result<FrameWriteGuard, TreeStatus> {
+    fn try_traverse_to_leaf_for_write(
+        &self,
+        key: &[u8],
+    ) -> Result<FrameWriteGuard, AccessMethodError> {
         let leaf_page = self.traverse_to_leaf_for_read(key);
         #[cfg(feature = "stat")]
         inc_exclusive_page_latch_count();
@@ -1829,7 +1800,7 @@ impl<T: MemPool> FosterBtree<T> {
             Err(_) => {
                 #[cfg(feature = "stat")]
                 inc_exclusive_page_latch_failures(true);
-                Err(TreeStatus::WriteLatchFailed)
+                Err(AccessMethodError::PageWriteLatchFailed)
             }
         }
     }
@@ -1845,7 +1816,7 @@ impl<T: MemPool> FosterBtree<T> {
                         inc_local_additional_traversals(attempts);
                         break leaf_page;
                     }
-                    Err(TreeStatus::WriteLatchFailed) => {
+                    Err(AccessMethodError::PageWriteLatchFailed) => {
                         attempts += 1;
                         log_trace!(
                             "Failed to acquire write lock (#attempt {}). Sleeping for {:?}",
@@ -1863,24 +1834,24 @@ impl<T: MemPool> FosterBtree<T> {
         leaf_page
     }
 
-    pub fn get(&self, key: &[u8]) -> Result<Vec<u8>, TreeStatus> {
+    pub fn get(&self, key: &[u8]) -> Result<Vec<u8>, AccessMethodError> {
         let foster_page = self.traverse_to_leaf_for_read(key);
         let slot_id = foster_page.upper_bound_slot_id(&BTreeKey::new(key)) - 1;
         if slot_id == 0 {
             // Lower fence. Non-existent key
-            Err(TreeStatus::NotFound)
+            Err(AccessMethodError::KeyNotFound)
         } else {
             // We can get the key if it exists
             if foster_page.get_raw_key(slot_id) == key {
                 Ok(foster_page.get_val(slot_id).to_vec())
             } else {
                 // Non-existent key
-                Err(TreeStatus::NotFound)
+                Err(AccessMethodError::KeyNotFound)
             }
         }
     }
 
-    pub fn insert(&self, key: &[u8], value: &[u8]) -> Result<(), TreeStatus> {
+    pub fn insert(&self, key: &[u8], value: &[u8]) -> Result<(), AccessMethodError> {
         let mut leaf_page = self.traverse_to_leaf_for_write(key);
         log_trace!("Acquired write lock for page {}", leaf_page.get_id());
         let slot_id = leaf_page.upper_bound_slot_id(&BTreeKey::new(key)) - 1;
@@ -1893,7 +1864,7 @@ impl<T: MemPool> FosterBtree<T> {
             // We can insert the key if it does not exist
             if leaf_page.get_raw_key(slot_id) == key {
                 // Exact match
-                Err(TreeStatus::Duplicate)
+                Err(AccessMethodError::KeyDuplicate)
             } else {
                 self.stats.inc_num_keys();
                 self.insert_at_slot_or_split(&mut leaf_page, slot_id + 1, key, value);
@@ -1902,13 +1873,13 @@ impl<T: MemPool> FosterBtree<T> {
         }
     }
 
-    pub fn update(&self, key: &[u8], value: &[u8]) -> Result<(), TreeStatus> {
+    pub fn update(&self, key: &[u8], value: &[u8]) -> Result<(), AccessMethodError> {
         let mut leaf_page = self.traverse_to_leaf_for_write(key);
         log_trace!("Acquired write lock for page {}", leaf_page.get_id());
         let slot_id = leaf_page.upper_bound_slot_id(&BTreeKey::new(key)) - 1;
         if slot_id == 0 {
             // We cannot update the lower fence
-            Err(TreeStatus::NotFound)
+            Err(AccessMethodError::KeyNotFound)
         } else {
             // We can update the key if it exists
             if leaf_page.get_raw_key(slot_id) == key {
@@ -1917,12 +1888,12 @@ impl<T: MemPool> FosterBtree<T> {
                 Ok(())
             } else {
                 // Non-existent key
-                Err(TreeStatus::NotFound)
+                Err(AccessMethodError::KeyNotFound)
             }
         }
     }
 
-    pub fn upsert(&self, key: &[u8], value: &[u8]) -> Result<(), TreeStatus> {
+    pub fn upsert(&self, key: &[u8], value: &[u8]) -> Result<(), AccessMethodError> {
         let mut leaf_page = self.traverse_to_leaf_for_write(key);
         log_trace!("Acquired write lock for page {}", leaf_page.get_id());
         let slot_id = leaf_page.upper_bound_slot_id(&BTreeKey::new(key)) - 1;
@@ -1949,7 +1920,7 @@ impl<T: MemPool> FosterBtree<T> {
         key: &[u8],
         value: &[u8],
         merge_func: impl Fn(&[u8], &[u8]) -> Vec<u8>,
-    ) -> Result<(), TreeStatus> {
+    ) -> Result<(), AccessMethodError> {
         let mut leaf_page = self.traverse_to_leaf_for_write(key);
         log_trace!("Acquired write lock for page {}", leaf_page.get_id());
         let slot_id = leaf_page.upper_bound_slot_id(&BTreeKey::new(key)) - 1;
@@ -1973,13 +1944,13 @@ impl<T: MemPool> FosterBtree<T> {
     }
 
     /// Physical deletion of a key
-    pub fn delete(&self, key: &[u8]) -> Result<(), TreeStatus> {
+    pub fn delete(&self, key: &[u8]) -> Result<(), AccessMethodError> {
         let mut leaf_page = self.traverse_to_leaf_for_write(key);
         log_trace!("Acquired write lock for page {}", leaf_page.get_id());
         let slot_id = leaf_page.upper_bound_slot_id(&BTreeKey::new(key)) - 1;
         if slot_id == 0 {
             // Lower fence cannot be deleted
-            Err(TreeStatus::NotFound)
+            Err(AccessMethodError::KeyNotFound)
         } else {
             // We can delete the key if it exists
             if leaf_page.get_raw_key(slot_id) == key {
@@ -1989,7 +1960,7 @@ impl<T: MemPool> FosterBtree<T> {
                 Ok(())
             } else {
                 // Non-existent key
-                Err(TreeStatus::NotFound)
+                Err(AccessMethodError::KeyNotFound)
             }
         }
     }
@@ -2245,7 +2216,7 @@ impl<T: MemPool> FosterBtreeAppendOnly<T> {
         self.fbt.num_kvs()
     }
 
-    pub fn append(&self, key: &[u8], value: &[u8]) -> Result<(), TreeStatus> {
+    pub fn append(&self, key: &[u8], value: &[u8]) -> Result<(), AccessMethodError> {
         // Adds a suffix to the key and insert the key-value pair.
         let mut suffixed_key = key.to_vec();
         let count = u32::MAX;
@@ -2567,7 +2538,7 @@ mod tests {
         access_method::fbt::foster_btree::{
             adopt, anti_adopt, ascend_root, balance, descend_root, is_large, is_small, merge,
             should_adopt, should_antiadopt, should_load_balance, should_merge, should_root_ascend,
-            should_root_descend, TreeStatus, MIN_BYTES_USED,
+            should_root_descend, AccessMethodError, MIN_BYTES_USED,
         },
         bp::{get_in_mem_pool, get_test_bp},
         random::RandomKVs,
@@ -3790,7 +3761,7 @@ mod tests {
             );
             let key = to_bytes(*i);
             let current_val = btree.get(&key);
-            assert_eq!(current_val, Err(TreeStatus::NotFound))
+            assert_eq!(current_val, Err(AccessMethodError::KeyNotFound))
         }
     }
 

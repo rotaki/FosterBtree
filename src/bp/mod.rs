@@ -8,7 +8,6 @@ use std::sync::Arc;
 
 pub use buffer_frame::{BufferFrame, FrameReadGuard, FrameWriteGuard};
 pub use buffer_pool::BufferPool;
-pub use eviction_policy::{DummyEvictionPolicy, EvictionPolicy, LRUEvictionPolicy};
 pub use in_mem_pool::InMemPool;
 pub use mem_pool_trait::{
     ContainerId, ContainerKey, DatabaseId, MemPool, MemPoolStatus, PageFrameKey,

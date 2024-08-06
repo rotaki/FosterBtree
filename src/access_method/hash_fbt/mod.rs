@@ -6,13 +6,16 @@ use std::{
 };
 
 use crate::{
-    bp::{ContainerKey, EvictionPolicy, MemPool, PageFrameKey},
+    bp::{ContainerKey, MemPool, PageFrameKey},
     page::{PageId, AVAILABLE_PAGE_SIZE},
 };
 
-use super::fbt::{
-    FosterBtree, FosterBtreeAppendOnly, FosterBtreeAppendOnlyRangeScanner, FosterBtreeRangeScanner,
-    TreeStatus,
+use super::{
+    fbt::{
+        FosterBtree, FosterBtreeAppendOnly, FosterBtreeAppendOnlyRangeScanner,
+        FosterBtreeRangeScanner,
+    },
+    AccessMethodError,
 };
 
 pub mod prelude {
@@ -114,19 +117,19 @@ impl<T: MemPool> HashFosterBtree<T> {
         &self.buckets[idx as usize]
     }
 
-    pub fn get(&self, key: &[u8]) -> Result<Vec<u8>, TreeStatus> {
+    pub fn get(&self, key: &[u8]) -> Result<Vec<u8>, AccessMethodError> {
         self.get_bucket(key).get(key)
     }
 
-    pub fn insert(&self, key: &[u8], value: &[u8]) -> Result<(), TreeStatus> {
+    pub fn insert(&self, key: &[u8], value: &[u8]) -> Result<(), AccessMethodError> {
         self.get_bucket(key).insert(key, value)
     }
 
-    pub fn update(&self, key: &[u8], value: &[u8]) -> Result<(), TreeStatus> {
+    pub fn update(&self, key: &[u8], value: &[u8]) -> Result<(), AccessMethodError> {
         self.get_bucket(key).update(key, value)
     }
 
-    pub fn upsert(&self, key: &[u8], value: &[u8]) -> Result<(), TreeStatus> {
+    pub fn upsert(&self, key: &[u8], value: &[u8]) -> Result<(), AccessMethodError> {
         self.get_bucket(key).upsert(key, value)
     }
 
@@ -135,11 +138,11 @@ impl<T: MemPool> HashFosterBtree<T> {
         key: &[u8],
         value: &[u8],
         merge_fn: impl Fn(&[u8], &[u8]) -> Vec<u8>,
-    ) -> Result<(), TreeStatus> {
+    ) -> Result<(), AccessMethodError> {
         self.get_bucket(key).upsert_with_merge(key, value, merge_fn)
     }
 
-    pub fn delete(&self, key: &[u8]) -> Result<(), TreeStatus> {
+    pub fn delete(&self, key: &[u8]) -> Result<(), AccessMethodError> {
         self.get_bucket(key).delete(key)
     }
 
@@ -276,7 +279,7 @@ impl<T: MemPool> HashFosterBtreeAppendOnly<T> {
         &self.buckets[idx as usize]
     }
 
-    pub fn append(&self, key: &[u8], value: &[u8]) -> Result<(), TreeStatus> {
+    pub fn append(&self, key: &[u8], value: &[u8]) -> Result<(), AccessMethodError> {
         self.get_bucket(key).append(key, value)
     }
 
@@ -292,13 +295,13 @@ mod tests {
     use std::{collections::HashSet, fs::File, sync::Arc};
 
     use crate::{
-        bp::{get_in_mem_pool, get_test_bp, BufferPool, LRUEvictionPolicy},
+        access_method::AccessMethodError,
+        bp::{get_in_mem_pool, get_test_bp, BufferPool},
         log_trace,
-        prelude::TreeStatus,
         random::RandomKVs,
     };
 
-    use super::{ContainerKey, EvictionPolicy, HashFosterBtree, MemPool};
+    use super::{ContainerKey, HashFosterBtree, MemPool};
 
     fn to_bytes(num: usize) -> Vec<u8> {
         num.to_be_bytes().to_vec()
@@ -429,7 +432,7 @@ mod tests {
             );
             let key = to_bytes(*i);
             let current_val = btree.get(&key);
-            assert_eq!(current_val, Err(TreeStatus::NotFound))
+            assert_eq!(current_val, Err(AccessMethodError::KeyNotFound))
         }
     }
 

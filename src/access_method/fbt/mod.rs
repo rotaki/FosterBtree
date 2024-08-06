@@ -4,7 +4,6 @@ mod foster_btree_visualizer_wasm;
 
 pub use foster_btree::{
     FosterBtree, FosterBtreeAppendOnly, FosterBtreeAppendOnlyRangeScanner, FosterBtreeRangeScanner,
-    TreeStatus,
 };
 pub use foster_btree_page::FosterBtreePage;
 
@@ -12,5 +11,5 @@ pub use foster_btree_page::FosterBtreePage;
 pub use foster_btree_visualizer_wasm::inner::FosterBtreeVisualizer;
 
 pub mod prelude {
-    pub use super::{FosterBtree, FosterBtreePage, TreeStatus};
+    pub use super::{FosterBtree, FosterBtreePage};
 }

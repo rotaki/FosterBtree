@@ -15,7 +15,7 @@ use crate::{
 };
 use crate::{
     access_method::prelude::{AppendOnlyStore, AppendOnlyStoreScanner},
-    bp::{EvictionPolicy, MemPool},
+    bp::MemPool,
 };
 
 pub enum Storage<M: MemPool> {

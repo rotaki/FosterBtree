@@ -13,15 +13,10 @@ use crate::{
     prelude::{ContainerKey, MemPool, PageFrameKey},
 };
 
-pub mod prelude {
-    pub use super::{AppendOnlyStore, AppendOnlyStoreError, AppendOnlyStoreScanner};
-}
+use super::AccessMethodError;
 
-#[derive(Debug, PartialEq)]
-pub enum AppendOnlyStoreError {
-    PageFull,
-    PageNotFound,
-    RecordTooLarge,
+pub mod prelude {
+    pub use super::{AppendOnlyStore, AppendOnlyStoreScanner};
 }
 
 struct RuntimeStats {
@@ -169,10 +164,10 @@ impl<T: MemPool> AppendOnlyStore<T> {
         self.stats.get_num_pages()
     }
 
-    pub fn append(&self, key: &[u8], value: &[u8]) -> Result<(), AppendOnlyStoreError> {
+    pub fn append(&self, key: &[u8], value: &[u8]) -> Result<(), AccessMethodError> {
         let data_len = key.len() + value.len();
         if data_len > <Page as AppendOnlyPage>::max_record_size() {
-            return Err(AppendOnlyStoreError::RecordTooLarge);
+            return Err(AccessMethodError::RecordTooLarge);
         }
         self.stats.inc_num_recs();
 
@@ -319,7 +314,7 @@ impl<T: MemPool> Iterator for AppendOnlyStoreScanner<T> {
 
 #[cfg(test)]
 mod tests {
-    use crate::bp::{get_test_bp, BufferPool, LRUEvictionPolicy};
+    use crate::bp::{get_test_bp, BufferPool};
     use crate::random::{gen_random_byte_vec, RandomKVs};
 
     use super::*;
@@ -353,7 +348,7 @@ mod tests {
         let value = gen_random_byte_vec(Page::max_record_size() + 1, Page::max_record_size() + 1);
         assert_eq!(
             store.append(&key, &value),
-            Err(AppendOnlyStoreError::RecordTooLarge)
+            Err(AccessMethodError::RecordTooLarge)
         );
 
         // Scan should return nothing

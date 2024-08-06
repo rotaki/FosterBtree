@@ -1,6 +1,4 @@
-use append_only_store::AppendOnlyStoreError;
-use fbt::TreeStatus;
-use prelude::PagedHashMapError;
+use crate::bp::MemPoolStatus;
 
 pub mod append_only_store;
 pub mod fbt;
@@ -9,27 +7,14 @@ pub mod hashindex;
 
 #[derive(Debug, PartialEq)]
 pub enum AccessMethodError {
-    HashIdx(PagedHashMapError),
-    BTreeIdx(TreeStatus),
-    AppendOnlyStore(AppendOnlyStoreError),
-}
-
-impl From<PagedHashMapError> for AccessMethodError {
-    fn from(err: PagedHashMapError) -> Self {
-        AccessMethodError::HashIdx(err)
-    }
-}
-
-impl From<TreeStatus> for AccessMethodError {
-    fn from(err: TreeStatus) -> Self {
-        AccessMethodError::BTreeIdx(err)
-    }
-}
-
-impl From<AppendOnlyStoreError> for AccessMethodError {
-    fn from(err: AppendOnlyStoreError) -> Self {
-        AccessMethodError::AppendOnlyStore(err)
-    }
+    KeyNotFound,
+    KeyDuplicate,
+    KeyNotInPageRange, // For Btree
+    PageReadLatchFailed,
+    PageWriteLatchFailed,
+    RecordTooLarge,
+    MemPoolStatus(MemPoolStatus),
+    Other(String),
 }
 
 pub mod prelude {

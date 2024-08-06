@@ -28,7 +28,7 @@ mod tests {
         bp::{
             get_test_bp,
             prelude::{ContainerId, DatabaseId},
-            BufferPool, LRUEvictionPolicy,
+            BufferPool,
         },
         random::RandomKVs,
     };

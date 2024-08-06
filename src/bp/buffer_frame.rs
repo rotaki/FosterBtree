@@ -1,6 +1,8 @@
 use super::mem_pool_trait::PageFrameKey;
-use super::LRUEvictionPolicy;
-use super::{eviction_policy::EvictionPolicy, mem_pool_trait::PageKey};
+use super::{
+    eviction_policy::{EvictionPolicy, LRUEvictionPolicy},
+    mem_pool_trait::PageKey,
+};
 use crate::page::Page;
 use crate::rwlatch::RwLatch;
 use std::{
