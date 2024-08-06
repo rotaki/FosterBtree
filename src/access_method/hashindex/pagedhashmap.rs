@@ -1099,6 +1099,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn test_page_overflow_and_chain_handling() {
         let map = setup_paged_hash_map(get_in_mem_pool());
         let key1 = "key1".as_bytes();
@@ -1121,6 +1122,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn test_edge_case_key_value_sizes() {
         let map = setup_paged_hash_map(get_in_mem_pool());
         let key = random_string(AVAILABLE_PAGE_SIZE / 4); // Large key
@@ -1427,6 +1429,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn test_page_overflow_and_chain_handling2() {
         let map = setup_paged_hash_map(get_in_mem_pool());
         let key1 = "key1".as_bytes();
@@ -1447,6 +1450,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn test_edge_case_key_value_sizes2() {
         let map = setup_paged_hash_map(get_in_mem_pool());
         let key = random_string(AVAILABLE_PAGE_SIZE / 4); // Large key

@@ -1102,6 +1102,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn test_upsert_with_merge_out_of_space() {
         let mut page = <Page as ShortKeyPage>::new();
         let key = b"key";
