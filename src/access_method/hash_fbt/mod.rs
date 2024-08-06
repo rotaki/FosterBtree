@@ -1,8 +1,6 @@
-use core::num;
 use std::{
     hash::{Hash, Hasher},
     sync::Arc,
-    u32,
 };
 
 use crate::{
@@ -44,7 +42,7 @@ impl<T: MemPool> HashFosterBtree<T> {
             panic!("Number of buckets too large to fit in the meta_page page");
         }
 
-        let mut meta_page = mem_pool.create_new_page_for_write(c_key.clone()).unwrap();
+        let mut meta_page = mem_pool.create_new_page_for_write(c_key).unwrap();
 
         let mut offset = 0;
         let num_buckets_bytes = num_buckets.to_be_bytes();
@@ -90,7 +88,7 @@ impl<T: MemPool> HashFosterBtree<T> {
             offset += root_page_id_bytes.len();
             let root_page_id = PageId::from_be_bytes(root_page_id_bytes.try_into().unwrap());
             let tree = Arc::new(FosterBtree::load(
-                c_key.clone(),
+                c_key,
                 mem_pool.clone(),
                 root_page_id,
             ));
@@ -206,7 +204,7 @@ impl<T: MemPool> HashFosterBtreeAppendOnly<T> {
             panic!("Number of buckets too large to fit in the meta_page page");
         }
 
-        let mut meta_page = mem_pool.create_new_page_for_write(c_key.clone()).unwrap();
+        let mut meta_page = mem_pool.create_new_page_for_write(c_key).unwrap();
 
         let mut offset = 0;
         let num_buckets_bytes = num_buckets.to_be_bytes();
@@ -252,7 +250,7 @@ impl<T: MemPool> HashFosterBtreeAppendOnly<T> {
             offset += root_page_id_bytes.len();
             let root_page_id = PageId::from_be_bytes(root_page_id_bytes.try_into().unwrap());
             let tree = Arc::new(FosterBtreeAppendOnly::load(
-                c_key.clone(),
+                c_key,
                 mem_pool.clone(),
                 root_page_id,
             ));
@@ -285,7 +283,7 @@ impl<T: MemPool> HashFosterBtreeAppendOnly<T> {
 
     pub fn scan_key(self: &Arc<Self>, key: &[u8]) -> FosterBtreeAppendOnlyRangeScanner<T> {
         // Find the bucket with the prefix
-        self.get_bucket(key).scan_key(&key)
+        self.get_bucket(key).scan_key(key)
     }
 }
 

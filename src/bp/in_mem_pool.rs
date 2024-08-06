@@ -201,8 +201,6 @@ mod tests {
     use super::*;
     use std::thread;
 
-    pub type InMemPool = super::InMemPool;
-
     #[test]
     fn test_mp_and_frame_latch() {
         let mp = InMemPool::new();

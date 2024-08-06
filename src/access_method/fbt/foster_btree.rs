@@ -784,13 +784,13 @@ fn split_insert(
     // We need to decide which page to insert the key-value pair.
     // If the key is less than the foster key, we insert the key into this.
     // Otherwise, we insert the key into the foster child.
-    let res = if key < &foster_key {
+    
+
+    if key < &foster_key {
         this.insert(key, value)
     } else {
         foster_child.insert(key, value)
-    };
-
-    res
+    }
     /*
     if !res {
         // Need to split the page into three
@@ -888,7 +888,7 @@ fn split_insert_triple(
 
         // Connect this to new_page1
         let foster_child_id = InnerVal::new_with_frame_id(new_page1.get_id(), new_page1.frame_id());
-        let res = this.insert(&foster_key1, &foster_child_id.to_bytes());
+        let res = this.insert(foster_key1, &foster_child_id.to_bytes());
         assert!(res);
         this.set_has_foster_child(true);
 
@@ -1508,16 +1508,14 @@ impl<T: MemPool> FosterBtree<T> {
                     if !split_insert_triple(this, &mut new_page1, &mut new_page2, key, value) {
                         let _ = self.unused_pages.push(new_page2.get_id());
                     }
-                } else {
-                    if !split_insert_triple(
-                        &mut foster_child,
-                        &mut new_page1,
-                        &mut new_page2,
-                        key,
-                        value,
-                    ) {
-                        let _ = self.unused_pages.push(new_page2.get_id());
-                    }
+                } else if !split_insert_triple(
+                    &mut foster_child,
+                    &mut new_page1,
+                    &mut new_page2,
+                    key,
+                    value,
+                ) {
+                    let _ = self.unused_pages.push(new_page2.get_id());
                 }
             }
         }
@@ -1547,7 +1545,6 @@ impl<T: MemPool> FosterBtree<T> {
             this.remove_at(slot);
             // Try inserting the key-value pair into this page again after removing the slot.
             if this.insert(key, value) {
-                return;
             } else {
                 println!(
                     "this_page_used: {}, this_page_free: {}, key size: {}, value size: {}",
@@ -1565,16 +1562,14 @@ impl<T: MemPool> FosterBtree<T> {
                         if !split_insert_triple(this, &mut new_page1, &mut new_page2, key, value) {
                             let _ = self.unused_pages.push(new_page2.get_id());
                         }
-                    } else {
-                        if !split_insert_triple(
-                            &mut foster_child,
-                            &mut new_page1,
-                            &mut new_page2,
-                            key,
-                            value,
-                        ) {
-                            let _ = self.unused_pages.push(new_page2.get_id());
-                        }
+                    } else if !split_insert_triple(
+                        &mut foster_child,
+                        &mut new_page1,
+                        &mut new_page2,
+                        key,
+                        value,
+                    ) {
+                        let _ = self.unused_pages.push(new_page2.get_id());
                     }
                 }
             }
@@ -2228,7 +2223,7 @@ impl<T: MemPool> FosterBtreeAppendOnly<T> {
         // If value_before is prefixed with key, use lower_fence + 1
         // If value_before is not prefixed with key, use key + "0000"
         let key_before = leaf_page.get_raw_key(slot_id);
-        let new_suffix = if key_before.starts_with(&key) {
+        let new_suffix = if key_before.starts_with(key) {
             if key_before.len() != suffixed_key.len() {
                 panic!("Key with the same prefix already exists");
             }

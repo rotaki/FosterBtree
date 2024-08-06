@@ -278,7 +278,7 @@ impl Frames {
     }
 
     pub fn reset_free_frames(&self) {
-        while let Ok(_) = self.fast_path_victims.pop() {}
+        while self.fast_path_victims.pop().is_ok() {}
         for i in 0..self.num_frames {
             self.fast_path_victims.push(i).unwrap();
         }
