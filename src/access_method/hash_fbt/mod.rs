@@ -10,10 +10,15 @@ use crate::{
     page::{PageId, AVAILABLE_PAGE_SIZE},
 };
 
-use super::fbt::{FosterBtree, FosterBtreeRangeScanner, TreeStatus};
+use super::fbt::{
+    FosterBtree, FosterBtreeAppendOnly, FosterBtreeAppendOnlyRangeScanner, FosterBtreeRangeScanner,
+    TreeStatus,
+};
 
 pub mod prelude {
     pub use super::HashFosterBtree;
+    pub use super::HashFosterBtreeAppendOnly;
+    pub use super::HashFosterBtreeIter;
 }
 
 pub struct HashFosterBtree<E: EvictionPolicy, T: MemPool<E>> {
@@ -149,32 +154,6 @@ impl<E: EvictionPolicy, T: MemPool<E>> HashFosterBtree<E, T> {
         }
         HashFosterBtreeIter::new(scanners)
     }
-
-    // Functions for hash tables... Temporary use only
-    pub fn check_key(&self, key: &[u8]) -> bool {
-        let mut first_key = key.to_vec();
-        first_key.extend(0_u32.to_be_bytes());
-        if let Ok(_) = self.get_bucket(&key).get(&first_key) {
-            true
-        } else {
-            false
-        }
-    }
-
-    pub fn append(&self, key: &[u8], value: &[u8]) -> Result<(), TreeStatus> {
-        self.get_bucket(key).append(key, value)
-    }
-
-    pub fn scan_with_prefix(self: &Arc<Self>, prefix: &[u8]) -> HashFosterBtreeIter<E, T> {
-        let mut first_key = prefix.to_vec();
-        first_key.extend(0_u32.to_be_bytes());
-
-        let mut last_key = prefix.to_vec();
-        last_key.extend(u32::MAX.to_be_bytes());
-
-        // Find the bucket with the prefix
-        HashFosterBtreeIter::new(vec![self.get_bucket(prefix).scan(&first_key, &last_key)])
-    }
 }
 
 pub struct HashFosterBtreeIter<E: EvictionPolicy + 'static, T: MemPool<E>> {
@@ -204,6 +183,109 @@ impl<E: EvictionPolicy, T: MemPool<E>> Iterator for HashFosterBtreeIter<E, T> {
             }
             self.current += 1;
         }
+    }
+}
+
+pub struct HashFosterBtreeAppendOnly<E: EvictionPolicy, T: MemPool<E>> {
+    pub mem_pool: Arc<T>,
+    c_key: ContainerKey,
+    num_buckets: usize,
+    meta_page_id: PageId, // Stores the number of buckets and all the page ids of the root of the foster btrees
+    buckets: Vec<Arc<FosterBtreeAppendOnly<E, T>>>,
+}
+
+impl<E: EvictionPolicy, T: MemPool<E>> HashFosterBtreeAppendOnly<E, T> {
+    pub fn new(c_key: ContainerKey, mem_pool: Arc<T>, num_buckets: usize) -> Self {
+        if num_buckets == 0 {
+            panic!("Number of buckets cannot be 0");
+        }
+        // If number of buckets does not fit in the meta_page, panic
+        if num_buckets * std::mem::size_of::<PageId>() + std::mem::size_of::<usize>()
+            > AVAILABLE_PAGE_SIZE
+        {
+            panic!("Number of buckets too large to fit in the meta_page page");
+        }
+
+        let mut meta_page = mem_pool.create_new_page_for_write(c_key.clone()).unwrap();
+
+        let mut offset = 0;
+        let num_buckets_bytes = num_buckets.to_be_bytes();
+        meta_page[offset..offset + num_buckets_bytes.len()].copy_from_slice(&num_buckets_bytes);
+        offset += num_buckets_bytes.len();
+
+        let mut buckets = Vec::with_capacity(num_buckets);
+        for _ in 0..num_buckets {
+            // Create a new foster btree
+            let tree = Arc::new(FosterBtreeAppendOnly::new(c_key, mem_pool.clone()));
+
+            let root_p_id = tree.fbt.root_key.p_key().page_id.to_be_bytes();
+            meta_page[offset..offset + root_p_id.len()].copy_from_slice(&root_p_id);
+            offset += root_p_id.len();
+
+            buckets.push(tree);
+        }
+
+        let meta_page_id = meta_page.get_id();
+
+        Self {
+            mem_pool: mem_pool.clone(),
+            c_key,
+            num_buckets,
+            meta_page_id,
+            buckets,
+        }
+    }
+
+    pub fn load(c_key: ContainerKey, mem_pool: Arc<T>, meta_page_id: PageId) -> Self {
+        let meta_page = mem_pool
+            .get_page_for_read(PageFrameKey::new(c_key, meta_page_id))
+            .unwrap();
+
+        let mut offset = 0;
+        let num_buckets_bytes = &meta_page[offset..offset + std::mem::size_of::<usize>()];
+        offset += num_buckets_bytes.len();
+        let num_buckets = usize::from_be_bytes(num_buckets_bytes.try_into().unwrap());
+
+        let mut buckets = Vec::with_capacity(num_buckets);
+        for _ in 0..num_buckets {
+            let root_page_id_bytes = &meta_page[offset..offset + std::mem::size_of::<PageId>()];
+            offset += root_page_id_bytes.len();
+            let root_page_id = PageId::from_be_bytes(root_page_id_bytes.try_into().unwrap());
+            let tree = Arc::new(FosterBtreeAppendOnly::load(
+                c_key.clone(),
+                mem_pool.clone(),
+                root_page_id,
+            ));
+            buckets.push(tree);
+        }
+
+        Self {
+            mem_pool: mem_pool.clone(),
+            c_key,
+            num_buckets,
+            meta_page_id,
+            buckets,
+        }
+    }
+
+    pub fn num_kvs(&self) -> usize {
+        self.buckets.iter().map(|b| b.num_kvs()).sum()
+    }
+
+    fn get_bucket(&self, key: &[u8]) -> &Arc<FosterBtreeAppendOnly<E, T>> {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        key.hash(&mut hasher);
+        let idx = hasher.finish() % self.num_buckets as u64;
+        &self.buckets[idx as usize]
+    }
+
+    pub fn append(&self, key: &[u8], value: &[u8]) -> Result<(), TreeStatus> {
+        self.get_bucket(key).append(key, value)
+    }
+
+    pub fn scan_key(self: &Arc<Self>, key: &[u8]) -> FosterBtreeAppendOnlyRangeScanner<E, T> {
+        // Find the bucket with the prefix
+        self.get_bucket(key).scan_key(&key)
     }
 }
 

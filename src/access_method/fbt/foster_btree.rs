@@ -2008,35 +2008,6 @@ impl<E: EvictionPolicy, T: MemPool<E>> FosterBtree<E, T> {
         }
     }
 
-    pub fn append(&self, key: &[u8], value: &[u8]) -> Result<(), TreeStatus> {
-        // Adds a suffix to the key and insert the key-value pair.
-        let mut suffixed_key = key.to_vec();
-        let count = u32::MAX;
-        suffixed_key.extend_from_slice(&count.to_be_bytes());
-        // Search for the key
-        let mut leaf_page = self.traverse_to_leaf_for_write(&suffixed_key);
-        let slot_id = leaf_page.upper_bound_slot_id(&BTreeKey::new(&suffixed_key)) - 1;
-
-        // If value_before is prefixed with key, use lower_fence + 1
-        // If value_before is not prefixed with key, use key + "0000"
-        let value_before = leaf_page.get_raw_key(slot_id);
-        let new_suffix =
-            if value_before.len() == suffixed_key.len() && value_before.starts_with(&key) {
-                let old_suffix = u32::from_be_bytes(value_before[key.len()..].try_into().unwrap());
-                if old_suffix == u32::MAX {
-                    panic!("Key is already appended with the maximum count");
-                }
-                old_suffix + 1
-            } else {
-                0
-            };
-        // Modify the suffix of the key
-        suffixed_key[key.len()..].copy_from_slice(&new_suffix.to_be_bytes());
-        self.stats.inc_num_keys();
-        self.insert_at_slot_or_split(&mut leaf_page, slot_id + 1, &suffixed_key, value);
-        Ok(())
-    }
-
     pub fn scan(self: &Arc<Self>, l_key: &[u8], r_key: &[u8]) -> FosterBtreeRangeScanner<E, T> {
         FosterBtreeRangeScanner::new(self, l_key, r_key)
     }
@@ -2252,6 +2223,136 @@ impl<E: EvictionPolicy + 'static, T: MemPool<E>> Iterator for FosterBtreeRangeSc
                 }
             }
         }
+    }
+}
+
+/// Tree index for non-unique keys.
+///
+/// The key is appended with a suffix to make it unique.
+/// The suffix is currently a 32-bit integer.
+/// This tree panics in the following cases
+/// 1. When you try to append a key for which the suffix has reached the maximum value.
+/// 2. When you try to append a key whose prefix key (not equal) is already in the tree.
+///
+/// We prevent the second case because the appended suffix can change the order of the two keys.
+/// For example, say the user inserts two keys "a" and "a:3". Here, "a" is a prefix of "a:3".
+/// Inserting "a" will internally create "a:0" and inserting "a:3" will create "a:3:0" because the suffix(count) is 0.
+/// As the user appends more "a" keys, the internal keys should be "a:1", "a:2", "a:3", "a:4".
+/// In the tree, however, the values of "a" and "a:3" will be interleaved because the internal keys are sorted by byte order.
+/// The sort order: "a:0", "a:1", "a:2", "a:3", "a:3:0", "a:4".
+/// To prevent this, we panic when the user tries to append a key whose prefix key is already in the tree.
+/// This will not happen when the keys are of fixed length.
+pub struct FosterBtreeAppendOnly<E: EvictionPolicy, T: MemPool<E>> {
+    pub fbt: Arc<FosterBtree<E, T>>,
+}
+
+impl<E: EvictionPolicy, T: MemPool<E>> FosterBtreeAppendOnly<E, T> {
+    pub fn new(c_key: ContainerKey, mem_pool: Arc<T>) -> Self {
+        FosterBtreeAppendOnly {
+            fbt: Arc::new(FosterBtree::new(c_key, mem_pool)),
+        }
+    }
+
+    pub fn load(c_key: ContainerKey, mem_pool: Arc<T>, root_page_id: PageId) -> Self {
+        FosterBtreeAppendOnly {
+            fbt: Arc::new(FosterBtree::load(c_key, mem_pool, root_page_id)),
+        }
+    }
+
+    pub fn num_kvs(&self) -> usize {
+        self.fbt.num_kvs()
+    }
+
+    pub fn append(&self, key: &[u8], value: &[u8]) -> Result<(), TreeStatus> {
+        // Adds a suffix to the key and insert the key-value pair.
+        let mut suffixed_key = key.to_vec();
+        let count = u32::MAX;
+        suffixed_key.extend_from_slice(&count.to_be_bytes());
+        // Search for the key
+        let mut leaf_page = self.fbt.traverse_to_leaf_for_write(&suffixed_key);
+        let slot_id = leaf_page.upper_bound_slot_id(&BTreeKey::new(&suffixed_key)) - 1;
+
+        // If value_before is prefixed with key, use lower_fence + 1
+        // If value_before is not prefixed with key, use key + "0000"
+        let key_before = leaf_page.get_raw_key(slot_id);
+        let new_suffix = if key_before.starts_with(&key) {
+            if key_before.len() != suffixed_key.len() {
+                panic!("Key with the same prefix already exists");
+            }
+            let old_suffix = u32::from_be_bytes(key_before[key.len()..].try_into().unwrap());
+            if old_suffix == u32::MAX {
+                panic!("Key is already appended with the maximum count");
+            }
+            old_suffix + 1
+        } else {
+            0
+        };
+        // Modify the suffix of the key
+        suffixed_key[key.len()..].copy_from_slice(&new_suffix.to_be_bytes());
+        self.fbt.stats.inc_num_keys();
+        self.fbt
+            .insert_at_slot_or_split(&mut leaf_page, slot_id + 1, &suffixed_key, value);
+        Ok(())
+    }
+
+    pub fn scan_key(self: &Arc<Self>, key: &[u8]) -> FosterBtreeAppendOnlyRangeScanner<E, T> {
+        let mut first_key = key.to_vec();
+        first_key.extend(0_u32.to_be_bytes());
+
+        let mut last_key = key.to_vec();
+        last_key.extend(u32::MAX.to_be_bytes());
+
+        let key_len = first_key.len();
+
+        FosterBtreeAppendOnlyRangeScanner::new(FosterBtreeRangeScanner::new_with_filter(
+            &self.fbt,
+            &first_key,
+            &last_key,
+            Box::new(move |(k, _)| k.len() == key_len),
+        ))
+    }
+
+    pub fn scan_range(
+        self: &Arc<Self>,
+        l_key: &[u8],
+        r_key: &[u8],
+    ) -> FosterBtreeAppendOnlyRangeScanner<E, T> {
+        let mut first_key = l_key.to_vec();
+        first_key.extend(0_u32.to_be_bytes());
+
+        let mut last_key = r_key.to_vec();
+        last_key.extend(u32::MAX.to_be_bytes());
+
+        FosterBtreeAppendOnlyRangeScanner::new(FosterBtreeRangeScanner::new(
+            &self.fbt, &first_key, &last_key,
+        ))
+    }
+
+    pub fn scan(self: &Arc<Self>) -> FosterBtreeAppendOnlyRangeScanner<E, T> {
+        FosterBtreeAppendOnlyRangeScanner::new(FosterBtreeRangeScanner::new(&self.fbt, &[], &[]))
+    }
+}
+
+pub struct FosterBtreeAppendOnlyRangeScanner<E: EvictionPolicy + 'static, T: MemPool<E>> {
+    scanner: FosterBtreeRangeScanner<E, T>,
+}
+
+impl<E: EvictionPolicy + 'static, T: MemPool<E>> FosterBtreeAppendOnlyRangeScanner<E, T> {
+    fn new(scanner: FosterBtreeRangeScanner<E, T>) -> Self {
+        Self { scanner }
+    }
+}
+
+impl<E: EvictionPolicy + 'static, T: MemPool<E>> Iterator
+    for FosterBtreeAppendOnlyRangeScanner<E, T>
+{
+    type Item = (Vec<u8>, Vec<u8>);
+
+    fn next(&mut self) -> Option<(Vec<u8>, Vec<u8>)> {
+        self.scanner.next().map(|(mut key, value)| {
+            key.truncate(key.len() - 4);
+            (key, value)
+        })
     }
 }
 
@@ -2495,8 +2596,8 @@ mod tests {
     };
 
     use super::{
-        ContainerKey, EvictionPolicy, FosterBtree, FosterBtreePage, LRUEvictionPolicy, MemPool,
-        PageFrameKey, MAX_BYTES_USED,
+        ContainerKey, EvictionPolicy, FosterBtree, FosterBtreeAppendOnly, FosterBtreePage,
+        LRUEvictionPolicy, MemPool, PageFrameKey, MAX_BYTES_USED,
     };
 
     fn to_bytes(num: usize) -> Vec<u8> {
@@ -4179,11 +4280,20 @@ mod tests {
         assert_eq!(current_val, val2);
     }
 
+    fn setup_btree_append_only_empty<E: EvictionPolicy, T: MemPool<E>>(
+        bp: Arc<T>,
+    ) -> FosterBtreeAppendOnly<E, T> {
+        let (db_id, c_id) = (0, 0);
+        let c_key = ContainerKey::new(db_id, c_id);
+
+        FosterBtreeAppendOnly::new(c_key, bp.clone())
+    }
+
     #[rstest]
     #[case::bp(get_test_bp(100))]
     #[case::in_mem(get_in_mem_pool())]
     fn test_append<E: EvictionPolicy + 'static, T: MemPool<E>>(#[case] bp: Arc<T>) {
-        let btree = Arc::new(setup_btree_empty(bp.clone()));
+        let btree = Arc::new(setup_btree_append_only_empty(bp.clone()));
         // Insert 1024 bytes
         let inserting_key = to_bytes(0);
         for i in 0..10 {
@@ -4194,7 +4304,7 @@ mod tests {
             btree.append(&inserting_key, &to_bytes(i)).unwrap();
         }
         // Scan the tree
-        let iter = btree.scan(&[], &[]);
+        let iter = btree.scan();
         let mut count = 0;
         for (key, current_val) in iter {
             println!(
@@ -4202,8 +4312,7 @@ mod tests {
                 count
             );
             // Check the prefix of the keys
-            assert!(key.starts_with(&inserting_key));
-            assert_eq!(*key.last().unwrap(), count as u8);
+            assert_eq!(key, inserting_key);
             assert_eq!(current_val, to_bytes(count));
             count += 1;
         }
@@ -4213,7 +4322,7 @@ mod tests {
     #[case::bp(get_test_bp(100))]
     #[case::in_mem(get_in_mem_pool())]
     fn test_append_large<E: EvictionPolicy + 'static, T: MemPool<E>>(#[case] bp: Arc<T>) {
-        let btree = Arc::new(setup_btree_empty(bp.clone()));
+        let btree = Arc::new(setup_btree_append_only_empty(bp.clone()));
         // Insert 1024 bytes
         let inserting_key = to_bytes(0);
         let val = vec![3_u8; 1024];
@@ -4225,7 +4334,7 @@ mod tests {
             btree.append(&inserting_key, &val).unwrap();
         }
         // Scan the tree
-        let iter = btree.scan(&[], &[]);
+        let iter = btree.scan();
         let mut count = 0;
         for (key, current_val) in iter {
             println!(
@@ -4233,8 +4342,7 @@ mod tests {
                 count
             );
             // Check the prefix of the keys
-            assert!(key.starts_with(&inserting_key));
-            assert_eq!(*key.last().unwrap(), count as u8);
+            assert_eq!(key, inserting_key);
             assert_eq!(current_val, val);
             count += 1;
         }
@@ -4244,7 +4352,7 @@ mod tests {
     #[case::bp(get_test_bp(100))]
     #[case::in_mem(get_in_mem_pool())]
     fn test_concurrent_append<E: EvictionPolicy + 'static, T: MemPool<E>>(#[case] bp: Arc<T>) {
-        let btree = Arc::new(setup_btree_empty(bp.clone()));
+        let btree = Arc::new(setup_btree_append_only_empty(bp.clone()));
         let num_keys = 1000;
         let key_size = 100;
         let val_min_size = 50;
@@ -4290,11 +4398,7 @@ mod tests {
         );
 
         // Check if all keys have been inserted.
-        let mut first_key = key.clone();
-        first_key.push(0);
-        let mut last_key = key.clone();
-        last_key.push((num_keys) as u8);
-        let iter = btree.scan(&first_key, &last_key);
+        let iter = btree.scan_key(&key);
         let mut count = 0;
         for (key, current_val) in iter {
             println!(
