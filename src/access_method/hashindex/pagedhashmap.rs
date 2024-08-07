@@ -568,7 +568,8 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
         page_key: PageFrameKey,
         key: &[u8],
     ) -> Result<FrameWriteGuard<E>, PagedHashMapError> {
-        let base = Duration::from_nanos(1);
+        // let base = Duration::from_nanos(1);
+        let base = 2;
         let mut attempts = 0;
         loop {
             let page = self.try_insert_traverse_to_endofchain_for_write(page_key, key);
@@ -578,9 +579,9 @@ impl<E: EvictionPolicy, T: MemPool<E>> PagedHashMap<E, T> {
                 }
                 Err(PagedHashMapError::WriteLatchFailed) => {
                     attempts += 1;
-                    // std::thread::sleep(base * attempts);
+                    std::thread::sleep(Duration::from_nanos(u64::pow(base, attempts)));
                     // std::hint::spin_loop();
-                    std::thread::yield_now();
+                    // std::thread::yield_now();
                 }
                 Err(PagedHashMapError::KeyExists) => {
                     return Err(PagedHashMapError::KeyExists);
