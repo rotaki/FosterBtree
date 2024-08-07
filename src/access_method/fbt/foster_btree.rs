@@ -11,7 +11,7 @@ use std::{
 };
 
 use crate::{
-    access_method::AccessMethodError,
+    access_method::{AccessMethodError, OrderedUniqueKeyIndex, UniqueKeyIndex},
     bp::prelude::*,
     log_debug, log_trace, log_warn,
     page::{Page, PageId, AVAILABLE_PAGE_SIZE},
@@ -1828,8 +1828,12 @@ impl<T: MemPool> FosterBtree<T> {
         };
         leaf_page
     }
+}
 
-    pub fn get(&self, key: &[u8]) -> Result<Vec<u8>, AccessMethodError> {
+impl<T: MemPool> UniqueKeyIndex for FosterBtree<T> {
+    type Iter = FosterBtreeRangeScanner<T>;
+
+    fn get(&self, key: &[u8]) -> Result<Vec<u8>, AccessMethodError> {
         let foster_page = self.traverse_to_leaf_for_read(key);
         let slot_id = foster_page.upper_bound_slot_id(&BTreeKey::new(key)) - 1;
         if slot_id == 0 {
@@ -1846,7 +1850,7 @@ impl<T: MemPool> FosterBtree<T> {
         }
     }
 
-    pub fn insert(&self, key: &[u8], value: &[u8]) -> Result<(), AccessMethodError> {
+    fn insert(&self, key: &[u8], value: &[u8]) -> Result<(), AccessMethodError> {
         let mut leaf_page = self.traverse_to_leaf_for_write(key);
         log_trace!("Acquired write lock for page {}", leaf_page.get_id());
         let slot_id = leaf_page.upper_bound_slot_id(&BTreeKey::new(key)) - 1;
@@ -1868,7 +1872,7 @@ impl<T: MemPool> FosterBtree<T> {
         }
     }
 
-    pub fn update(&self, key: &[u8], value: &[u8]) -> Result<(), AccessMethodError> {
+    fn update(&self, key: &[u8], value: &[u8]) -> Result<(), AccessMethodError> {
         let mut leaf_page = self.traverse_to_leaf_for_write(key);
         log_trace!("Acquired write lock for page {}", leaf_page.get_id());
         let slot_id = leaf_page.upper_bound_slot_id(&BTreeKey::new(key)) - 1;
@@ -1888,7 +1892,7 @@ impl<T: MemPool> FosterBtree<T> {
         }
     }
 
-    pub fn upsert(&self, key: &[u8], value: &[u8]) -> Result<(), AccessMethodError> {
+    fn upsert(&self, key: &[u8], value: &[u8]) -> Result<(), AccessMethodError> {
         let mut leaf_page = self.traverse_to_leaf_for_write(key);
         log_trace!("Acquired write lock for page {}", leaf_page.get_id());
         let slot_id = leaf_page.upper_bound_slot_id(&BTreeKey::new(key)) - 1;
@@ -1910,7 +1914,7 @@ impl<T: MemPool> FosterBtree<T> {
         Ok(())
     }
 
-    pub fn upsert_with_merge(
+    fn upsert_with_merge(
         &self,
         key: &[u8],
         value: &[u8],
@@ -1939,7 +1943,7 @@ impl<T: MemPool> FosterBtree<T> {
     }
 
     /// Physical deletion of a key
-    pub fn delete(&self, key: &[u8]) -> Result<(), AccessMethodError> {
+    fn delete(&self, key: &[u8]) -> Result<(), AccessMethodError> {
         let mut leaf_page = self.traverse_to_leaf_for_write(key);
         log_trace!("Acquired write lock for page {}", leaf_page.get_id());
         let slot_id = leaf_page.upper_bound_slot_id(&BTreeKey::new(key)) - 1;
@@ -1960,21 +1964,36 @@ impl<T: MemPool> FosterBtree<T> {
         }
     }
 
-    pub fn scan(self: &Arc<Self>, l_key: &[u8], r_key: &[u8]) -> FosterBtreeRangeScanner<T> {
-        FosterBtreeRangeScanner::new(self, l_key, r_key)
+    fn scan(self: &Arc<Self>) -> FosterBtreeRangeScanner<T> {
+        FosterBtreeRangeScanner::new(self, &[], &[])
     }
 
-    pub fn scan_with_filter(
+    fn scan_with_filter(
         self: &Arc<Self>,
-        l_key: &[u8],
-        r_key: &[u8],
         filter: FilterFunc,
     ) -> FosterBtreeRangeScanner<T> {
-        FosterBtreeRangeScanner::new_with_filter(self, l_key, r_key, filter)
+        FosterBtreeRangeScanner::new_with_filter(self, &[], &[], filter)
     }
 }
 
-type FilterFunc = Box<dyn FnMut((&[u8], &[u8])) -> bool>;
+impl<T: MemPool> OrderedUniqueKeyIndex for FosterBtree<T> {
+    type OrderedIter = FosterBtreeRangeScanner<T>;
+
+    fn scan_range(self: &Arc<Self>, start_key: &[u8], end_key: &[u8]) -> Self::Iter {
+        FosterBtreeRangeScanner::new(self, start_key, end_key)
+    }
+
+    fn scan_range_with_filter(
+        self: &Arc<Self>,
+        start_key: &[u8],
+        end_key: &[u8],
+        filter: FilterFunc,
+    ) -> Self::Iter {
+        FosterBtreeRangeScanner::new_with_filter(self, start_key, end_key, filter)
+    }
+}
+
+type FilterFunc = Box<dyn FnMut(&[u8], &[u8]) -> bool>;
 
 /// Scan the BTree in the range [l_key, r_key)
 /// To specify all keys, use an empty slice.
@@ -2163,7 +2182,7 @@ impl<T: MemPool> Iterator for FosterBtreeRangeScanner<T> {
                 self.current_slot_id = 1;
             } else {
                 let val = leaf_page.get_val(self.current_slot_id);
-                if self.filter.is_none() || (self.filter.as_mut().unwrap())((key, val)) {
+                if self.filter.is_none() || (self.filter.as_mut().unwrap())(key, val) {
                     self.current_slot_id += 1;
                     return Some((key.to_owned(), val.to_owned()));
                 } else {
@@ -2256,7 +2275,7 @@ impl<T: MemPool> FosterBtreeAppendOnly<T> {
             &self.fbt,
             &first_key,
             &last_key,
-            Box::new(move |(k, _)| k.len() == key_len),
+            Box::new(move |k, _| k.len() == key_len),
         ))
     }
 
@@ -2533,7 +2552,7 @@ mod tests {
         access_method::fbt::foster_btree::{
             adopt, anti_adopt, ascend_root, balance, descend_root, is_large, is_small, merge,
             should_adopt, should_antiadopt, should_load_balance, should_merge, should_root_ascend,
-            should_root_descend, AccessMethodError, MIN_BYTES_USED,
+            should_root_descend, AccessMethodError, MIN_BYTES_USED, UniqueKeyIndex, OrderedUniqueKeyIndex, 
         },
         bp::{get_in_mem_pool, get_test_bp},
         random::RandomKVs,
@@ -3869,7 +3888,7 @@ mod tests {
         }
         let start_key = to_bytes(2);
         let end_key = to_bytes(7);
-        let iter = btree.scan(&start_key, &end_key);
+        let iter = btree.scan_range(&start_key, &end_key);
         let mut count = 0;
         for (key, current_val) in iter {
             let key = from_bytes(&key);
@@ -3884,7 +3903,7 @@ mod tests {
 
         let start_key = to_bytes(0);
         let end_key = to_bytes(10);
-        let iter = btree.scan(&start_key, &end_key);
+        let iter = btree.scan_range(&start_key, &end_key);
         let mut count = 0;
         for (key, current_val) in iter {
             let key = from_bytes(&key);
@@ -3899,7 +3918,7 @@ mod tests {
 
         let start_key = [];
         let end_key = [];
-        let iter = btree.scan(&start_key, &end_key);
+        let iter = btree.scan_range(&start_key, &end_key);
         let mut count = 0;
         for (key, current_val) in iter {
             let key = from_bytes(&key);
@@ -3934,11 +3953,11 @@ mod tests {
                 btree.upsert(&key, &val1).unwrap();
             }
         }
-        let filter1 = Box::new(|(_, value): (&[u8], &[u8])| -> bool {
+        let filter1 = Box::new(|_: &[u8], value: &[u8]| -> bool {
             // Filter by value.
             value.len() == 512
         });
-        let iter = btree.scan_with_filter(&[], &[], filter1);
+        let iter = btree.scan_with_filter(filter1);
         let mut count = 0;
         for (key, current_val) in iter {
             let key = from_bytes(&key);
@@ -3950,11 +3969,11 @@ mod tests {
             count += 1;
         }
         assert_eq!(count, 5);
-        let filter2 = Box::new(|(key, _): (&[u8], &[u8])| -> bool {
+        let filter2 = Box::new(|key: &[u8], _: &[u8]| -> bool {
             // Filter by key
             from_bytes(key) % 2 == 0
         });
-        let iter = btree.scan_with_filter(&[], &[], filter2);
+        let iter = btree.scan_with_filter(filter2);
         let mut count = 0;
         for (key, current_val) in iter {
             let key = from_bytes(&key);
@@ -4004,7 +4023,7 @@ mod tests {
             btree.insert(key, val).unwrap();
         }
 
-        let iter = btree.scan(&[], &[]);
+        let iter = btree.scan();
         let mut count = 0;
         for (key, current_val) in iter {
             println!(
@@ -4026,7 +4045,7 @@ mod tests {
             assert_eq!(current_val, *val);
         }
 
-        let iter = btree.scan(&[], &[]);
+        let iter = btree.scan();
         let mut count = 0;
         for (key, current_val) in iter {
             println!(

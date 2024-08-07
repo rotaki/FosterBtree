@@ -1,6 +1,5 @@
 use std::{
-    hash::{Hash, Hasher},
-    sync::Arc,
+    cmp::Reverse, collections::BinaryHeap, fmt::Binary, hash::{Hash, Hasher}, sync::Arc
 };
 
 use crate::{
@@ -12,8 +11,7 @@ use super::{
     fbt::{
         FosterBtree, FosterBtreeAppendOnly, FosterBtreeAppendOnlyRangeScanner,
         FosterBtreeRangeScanner,
-    },
-    AccessMethodError,
+    }, AccessMethodError, OrderedUniqueKeyIndex, UniqueKeyIndex
 };
 
 pub mod prelude {
@@ -114,24 +112,28 @@ impl<T: MemPool> HashFosterBtree<T> {
         let idx = hasher.finish() % self.num_buckets as u64;
         &self.buckets[idx as usize]
     }
+}
 
-    pub fn get(&self, key: &[u8]) -> Result<Vec<u8>, AccessMethodError> {
+impl<T: MemPool> UniqueKeyIndex for HashFosterBtree<T> {
+    type Iter = HashFosterBtreeIter<T>;
+
+    fn get(&self, key: &[u8]) -> Result<Vec<u8>, AccessMethodError> {
         self.get_bucket(key).get(key)
     }
 
-    pub fn insert(&self, key: &[u8], value: &[u8]) -> Result<(), AccessMethodError> {
+    fn insert(&self, key: &[u8], value: &[u8]) -> Result<(), AccessMethodError> {
         self.get_bucket(key).insert(key, value)
     }
 
-    pub fn update(&self, key: &[u8], value: &[u8]) -> Result<(), AccessMethodError> {
+    fn update(&self, key: &[u8], value: &[u8]) -> Result<(), AccessMethodError> {
         self.get_bucket(key).update(key, value)
     }
 
-    pub fn upsert(&self, key: &[u8], value: &[u8]) -> Result<(), AccessMethodError> {
+    fn upsert(&self, key: &[u8], value: &[u8]) -> Result<(), AccessMethodError> {
         self.get_bucket(key).upsert(key, value)
     }
 
-    pub fn upsert_with_merge(
+    fn upsert_with_merge(
         &self,
         key: &[u8],
         value: &[u8],
@@ -140,23 +142,33 @@ impl<T: MemPool> HashFosterBtree<T> {
         self.get_bucket(key).upsert_with_merge(key, value, merge_fn)
     }
 
-    pub fn delete(&self, key: &[u8]) -> Result<(), AccessMethodError> {
+    fn delete(&self, key: &[u8]) -> Result<(), AccessMethodError> {
         self.get_bucket(key).delete(key)
     }
 
-    pub fn scan(self: &Arc<Self>) -> HashFosterBtreeIter<T> {
+    fn scan(self: &Arc<Self>) -> HashFosterBtreeIter<T> {
         // Chain the iterators from all the buckets
         let mut scanners = Vec::with_capacity(self.num_buckets);
         for bucket in self.buckets.iter() {
-            scanners.push(bucket.scan(&[], &[]));
+            scanners.push(bucket.scan());
         }
         HashFosterBtreeIter::new(scanners)
+    }
+
+    fn scan_with_filter(self: &Arc<Self>, filter: Box<dyn FnMut(&[u8], &[u8]) -> bool>) -> Self::Iter {
+        // Chain the iterators from all the buckets
+        let mut scanners = Vec::with_capacity(self.num_buckets);
+        for bucket in self.buckets.iter() {
+            scanners.push(bucket.scan());
+        }
+        HashFosterBtreeIter::new_with_filter(scanners, filter)
     }
 }
 
 pub struct HashFosterBtreeIter<T: MemPool> {
     scanners: Vec<FosterBtreeRangeScanner<T>>,
     current: usize,
+    filter: Option<Box<dyn FnMut(&[u8], &[u8]) -> bool>>,
 }
 
 impl<T: MemPool> HashFosterBtreeIter<T> {
@@ -164,6 +176,18 @@ impl<T: MemPool> HashFosterBtreeIter<T> {
         Self {
             scanners,
             current: 0,
+            filter: None,
+        }
+    }
+
+    pub fn new_with_filter(
+        scanners: Vec<FosterBtreeRangeScanner<T>>,
+        filter: Box<dyn FnMut(&[u8], &[u8]) -> bool>,
+    ) -> Self {
+        Self {
+            scanners,
+            current: 0,
+            filter: Some(filter),
         }
     }
 }
@@ -177,12 +201,99 @@ impl<T: MemPool> Iterator for HashFosterBtreeIter<T> {
                 return None;
             }
             if let Some((key, value)) = self.scanners[self.current].next() {
-                return Some((key, value));
+                if let Some(filter) = &mut self.filter {
+                    if !filter(&key, &value) {
+                        continue;
+                    } else {
+                        return Some((key, value));
+                    }
+                }
             }
             self.current += 1;
         }
     }
 }
+
+impl<T: MemPool> OrderedUniqueKeyIndex for HashFosterBtree<T> {
+    type OrderedIter = HashFosterBtreeIter<T>;
+
+    fn scan_range(&self, start_key: &[u8], end_key: &[u8]) -> Self::OrderedIter {
+        // Chain the iterators from all the buckets
+        let mut scanners = Vec::with_capacity(self.num_buckets);
+        for bucket in self.buckets.iter() {
+            scanners.push(bucket.scan_range(start_key, end_key));
+        }
+        HashFosterBtreeIter::new(scanners)
+    }
+
+    fn scan_range_with_filter(
+        &self,
+        start_key: &[u8],
+        end_key: &[u8],
+        filter: Box<dyn FnMut(&[u8], &[u8]) -> bool>,
+    ) -> Self::OrderedIter {
+        // Chain the iterators from all the buckets
+        let mut scanners = Vec::with_capacity(self.num_buckets);
+        for bucket in self.buckets.iter() {
+            scanners.push(bucket.scan_range(start_key, end_key));
+        }
+        HashFosterBtreeIter::new_with_filter(scanners, filter)
+    }
+}
+
+pub struct HashFosterBtreeOrderedIter<T: MemPool> {
+    scanners: Vec<FosterBtreeRangeScanner<T>>,
+    current: usize,
+    filter: Option<Box<dyn FnMut(&[u8], &[u8]) -> bool>>,
+    heap: BinaryHeap<(Reverse<Vec<u8>>, (usize, Vec<u8>))>, // (key, (tree_index, value))
+}
+
+impl<T: MemPool> HashFosterBtreeOrderedIter<T> {
+    pub fn new(scanners: Vec<FosterBtreeRangeScanner<T>>) -> Self {
+        Self {
+            scanners,
+            current: 0,
+            filter: None,
+            heap: BinaryHeap::new(),
+        }
+    }
+
+    pub fn new_with_filter(
+        scanners: Vec<FosterBtreeRangeScanner<T>>,
+        filter: Box<dyn FnMut(&[u8], &[u8]) -> bool>,
+    ) -> Self {
+        Self {
+            scanners,
+            current: 0,
+            filter: Some(filter),
+            heap: BinaryHeap::new(),
+        }
+    }
+}
+
+impl<T: MemPool> Iterator for HashFosterBtreeOrderedIter<T> {
+    type Item = (Vec<u8>, Vec<u8>);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if self.current >= self.scanners.len() {
+                return None;
+            }
+            if let Some((key, value)) = self.scanners[self.current].next() {
+                if let Some(filter) = &mut self.filter {
+                    if !filter(&key, &value) {
+                        continue;
+                    } else {
+                        self.heap.push((Reverse(key), (self.current, value)));
+                    }
+                }
+            }
+            self.current += 1;
+        }
+    }
+}
+
+
 
 pub struct HashFosterBtreeAppendOnly<T: MemPool> {
     pub mem_pool: Arc<T>,
@@ -299,7 +410,7 @@ mod tests {
         random::RandomKVs,
     };
 
-    use super::{ContainerKey, HashFosterBtree, MemPool};
+    use super::{ContainerKey, HashFosterBtree, MemPool, UniqueKeyIndex};
 
     fn to_bytes(num: usize) -> Vec<u8> {
         num.to_be_bytes().to_vec()

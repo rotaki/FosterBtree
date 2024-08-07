@@ -338,6 +338,7 @@ dependencies = [
  "serde_cbor",
  "tempfile",
  "wasm-bindgen",
+ "zipf",
 ]
 
 [[package]]
@@ -1150,4 +1151,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f593a95398737aeed53e489c785df13f3618e41dbcd6718c6addbf1395aa6876"
 dependencies = [
  "memchr",
+]
+
+[[package]]
+name = "zipf"
+version = "7.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "390e51da0ed8cc3ade001d15fa5ba6f966b99c858fb466ec6b06d1682f1f94dd"
+dependencies = [
+ "rand",
 ]
