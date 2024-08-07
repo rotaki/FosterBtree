@@ -48,11 +48,11 @@ fn main() {
         duration_insert_no_ps
     );
 
-    println!("After Insertion\n{}\n", phm_no_ps.bp.stats());
+    println!("After Insertion\n{:?}\n", phm_no_ps.bp.stats());
     phm_no_ps.bp.flush_all().unwrap();
-    println!("After Flushing\n{}\n", phm_no_ps.bp.stats());
+    println!("After Flushing\n{:?}\n", phm_no_ps.bp.stats());
     phm_no_ps.bp.reset_stats();
-    println!("After Resetting Stats\n{}\n", phm_no_ps.bp.stats());
+    println!("After Resetting Stats\n{:?}\n", phm_no_ps.bp.stats());
 
     #[cfg(feature = "stat")]
     {
@@ -75,11 +75,11 @@ fn main() {
         duration_get_no_ps
     );
 
-    println!("After Get\n{}\n", phm_no_ps.bp.stats());
+    println!("After Get\n{:?}\n", phm_no_ps.bp.stats());
     phm_no_ps.bp.flush_all().unwrap();
-    println!("After Flushing\n{}\n", phm_no_ps.bp.stats());
+    println!("After Flushing\n{:?}\n", phm_no_ps.bp.stats());
     phm_no_ps.bp.reset_stats();
-    println!("After Resetting Stats\n{}\n", phm_no_ps.bp.stats());
+    println!("After Resetting Stats\n{:?}\n", phm_no_ps.bp.stats());
     #[cfg(feature = "stat")]
     {
         println!("BP stats: ");
@@ -110,11 +110,11 @@ fn main() {
         duration_insert
     );
 
-    println!("After Insertion\n{}\n", phm.bp.stats());
+    println!("After Insertion\n{:?}\n", phm.bp.stats());
     phm.bp.flush_all().unwrap();
-    println!("After Flushing\n{}\n", phm.bp.stats());
+    println!("After Flushing\n{:?}\n", phm.bp.stats());
     phm.bp.reset_stats();
-    println!("After Resetting Stats\n{}\n", phm.bp.stats());
+    println!("After Resetting Stats\n{:?}\n", phm.bp.stats());
 
     #[cfg(feature = "stat")]
     {
@@ -134,11 +134,11 @@ fn main() {
     let duration_get = start_get.elapsed();
     println!("Get Time with Pointer Swizzling: {:?}\n", duration_get);
 
-    println!("After Get\n{}\n", phm.bp.stats());
+    println!("After Get\n{:?}\n", phm.bp.stats());
     phm.bp.flush_all().unwrap();
-    println!("After Flushing\n{}\n", phm.bp.stats());
+    println!("After Flushing\n{:?}\n", phm.bp.stats());
     phm.bp.reset_stats();
-    println!("After Resetting Stats\n{}\n", phm.bp.stats());
+    println!("After Resetting Stats\n{:?}\n", phm.bp.stats());
     #[cfg(feature = "stat")]
     {
         println!("BP stats: ");
