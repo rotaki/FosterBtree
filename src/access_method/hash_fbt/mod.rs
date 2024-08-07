@@ -276,19 +276,6 @@ impl<T: MemPool> Iterator for HashFosterBtreeOrderedIter<T> {
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {
-            if self.current >= self.scanners.len() {
-                return None;
-            }
-            if let Some((key, value)) = self.scanners[self.current].next() {
-                if let Some(filter) = &mut self.filter {
-                    if !filter(&key, &value) {
-                        continue;
-                    } else {
-                        self.heap.push((Reverse(key), (self.current, value)));
-                    }
-                }
-            }
-            self.current += 1;
         }
     }
 }
