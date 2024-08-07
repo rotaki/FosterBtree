@@ -1,44 +1,49 @@
 use clap::Parser;
 use fbtree::{
-    bp::{get_in_mem_pool, get_test_bp, BufferPool, InMemPool}, prelude::{AVAILABLE_PAGE_SIZE, PAGE_SIZE}, random::gen_random_byte_vec
+    access_method::{NonUniqueKeyIndex, OrderedUniqueKeyIndex, UniqueKeyIndex},
+    bp::{get_in_mem_pool, get_test_bp, BufferPool, InMemPool},
+    prelude::{HashFosterBtree, AVAILABLE_PAGE_SIZE, PAGE_SIZE},
+    random::gen_random_byte_vec,
 };
 use rand::prelude::Distribution;
 use rand::Rng;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
+
+use fbtree::{
+    bp::{ContainerKey, MemPool},
+    prelude::FosterBtree,
+    random::gen_random_int,
+};
 
 #[derive(Debug, Parser, Clone)]
 pub struct YCSBParams {
     /// Workload type
     #[clap(short, long, default_value = "A")]
     pub workload_type: char,
-
     // Number of threads
     #[clap(short, long, default_value = "1")]
     pub num_threads: usize,
-
-    /// Buffer pool size. if 0, in-memory pool is used
+    /// Buffer pool size. if 0 panic
     #[clap(short, long, default_value = "100000")]
     pub bp_size: usize,
-
     /// Number of records. Default 10 M
     #[clap(short, long, default_value = "10000000")]
     pub num_keys: usize,
-
     /// Key size
     #[clap(short, long, default_value = "10")]
     pub key_size: usize,
-
     /// Record size
     #[clap(short, long, default_value = "1000")]
     pub record_size: usize,
-
     /// Skew factor
     #[clap(short, long, default_value = "0.0")]
     pub skew_factor: f64,
-
     /// Warmup time in seconds
     #[clap(short, long, default_value = "3")]
     pub warmup_time: usize,
-
     /// Execution time in seconds
     #[clap(short, long, default_value = "10")]
     pub exec_time: usize,
@@ -93,17 +98,36 @@ fn get_new_value(value_size: usize) -> Vec<u8> {
 }
 
 pub struct KeyValueGenerator {
-    num_keys: usize,
     key_size: usize,
     value_size: usize,
-    current_key: usize,
+    start_key: usize, // Inclusive
+    end_key: usize,   // Exclusive
 }
 
 impl KeyValueGenerator {
     pub fn new(partition: usize, num_keys: usize, key_size: usize, value_size: usize) -> Vec<Self> {
-        // Each partition will have its own generator
-        // Divide the keys equally among the partitions and 
-        // the la
+        // Divide the keys equally among the partitions and
+        // assign the remaining keys to the last partition
+        let num_keys_per_partition = num_keys / partition;
+        let mut generators = Vec::new();
+        let mut count = 0;
+        for i in 0..partition {
+            let start_key = count;
+            let end_key = if i == partition - 1 {
+                num_keys
+            } else {
+                count + num_keys_per_partition
+            };
+            count = end_key;
+
+            generators.push(Self {
+                key_size,
+                value_size,
+                start_key,
+                end_key,
+            });
+        }
+        generators
     }
 }
 
@@ -111,152 +135,204 @@ impl Iterator for KeyValueGenerator {
     type Item = (Vec<u8>, Vec<u8>);
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.current_key == self.num_keys {
+        if self.start_key >= self.end_key {
             return None;
         }
-
-        let key = get_key_bytes(self.current_key, self.key_size);
+        let key = get_key_bytes(self.start_key, self.key_size);
         let value = gen_random_byte_vec(self.value_size, self.value_size);
-        self.current_key += 1;
+        self.start_key += 1;
 
         Some((key, value))
     }
 }
 
-mod foster_btree_ycsb {
-    use std::sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    };
+pub fn load_table(params: &YCSBParams, table: &Arc<impl UniqueKeyIndex + Send + Sync + 'static>) {
+    let num_insertion_threads = 6;
 
-    use fbtree::{
-        bp::{ContainerKey, MemPool},
-        prelude::FosterBtree,
-        random::gen_random_int,
-    };
+    let mut gen = KeyValueGenerator::new(
+        num_insertion_threads,
+        params.num_keys,
+        params.key_size,
+        params.record_size,
+    );
 
-    use crate::{get_key, get_key_bytes, get_new_value, workload_proportion, KeyValueGenerator};
-
-    use super::YCSBParams;
-
-    pub fn load_table(
-        params: &YCSBParams,
-        mem_pool: &Arc<impl MemPool>,
-    ) -> Arc<FosterBtree<impl MemPool>> {
-        let fbt = Arc::new(FosterBtree::new(ContainerKey::new(0, 0), mem_pool.clone()));
-        let mut gen = KeyValueGenerator::new(params.num_keys, params.key_size, params.record_size);
-        for _ in 0..params.num_keys {
-            let (key, value) = gen.next().unwrap();
-            fbt.insert(&key, &value).unwrap();
-        }
-        fbt
-    }
-
-    pub fn execute_workload(params: &YCSBParams, table: &Arc<FosterBtree<impl MemPool + 'static>>) 
-    -> (usize, usize, usize, usize, usize)
-    {
-        let warmup_flag = Arc::new(AtomicBool::new(true)); // Flag to stop the warmup
-        let exec_flag = Arc::new(AtomicBool::new(true)); // Flag to stop the workload
-
-        let (read, update, scan, insert, rmw) = workload_proportion(params.workload_type);
-
-        // Execute the workload
-        let mut threads = Vec::new();
-
-        for _ in 0..params.num_threads {
-            threads.push(std::thread::spawn({
-                let table = table.clone();
-                let warmup_flag = warmup_flag.clone();
-                let exec_flag = exec_flag.clone();
-                let params = params.clone();
-                move || {
-                    let mut read_count = 0;
-                    let mut update_count = 0;
-                    let mut scan_count = 0;
-                    let mut insert_count = 0;
-                    let mut rmw_count = 0;
-
-                    while exec_flag.load(Ordering::Relaxed) {
-                        let x = gen_random_int(1, 100);
-                        if x <= read {
-                            let key = get_key(params.num_keys, params.skew_factor);
-                            // Read
-                            let _ = table
-                                .get(&get_key_bytes(
-                                    key,
-                                    params.key_size,
-                                ))
-                                .unwrap();
-                            if warmup_flag.load(Ordering::Relaxed) {
-                                read_count += 1;
-                            }
-                        } else if x <= read + update {
-                            // Update
-                            let key = get_key(params.num_keys, params.skew_factor);
-                            let _ = table
-                                .update(
-                                    &get_key_bytes(
-                                        key,
-                                        params.key_size,
-                                    ),
-                                    &get_new_value(params.record_size),
-                                )
-                                .unwrap();
-                            if warmup_flag.load(Ordering::Relaxed) {
-                                update_count += 1;
-                            }
-                        } else if x <= read + update + scan {
-                            // Scan
-                            unreachable!();
-                            // if warmup_flag.load(Ordering::Relaxed) {
-                            //     scan_count += 1;
-                            // }
-                        } else if x <= read + update + scan + insert {
-                            // Insert
-                            unreachable!();
-                            // if warmup_flag.load(Ordering::Relaxed) {
-                            //     insert_count += 1;
-                            // }
-                        } else if x <= read + update + scan + insert + rmw {
-                            // Read-modify-write
-                            unreachable!();
-                            // if warmup_flag.load(Ordering::Relaxed) {
-                            //     rmw_count += 1;
-                            // }
-                        } else {
-                            panic!("Invalid operation");
-                        }
-                    }
-                    (read_count, update_count, scan_count, insert_count, rmw_count)
+    // Multi-thread insert. Use 6 threads to insert the keys.
+    std::thread::scope(|s| {
+        for _ in 0..6 {
+            let table = table.clone();
+            let key_gen = gen.pop().unwrap();
+            s.spawn(move || {
+                for (key, value) in key_gen {
+                    let _ = table.insert(&key, &value).unwrap();
                 }
-            }));
+            });
         }
+    });
+}
 
-        // Wait for the warmup time
-        std::thread::sleep(std::time::Duration::from_secs(params.warmup_time as u64));
-        warmup_flag.store(false, Ordering::Relaxed);
+pub fn execute_workload(
+    params: &YCSBParams,
+    table: Arc<impl UniqueKeyIndex + Send + Sync + 'static>,
+) -> (usize, usize, usize, usize, usize) {
+    let warmup_flag = Arc::new(AtomicBool::new(true)); // Flag to stop the warmup
+    let exec_flag = Arc::new(AtomicBool::new(true)); // Flag to stop the workload
 
-        // Wait for the execution time
-        std::thread::sleep(std::time::Duration::from_secs(params.exec_time as u64));
-        exec_flag.store(false, Ordering::Relaxed);
+    let (read, update, scan, insert, rmw) = workload_proportion(params.workload_type);
 
-        // Collect the stats
-        let mut read_count = 0;
-        let mut update_count = 0;
-        let mut scan_count = 0;
-        let mut insert_count = 0;
-        let mut rmw_count = 0;
-        for t in threads {
-            let (r, u, s, i, m) = t.join().unwrap();
-            read_count += r;
-            update_count += u;
-            scan_count += s;
-            insert_count += i;
-            rmw_count += m;
-        }
+    // Execute the workload
+    let mut threads = Vec::new();
 
-        (read_count, update_count, scan_count, insert_count, rmw_count)
+    for _ in 0..params.num_threads {
+        threads.push(std::thread::spawn({
+            let table = table.clone();
+            let warmup_flag = warmup_flag.clone();
+            let exec_flag = exec_flag.clone();
+            let params = params.clone();
+            move || {
+                let mut read_count = 0;
+                let mut update_count = 0;
+                let mut scan_count = 0;
+                let mut insert_count = 0;
+                let mut rmw_count = 0;
+
+                while exec_flag.load(Ordering::Relaxed) {
+                    let x = gen_random_int(1, 100);
+                    if x <= read {
+                        let key = get_key(params.num_keys, params.skew_factor);
+                        // Read
+                        let _ = table.get(&get_key_bytes(key, params.key_size)).unwrap();
+                        if warmup_flag.load(Ordering::Relaxed) {
+                            read_count += 1;
+                        }
+                    } else if x <= read + update {
+                        // Update
+                        let key = get_key(params.num_keys, params.skew_factor);
+                        let _ = table
+                            .update(
+                                &get_key_bytes(key, params.key_size),
+                                &get_new_value(params.record_size),
+                            )
+                            .unwrap();
+                        if warmup_flag.load(Ordering::Relaxed) {
+                            update_count += 1;
+                        }
+                    } else if x <= read + update + scan {
+                        // Scan
+                        unreachable!();
+                        // if warmup_flag.load(Ordering::Relaxed) {
+                        //     scan_count += 1;
+                        // }
+                    } else if x <= read + update + scan + insert {
+                        // Insert
+                        unreachable!();
+                        // if warmup_flag.load(Ordering::Relaxed) {
+                        //     insert_count += 1;
+                        // }
+                    } else if x <= read + update + scan + insert + rmw {
+                        // Read-modify-write
+                        unreachable!();
+                        // if warmup_flag.load(Ordering::Relaxed) {
+                        //     rmw_count += 1;
+                        // }
+                    } else {
+                        panic!("Invalid operation");
+                    }
+                }
+                (
+                    read_count,
+                    update_count,
+                    scan_count,
+                    insert_count,
+                    rmw_count,
+                )
+            }
+        }));
     }
+
+    // Wait for the warmup time
+    std::thread::sleep(std::time::Duration::from_secs(params.warmup_time as u64));
+    warmup_flag.store(false, Ordering::Relaxed);
+
+    // Wait for the execution time
+    std::thread::sleep(std::time::Duration::from_secs(params.exec_time as u64));
+    exec_flag.store(false, Ordering::Relaxed);
+
+    // Collect the stats
+    let mut read_count = 0;
+    let mut update_count = 0;
+    let mut scan_count = 0;
+    let mut insert_count = 0;
+    let mut rmw_count = 0;
+    for t in threads {
+        let (r, u, s, i, m) = t.join().unwrap();
+        read_count += r;
+        update_count += u;
+        scan_count += s;
+        insert_count += i;
+        rmw_count += m;
+    }
+
+    (
+        read_count,
+        update_count,
+        scan_count,
+        insert_count,
+        rmw_count,
+    )
+}
+
+#[cfg(not(any(feature = "ycsb_fbt", feature = "ycsb_hash_fbt")))]
+fn get_index(bp: Arc<BufferPool>) -> Arc<FosterBtree<BufferPool>> {
+    Arc::new(FosterBtree::new(ContainerKey::new(0, 0), bp))
+}
+
+#[cfg(feature = "ycsb_fbt")]
+fn get_index(bp: Arc<BufferPool>) -> Arc<FosterBtree<BufferPool>> {
+    Arc::new(FosterBtree::new(ContainerKey::new(0, 0), bp))
+}
+
+#[cfg(feature = "ycsb_hash_fbt")]
+fn get_index(bp: Arc<BufferPool>) -> Arc<HashFosterBtree<BufferPool>> {
+    Arc::new(HashFosterBtree::new(ContainerKey::new(0, 0), bp, 1024))
+}
+
+fn print_stats(r: usize, u: usize, s: usize, i: usize, m: usize, total: usize, exec_time: usize) {
+    println!(
+        "{:16}: {:10}, ratio: {:.2}%",
+        "Read count",
+        r,
+        r as f64 / total as f64 * 100f64
+    );
+    println!(
+        "{:16}: {:10}, ratio: {:.2}%",
+        "Update count",
+        u,
+        u as f64 / total as f64 * 100f64
+    );
+    println!(
+        "{:16}: {:10}, ratio: {:.2}%",
+        "Scan count",
+        s,
+        s as f64 / total as f64 * 100f64
+    );
+    println!(
+        "{:16}: {:10}, ratio: {:.2}%",
+        "Insert count",
+        i,
+        i as f64 / total as f64 * 100f64
+    );
+    println!(
+        "{:16}: {:10}, ratio: {:.2}%",
+        "RMW count",
+        m,
+        m as f64 / total as f64 * 100f64
+    );
+    println!("{:16}: {:10}", "Total count", total);
+    println!(
+        "{:16}: {:10.2} ops/sec",
+        "Throughput",
+        total as f64 / exec_time as f64
+    );
 }
 
 fn main() {
@@ -264,34 +340,20 @@ fn main() {
     println!("Page size: {}", PAGE_SIZE);
     println!("{:?}", params);
 
-    let (read_count, update_count, scan_count, insert_count, rmw_count) = if params.bp_size == 0 {
-        let mem_pool = get_in_mem_pool();
-        println!("Loading table in memory...");
-        let table = foster_btree_ycsb::load_table(&params, &mem_pool);
-        println!("Executing workload...");
-        foster_btree_ycsb::execute_workload(&params, &table)
-    } else {
-        let bp = get_test_bp(params.bp_size);
-        println!("Loading table in bp...");
-        let table = foster_btree_ycsb::load_table(&params, &bp);
-        println!("Buffer pool stats after load: {:?}", bp.stats());
-        bp.reset_stats();
-        println!("Executing workload...");
-        let result = foster_btree_ycsb::execute_workload(&params, &table);
-        println!("Buffer pool stats after exec: {:?}", bp.stats());
-        result
-    };
+    let bp = get_test_bp(params.bp_size);
+    let table = get_index(bp.clone());
 
-    // Print each count and the ratio. Format the ratio to 2 decimal places.
-    // Print the total count / total time to get the throughput
-    let total = read_count + update_count + scan_count + insert_count + rmw_count;
+    println!("Loading table...");
+    load_table(&params, &table);
 
-    println!("{:16}: {:10}, ratio: {:.2}%", "Read count", read_count, read_count as f64 / total as f64 * 100f64);
-    println!("{:16}: {:10}, ratio: {:.2}%", "Update count", update_count, update_count as f64 / total as f64 * 100f64);
-    println!("{:16}: {:10}, ratio: {:.2}%", "Scan count", scan_count, scan_count as f64 / total as f64 * 100f64);
-    println!("{:16}: {:10}, ratio: {:.2}%", "Insert count", insert_count, insert_count as f64 / total as f64 * 100f64);
-    println!("{:16}: {:10}, ratio: {:.2}%", "RMW count", rmw_count, rmw_count as f64 / total as f64 * 100f64);
-    println!("{:16}: {:10}", "Total count", total);
-    println!("{:16}: {:10.2} ops/sec", "Throughput", total as f64 / params.exec_time as f64);
+    println!("Buffer pool stats after load: {:?}", bp.stats());
+    println!("Resetting stats...");
+    bp.reset_stats();
 
+    println!("Executing workload...");
+    let (r, u, s, i, m) = execute_workload(&params, table);
+
+    println!("Buffer pool stats after exec: {:?}", bp.stats());
+
+    print_stats(r, u, s, i, m, r + u + s + i + m, params.exec_time);
 }

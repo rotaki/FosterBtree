@@ -784,7 +784,6 @@ fn split_insert(
     // We need to decide which page to insert the key-value pair.
     // If the key is less than the foster key, we insert the key into this.
     // Otherwise, we insert the key into the foster child.
-    
 
     if key < &foster_key {
         this.insert(key, value)
@@ -1968,10 +1967,7 @@ impl<T: MemPool> UniqueKeyIndex for FosterBtree<T> {
         FosterBtreeRangeScanner::new(self, &[], &[])
     }
 
-    fn scan_with_filter(
-        self: &Arc<Self>,
-        filter: FilterFunc,
-    ) -> FosterBtreeRangeScanner<T> {
+    fn scan_with_filter(self: &Arc<Self>, filter: FilterFunc) -> FosterBtreeRangeScanner<T> {
         FosterBtreeRangeScanner::new_with_filter(self, &[], &[], filter)
     }
 }
@@ -2552,7 +2548,8 @@ mod tests {
         access_method::fbt::foster_btree::{
             adopt, anti_adopt, ascend_root, balance, descend_root, is_large, is_small, merge,
             should_adopt, should_antiadopt, should_load_balance, should_merge, should_root_ascend,
-            should_root_descend, AccessMethodError, MIN_BYTES_USED, UniqueKeyIndex, OrderedUniqueKeyIndex, 
+            should_root_descend, AccessMethodError, OrderedUniqueKeyIndex, UniqueKeyIndex,
+            MIN_BYTES_USED,
         },
         bp::{get_in_mem_pool, get_test_bp},
         random::RandomKVs,

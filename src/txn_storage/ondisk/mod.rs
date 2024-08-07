@@ -15,6 +15,7 @@ use crate::{
 };
 use crate::{
     access_method::prelude::{AppendOnlyStore, AppendOnlyStoreScanner},
+    access_method::UniqueKeyIndex,
     bp::MemPool,
 };
 
@@ -120,7 +121,7 @@ impl<M: MemPool> Storage<M> {
             Storage::HashMap() => {
                 unimplemented!("Hash container not implemented")
             }
-            Storage::BTreeMap(b) => OnDiskIterator::btree(b.scan(&[], &[])),
+            Storage::BTreeMap(b) => OnDiskIterator::btree(b.scan()),
             Storage::AppendOnly(v) => OnDiskIterator::vec(v.scan()),
         }
     }
@@ -217,7 +218,7 @@ impl<M: MemPool> OnDiskStorage<M> {
         ));
         // Scans the metadata to get all the containers
         let mut containers = Vec::new();
-        let iter = metadata.scan(&[], &[]);
+        let iter = metadata.scan();
         for (k, v) in iter {
             let c_id = ContainerId::from_be_bytes(k.try_into().unwrap());
             let c_type = ContainerType::from_bytes(&v);

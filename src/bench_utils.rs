@@ -3,6 +3,7 @@ use std::{collections::BTreeMap, sync::Arc, thread};
 use clap::Parser;
 
 use crate::{
+    access_method::UniqueKeyIndex,
     access_method::{fbt::FosterBtree, hashindex::prelude::*},
     bp::{
         get_in_mem_pool, get_test_bp,

@@ -1,5 +1,5 @@
 use clap::Parser;
-use fbtree::{bench_utils::*, random::RandomKVs};
+use fbtree::{access_method::*, bench_utils::*, random::RandomKVs};
 
 fn main() {
     let mut insert_params = BenchParams::parse();
@@ -45,7 +45,7 @@ fn main() {
 
     let mut total_len = 0;
 
-    for (k, v) in tree.scan(&[], &[]) {
+    for (k, v) in tree.scan() {
         total_len += k.len() + v.len();
     }
 

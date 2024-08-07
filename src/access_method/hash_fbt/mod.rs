@@ -1,5 +1,9 @@
 use std::{
-    cmp::Reverse, collections::BinaryHeap, fmt::Binary, hash::{Hash, Hasher}, sync::Arc
+    cmp::Reverse,
+    collections::BinaryHeap,
+    fmt::Binary,
+    hash::{Hash, Hasher},
+    sync::Arc,
 };
 
 use crate::{
@@ -11,7 +15,8 @@ use super::{
     fbt::{
         FosterBtree, FosterBtreeAppendOnly, FosterBtreeAppendOnlyRangeScanner,
         FosterBtreeRangeScanner,
-    }, AccessMethodError, OrderedUniqueKeyIndex, UniqueKeyIndex
+    },
+    AccessMethodError, OrderedUniqueKeyIndex, UniqueKeyIndex,
 };
 
 pub mod prelude {
@@ -85,11 +90,7 @@ impl<T: MemPool> HashFosterBtree<T> {
             let root_page_id_bytes = &meta_page[offset..offset + std::mem::size_of::<PageId>()];
             offset += root_page_id_bytes.len();
             let root_page_id = PageId::from_be_bytes(root_page_id_bytes.try_into().unwrap());
-            let tree = Arc::new(FosterBtree::load(
-                c_key,
-                mem_pool.clone(),
-                root_page_id,
-            ));
+            let tree = Arc::new(FosterBtree::load(c_key, mem_pool.clone(), root_page_id));
             buckets.push(tree);
         }
 
@@ -155,7 +156,10 @@ impl<T: MemPool> UniqueKeyIndex for HashFosterBtree<T> {
         HashFosterBtreeIter::new(scanners)
     }
 
-    fn scan_with_filter(self: &Arc<Self>, filter: Box<dyn FnMut(&[u8], &[u8]) -> bool>) -> Self::Iter {
+    fn scan_with_filter(
+        self: &Arc<Self>,
+        filter: Box<dyn FnMut(&[u8], &[u8]) -> bool>,
+    ) -> Self::Iter {
         // Chain the iterators from all the buckets
         let mut scanners = Vec::with_capacity(self.num_buckets);
         for bucket in self.buckets.iter() {
@@ -204,10 +208,9 @@ impl<T: MemPool> Iterator for HashFosterBtreeIter<T> {
                 if let Some(filter) = &mut self.filter {
                     if !filter(&key, &value) {
                         continue;
-                    } else {
-                        return Some((key, value));
                     }
                 }
+                return Some((key, value));
             }
             self.current += 1;
         }
@@ -215,19 +218,19 @@ impl<T: MemPool> Iterator for HashFosterBtreeIter<T> {
 }
 
 impl<T: MemPool> OrderedUniqueKeyIndex for HashFosterBtree<T> {
-    type OrderedIter = HashFosterBtreeIter<T>;
+    type OrderedIter = HashFosterBtreeOrderedIter<T>;
 
-    fn scan_range(&self, start_key: &[u8], end_key: &[u8]) -> Self::OrderedIter {
+    fn scan_range(self: &Arc<Self>, start_key: &[u8], end_key: &[u8]) -> Self::OrderedIter {
         // Chain the iterators from all the buckets
         let mut scanners = Vec::with_capacity(self.num_buckets);
         for bucket in self.buckets.iter() {
             scanners.push(bucket.scan_range(start_key, end_key));
         }
-        HashFosterBtreeIter::new(scanners)
+        HashFosterBtreeOrderedIter::new(scanners)
     }
 
     fn scan_range_with_filter(
-        &self,
+        self: &Arc<Self>,
         start_key: &[u8],
         end_key: &[u8],
         filter: Box<dyn FnMut(&[u8], &[u8]) -> bool>,
@@ -237,7 +240,7 @@ impl<T: MemPool> OrderedUniqueKeyIndex for HashFosterBtree<T> {
         for bucket in self.buckets.iter() {
             scanners.push(bucket.scan_range(start_key, end_key));
         }
-        HashFosterBtreeIter::new_with_filter(scanners, filter)
+        HashFosterBtreeOrderedIter::new_with_filter(scanners, filter)
     }
 }
 
@@ -246,6 +249,8 @@ pub struct HashFosterBtreeOrderedIter<T: MemPool> {
     current: usize,
     filter: Option<Box<dyn FnMut(&[u8], &[u8]) -> bool>>,
     heap: BinaryHeap<(Reverse<Vec<u8>>, (usize, Vec<u8>))>, // (key, (tree_index, value))
+    initialized: bool,
+    finished: bool,
 }
 
 impl<T: MemPool> HashFosterBtreeOrderedIter<T> {
@@ -255,6 +260,8 @@ impl<T: MemPool> HashFosterBtreeOrderedIter<T> {
             current: 0,
             filter: None,
             heap: BinaryHeap::new(),
+            initialized: false,
+            finished: false,
         }
     }
 
@@ -267,7 +274,23 @@ impl<T: MemPool> HashFosterBtreeOrderedIter<T> {
             current: 0,
             filter: Some(filter),
             heap: BinaryHeap::new(),
+            initialized: false,
+            finished: false,
         }
+    }
+
+    fn initialize(&mut self) {
+        for (i, scanner) in self.scanners.iter_mut().enumerate() {
+            while let Some((key, value)) = scanner.next() {
+                if let Some(filter) = &mut self.filter {
+                    if !filter(&key, &value) {
+                        continue;
+                    }
+                }
+                self.heap.push((Reverse(key), (i, value)));
+            }
+        }
+        self.initialized = true;
     }
 }
 
@@ -275,12 +298,27 @@ impl<T: MemPool> Iterator for HashFosterBtreeOrderedIter<T> {
     type Item = (Vec<u8>, Vec<u8>);
 
     fn next(&mut self) -> Option<Self::Item> {
-        loop {
+        if !self.initialized {
+            self.initialize();
         }
+        if self.finished {
+            return None;
+        }
+        if let Some((key, (i, value))) = self.heap.pop() {
+            if let Some((key, value)) = self.scanners[i].next() {
+                if let Some(filter) = &mut self.filter {
+                    if !filter(&key, &value) {
+                        return self.next();
+                    }
+                }
+                self.heap.push((Reverse(key), (i, value)));
+            }
+            return Some((key.0, value));
+        }
+        self.finished = true;
+        None
     }
 }
-
-
 
 pub struct HashFosterBtreeAppendOnly<T: MemPool> {
     pub mem_pool: Arc<T>,
@@ -388,16 +426,17 @@ impl<T: MemPool> HashFosterBtreeAppendOnly<T> {
 #[cfg(test)]
 mod tests {
 
+    use core::num;
     use std::{collections::HashSet, fs::File, sync::Arc};
 
     use crate::{
         access_method::AccessMethodError,
         bp::{get_in_mem_pool, get_test_bp, BufferPool},
         log_trace,
-        random::RandomKVs,
+        random::{gen_random_permutation, RandomKVs},
     };
 
-    use super::{ContainerKey, HashFosterBtree, MemPool, UniqueKeyIndex};
+    use super::{ContainerKey, HashFosterBtree, MemPool, OrderedUniqueKeyIndex, UniqueKeyIndex};
 
     fn to_bytes(num: usize) -> Vec<u8> {
         num.to_be_bytes().to_vec()
@@ -652,6 +691,72 @@ mod tests {
             count += 1;
         }
         assert_eq!(count, 10);
+    }
+
+    #[rstest]
+    #[case::bp(get_test_bp(20))]
+    #[case::in_mem(get_in_mem_pool())]
+    fn test_scan_ordered<T: MemPool>(#[case] bp: Arc<T>) {
+        let btree = Arc::new(setup_hashbtree_empty(bp.clone()));
+        // Insert 1024 bytes
+        let val = vec![3_u8; 1024];
+        let order = [6, 3, 8, 1, 5, 7, 2, 4, 9, 0];
+        for i in order.iter() {
+            println!(
+                "**************************** Upserting key {} **************************",
+                i
+            );
+            let key = to_bytes(*i);
+            btree.upsert(&key, &val).unwrap();
+        }
+
+        let iter = btree.scan_range(&[], &[]);
+        let mut count = 0;
+        for (key, current_val) in iter {
+            let key = from_bytes(&key);
+            println!(
+                "**************************** Scanning key {} **************************",
+                key
+            );
+            assert_eq!(current_val, val);
+            assert_eq!(key, count);
+            count += 1;
+        }
+        assert_eq!(count, 10);
+    }
+
+    #[rstest]
+    #[case::bp(get_test_bp(100))]
+    #[case::in_mem(get_in_mem_pool())]
+    fn test_insert_multiple_and_scan_ordered<T: MemPool>(#[case] bp: Arc<T>) {
+        let btree = Arc::new(setup_hashbtree_empty(bp.clone()));
+        // Insert 1024 bytes
+        let val = vec![3_u8; 1024];
+        let num_keys = 3000;
+        let keys = (0..num_keys).collect::<Vec<usize>>();
+        let order = gen_random_permutation(keys);
+        for i in order.iter() {
+            println!(
+                "**************************** Upserting key {} **************************",
+                i
+            );
+            let key = to_bytes(*i);
+            btree.upsert(&key, &val).unwrap();
+        }
+
+        let iter = btree.scan_range(&[], &[]);
+        let mut count = 0;
+        for (key, current_val) in iter {
+            let key = from_bytes(&key);
+            println!(
+                "**************************** Scanning key {} **************************",
+                key
+            );
+            assert_eq!(current_val, val);
+            assert_eq!(key, count);
+            count += 1;
+        }
+        assert_eq!(count, num_keys);
     }
 
     #[rstest]

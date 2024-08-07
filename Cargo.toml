@@ -22,6 +22,8 @@ stat = []
 512k_page = ["heap_allocated_page"]
 1m_page = ["heap_allocated_page"]
 heap_allocated_page = []
+ycsb_fbt = []
+ycsb_hash_fbt = []
 async_write = ["io-uring", "libc"]
 
 [dependencies]
