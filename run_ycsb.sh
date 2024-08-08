@@ -1,0 +1,55 @@
+#!/bin/bash
+
+# Usage: ./run_experiments.sh <number_of_experiments>
+# Example: ./run_experiments.sh 3
+
+NUM_EXPERIMENTS=$1
+
+if [ -z "$NUM_EXPERIMENTS" ]; then
+    echo "Please provide the number of experiments."
+    exit 1
+fi
+
+LOG_FILE="experiment_output.log"
+
+# Initialize the CSV headers
+HEADER="n"
+for (( i=0; i<$NUM_EXPERIMENTS; i++ ))
+do
+    HEADER="$HEADER,throughput$i"
+done
+
+# Define the set of n values to iterate over
+N_VALUES=(1 2 3 4 5 6 7 8 9 10 13 16 19 22 25 28 31 34 37 40)
+# N_VALUES=(1 2)
+# Define the set of skew factors to iterate over
+SKEW_VALUES=(0.0 0.8 0.9)
+# SKEW_VALUES=(0.0 0.8)
+
+run_experiment() {
+    BINARY=$1
+    SKEW=$2
+    OUTPUT_FILE=$3
+
+    echo $HEADER > $OUTPUT_FILE
+
+    for n in "${N_VALUES[@]}"
+    do
+        LINE="$n"
+        for (( i=0; i<$NUM_EXPERIMENTS; i++ ))
+        do
+            echo "Running $BINARY with n=$n and skew=$SKEW (experiment $i)..."
+            OUTPUT=$(./target/release/$BINARY -n $n -w A -s $SKEW 2>&1 | tee -a $LOG_FILE)
+            THROUGHPUT=$(echo "$OUTPUT" | grep 'Throughput' | awk '{print $3}')
+            LINE="$LINE,$THROUGHPUT"
+        done
+        echo $LINE >> $OUTPUT_FILE
+    done
+}
+
+# Run experiments for both binaries and all skew values
+for SKEW in "${SKEW_VALUES[@]}"
+do
+    run_experiment "ycsb_fbt" $SKEW "throughput_results_ycsb_fbt_skew_$SKEW.csv"
+    run_experiment "ycsb_hash_fbt" $SKEW "throughput_results_ycsb_hash_fbt_skew_$SKEW.csv"
+done

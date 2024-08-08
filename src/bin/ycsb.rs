@@ -288,11 +288,13 @@ fn get_index(bp: Arc<BufferPool>) -> Arc<FosterBtree<BufferPool>> {
 
 #[cfg(feature = "ycsb_fbt")]
 fn get_index(bp: Arc<BufferPool>) -> Arc<FosterBtree<BufferPool>> {
+    println!("Using FosterBtree");
     Arc::new(FosterBtree::new(ContainerKey::new(0, 0), bp))
 }
 
 #[cfg(feature = "ycsb_hash_fbt")]
 fn get_index(bp: Arc<BufferPool>) -> Arc<HashFosterBtree<BufferPool>> {
+    println!("Using HashFosterBtree");
     Arc::new(HashFosterBtree::new(ContainerKey::new(0, 0), bp, 1024))
 }
 
