@@ -2008,6 +2008,7 @@ pub struct FosterBtreeRangeScanner<T: MemPool> {
     prev_high_fence: Option<Vec<u8>>,
     current_leaf_page: Option<FrameReadGuard<'static>>, // As long as btree is alive, bp is alive so the frame is alive
     current_slot_id: u32,
+    parents: Vec<PageFrameKey>,
 }
 
 impl<T: MemPool> FosterBtreeRangeScanner<T> {
@@ -2024,6 +2025,7 @@ impl<T: MemPool> FosterBtreeRangeScanner<T> {
             prev_high_fence: None,
             current_leaf_page: None,
             current_slot_id: 0,
+            parents: Vec::new(),
         }
     }
 
@@ -2045,6 +2047,7 @@ impl<T: MemPool> FosterBtreeRangeScanner<T> {
             prev_high_fence: None,
             current_leaf_page: None,
             current_slot_id: 0,
+            parents: Vec::new(),
         }
     }
 
@@ -2090,12 +2093,44 @@ impl<T: MemPool> FosterBtreeRangeScanner<T> {
         self.current_slot_id = slot;
     }
 
+    /// Traverse to child
+    /// For scans, the pages might be evicted right after the scan. So we don't need to fix the frame_id.
+    /// We also don't do any structure modification to improve the performance.
+    fn traverse_to_leaf_for_read(&self, key: &[u8]) -> FrameReadGuard {
+        let mut current_page = self.btree.read_page(self.btree.root_key);
+        loop {
+            let this_page = current_page;
+            log_trace!("Traversal for read, page: {}", this_page.get_id());
+            if this_page.is_leaf() {
+                if this_page.has_foster_child() && this_page.get_foster_key() <= key {
+                    // Check whether the foster child should be traversed.
+                    let val = InnerVal::from_bytes(this_page.get_foster_val());
+                    let foster_page_key = PageFrameKey::new_with_frame_id(
+                        self.btree.c_key,
+                        val.page_id,
+                        val.frame_id,
+                    );
+                    let foster_page = self.btree.read_page(foster_page_key);
+                    current_page = foster_page;
+                    continue;
+                } else {
+                    return this_page;
+                }
+            }
+            let slot_id = this_page.upper_bound_slot_id(&BTreeKey::new(key)) - 1;
+            let val = InnerVal::from_bytes(this_page.get_val(slot_id));
+            let page_key =
+                PageFrameKey::new_with_frame_id(self.btree.c_key, val.page_id, val.frame_id);
+
+            let next_page = self.btree.read_page(page_key);
+            current_page = next_page;
+        }
+    }
+
     fn go_to_leaf(&mut self) {
         // Traverse to the leaf page that contains the current key (high fence of the previous leaf page)
         // Current key should NOT be equal to the r_key. Otherwise, we are done.
-        let leaf_page = self
-            .btree
-            .traverse_to_leaf_for_read(self.prev_high_fence.as_ref().unwrap());
+        let leaf_page = self.traverse_to_leaf_for_read(self.prev_high_fence.as_ref().unwrap());
         let leaf_page =
             unsafe { std::mem::transmute::<FrameReadGuard, FrameReadGuard<'static>>(leaf_page) };
         self.current_leaf_page = Some(leaf_page);
