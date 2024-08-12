@@ -113,11 +113,18 @@ impl<T: MemPool> HashFosterBtree<T> {
         let idx = hasher.finish() % self.num_buckets as u64;
         &self.buckets[idx as usize]
     }
+
+    pub fn page_stats(&self, verbose: bool) -> String {
+        let mut stats = String::new();
+        for (i, bucket) in self.buckets.iter().enumerate() {
+            stats.push_str(&format!("Bucket {}:\n", i));
+            stats.push_str(&bucket.page_stats(verbose));
+        }
+        stats
+    }
 }
 
 impl<T: MemPool> UniqueKeyIndex for HashFosterBtree<T> {
-    type Iter = HashFosterBtreeIter<T>;
-
     fn get(&self, key: &[u8]) -> Result<Vec<u8>, AccessMethodError> {
         self.get_bucket(key).get(key)
     }
@@ -147,7 +154,7 @@ impl<T: MemPool> UniqueKeyIndex for HashFosterBtree<T> {
         self.get_bucket(key).delete(key)
     }
 
-    fn scan(self: &Arc<Self>) -> HashFosterBtreeIter<T> {
+    fn scan(self: &Arc<Self>) -> impl Iterator<Item = (Vec<u8>, Vec<u8>)> {
         // Chain the iterators from all the buckets
         let mut scanners = Vec::with_capacity(self.num_buckets);
         for bucket in self.buckets.iter() {
@@ -159,7 +166,7 @@ impl<T: MemPool> UniqueKeyIndex for HashFosterBtree<T> {
     fn scan_with_filter(
         self: &Arc<Self>,
         filter: Box<dyn FnMut(&[u8], &[u8]) -> bool>,
-    ) -> Self::Iter {
+    ) -> impl Iterator<Item = (Vec<u8>, Vec<u8>)> {
         // Chain the iterators from all the buckets
         let mut scanners = Vec::with_capacity(self.num_buckets);
         for bucket in self.buckets.iter() {
@@ -218,15 +225,17 @@ impl<T: MemPool> Iterator for HashFosterBtreeIter<T> {
 }
 
 impl<T: MemPool> OrderedUniqueKeyIndex for HashFosterBtree<T> {
-    type OrderedIter = HashFosterBtreeOrderedIter<T>;
-
-    fn scan_range(self: &Arc<Self>, start_key: &[u8], end_key: &[u8]) -> Self::OrderedIter {
+    fn scan_range(
+        self: &Arc<Self>,
+        start_key: &[u8],
+        end_key: &[u8],
+    ) -> impl Iterator<Item = (Vec<u8>, Vec<u8>)> {
         // Chain the iterators from all the buckets
         let mut scanners = Vec::with_capacity(self.num_buckets);
         for bucket in self.buckets.iter() {
             scanners.push(bucket.scan_range(start_key, end_key));
         }
-        HashFosterBtreeOrderedIter::new(scanners)
+        HashFosterBtreeUnorderedIter::new(scanners)
     }
 
     fn scan_range_with_filter(
@@ -234,18 +243,64 @@ impl<T: MemPool> OrderedUniqueKeyIndex for HashFosterBtree<T> {
         start_key: &[u8],
         end_key: &[u8],
         filter: Box<dyn FnMut(&[u8], &[u8]) -> bool>,
-    ) -> Self::OrderedIter {
+    ) -> impl Iterator<Item = (Vec<u8>, Vec<u8>)> {
         // Chain the iterators from all the buckets
         let mut scanners = Vec::with_capacity(self.num_buckets);
         for bucket in self.buckets.iter() {
             scanners.push(bucket.scan_range(start_key, end_key));
         }
-        HashFosterBtreeOrderedIter::new_with_filter(scanners, filter)
+        HashFosterBtreeUnorderedIter::new_with_filter(scanners, filter)
     }
 }
 
-pub struct HashFosterBtreeOrderedIter<T: MemPool> {
-    scanners: Vec<FosterBtreeRangeScanner<T>>,
+pub struct HashFosterBtreeUnorderedIter<T: Iterator<Item = (Vec<u8>, Vec<u8>)>> {
+    scanners: Vec<T>,
+    current: usize,
+    filter: Option<Box<dyn FnMut(&[u8], &[u8]) -> bool>>,
+}
+
+impl<T: Iterator<Item = (Vec<u8>, Vec<u8>)>> HashFosterBtreeUnorderedIter<T> {
+    // If sorted is true, then the iterator will return the keys in sorted order
+    pub fn new(scanners: Vec<T>) -> Self {
+        Self {
+            scanners,
+            current: 0,
+            filter: None,
+        }
+    }
+
+    pub fn new_with_filter(scanners: Vec<T>, filter: Box<dyn FnMut(&[u8], &[u8]) -> bool>) -> Self {
+        Self {
+            scanners,
+            current: 0,
+            filter: Some(filter),
+        }
+    }
+}
+
+impl<T: Iterator<Item = (Vec<u8>, Vec<u8>)>> Iterator for HashFosterBtreeUnorderedIter<T> {
+    type Item = (Vec<u8>, Vec<u8>);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if self.current >= self.scanners.len() {
+                return None;
+            }
+            if let Some((key, value)) = self.scanners[self.current].next() {
+                if let Some(filter) = &mut self.filter {
+                    if !filter(&key, &value) {
+                        continue;
+                    }
+                }
+                return Some((key, value));
+            }
+            self.current += 1;
+        }
+    }
+}
+
+pub struct HashFosterBtreeOrderedIter<T: Iterator<Item = (Vec<u8>, Vec<u8>)>> {
+    scanners: Vec<T>,
     current: usize,
     filter: Option<Box<dyn FnMut(&[u8], &[u8]) -> bool>>,
     heap: BinaryHeap<(Reverse<Vec<u8>>, (usize, Vec<u8>))>, // (key, (tree_index, value))
@@ -253,8 +308,9 @@ pub struct HashFosterBtreeOrderedIter<T: MemPool> {
     finished: bool,
 }
 
-impl<T: MemPool> HashFosterBtreeOrderedIter<T> {
-    pub fn new(scanners: Vec<FosterBtreeRangeScanner<T>>) -> Self {
+impl<T: Iterator<Item = (Vec<u8>, Vec<u8>)>> HashFosterBtreeOrderedIter<T> {
+    // If sorted is true, then the iterator will return the keys in sorted order
+    pub fn new(scanners: Vec<T>) -> Self {
         Self {
             scanners,
             current: 0,
@@ -265,10 +321,7 @@ impl<T: MemPool> HashFosterBtreeOrderedIter<T> {
         }
     }
 
-    pub fn new_with_filter(
-        scanners: Vec<FosterBtreeRangeScanner<T>>,
-        filter: Box<dyn FnMut(&[u8], &[u8]) -> bool>,
-    ) -> Self {
+    pub fn new_with_filter(scanners: Vec<T>, filter: Box<dyn FnMut(&[u8], &[u8]) -> bool>) -> Self {
         Self {
             scanners,
             current: 0,
@@ -294,7 +347,7 @@ impl<T: MemPool> HashFosterBtreeOrderedIter<T> {
     }
 }
 
-impl<T: MemPool> Iterator for HashFosterBtreeOrderedIter<T> {
+impl<T: Iterator<Item = (Vec<u8>, Vec<u8>)>> Iterator for HashFosterBtreeOrderedIter<T> {
     type Item = (Vec<u8>, Vec<u8>);
 
     fn next(&mut self) -> Option<Self::Item> {

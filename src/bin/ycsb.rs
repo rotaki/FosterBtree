@@ -25,7 +25,11 @@ pub struct YCSBParams {
     pub workload_type: char,
     // Number of threads
     #[clap(short, long, default_value = "1")]
-    pub num_threads: usize,
+    pub threads: usize,
+    /// Number of hash buckets if applicable
+    /// Default 1024
+    #[clap(short = 'p', long, default_value = "1024")]
+    pub buckets: usize,
     /// Buffer pool size. if 0 panic
     #[clap(short, long, default_value = "100000")]
     pub bp_size: usize,
@@ -67,6 +71,10 @@ fn workload_proportion(workload_type: char) -> (usize, usize, usize, usize, usiz
         'F' => {
             panic!("Workload type F not supported yet");
             // (50, 0, 0, 0, 50) // Read-modify-write workload
+        }
+        'X' => {
+            // My workload. Scan only.
+            (0, 0, 100, 0, 0)
         }
         _ => panic!("Invalid workload type. Choose from A, B, C, D, E, F"),
     }
@@ -172,7 +180,7 @@ pub fn load_table(params: &YCSBParams, table: &Arc<impl UniqueKeyIndex + Send + 
 
 pub fn execute_workload(
     params: &YCSBParams,
-    table: Arc<impl UniqueKeyIndex + Send + Sync + 'static>,
+    table: Arc<impl UniqueKeyIndex + OrderedUniqueKeyIndex + Send + Sync + 'static>,
 ) -> (usize, usize, usize, usize, usize) {
     let warmup_flag = Arc::new(AtomicBool::new(true)); // Flag to stop the warmup
     let exec_flag = Arc::new(AtomicBool::new(true)); // Flag to stop the workload
@@ -182,7 +190,7 @@ pub fn execute_workload(
     // Execute the workload
     let mut threads = Vec::new();
 
-    for _ in 0..params.num_threads {
+    for _ in 0..params.threads {
         threads.push(std::thread::spawn({
             let table = table.clone();
             let warmup_flag = warmup_flag.clone();
@@ -217,11 +225,21 @@ pub fn execute_workload(
                             update_count += 1;
                         }
                     } else if x <= read + update + scan {
+                        let start_key = get_key(params.num_keys, params.skew_factor);
+                        let end_key = start_key + 100;
+                        let start_bytes = get_key_bytes(start_key, params.key_size);
+                        let end_bytes = get_key_bytes(end_key, params.key_size);
+                        let iter = table.scan_range(&start_bytes, &end_bytes);
+                        // Check the scan results
+                        for (key, value) in iter {
+                            assert_eq!(key.len(), params.key_size);
+                            assert_eq!(value.len(), params.record_size);
+                        }
+
                         // Scan
-                        unreachable!();
-                        // if warmup_flag.load(Ordering::Relaxed) {
-                        //     scan_count += 1;
-                        // }
+                        if warmup_flag.load(Ordering::Relaxed) {
+                            scan_count += 1;
+                        }
                     } else if x <= read + update + scan + insert {
                         // Insert
                         unreachable!();
@@ -282,20 +300,24 @@ pub fn execute_workload(
 }
 
 #[cfg(not(any(feature = "ycsb_fbt", feature = "ycsb_hash_fbt")))]
-fn get_index(bp: Arc<BufferPool>) -> Arc<FosterBtree<BufferPool>> {
+fn get_index(bp: Arc<BufferPool>, _params: &YCSBParams) -> Arc<FosterBtree<BufferPool>> {
     Arc::new(FosterBtree::new(ContainerKey::new(0, 0), bp))
 }
 
 #[cfg(feature = "ycsb_fbt")]
-fn get_index(bp: Arc<BufferPool>) -> Arc<FosterBtree<BufferPool>> {
+fn get_index(bp: Arc<BufferPool>, _params: &YCSBParams) -> Arc<FosterBtree<BufferPool>> {
     println!("Using FosterBtree");
     Arc::new(FosterBtree::new(ContainerKey::new(0, 0), bp))
 }
 
 #[cfg(feature = "ycsb_hash_fbt")]
-fn get_index(bp: Arc<BufferPool>) -> Arc<HashFosterBtree<BufferPool>> {
+fn get_index(bp: Arc<BufferPool>, params: &YCSBParams) -> Arc<HashFosterBtree<BufferPool>> {
     println!("Using HashFosterBtree");
-    Arc::new(HashFosterBtree::new(ContainerKey::new(0, 0), bp, 1024))
+    Arc::new(HashFosterBtree::new(
+        ContainerKey::new(0, 0),
+        bp,
+        params.buckets,
+    ))
 }
 
 fn print_stats(r: usize, u: usize, s: usize, i: usize, m: usize, total: usize, exec_time: usize) {
@@ -343,12 +365,15 @@ fn main() {
     println!("{:?}", params);
 
     let bp = get_test_bp(params.bp_size);
-    let table = get_index(bp.clone());
+    let table = get_index(bp.clone(), &params);
 
     println!("Loading table...");
     load_table(&params, &table);
 
     println!("Buffer pool stats after load: {:?}", bp.stats());
+
+    println!("--- Page stats ---\n{}", table.page_stats(false));
+
     println!("Resetting stats...");
     bp.reset_stats();
 
