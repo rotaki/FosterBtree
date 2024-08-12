@@ -1,7 +1,7 @@
 use crate::page::Page;
 
 // Page layout:
-// 1 byte: flags (is_root, leftmost, rightmost, has_foster_children) (u8)
+// 1 byte: flags (is_valid, is_root, leftmost, rightmost, has_foster_children) (u8)
 // 1 byte: level (0 for leaf) (u8)
 // 4 byte: slot count (generally >=2  because of low and high fences) (u32)
 // 4 byte: total bytes used (PAGE_HEADER_SIZE + slots + records) (u32)
@@ -227,6 +227,8 @@ pub trait FosterBtreePage {
     fn set_total_bytes_used(&mut self, total_bytes_used: u32);
     fn bytes_used(&self, range: std::ops::Range<u32>) -> u32;
     fn bytes_needed(&self, key: &[u8], value: &[u8]) -> u32;
+    fn is_valid(&self) -> bool;
+    fn set_valid(&mut self, is_valid: bool);
     fn is_root(&self) -> bool;
     fn set_root(&mut self, is_root: bool);
     fn is_leaf(&self) -> bool;
@@ -282,15 +284,27 @@ pub trait FosterBtreePage {
 }
 
 impl FosterBtreePage for Page {
-    fn is_root(&self) -> bool {
+    fn is_valid(&self) -> bool {
         self[0] & 0b1000_0000 != 0
+    }
+
+    fn set_valid(&mut self, is_valid: bool) {
+        if is_valid {
+            self[0] |= 0b1000_0000;
+        } else {
+            self[0] &= 0b0111_1111;
+        }
+    }
+
+    fn is_root(&self) -> bool {
+        self[0] & 0b0100_0000 != 0
     }
 
     fn set_root(&mut self, is_root: bool) {
         if is_root {
-            self[0] |= 0b1000_0000;
+            self[0] |= 0b0100_0000;
         } else {
-            self[0] &= 0b0111_1111;
+            self[0] &= 0b1011_1111;
         }
     }
 
@@ -299,38 +313,38 @@ impl FosterBtreePage for Page {
     }
 
     fn is_left_most(&self) -> bool {
-        self[0] & 0b0100_0000 != 0
+        self[0] & 0b0010_0000 != 0
     }
 
     fn set_left_most(&mut self, is_left_most: bool) {
         if is_left_most {
-            self[0] |= 0b0100_0000;
-        } else {
-            self[0] &= 0b1011_1111;
-        }
-    }
-
-    fn is_right_most(&self) -> bool {
-        self[0] & 0b0010_0000 != 0
-    }
-
-    fn set_right_most(&mut self, is_right_most: bool) {
-        if is_right_most {
             self[0] |= 0b0010_0000;
         } else {
             self[0] &= 0b1101_1111;
         }
     }
 
-    fn has_foster_child(&self) -> bool {
+    fn is_right_most(&self) -> bool {
         self[0] & 0b0001_0000 != 0
+    }
+
+    fn set_right_most(&mut self, is_right_most: bool) {
+        if is_right_most {
+            self[0] |= 0b0001_0000;
+        } else {
+            self[0] &= 0b1110_1111;
+        }
+    }
+
+    fn has_foster_child(&self) -> bool {
+        self[0] & 0b0000_1000 != 0
     }
 
     fn set_has_foster_child(&mut self, has_foster_child: bool) {
         if has_foster_child {
-            self[0] |= 0b0001_0000;
+            self[0] |= 0b0000_1000;
         } else {
-            self[0] &= 0b1110_1111;
+            self[0] &= 0b1111_0111;
         }
     }
 
@@ -656,7 +670,8 @@ impl FosterBtreePage for Page {
     }
 
     fn init(&mut self) {
-        // Default is non-root, leaf, non-leftmost, non-rightmost, non-foster_children
+        // Default is valid, non-root, leaf, non-leftmost, non-rightmost, non-foster_children
+        self.set_valid(true);
         self.set_root(false);
         self.set_left_most(false);
         self.set_right_most(false);
@@ -672,6 +687,7 @@ impl FosterBtreePage for Page {
     }
 
     fn init_as_root(&mut self) {
+        self.set_valid(true);
         self.set_root(true);
         self.set_left_most(true);
         self.set_right_most(true);

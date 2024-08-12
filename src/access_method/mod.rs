@@ -29,6 +29,7 @@ pub mod prelude {
 }
 
 pub trait UniqueKeyIndex {
+    type Iter: Iterator<Item = (Vec<u8>, Vec<u8>)>;
     fn insert(&self, key: &[u8], value: &[u8]) -> Result<(), AccessMethodError>;
     fn get(&self, key: &[u8]) -> Result<Vec<u8>, AccessMethodError>;
     fn delete(&self, key: &[u8]) -> Result<(), AccessMethodError>;
@@ -40,29 +41,27 @@ pub trait UniqueKeyIndex {
         value: &[u8],
         merge_fn: impl Fn(&[u8], &[u8]) -> Vec<u8>,
     ) -> Result<(), AccessMethodError>;
-    fn scan(self: &Arc<Self>) -> impl Iterator<Item = (Vec<u8>, Vec<u8>)>;
+    fn scan(self: &Arc<Self>) -> Self::Iter;
     fn scan_with_filter(
         self: &Arc<Self>,
         filter: Box<dyn FnMut(&[u8], &[u8]) -> bool>,
-    ) -> impl Iterator<Item = (Vec<u8>, Vec<u8>)>;
+    ) -> Self::Iter;
 }
 
 pub trait OrderedUniqueKeyIndex: UniqueKeyIndex {
-    fn scan_range(
-        self: &Arc<Self>,
-        start_key: &[u8],
-        end_key: &[u8],
-    ) -> impl Iterator<Item = (Vec<u8>, Vec<u8>)>;
+    type RangeIter: Iterator<Item = (Vec<u8>, Vec<u8>)>;
+    fn scan_range(self: &Arc<Self>, start_key: &[u8], end_key: &[u8]) -> Self::RangeIter;
     fn scan_range_with_filter(
         self: &Arc<Self>,
         start_key: &[u8],
         end_key: &[u8],
         filter: Box<dyn FnMut(&[u8], &[u8]) -> bool>,
-    ) -> impl Iterator<Item = (Vec<u8>, Vec<u8>)>;
+    ) -> Self::RangeIter;
 }
 
 pub trait NonUniqueKeyIndex {
+    type Iter: Iterator<Item = (Vec<u8>, Vec<u8>)>;
     fn append(&mut self, key: &[u8], value: &[u8]) -> Result<(), AccessMethodError>;
     fn scan(self: &Arc<Self>) -> impl Iterator<Item = (Vec<u8>, Vec<u8>)>;
-    fn scan_key(self: &Arc<Self>, key: &[u8]) -> impl Iterator<Item = Vec<u8>>;
+    fn scan_key(self: &Arc<Self>, key: &[u8]) -> Self::Iter;
 }

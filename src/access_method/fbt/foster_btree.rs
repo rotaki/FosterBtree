@@ -1830,6 +1830,8 @@ impl<T: MemPool> FosterBtree<T> {
 }
 
 impl<T: MemPool> UniqueKeyIndex for FosterBtree<T> {
+    type Iter = FosterBtreeRangeScanner<T>;
+
     fn get(&self, key: &[u8]) -> Result<Vec<u8>, AccessMethodError> {
         let foster_page = self.traverse_to_leaf_for_read(key);
         let slot_id = foster_page.upper_bound_slot_id(&BTreeKey::new(key)) - 1;
@@ -1961,21 +1963,19 @@ impl<T: MemPool> UniqueKeyIndex for FosterBtree<T> {
         }
     }
 
-    fn scan(self: &Arc<Self>) -> FosterBtreeRangeScanner<T> {
+    fn scan(self: &Arc<Self>) -> Self::Iter {
         FosterBtreeRangeScanner::new(self, &[], &[])
     }
 
-    fn scan_with_filter(self: &Arc<Self>, filter: FilterFunc) -> FosterBtreeRangeScanner<T> {
+    fn scan_with_filter(self: &Arc<Self>, filter: FilterFunc) -> Self::Iter {
         FosterBtreeRangeScanner::new_with_filter(self, &[], &[], filter)
     }
 }
 
 impl<T: MemPool> OrderedUniqueKeyIndex for FosterBtree<T> {
-    fn scan_range(
-        self: &Arc<Self>,
-        start_key: &[u8],
-        end_key: &[u8],
-    ) -> impl Iterator<Item = (Vec<u8>, Vec<u8>)> {
+    type RangeIter = FosterBtreeRangeScanner<T>;
+
+    fn scan_range(self: &Arc<Self>, start_key: &[u8], end_key: &[u8]) -> Self::RangeIter {
         FosterBtreeRangeScanner::new(self, start_key, end_key)
     }
 
@@ -1984,7 +1984,7 @@ impl<T: MemPool> OrderedUniqueKeyIndex for FosterBtree<T> {
         start_key: &[u8],
         end_key: &[u8],
         filter: FilterFunc,
-    ) -> impl Iterator<Item = (Vec<u8>, Vec<u8>)> {
+    ) -> Self::RangeIter {
         FosterBtreeRangeScanner::new_with_filter(self, start_key, end_key, filter)
     }
 }
