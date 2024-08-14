@@ -1,7 +1,6 @@
 use std::{
     cmp::Reverse,
     collections::BinaryHeap,
-    fmt::Binary,
     hash::{Hash, Hasher},
     sync::Arc,
 };
@@ -331,7 +330,7 @@ impl<T: Iterator<Item = (Vec<u8>, Vec<u8>)>> HashFosterBtreeOrderedIter<T> {
 
     fn initialize(&mut self) {
         for (i, scanner) in self.scanners.iter_mut().enumerate() {
-            while let Some((key, value)) = scanner.next() {
+            for (key, value) in scanner.by_ref() {
                 if let Some(filter) = &mut self.filter {
                     if !filter(&key, &value) {
                         continue;

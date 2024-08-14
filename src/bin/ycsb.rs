@@ -1,8 +1,8 @@
 use clap::Parser;
 use fbtree::{
-    access_method::{NonUniqueKeyIndex, OrderedUniqueKeyIndex, UniqueKeyIndex},
-    bp::{get_in_mem_pool, get_test_bp, BufferPool, InMemPool},
-    prelude::{HashFosterBtree, AVAILABLE_PAGE_SIZE, PAGE_SIZE},
+    access_method::{OrderedUniqueKeyIndex, UniqueKeyIndex},
+    bp::{get_test_bp, BufferPool},
+    prelude::PAGE_SIZE,
     random::gen_random_byte_vec,
 };
 use rand::prelude::Distribution;
@@ -171,7 +171,7 @@ pub fn load_table(params: &YCSBParams, table: &Arc<impl UniqueKeyIndex + Send + 
             let key_gen = gen.pop().unwrap();
             s.spawn(move || {
                 for (key, value) in key_gen {
-                    let _ = table.insert(&key, &value).unwrap();
+                    table.insert(&key, &value).unwrap();
                 }
             });
         }
@@ -180,7 +180,7 @@ pub fn load_table(params: &YCSBParams, table: &Arc<impl UniqueKeyIndex + Send + 
 
 pub fn execute_workload(
     params: &YCSBParams,
-    table: Arc<impl UniqueKeyIndex + OrderedUniqueKeyIndex + Send + Sync + 'static>,
+    table: Arc<impl OrderedUniqueKeyIndex + Send + Sync + 'static>,
 ) -> (usize, usize, usize, usize, usize) {
     let warmup_flag = Arc::new(AtomicBool::new(true)); // Flag to stop the warmup
     let exec_flag = Arc::new(AtomicBool::new(true)); // Flag to stop the workload
@@ -200,8 +200,8 @@ pub fn execute_workload(
                 let mut read_count = 0;
                 let mut update_count = 0;
                 let mut scan_count = 0;
-                let mut insert_count = 0;
-                let mut rmw_count = 0;
+                let insert_count = 0;
+                let rmw_count = 0;
 
                 while exec_flag.load(Ordering::Relaxed) {
                     let x = gen_random_int(1, 100);
@@ -215,7 +215,7 @@ pub fn execute_workload(
                     } else if x <= read + update {
                         // Update
                         let key = get_key(params.num_keys, params.skew_factor);
-                        let _ = table
+                        table
                             .update(
                                 &get_key_bytes(key, params.key_size),
                                 &get_new_value(params.record_size),
