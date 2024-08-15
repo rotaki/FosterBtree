@@ -1,4 +1,5 @@
 use clap::Parser;
+use core::panic;
 use fbtree::{
     access_method::{OrderedUniqueKeyIndex, UniqueKeyIndex},
     bp::{get_test_bp, BufferPool},
@@ -37,7 +38,7 @@ pub struct YCSBParams {
     #[clap(short, long, default_value = "10000000")]
     pub num_keys: usize,
     /// Key size
-    #[clap(short, long, default_value = "10")]
+    #[clap(short, long, default_value = "8")]
     pub key_size: usize,
     /// Record size
     #[clap(short, long, default_value = "1000")]
@@ -88,6 +89,16 @@ fn get_key_bytes(key: usize, key_size: usize) -> Vec<u8> {
     let bytes = key.to_be_bytes().to_vec();
     key_vec[key_size - bytes.len()..].copy_from_slice(&bytes);
     key_vec
+}
+
+fn from_key_bytes(key: &[u8]) -> usize {
+    // The last 8 bytes of the key is the key
+    let key = usize::from_be_bytes(
+        key[key.len() - std::mem::size_of::<usize>()..]
+            .try_into()
+            .unwrap(),
+    );
+    key
 }
 
 fn get_key(num_keys: usize, skew_factor: f64) -> usize {

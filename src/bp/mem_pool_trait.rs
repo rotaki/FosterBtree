@@ -1,5 +1,4 @@
 use super::buffer_frame::{FrameReadGuard, FrameWriteGuard};
-use super::eviction_policy::EvictionPolicy;
 
 use crate::{file_manager::FMError, page::PageId};
 

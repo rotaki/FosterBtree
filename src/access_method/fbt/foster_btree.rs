@@ -905,7 +905,7 @@ fn split_insert_triple(
 /// Merge the foster child page into this page.
 /// The foster child page will be deleted.
 /// Before:
-///   this [k0, k2) --> sibling [k1, k2)
+///   this [k0, k2) --> foster_child [k1, k2)
 ///
 /// After:
 ///   this [k0, k2)
@@ -927,6 +927,7 @@ fn merge(this: &mut FrameWriteGuard, foster_child: &mut FrameWriteGuard) {
     let res = this.append_sorted(&kvs);
     assert!(res);
     this.set_has_foster_child(foster_child.has_foster_child());
+    this.set_right_most(foster_child.is_right_most());
     foster_child.init();
     foster_child.set_valid(false);
 
@@ -1067,32 +1068,33 @@ fn balance(this: &mut FrameWriteGuard, foster_child: &mut FrameWriteGuard) {
 ///   parent [k0, k2)
 ///    |
 ///    v
-///   child0 [k0, k2) --> child1 [k1, k2)
+///   child1 [k0, k2) --> child2 [k1, k2)
 //
 /// After:
 ///   parent [k0, k2)
 ///    +-------------------+
 ///    |                   |
 ///    v                   v
-///   child0 [k0, k1)    child1 [k1, k2)
-fn adopt(parent: &mut FrameWriteGuard, child: &mut FrameWriteGuard) {
+///   child1 [k0, k1)    child2 [k1, k2)
+fn adopt(parent: &mut FrameWriteGuard, child1: &mut FrameWriteGuard) {
     #[cfg(feature = "stat")]
     inc_local_stat_success(OpType::Adopt);
 
-    debug_assert!(is_parent_and_child(parent, child));
-    debug_assert!(!is_foster_relationship(parent, child));
-    debug_assert!(child.has_foster_child());
+    debug_assert!(is_parent_and_child(parent, child1));
+    debug_assert!(!is_foster_relationship(parent, child1));
+    debug_assert!(child1.has_foster_child());
 
     // Try insert the foster key and value into parent page.
     let res = parent.insert(
-        child.get_foster_key(),
-        child.get_val(child.foster_child_slot_id()),
+        child1.get_foster_key(),
+        child1.get_val(child1.foster_child_slot_id()),
     );
     assert!(res);
     // Make the foster key the high fence of the child page.
-    let high_fence_slot_id = child.high_fence_slot_id();
-    child.remove_at(high_fence_slot_id); // Remove the high fence to make the foster key the high fence.
-    child.set_has_foster_child(false);
+    let high_fence_slot_id = child1.high_fence_slot_id();
+    child1.remove_at(high_fence_slot_id); // Remove the high fence to make the foster key the high fence.
+    child1.set_has_foster_child(false);
+    child1.set_right_most(false);
 }
 
 /// Anti-adopt.
@@ -1126,11 +1128,17 @@ fn anti_adopt(parent: &mut FrameWriteGuard, child1: &mut FrameWriteGuard) {
     } else {
         debug_assert!(slot_id < parent.high_fence_slot_id());
     }
+    // We remove k1 from the parent
     let k1 = parent.get_raw_key(slot_id);
     let child2_ptr = parent.get_val(slot_id);
     let k2 = parent.get_raw_key(slot_id + 1);
     child1.set_high_fence(k2);
     child1.set_has_foster_child(true);
+    if parent.is_right_most() && slot_id + 1 == parent.high_fence_slot_id() {
+        // If k2 is the high fence of the parent, then child1 also becomes the right most child
+        // because k2 is the high fence of child1 as well.
+        child1.set_right_most(true);
+    }
     let res = child1.insert(k1, child2_ptr);
     if !res {
         panic!("Cannot insert the slot into the child page");
@@ -1210,6 +1218,7 @@ fn ascend_root(root: &mut FrameWriteGuard, child: &mut FrameWriteGuard) {
     child.set_level(root.level());
     child.set_low_fence(root.get_raw_key(root.low_fence_slot_id()));
     child.set_left_most(root.is_left_most());
+    child.set_right_most(false); // Right most will be false for the child page
     child.set_high_fence(&foster_key);
     root.increment_level();
     root.set_has_foster_child(false);
@@ -2095,7 +2104,6 @@ impl<T: MemPool> FosterBtreeRangeScanner<T> {
         // Once we reach this loop, we never go back to the outer loop.
         loop {
             let this_page = current_page;
-            log_trace!("Traversal for read, page: {}", this_page.get_id());
             if this_page.is_leaf() {
                 if this_page.has_foster_child()
                     && this_page.get_foster_key() <= self.l_key.as_slice()
@@ -4068,6 +4076,22 @@ mod tests {
             count += 1;
         }
         assert_eq!(count, num_keys);
+
+        // Scan with range
+        let start_key = to_bytes(1000);
+        let end_key = to_bytes(2000);
+        let iter = btree.scan_range(&start_key, &end_key);
+        let mut count = 0;
+        for (idx, (key, _)) in iter.enumerate() {
+            let key = from_bytes(&key);
+            println!(
+                "**************************** Scanning key {} **************************",
+                key
+            );
+            assert_eq!(key, idx + 1000);
+            count += 1;
+        }
+        assert_eq!(count, 1000);
     }
 
     #[rstest]
