@@ -2090,10 +2090,38 @@ impl<T: MemPool> FosterBtreeRangeScanner<T> {
         self.current_leaf_page = None;
     }
 
+    #[cfg(feature = "old_iter")]
+    fn initialize(&mut self) {
+        // Traverse to the leaf page that contains the l_key
+        let leaf_page = self.btree.traverse_to_leaf_for_read(self.l_key.as_slice());
+        let leaf_page =
+            unsafe { std::mem::transmute::<FrameReadGuard, FrameReadGuard<'static>>(leaf_page) };
+        let mut slot = leaf_page.lower_bound_slot_id(&self.l_key());
+        if slot == 0 {
+            slot = 1; // Skip the lower fence
+        }
+        self.current_leaf_page = Some(leaf_page);
+        self.current_slot_id = slot;
+    }
+
+    #[cfg(feature = "old_iter")]
+    fn go_to_next_leaf(&mut self) {
+        // Traverse to the leaf page that contains the current key (high fence of the previous leaf page)
+        // Current key should NOT be equal to the r_key. Otherwise, we are done.
+        let leaf_page = self
+            .btree
+            .traverse_to_leaf_for_read(self.prev_high_fence.as_ref().unwrap());
+        let leaf_page =
+            unsafe { std::mem::transmute::<FrameReadGuard, FrameReadGuard<'static>>(leaf_page) };
+        self.current_leaf_page = Some(leaf_page);
+        self.current_slot_id = 1; // Skip the lower fence
+    }
+
     /// Traverse to the leaf page to find the page with l_key.
     /// Creates a parents stack to keep track of the traversal path.
     /// At the end of the function, the stack will contain the path from the root to the leaf page
     /// including the foster pages.
+    #[cfg(not(feature = "old_iter"))]
     fn initialize(&mut self) {
         // Push the root page to the stack
         self.parents.push(self.btree.root_key);
@@ -2160,6 +2188,7 @@ impl<T: MemPool> FosterBtreeRangeScanner<T> {
     /// during the traversal. Deadlocks are not a problem in this case because the traversal only
     /// takes a read latch. If taking the read latch fails, there is a concurrent write operation
     /// that is modifying the page. If we detect this situation, we can wait for a while.
+    #[cfg(not(feature = "old_iter"))]
     fn go_to_next_leaf(&mut self) {
         // Pop the current page from the stack
         self.parents.pop().unwrap();
