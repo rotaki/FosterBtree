@@ -140,22 +140,32 @@ pub trait MemPool: Sync + Send {
     /// This function assumes that a page is already created and either in memory or on disk.
     fn get_page_for_read(&self, key: PageFrameKey) -> Result<FrameReadGuard, MemPoolStatus>;
 
-    /// Return the runtime statistics of the memory pool.
-    fn stats(&self) -> (usize, usize, usize);
-
-    /// Reset the runtime statistics of the memory pool.
-    fn reset_stats(&self);
-
     /// Persist all the dirty pages to disk.
+    /// This function will not deallocate the memory pool.
     /// This does not clear out the frames in the memory pool.
     fn flush_all(&self) -> Result<(), MemPoolStatus>;
+
+    /// Persist all the dirty pages to disk and reset the memory pool.
+    /// This function will not deallocate the memory pool but
+    /// clears out all the frames in the memory pool.
+    /// After calling this function, pages will be read from disk when requested.
+    fn flush_all_and_reset(&self) -> Result<(), MemPoolStatus>;
+
+    /// Clear the dirty flags of all the pages in the memory pool.
+    /// This function will not deallocate the memory pool.
+    /// This does not clear out the frames in the memory pool.
+    /// Dirty pages will not be written to disk.
+    /// This function is used for experiments to avoid writing pages to disk.
+    fn clear_dirty_flags(&self) -> Result<(), MemPoolStatus>;
 
     /// Tell the memory pool that a page in the frame should be evicted as soon as possible.
     /// This function will not evict the page immediately.
     /// This function is used as a hint to the memory pool to evict the page when possible.
     fn fast_evict(&self, frame_id: u32) -> Result<(), MemPoolStatus>;
 
-    /// Clear all the frames in the memory pool.
-    /// If there are any dirty pages, they will be written to disk.
-    fn clear_frames(&self) -> Result<(), MemPoolStatus>;
+    /// Return the runtime statistics of the memory pool.
+    fn stats(&self) -> (usize, usize, usize);
+
+    /// Reset the runtime statistics of the memory pool.
+    fn reset_stats(&self);
 }

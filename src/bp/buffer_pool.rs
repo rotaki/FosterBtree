@@ -394,7 +394,7 @@ impl Drop for BufferPool {
             std::fs::remove_dir_all(&self.path).unwrap();
         } else {
             // Persist all the pages to disk
-            self.clear_frames().unwrap();
+            self.flush_all_and_reset().unwrap();
         }
     }
 }
@@ -577,13 +577,15 @@ impl BufferPool {
             Err(MemPoolStatus::CannotEvictPage)
         }
     }
+}
 
+impl MemPool for BufferPool {
     /// Create a new page for write in memory.
     /// NOTE: This function does not write the page to disk.
     /// See more at `handle_page_fault(key, new_page=true)`
     /// The newly allocated page is not formatted except for the page id.
     /// The caller is responsible for initializing the page.
-    pub fn create_new_page_for_write(
+    fn create_new_page_for_write(
         &self,
         c_key: ContainerKey,
     ) -> Result<FrameWriteGuard, MemPoolStatus> {
@@ -615,7 +617,7 @@ impl BufferPool {
         res
     }
 
-    pub fn get_page_for_write(&self, key: PageFrameKey) -> Result<FrameWriteGuard, MemPoolStatus> {
+    fn get_page_for_write(&self, key: PageFrameKey) -> Result<FrameWriteGuard, MemPoolStatus> {
         log_debug!("Page write: {}", key);
 
         {
@@ -725,7 +727,7 @@ impl BufferPool {
         result
     }
 
-    pub fn get_page_for_read(&self, key: PageFrameKey) -> Result<FrameReadGuard, MemPoolStatus> {
+    fn get_page_for_read(&self, key: PageFrameKey) -> Result<FrameReadGuard, MemPoolStatus> {
         log_debug!("Page read: {}", key);
 
         {
@@ -831,7 +833,7 @@ impl BufferPool {
         result
     }
 
-    pub fn flush_all(&self) -> Result<(), MemPoolStatus> {
+    fn flush_all(&self) -> Result<(), MemPoolStatus> {
         self.shared();
 
         let frames = unsafe { &*self.frames.get() };
@@ -858,11 +860,16 @@ impl BufferPool {
             }
         }
 
+        // Call fsync on all the files
+        for file in container_to_file.values() {
+            file.flush()?;
+        }
+
         self.release_shared();
         Ok(())
     }
 
-    pub fn fast_evict(&self, frame_id: u32) -> Result<(), MemPoolStatus> {
+    fn fast_evict(&self, frame_id: u32) -> Result<(), MemPoolStatus> {
         // push_to_eviction_queue can be done without buffer pool latch
         // because it is a lock-free operation
         let frames = unsafe { &*self.frames.get() };
@@ -871,19 +878,19 @@ impl BufferPool {
     }
 
     // Just return the runtime stats
-    pub fn stats(&self) -> (usize, usize, usize) {
+    fn stats(&self) -> (usize, usize, usize) {
         self.runtime_stats.get()
     }
 
     // Reset the runtime stats
-    pub fn reset_stats(&self) {
+    fn reset_stats(&self) {
         self.runtime_stats.clear();
     }
 
     /// Reset the buffer pool to its initial state.
-    /// This will not flush the dirty pages to disk.
-    /// This also removes all the files in disk.
-    pub fn clear_frames(&self) -> Result<(), MemPoolStatus> {
+    /// This will write all the dirty pages to disk and flush the files.
+    /// After this operation, the buffer pool will have all the frames cleared.
+    fn flush_all_and_reset(&self) -> Result<(), MemPoolStatus> {
         self.exclusive();
 
         let frames = unsafe { &*self.frames.get() };
@@ -918,11 +925,13 @@ impl BufferPool {
 
         id_to_index.clear();
 
+        frames.reset_free_frames();
+
         self.release_exclusive();
         Ok(())
     }
 
-    pub fn reset(&self) -> Result<(), MemPoolStatus> {
+    fn clear_dirty_flags(&self) -> Result<(), MemPoolStatus> {
         self.exclusive();
 
         let frames = unsafe { &*self.frames.get() };
@@ -939,7 +948,8 @@ impl BufferPool {
             frame.dirty().store(false, Ordering::Release);
         }
 
-        // Call fsync on all the files
+        // Call fsync on all the files to ensure that no dirty pages
+        // are left in the file manager queue
         for file in container_to_file.values() {
             file.flush()?;
         }
@@ -949,50 +959,6 @@ impl BufferPool {
 
         self.release_exclusive();
         Ok(())
-    }
-
-    pub fn reset_free_frames(&self) {
-        self.exclusive();
-        let frames = unsafe { &mut *self.frames.get() };
-        frames.reset_free_frames();
-        self.release_exclusive();
-    }
-}
-
-impl MemPool for BufferPool {
-    fn create_new_page_for_write(
-        &self,
-        c_key: ContainerKey,
-    ) -> Result<FrameWriteGuard, MemPoolStatus> {
-        BufferPool::create_new_page_for_write(self, c_key)
-    }
-
-    fn get_page_for_write(&self, key: PageFrameKey) -> Result<FrameWriteGuard, MemPoolStatus> {
-        BufferPool::get_page_for_write(self, key)
-    }
-
-    fn get_page_for_read(&self, key: PageFrameKey) -> Result<FrameReadGuard, MemPoolStatus> {
-        BufferPool::get_page_for_read(self, key)
-    }
-
-    fn stats(&self) -> (usize, usize, usize) {
-        BufferPool::stats(self)
-    }
-
-    fn reset_stats(&self) {
-        BufferPool::reset_stats(self);
-    }
-
-    fn flush_all(&self) -> Result<(), MemPoolStatus> {
-        BufferPool::flush_all(self)
-    }
-
-    fn fast_evict(&self, frame_id: u32) -> Result<(), MemPoolStatus> {
-        BufferPool::fast_evict(self, frame_id)
-    }
-
-    fn clear_frames(&self) -> Result<(), MemPoolStatus> {
-        BufferPool::clear_frames(self)
     }
 }
 
@@ -1051,7 +1017,6 @@ unsafe impl Sync for BufferPool {}
 
 #[cfg(test)]
 mod tests {
-    use crate::bp::eviction_policy::LRUEvictionPolicy;
     #[allow(unused_imports)]
     use crate::log;
     use crate::log_trace;
@@ -1240,7 +1205,7 @@ mod tests {
         bp.run_checks();
 
         // Clear the buffer pool
-        bp.clear_frames().unwrap();
+        bp.flush_all_and_reset().unwrap();
 
         bp.run_checks();
 
@@ -1272,7 +1237,7 @@ mod tests {
         bp1.run_checks();
 
         // Clear the buffer pool
-        bp1.clear_frames().unwrap();
+        bp1.flush_all_and_reset().unwrap();
 
         bp1.run_checks();
 

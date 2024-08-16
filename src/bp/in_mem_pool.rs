@@ -154,11 +154,15 @@ impl MemPool for InMemPool {
         Ok(())
     }
 
-    fn fast_evict(&self, _frame_id: u32) -> Result<(), MemPoolStatus> {
+    fn flush_all_and_reset(&self) -> Result<(), MemPoolStatus> {
         Ok(())
     }
 
-    fn clear_frames(&self) -> Result<(), MemPoolStatus> {
+    fn clear_dirty_flags(&self) -> Result<(), MemPoolStatus> {
+        Ok(())
+    }
+
+    fn fast_evict(&self, _frame_id: u32) -> Result<(), MemPoolStatus> {
         Ok(())
     }
 }

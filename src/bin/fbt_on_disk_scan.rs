@@ -1,5 +1,5 @@
 use clap::Parser;
-use fbtree::{access_method::*, bench_utils::*, random::RandomKVs};
+use fbtree::{access_method::*, bench_utils::*, bp::MemPool, random::RandomKVs};
 
 fn main() {
     let mut insert_params = BenchParams::parse();

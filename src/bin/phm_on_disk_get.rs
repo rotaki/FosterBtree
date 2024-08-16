@@ -1,5 +1,5 @@
 use clap::Parser;
-use fbtree::{bench_utils::*, random::RandomKVs};
+use fbtree::{bench_utils::*, bp::MemPool, random::RandomKVs};
 fn main() {
     let mut insert_params = BenchParams::parse();
     insert_params.ops_ratio = "1:0:0:0".to_string(); // Only insertions are done in this snipp

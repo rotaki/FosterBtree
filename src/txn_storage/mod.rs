@@ -28,7 +28,7 @@ mod tests {
         bp::{
             get_test_bp,
             prelude::{ContainerId, DatabaseId},
-            BufferPool,
+            BufferPool, MemPool,
         },
         random::RandomKVs,
     };
@@ -267,7 +267,7 @@ mod tests {
                 }
                 storage1.commit_txn(&txn, false).unwrap();
             }
-            bp1.clear_frames().unwrap();
+            bp1.flush_all_and_reset().unwrap();
 
             (db_id, (c_id1, c_id2, c_id3))
         };
