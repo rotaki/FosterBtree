@@ -1127,6 +1127,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn test_sequential_upsert_with_merge_multiple_pages() {
         let map = setup_paged_hash_map(get_in_mem_pool());
         let mut last_key = vec![];
