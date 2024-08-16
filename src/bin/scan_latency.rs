@@ -178,6 +178,7 @@ pub fn execute_workload(
 
 #[cfg(not(any(feature = "ycsb_fbt", feature = "ycsb_hash_fbt")))]
 fn get_index(bp: Arc<BufferPool>, _params: &Params) -> Arc<FosterBtree<BufferPool>> {
+    println!("Using FosterBtree");
     Arc::new(FosterBtree::new(ContainerKey::new(0, 0), bp))
 }
 
