@@ -512,70 +512,70 @@ impl BufferPool {
         self.latch.release_exclusive();
     }
 
-    // Invariant: The exclusive latch must be held when calling this function
+    // The exclusive latch must be held when calling this function
+    fn choose_victim(&self) -> Option<FrameWriteGuard> {
+        let frames = unsafe { &mut *self.frames.get() };
+        frames.choose_victim()
+    }
+
+    // The exclusive latch must be held when calling this function
     fn handle_page_fault(
         &self,
         key: PageKey,
         new_page: bool,
-    ) -> Result<FrameWriteGuard, MemPoolStatus> {
-        let frames = unsafe { &mut *self.frames.get() };
+        location: &mut FrameWriteGuard,
+    ) -> Result<(), MemPoolStatus> {
         let id_to_index = unsafe { &mut *self.id_to_index.get() };
         let container_to_file = unsafe { &mut *self.container_to_file.get() };
 
-        if let Some(mut guard) = frames.choose_victim() {
-            let index = guard.frame_id();
-            let is_dirty = guard.dirty().load(Ordering::Acquire);
+        let index = location.frame_id();
+        let is_dirty = location.dirty().load(Ordering::Acquire);
 
-            // Evict old page if necessary
-            if let Some(old_key) = guard.page_key() {
-                if is_dirty {
-                    #[cfg(feature = "stat")]
-                    inc_local_bp_dirty_victim();
-                    guard.dirty().store(false, Ordering::Release);
-                    let file = container_to_file
-                        .get(&old_key.c_key)
-                        .ok_or(MemPoolStatus::FileManagerNotFound)?;
-
-                    self.runtime_stats.inc_write_count();
-                    file.write_page(old_key.page_id, &guard)?;
-                } else {
-                    #[cfg(feature = "stat")]
-                    inc_local_bp_clean_victim();
-                }
-                id_to_index.remove(old_key);
-                log_debug!("Page evicted: {}", old_key);
-            } else {
+        // Evict old page if necessary
+        if let Some(old_key) = location.page_key() {
+            if is_dirty {
                 #[cfg(feature = "stat")]
-                inc_local_bp_free_victim();
-            }
-
-            // Create a new page or read from disk
-            if new_page {
-                guard.set_id(key.page_id);
-            } else {
+                inc_local_bp_dirty_victim();
+                location.dirty().store(false, Ordering::Release);
                 let file = container_to_file
-                    .get(&key.c_key)
+                    .get(&old_key.c_key)
                     .ok_or(MemPoolStatus::FileManagerNotFound)?;
 
-                self.runtime_stats.inc_read_count();
-                file.read_page(key.page_id, &mut guard)?;
-            };
-
-            id_to_index.insert(key, index as usize);
-            *guard.page_key_mut() = Some(key);
-            {
-                let mut evict_info = guard.evict_info().write().unwrap();
-                evict_info.reset();
-                evict_info.update();
+                self.runtime_stats.inc_write_count();
+                file.write_page(old_key.page_id, &location)?;
+            } else {
+                #[cfg(feature = "stat")]
+                inc_local_bp_clean_victim();
             }
-
-            log_debug!("Page loaded: key: {}", key);
-            Ok(guard)
+            id_to_index.remove(old_key);
+            log_debug!("Page evicted: {}", old_key);
         } else {
             #[cfg(feature = "stat")]
-            inc_local_bp_all_latched_victim();
-            Err(MemPoolStatus::CannotEvictPage)
+            inc_local_bp_free_victim();
         }
+
+        // Create a new page or read from disk
+        if new_page {
+            location.set_id(key.page_id);
+        } else {
+            let file = container_to_file
+                .get(&key.c_key)
+                .ok_or(MemPoolStatus::FileManagerNotFound)?;
+
+            self.runtime_stats.inc_read_count();
+            file.read_page(key.page_id, location)?;
+        };
+
+        id_to_index.insert(key, index as usize);
+        *location.page_key_mut() = Some(key);
+        {
+            let mut evict_info = location.evict_info().write().unwrap();
+            evict_info.reset();
+            evict_info.update();
+        }
+
+        log_debug!("Page loaded: key: {}", key);
+        Ok(())
     }
 }
 
@@ -602,31 +602,36 @@ impl MemPool for BufferPool {
 
         let page_id = fm.fetch_add_page_id();
         let key = PageKey::new(c_key, page_id);
-        let res: Result<FrameWriteGuard, MemPoolStatus> = self.handle_page_fault(key, true);
-        if let Ok(ref guard) = res {
-            #[cfg(feature = "stat")]
-            inc_local_bp_new_page();
-            guard.dirty().store(true, Ordering::Release);
-        } else {
-            #[cfg(feature = "stat")]
-            inc_local_bp_latch_failures();
-            fm.fetch_sub_page_id();
-        }
+        if let Some(mut location) = self.choose_victim() {
+            let res = self.handle_page_fault(key, true, &mut location);
+            if let Ok(()) = res {
+                #[cfg(feature = "stat")]
+                inc_local_bp_new_page();
+                location.dirty().store(true, Ordering::Release);
+            } else {
+                #[cfg(feature = "stat")]
+                inc_local_bp_latch_failures();
+                fm.fetch_sub_page_id();
+            }
 
-        self.release_exclusive();
-        res
+            self.release_exclusive();
+            res.map(|_| location)
+        } else {
+            self.release_exclusive();
+            Err(MemPoolStatus::CannotEvictPage)
+        }
     }
 
     fn get_page_for_write(&self, key: PageFrameKey) -> Result<FrameWriteGuard, MemPoolStatus> {
         log_debug!("Page write: {}", key);
 
-        {
+        let location = {
             // Fast path access to the frame using frame_id
             let frame_id = key.frame_id();
             let frames = unsafe { &*self.frames.get() };
             if (frame_id as usize) < frames.len() {
                 let guard = frames[frame_id as usize].try_write(false);
-                if let Some(g) = &guard {
+                if let Some(g) = guard {
                     // Check if the page key matches
                     if let Some(page_key) = g.page_key() {
                         if page_key == &key.p_key() {
@@ -637,16 +642,17 @@ impl MemPool for BufferPool {
                             log_debug!("Page fast path write: {}", key);
                             #[cfg(feature = "stat")]
                             inc_local_bp_fast_path_hit();
-                            return Ok(guard.unwrap());
+                            return Ok(g);
                         } else {
                             // The page key does not match.
                             // Go to the slow path.
-                            log_debug!("Page fast path write key mismatch: {}", key);
+                            Some(g)
                         }
                     } else {
                         // The frame is empty.
                         // Go to the slow path.
                         log_debug!("Page fast path write empty frame: {}", key);
+                        Some(g)
                     }
                 } else {
                     // The frame is latched.
@@ -654,13 +660,15 @@ impl MemPool for BufferPool {
                     log_debug!("Page fast path write latch failed: {}", key);
                     #[cfg(feature = "stat")]
                     inc_local_bp_latch_failures();
+                    None
                 }
             } else {
                 // The frame id is out of bounds.
                 // Go to the slow path.
                 log_debug!("Page fast path write frame id out of bounds: {}", key);
+                None
             }
-        }
+        };
 
         {
             self.shared();
@@ -710,17 +718,27 @@ impl MemPool for BufferPool {
                 guard.ok_or(MemPoolStatus::FrameWriteLatchGrantFailed)
             }
             None => {
-                let res = self.handle_page_fault(key.p_key(), false);
+                let mut victim = if let Some(location) = location {
+                    location
+                } else {
+                    if let Some(location) = self.choose_victim() {
+                        location
+                    } else {
+                        self.release_exclusive();
+                        return Err(MemPoolStatus::CannotEvictPage);
+                    }
+                };
+                let res = self.handle_page_fault(key.p_key(), false, &mut victim);
                 // If guard is ok, mark the page as dirty
-                if let Ok(ref guard) = res {
+                if let Ok(()) = res {
                     #[cfg(feature = "stat")]
                     inc_local_bp_slow_path_miss();
-                    guard.dirty().store(true, Ordering::Release);
+                    victim.dirty().store(true, Ordering::Release);
                 } else {
                     #[cfg(feature = "stat")]
                     inc_local_bp_latch_failures();
                 }
-                res
+                res.map(|_| victim)
             }
         };
         self.release_exclusive();
@@ -730,13 +748,13 @@ impl MemPool for BufferPool {
     fn get_page_for_read(&self, key: PageFrameKey) -> Result<FrameReadGuard, MemPoolStatus> {
         log_debug!("Page read: {}", key);
 
-        {
+        let location = {
             // Fast path access to the frame using frame_id
             let frame_id = key.frame_id();
             let frames = unsafe { &*self.frames.get() };
             if (frame_id as usize) < frames.len() {
                 let guard = frames[frame_id as usize].try_read();
-                if let Some(g) = &guard {
+                if let Some(g) = guard {
                     // Check if the page key matches
                     if let Some(page_key) = g.page_key() {
                         if page_key == &key.p_key() {
@@ -745,16 +763,19 @@ impl MemPool for BufferPool {
                             log_debug!("Page fast path read: {}", key);
                             #[cfg(feature = "stat")]
                             inc_local_bp_fast_path_hit();
-                            return Ok(guard.unwrap());
+                            return Ok(g);
                         } else {
                             // The page key does not match.
                             // Go to the slow path.
                             log_debug!("Page fast path read key mismatch: {}", key);
+                            // Return option
+                            g.try_upgrade(false).ok()
                         }
                     } else {
                         // The frame is empty.
                         // Go to the slow path.
                         log_debug!("Page fast path read empty frame: {}", key);
+                        g.try_upgrade(false).ok()
                     }
                 } else {
                     // The frame is latched.
@@ -762,13 +783,15 @@ impl MemPool for BufferPool {
                     log_debug!("Page fast path read latch failed: {}", key);
                     #[cfg(feature = "stat")]
                     inc_local_bp_latch_failures();
+                    None
                 }
             } else {
                 // The frame id is out of bounds.
                 // Go to the slow path.
                 log_debug!("Page fast path read frame id out of bounds: {}", key);
+                None
             }
-        }
+        };
 
         {
             self.shared();
@@ -817,16 +840,24 @@ impl MemPool for BufferPool {
                 guard.ok_or(MemPoolStatus::FrameReadLatchGrantFailed)
             }
             None => {
-                let res = self
-                    .handle_page_fault(key.p_key(), false)
-                    .map(|guard| guard.downgrade());
+                let mut victim = if let Some(location) = location {
+                    location
+                } else {
+                    if let Some(location) = self.choose_victim() {
+                        location
+                    } else {
+                        self.release_exclusive();
+                        return Err(MemPoolStatus::CannotEvictPage);
+                    }
+                };
+                let res = self.handle_page_fault(key.p_key(), false, &mut victim);
                 #[cfg(feature = "stat")]
                 if res.is_ok() {
                     inc_local_bp_slow_path_miss();
                 } else {
                     inc_local_bp_latch_failures();
                 }
-                res
+                res.map(|_| victim.downgrade())
             }
         };
         self.release_exclusive();
