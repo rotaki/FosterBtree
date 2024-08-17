@@ -31,12 +31,14 @@ impl From<io::Error> for FMError {
     }
 }
 
-#[cfg(any(not(feature = "async_write"), target_arch = "wasm32"))]
+#[cfg(not(any(feature = "async_write", feature = "new_async_write")))]
 pub type FileManager = sync_write::FileManager;
-#[cfg(all(feature = "async_write", not(target_arch = "wasm32")))]
+#[cfg(feature = "async_write")]
 pub type FileManager = async_write::FileManager;
+#[cfg(feature = "new_async_write")]
+pub type FileManager = new_async_write::FileManager;
 
-#[cfg(any(not(feature = "async_write"), target_arch = "wasm32"))]
+#[cfg(not(any(feature = "async_write", feature = "new_async_write")))]
 pub mod sync_write {
     use super::FMError;
     use crate::bp::ContainerId;
@@ -104,6 +106,10 @@ pub mod sync_write {
             self.io_count.1.store(0, Ordering::Release);
         }
 
+        pub fn prefetch_page(&self, _page_id: PageId) -> Result<(), FMError> {
+            Ok(())
+        }
+
         pub fn read_page(&self, page_id: PageId, page: &mut Page) -> Result<(), FMError> {
             let mut file = self.file.lock().unwrap();
             self.io_count.0.fetch_add(1, Ordering::AcqRel);
@@ -136,7 +142,7 @@ pub mod sync_write {
     }
 }
 
-#[cfg(all(feature = "async_write", not(target_arch = "wasm32")))]
+#[cfg(feature = "async_write")]
 pub mod async_write {
     use super::FMError;
     use crate::bp::ContainerId;
@@ -211,6 +217,10 @@ pub mod async_write {
             {
                 "Stat is disabled".to_string()
             }
+        }
+
+        pub fn prefetch_page(&self, page_id: PageId) -> Result<(), FMError> {
+            Ok(())
         }
 
         pub fn read_page(&self, page_id: PageId, page: &mut Page) -> Result<(), FMError> {
@@ -680,6 +690,362 @@ pub mod async_write {
     }
 }
 
+#[cfg(feature = "new_async_write")]
+mod new_async_write {
+    use super::FMError;
+    use crate::bp::ContainerId;
+    #[allow(unused_imports)]
+    use crate::log;
+    use crate::page::{Page, PageId, PAGE_SIZE};
+    use crate::rwlatch::RwLatch;
+    use crate::{log_debug, log_error, log_trace};
+    use std::cell::UnsafeCell;
+    use std::fs::{File, OpenOptions};
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::{Condvar, Mutex, RwLock};
+
+    use io_uring::{opcode, types, CompletionQueue, IoUring, SubmissionQueue};
+    use libc::iovec;
+    use std::hash::{Hash, Hasher};
+    use std::os::unix::io::AsRawFd;
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum IOOp {
+        Read,
+        Write,
+        Flush,
+    }
+
+    impl IOOp {
+        fn as_u32(&self) -> u32 {
+            match self {
+                IOOp::Read => 0,
+                IOOp::Write => 1,
+                IOOp::Flush => 2,
+            }
+        }
+    }
+
+    impl From<u32> for IOOp {
+        fn from(op: u32) -> Self {
+            match op {
+                0 => IOOp::Read,
+                1 => IOOp::Write,
+                2 => IOOp::Flush,
+                _ => panic!("Invalid IOOp"),
+            }
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    struct IOOpTag {
+        op: IOOp,
+        page_id: PageId,
+    }
+
+    impl IOOpTag {
+        fn get_op(&self) -> IOOp {
+            self.op
+        }
+
+        fn get_id(&self) -> PageId {
+            self.page_id
+        }
+
+        fn new_read(page_id: PageId) -> Self {
+            IOOpTag {
+                op: IOOp::Read,
+                page_id,
+            }
+        }
+
+        fn new_write(page_id: PageId) -> Self {
+            IOOpTag {
+                op: IOOp::Write,
+                page_id,
+            }
+        }
+
+        fn new_flush() -> Self {
+            IOOpTag {
+                op: IOOp::Flush,
+                page_id: PageId::MAX,
+            }
+        }
+
+        fn as_u64(&self) -> u64 {
+            let upper_32 = self.op.as_u32() as u64;
+            let lower_32 = self.page_id as u64;
+            (upper_32 << 32) | lower_32
+        }
+    }
+
+    impl From<u64> for IOOpTag {
+        fn from(tag: u64) -> Self {
+            let upper_32 = (tag >> 32) as u32;
+            let lower_32 = tag as u32;
+            IOOpTag {
+                op: IOOp::from(upper_32),
+                page_id: lower_32,
+            }
+        }
+    }
+
+    const PAGE_BUFFER_SIZE: usize = 128;
+
+    pub struct FileManager {
+        _file: File,
+        num_pages: AtomicU32,
+        ring: Mutex<IoUring>,
+        page_buffer: Vec<(UnsafeCell<Page>, AtomicU32, RwLatch)>, // (Page, Status, Latch) // Status: 0 = no on-going work, 1 = on-going work
+    }
+
+    unsafe impl Sync for FileManager {}
+
+    impl FileManager {
+        pub fn new<P: AsRef<std::path::Path>>(
+            db_dir: P,
+            c_id: ContainerId,
+        ) -> Result<Self, FMError> {
+            println!("New file manager");
+            std::fs::create_dir_all(&db_dir).map_err(|_| FMError::DirCreate)?;
+            let path = db_dir.as_ref().join(format!("{}", c_id));
+            let file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(&path)
+                .map_err(|_| FMError::Open)?;
+            let num_pages = file.metadata().unwrap().len() as usize / PAGE_SIZE;
+
+            let ring = IoUring::builder()
+                .setup_sqpoll(1)
+                .build(PAGE_BUFFER_SIZE as _)?;
+            let page_buffer: Vec<(UnsafeCell<Page>, AtomicU32, RwLatch)> = (0..PAGE_BUFFER_SIZE)
+                .map(|_| {
+                    let page = UnsafeCell::new(Page::new(PageId::MAX));
+                    (page, AtomicU32::new(0), RwLatch::default())
+                })
+                .collect();
+            // Register the file and the page buffer with the io_uring.
+            let submitter = &ring.submitter();
+            submitter.register_files(&[file.as_raw_fd()])?;
+
+            Ok(FileManager {
+                _file: file,
+                num_pages: AtomicU32::new(num_pages as PageId),
+                ring: Mutex::new(ring),
+                page_buffer,
+            })
+        }
+
+        pub fn fetch_add_page_id(&self) -> PageId {
+            self.num_pages.fetch_add(1, Ordering::AcqRel)
+        }
+
+        pub fn fetch_sub_page_id(&self) -> PageId {
+            self.num_pages.fetch_sub(1, Ordering::AcqRel)
+        }
+
+        #[allow(dead_code)]
+        pub fn get_stats(&self) -> String {
+            format!("Num pages: {}", self.num_pages.load(Ordering::Acquire),)
+        }
+
+        fn compute_hash(page_id: PageId) -> usize {
+            // For safety, we take the Rust std::hash function
+            // instead of a simple page_id as usize % PAGE_BUFFER_SIZE
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            page_id.hash(&mut hasher);
+            hasher.finish() as usize % PAGE_BUFFER_SIZE
+        }
+
+        fn poll_once(&self) {
+            if let Some(entry) = self.ring.lock().unwrap().completion().next() {
+                let tag = IOOpTag::from(entry.user_data());
+                match tag.get_op() {
+                    IOOp::Read => {
+                        let page_id = tag.get_id();
+                        let hash = FileManager::compute_hash(page_id);
+                        self.page_buffer[hash].1.store(0, Ordering::Release); // Mark the page as no on-going work.
+                    }
+                    IOOp::Write => {
+                        let page_id = tag.get_id();
+                        let hash = FileManager::compute_hash(page_id);
+                        self.page_buffer[hash].1.store(0, Ordering::Release); // Mark the page as no on-going work.
+                    }
+                    IOOp::Flush => {
+                        // Do nothing
+                    }
+                }
+            }
+        }
+
+        pub fn prefetch_page(&self, page_id: PageId) -> Result<(), FMError> {
+            let hash = FileManager::compute_hash(page_id);
+            let (buffer, status, latch) = &self.page_buffer[hash];
+            let buffer = unsafe { &mut *buffer.get() };
+
+            // Latch the page for loading the page from disk to buffer.
+            while !latch.try_exclusive() {
+                self.poll_once();
+            }
+
+            // While there is on-going work on the page, wait.
+            while status.swap(1, Ordering::AcqRel) == 1 {
+                self.poll_once();
+            }
+
+            // Now, the page has no on-going work.
+            if buffer.get_id() == page_id {
+                status.store(0, Ordering::Release); // Mark the page as no on-going work.
+                latch.release_exclusive();
+                Ok(())
+            } else {
+                // Issue a read operation to the file.
+                let buf = buffer.get_raw_bytes_mut();
+                let entry = opcode::Read::new(types::Fixed(0), buf.as_mut_ptr(), buf.len() as _)
+                    .offset(page_id as u64 * PAGE_SIZE as u64)
+                    .build()
+                    .user_data(IOOpTag::new_read(page_id).as_u64());
+                let ring = &mut *self.ring.lock().unwrap();
+                unsafe { ring.submission().push(&entry).expect("queue is full") };
+                let _res = ring.submit()?;
+                // assert_eq!(res, 1); // This is true if SQPOLL is disabled.
+
+                latch.release_exclusive();
+                // The status is kept as 1, to tell that the buffer is currently being used for prefetching.
+                Ok(())
+            }
+        }
+
+        pub fn read_page(&self, page_id: PageId, page: &mut Page) -> Result<(), FMError> {
+            // Check the entry in the page_buffer
+            let hash = FileManager::compute_hash(page_id);
+            let (buffer, status, latch) = &self.page_buffer[hash];
+            let buffer = unsafe { &*buffer.get() };
+
+            log_error!(
+                "page_id: {}, hash: {}, buffer_id: {}",
+                page_id,
+                hash,
+                buffer.get_id()
+            );
+
+            log_error!("before latch");
+
+            // Latch the page for loading.
+            while !latch.try_exclusive() {
+                self.poll_once();
+            }
+
+            log_error!("after latch");
+
+            // While there is on-going work on the page, wait.
+            while status.swap(1, Ordering::AcqRel) == 1 {
+                self.poll_once();
+            }
+
+            // Now, the page has no on-going work.
+            if buffer.get_id() == page_id {
+                // println!("Direct read");
+                page.copy(buffer);
+                status.store(0, Ordering::Release); // Mark the page as no on-going work.
+                latch.release_exclusive();
+                Ok(())
+            } else {
+                log_error!("Indirect read");
+                // println!("Indirect read");
+                // The page is not in the buffer.
+                // Since no one else is working on page, we can issue the read operation to the file.
+                let buf = page.get_raw_bytes_mut();
+                let entry = opcode::Read::new(types::Fixed(0), buf.as_mut_ptr(), buf.len() as _)
+                    .offset(page_id as u64 * PAGE_SIZE as u64)
+                    .build()
+                    .user_data(IOOpTag::new_read(page_id).as_u64());
+                {
+                    let ring = &mut self.ring.lock().unwrap();
+                    unsafe { ring.submission().push(&entry).expect("queue is full") };
+                    let _res = ring.submit()?;
+                }
+
+                // Poll the completion queue until the read operation is completed.
+                while status.load(Ordering::Acquire) == 1 {
+                    self.poll_once();
+                }
+
+                // The read operation is completed. The page contains the buffer now.
+                // Note that buffer is not updated.
+                // assert_eq!(page.get_id(), page_id); This is usually true but in some tests, page_id is not set.
+                latch.release_exclusive();
+                Ok(())
+            }
+        }
+
+        pub fn write_page(&self, page_id: PageId, page: &Page) -> Result<(), FMError> {
+            // Check the entry in the page_buffer
+            let hash = FileManager::compute_hash(page_id);
+            let (buffer, status, latch) = &self.page_buffer[hash];
+            let buffer = unsafe { &mut *buffer.get() };
+
+            // Latch the page for writing.
+            while !latch.try_exclusive() {
+                self.poll_once();
+            }
+
+            // While there is on-going work on the page, wait.
+            while status.swap(1, Ordering::AcqRel) == 1 {
+                self.poll_once();
+            }
+
+            buffer.copy(page);
+            let buf = buffer.get_raw_bytes();
+            let entry = opcode::Write::new(types::Fixed(0), buf.as_ptr(), buf.len() as _)
+                .offset(page_id as u64 * PAGE_SIZE as u64)
+                .build()
+                .user_data(IOOpTag::new_write(page_id).as_u64());
+
+            let ring = &mut *self.ring.lock().unwrap();
+            unsafe { ring.submission().push(&entry).expect("queue is full") };
+            let _res = ring.submit()?;
+            // assert_eq!(res, 1); // This is true if SQPOLL is disabled.
+
+            // Release the latch
+            latch.release_exclusive();
+
+            Ok(()) // This is the only return point.
+        }
+
+        pub fn flush(&self) -> Result<(), FMError> {
+            // Find the first entry in the page_buffer that is not written. Wait for it to be written.
+            for i in 0..PAGE_BUFFER_SIZE {
+                let (_, status, latch) = &self.page_buffer[i];
+                while !latch.try_exclusive() {
+                    self.poll_once();
+                }
+
+                while status.load(Ordering::Acquire) == 1 {
+                    self.poll_once();
+                }
+
+                latch.release_exclusive();
+            }
+
+            // Now issue a flush operation.
+            let entry = opcode::Fsync::new(types::Fixed(0))
+                .build()
+                .user_data(IOOpTag::new_flush().as_u64());
+            let ring = &mut *self.ring.lock().unwrap();
+            unsafe { ring.submission().push(&entry).expect("queue is full") };
+            let _res = ring.submit()?;
+
+            Ok(())
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::FileManager;
@@ -704,6 +1070,32 @@ mod tests {
         file_manager.read_page(page_id, &mut read_page).unwrap();
 
         assert_eq!(&read_page[0..data.len()], data);
+    }
+
+    #[test]
+    fn test_prefetch() {
+        let temp_path = tempfile::tempdir().unwrap();
+        let file_manager = FileManager::new(&temp_path, 0).unwrap();
+
+        let num_pages = 1000;
+        let page_id_vec = (0..num_pages).collect::<Vec<PageId>>();
+
+        // Write the pages
+        for i in 0..num_pages {
+            let mut page = Page::new_empty();
+            page.set_id(i);
+
+            let data = format!("Hello, World! {}", i);
+            page[0..data.len()].copy_from_slice(data.as_bytes());
+
+            file_manager.write_page(i, &page).unwrap();
+        }
+
+        for i in gen_random_permutation(page_id_vec) {
+            file_manager.prefetch_page(i).unwrap();
+            let mut read_page = Page::new_empty();
+            file_manager.read_page(i, &mut read_page).unwrap();
+        }
     }
 
     #[test]
@@ -820,5 +1212,63 @@ mod tests {
             let data = format!("Hello, World! {}", i);
             assert_eq!(&read_page[0..data.len()], data.as_bytes());
         }
+    }
+
+    #[test]
+    fn test_concurrent_read_write_file() {
+        let temp_path = tempfile::tempdir().unwrap();
+        let file_manager = FileManager::new(&temp_path, 0).unwrap();
+
+        let num_pages = 1000;
+        let page_id_vec = (0..num_pages).collect::<Vec<PageId>>();
+
+        let num_threads = 2;
+
+        // Partition the page_id_vec into num_threads partitions.
+        let partitions: Vec<Vec<PageId>> = {
+            let mut partitions = vec![];
+            let partition_size = num_pages / num_threads;
+            for i in 0..num_threads {
+                let start = (i * partition_size) as usize;
+                let end = if i == num_threads - 1 {
+                    num_pages
+                } else {
+                    (i + 1) * partition_size
+                } as usize;
+                partitions.push(page_id_vec[start..end].to_vec());
+            }
+            partitions
+        };
+
+        std::thread::scope(|s| {
+            for partition in partitions.clone() {
+                s.spawn(|| {
+                    for i in gen_random_permutation(partition) {
+                        let mut page = Page::new_empty();
+                        page.set_id(i);
+
+                        let data = format!("Hello, World! {}", i);
+                        page[0..data.len()].copy_from_slice(data.as_bytes());
+
+                        file_manager.write_page(i, &page).unwrap();
+                    }
+                });
+            }
+        });
+
+        // Issue concurrent read
+        std::thread::scope(|s| {
+            for partition in partitions {
+                s.spawn(|| {
+                    for i in gen_random_permutation(partition) {
+                        let mut read_page = Page::new_empty();
+                        file_manager.read_page(i, &mut read_page).unwrap();
+
+                        let data = format!("Hello, World! {}", i);
+                        assert_eq!(&read_page[0..data.len()], data.as_bytes());
+                    }
+                });
+            }
+        });
     }
 }

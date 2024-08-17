@@ -26,6 +26,7 @@ ycsb_fbt = []
 ycsb_hash_fbt = []
 old_iter = []
 async_write = ["io-uring", "libc"]
+new_async_write = ["io-uring", "libc"]
 
 [dependencies]
 tempfile = "3.8"

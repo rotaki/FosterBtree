@@ -135,6 +135,10 @@ impl MemPool for InMemPool {
         }
     }
 
+    fn prefetch_page(&self, _key: PageFrameKey) -> Result<(), MemPoolStatus> {
+        Ok(())
+    }
+
     fn stats(&self) -> (usize, usize, usize) {
         unimplemented!("stats")
         // "Num pages: ".to_string()

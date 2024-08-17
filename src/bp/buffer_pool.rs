@@ -833,6 +833,47 @@ impl MemPool for BufferPool {
         result
     }
 
+    fn prefetch_page(&self, key: PageFrameKey) -> Result<(), MemPoolStatus> {
+        #[cfg(not(feature = "new_async_write"))]
+        return Ok(());
+
+        #[cfg(feature = "new_async_write")]
+        {
+            log_debug!("Page prefetch: {}", key);
+            // Fast path access to the frame using frame_id
+            let frame_id = key.frame_id();
+            let frames = unsafe { &*self.frames.get() };
+            if (frame_id as usize) < frames.len() {
+                let guard = frames[frame_id as usize].try_read();
+                if let Some(g) = &guard {
+                    // Check if the page key matches
+                    if let Some(page_key) = g.page_key() {
+                        if page_key == &key.p_key() {
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+
+            self.shared();
+            let id_to_index = unsafe { &mut *self.id_to_index.get() };
+            let container_to_file = unsafe { &mut *self.container_to_file.get() };
+
+            if id_to_index.contains_key(&key.p_key()) {
+                // Do nothing
+            } else {
+                let file = container_to_file
+                    .get(&key.p_key().c_key)
+                    .ok_or(MemPoolStatus::FileManagerNotFound)
+                    .unwrap();
+                file.prefetch_page(key.p_key().page_id).unwrap();
+            }
+
+            self.release_shared();
+            Ok(())
+        }
+    }
+
     fn flush_all(&self) -> Result<(), MemPoolStatus> {
         self.shared();
 

@@ -140,6 +140,10 @@ pub trait MemPool: Sync + Send {
     /// This function assumes that a page is already created and either in memory or on disk.
     fn get_page_for_read(&self, key: PageFrameKey) -> Result<FrameReadGuard, MemPoolStatus>;
 
+    /// Prefetch page
+    /// Load the page into memory so that read access will be faster.
+    fn prefetch_page(&self, key: PageFrameKey) -> Result<(), MemPoolStatus>;
+
     /// Persist all the dirty pages to disk.
     /// This function will not deallocate the memory pool.
     /// This does not clear out the frames in the memory pool.

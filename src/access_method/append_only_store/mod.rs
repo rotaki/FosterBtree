@@ -232,7 +232,7 @@ pub struct AppendOnlyStoreScanner<T: MemPool> {
 }
 
 impl<T: MemPool> AppendOnlyStoreScanner<T> {
-    pub fn initialize(&mut self) {
+    fn initialize(&mut self) {
         let root_key = self.storage.root_key;
         let root_page = self.storage.mem_pool.get_page_for_read(root_key).unwrap();
         // Read the first data page
@@ -244,6 +244,16 @@ impl<T: MemPool> AppendOnlyStoreScanner<T> {
             unsafe { std::mem::transmute::<FrameReadGuard, FrameReadGuard<'static>>(data_page) };
         self.current_page = Some(data_page);
         self.current_slot_id = 0;
+    }
+
+    fn prefetch_next_page(&self) {
+        if let Some(current_page) = &self.current_page {
+            if let Some((page_id, frame_id)) = current_page.next_page() {
+                let next_key =
+                    PageFrameKey::new_with_frame_id(self.storage.c_key, page_id, frame_id);
+                self.storage.mem_pool.prefetch_page(next_key).unwrap();
+            }
+        }
     }
 }
 
@@ -257,6 +267,7 @@ impl<T: MemPool> Iterator for AppendOnlyStoreScanner<T> {
 
         if !self.initialized {
             self.initialize();
+            self.prefetch_next_page();
             self.initialized = true;
         }
 
@@ -293,6 +304,7 @@ impl<T: MemPool> Iterator for AppendOnlyStoreScanner<T> {
 
                     self.current_page = Some(next_page);
                     self.current_slot_id = 0;
+                    self.prefetch_next_page();
                     self.next()
                 }
                 None => {
