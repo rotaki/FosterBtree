@@ -784,7 +784,6 @@ fn split_insert(
     // We need to decide which page to insert the key-value pair.
     // If the key is less than the foster key, we insert the key into this.
     // Otherwise, we insert the key into the foster child.
-    
 
     if key < &foster_key {
         this.insert(key, value)

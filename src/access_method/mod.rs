@@ -1,6 +1,7 @@
-use crate::bp::MemPoolStatus;
+use crate::bp::{FrameWriteGuard, MemPoolStatus};
 
 pub mod append_only_store;
+pub mod chain;
 pub mod fbt;
 pub mod hash_fbt;
 pub mod hashindex;
@@ -14,6 +15,8 @@ pub enum AccessMethodError {
     PageWriteLatchFailed,
     RecordTooLarge,
     MemPoolStatus(MemPoolStatus),
+    OutOfSpace, // For ReadOptimizedPage
+    OutOfSpaceForUpdate(Vec<u8>),
     Other(String),
 }
 

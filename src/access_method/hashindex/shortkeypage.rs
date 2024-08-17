@@ -39,14 +39,23 @@ pub trait ShortKeyPage {
     fn get(&self, key: &[u8]) -> Option<Vec<u8>>;
     fn remove(&mut self, key: &[u8]) -> Option<Vec<u8>>;
 
+    fn write_values(&mut self, start_offset: usize, values: &[u8]);
+
+    fn adjust_offsets_and_collect_values(&mut self) -> Vec<u8>;
+    fn compact(&mut self) -> Result<(), ShortKeyPageError>;
+
     fn encode_shortkey_header(&mut self, header: &ShortKeyHeader);
     fn decode_shortkey_header(&self) -> ShortKeyHeader;
 
     fn get_next_page_id(&self) -> PageId;
     fn set_next_page_id(&mut self, next_page_id: PageId);
+    fn get_next_page(&self) -> PageId;
+    fn set_next_page(&mut self, next_page_id: PageId, next_frame_id: u32);
 
     fn get_next_frame_id(&self) -> u32;
     fn set_next_frame_id(&mut self, next_frame_id: u32);
+    fn get_next_frame(&self) -> u32;
+    fn set_next_frame(&mut self, next_frame_id: u32);
 
     fn encode_shortkey_slot(&mut self, index: u16, slot: &ShortKeySlot);
     fn decode_shortkey_slot(&self, index: u16) -> ShortKeySlot;
@@ -108,6 +117,18 @@ pub struct ShortKeyValue {
     pub remain_key: Vec<u8>, // dynamic size (remain part of actual key), if key_len > 8
     pub vals_len: u16,       // u16
     pub vals: Vec<u8>, // vector of vals (variable size), decode in the top of the page (HashTable)
+}
+
+impl ShortKeyValue {
+    fn encode(&self) -> Vec<u8> {
+        let mut encoded = Vec::with_capacity(self.remain_key.len() + 2 + self.vals.len());
+
+        encoded.extend_from_slice(&self.remain_key);
+        encoded.extend_from_slice(&self.vals_len.to_le_bytes());
+        encoded.extend_from_slice(&self.vals);
+
+        encoded
+    }
 }
 
 pub struct ShortKeyValueSample<'a> {
@@ -685,11 +706,32 @@ impl ShortKeyPage for Page {
         self.encode_shortkey_header(&header);
     }
 
+    fn get_next_page(&self) -> PageId {
+        self.decode_shortkey_header().next_page_id
+    }
+
+    fn set_next_page(&mut self, next_page_id: PageId, next_frame_id: u32) {
+        let mut header = self.decode_shortkey_header();
+        header.next_page_id = next_page_id;
+        header.next_frame_id = next_frame_id;
+        self.encode_shortkey_header(&header);
+    }
+
     fn get_next_frame_id(&self) -> u32 {
         self.decode_shortkey_header().next_frame_id
     }
 
     fn set_next_frame_id(&mut self, next_frame_id: u32) {
+        let mut header = self.decode_shortkey_header();
+        header.next_frame_id = next_frame_id;
+        self.encode_shortkey_header(&header);
+    }
+
+    fn get_next_frame(&self) -> u32 {
+        self.decode_shortkey_header().next_frame_id
+    }
+
+    fn set_next_frame(&mut self, next_frame_id: u32) {
         let mut header = self.decode_shortkey_header();
         header.next_frame_id = next_frame_id;
         self.encode_shortkey_header(&header);
@@ -820,6 +862,58 @@ impl ShortKeyPage for Page {
 
     fn get_free_space(&self) -> usize {
         self.decode_shortkey_header().val_start_offset as usize - self.slot_end_offset()
+    }
+
+    fn write_values(&mut self, start_offset: usize, values: &[u8]) {
+        let end_offset = start_offset + values.len();
+        self[start_offset..end_offset].copy_from_slice(values);
+    }
+
+    fn adjust_offsets_and_collect_values(&mut self) -> Vec<u8> {
+        let mut new_values_block = Vec::new();
+        let mut current_offset = AVAILABLE_PAGE_SIZE; // Start from the end of the page
+
+        let mut header = self.decode_shortkey_header();
+
+        for i in 0..header.slot_num {
+            let mut slot = self.decode_shortkey_slot(i);
+            let remain_key_len = if slot.key_len > 8 {
+                slot.key_len - 8
+            } else {
+                0
+            };
+            let value_entry = self.decode_shortkey_value(slot.val_offset as usize, remain_key_len);
+
+            // Calculate new offset
+            let value_size = value_entry.vals.len() + 2 + value_entry.remain_key.len();
+            current_offset -= value_size;
+
+            // Update the slot with the new offset
+            slot.val_offset = current_offset as u16;
+            self.encode_shortkey_slot(i, &slot);
+
+            // Use the encode function to get the byte representation of the value entry
+            let value_bytes = value_entry.encode();
+
+            // Insert the value_bytes at the beginning of the new_values_block
+            new_values_block.splice(0..0, value_bytes);
+        }
+
+        assert_eq!(current_offset, AVAILABLE_PAGE_SIZE - new_values_block.len());
+        header.val_start_offset = current_offset as u16;
+        self.encode_shortkey_header(&header);
+
+        new_values_block
+    }
+
+    fn compact(&mut self) -> Result<(), ShortKeyPageError> {
+        let new_values_block = self.adjust_offsets_and_collect_values();
+        self.write_values(
+            AVAILABLE_PAGE_SIZE - new_values_block.len(),
+            &new_values_block,
+        );
+
+        Ok(())
     }
 }
 
@@ -1458,5 +1552,137 @@ mod tests {
         for (key, value) in keys_and_values {
             assert_eq!(page.get(&key), Some(value));
         }
+    }
+
+    #[test]
+    fn test_compact_after_deletions() {
+        let mut page = <Page as ShortKeyPage>::new();
+        let keys_and_values = vec![
+            (b"key1", b"value1"),
+            (b"key2", b"value2"),
+            (b"key3", b"value3"),
+            (b"key4", b"value4"),
+        ];
+
+        // Insert keys
+        for &(key, value) in &keys_and_values {
+            assert_eq!(page.upsert(key, value), (true, None));
+        }
+
+        // Remove some keys
+        assert!(page.remove(b"key2").is_some());
+        assert!(page.remove(b"key4").is_some());
+
+        // Compact the page
+        assert!(page.compact().is_ok());
+
+        // Verify the remaining keys
+        assert_eq!(page.get(b"key1"), Some(b"value1".to_vec()));
+        assert!(page.get(b"key2").is_none());
+        assert_eq!(page.get(b"key3"), Some(b"value3".to_vec()));
+        assert!(page.get(b"key4").is_none());
+    }
+
+    #[test]
+    fn test_compact_on_nearly_full_page() {
+        let mut page = <Page as ShortKeyPage>::new();
+        let large_value =
+            vec![
+                0u8;
+                (AVAILABLE_PAGE_SIZE - SHORT_KEY_PAGE_HEADER_SIZE) / 2 - SHORT_KEY_SLOT_SIZE - 2
+            ];
+        let key1 = b"key1";
+        let key2 = b"key2";
+
+        // Insert two large values
+        assert_eq!(page.upsert(key1, &large_value), (true, None));
+        assert_eq!(page.upsert(key2, &large_value), (true, None));
+
+        // Remove one key and compact
+        assert!(page.remove(key1).is_some());
+        assert!(page.compact().is_ok());
+
+        // Verify the remaining key
+        assert!(page.get(key1).is_none());
+        assert_eq!(page.get(key2), Some(large_value.clone()));
+
+        // Insert a new key
+        let key3 = b"key3";
+        assert_eq!(page.upsert(key3, &large_value), (true, None));
+        assert_eq!(page.get(key3), Some(large_value.clone()));
+    }
+
+    #[test]
+    fn test_compact_empty_page() {
+        let mut page = <Page as ShortKeyPage>::new();
+
+        // Compact an empty page
+        assert!(page.compact().is_ok());
+
+        // Verify the page is still empty
+        assert!(page.get(b"any_key").is_none());
+    }
+
+    #[test]
+    fn test_compact_after_multiple_operations() {
+        let mut page = <Page as ShortKeyPage>::new();
+        let key1 = b"key1";
+        let key2 = b"key2";
+        let key3 = b"key3";
+        let value1 = b"value1";
+        let value2 = b"value2";
+        let value3 = b"value3";
+
+        // Insert keys
+        assert_eq!(page.upsert(key1, value1), (true, None));
+        assert_eq!(page.upsert(key2, value2), (true, None));
+
+        // Update a key
+        assert_eq!(page.upsert(key1, value3), (true, Some(value1.to_vec())));
+
+        // Delete a key
+        assert!(page.remove(key2).is_some());
+
+        // Compact the page
+        assert!(page.compact().is_ok());
+
+        // Verify remaining keys
+        assert_eq!(page.get(key1), Some(value3.to_vec()));
+        assert!(page.get(key2).is_none());
+
+        // Insert another key
+        assert_eq!(page.upsert(key3, value3), (true, None));
+        assert_eq!(page.get(key3), Some(value3.to_vec()));
+    }
+
+    #[test]
+    fn test_compact_with_full_page() {
+        let mut page = <Page as ShortKeyPage>::new();
+        let key1 = b"key1";
+        let key2 = b"key2";
+        let key3 = b"key3";
+        let value1 = vec![0u8; AVAILABLE_PAGE_SIZE / 4];
+        let value2 = vec![0u8; AVAILABLE_PAGE_SIZE / 4];
+        let value3 = vec![0u8; AVAILABLE_PAGE_SIZE / 4];
+
+        // Insert three large values
+        assert_eq!(page.upsert(key1, &value1), (true, None));
+        assert_eq!(page.upsert(key2, &value2), (true, None));
+        assert_eq!(page.upsert(key3, &value3), (true, None));
+
+        // Remove one key and compact
+        assert!(page.remove(key2).is_some());
+        assert!(page.compact().is_ok());
+
+        // Verify remaining keys
+        assert_eq!(page.get(key1), Some(value1.clone()));
+        assert!(page.get(key2).is_none());
+        assert_eq!(page.get(key3), Some(value3.clone()));
+
+        // Try to insert a new key after compaction
+        let key4 = b"key4";
+        let value4 = vec![0u8; AVAILABLE_PAGE_SIZE / 4];
+        assert_eq!(page.upsert(key4, &value4), (true, None));
+        assert_eq!(page.get(key4), Some(value4.clone()));
     }
 }

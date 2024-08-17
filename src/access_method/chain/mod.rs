@@ -1,3 +1,28 @@
+mod read_optimized_chain;
+mod write_optimized_chain;
+
+mod read_optimized_page;
+mod write_optimized_page;
+
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+pub struct Key<'a> {
+    pub prefix: &'a [u8],
+    pub remaining: &'a [u8],
+}
+
+// Override [] operator for Key
+impl<'a> std::ops::Index<usize> for Key<'a> {
+    type Output = u8;
+
+    fn index(&self, index: usize) -> &Self::Output {
+        if index < self.prefix.len() {
+            &self.prefix[index]
+        } else {
+            &self.remaining[index - self.prefix.len()]
+        }
+    }
+}
+
 use std::{
     hash::{Hash, Hasher},
     sync::Arc,
@@ -9,28 +34,21 @@ use crate::{
 };
 
 use super::{
-    fbt::{
-        FosterBtree, FosterBtreeAppendOnly, FosterBtreeAppendOnlyRangeScanner,
-        FosterBtreeRangeScanner,
-    },
+    chain::read_optimized_chain::{ReadOptimizedChain, ReadOptimizedChainRangeScanner},
     AccessMethodError,
 };
 
-pub mod prelude {
-    pub use super::HashFosterBtree;
-    pub use super::HashFosterBtreeAppendOnly;
-    pub use super::HashFosterBtreeIter;
-}
+pub mod prelude {}
 
-pub struct HashFosterBtree<T: MemPool> {
+pub struct HashReadOptimize<T: MemPool> {
     pub mem_pool: Arc<T>,
     c_key: ContainerKey,
     num_buckets: usize,
-    meta_page_id: PageId, // Stores the number of buckets and all the page ids of the root of the foster btrees
-    buckets: Vec<Arc<FosterBtree<T>>>,
+    meta_page_id: PageId, // Stores the number of buckets and all the page ids of the first of the chain
+    buckets: Vec<Arc<ReadOptimizedChain<T>>>,
 }
 
-impl<T: MemPool> HashFosterBtree<T> {
+impl<T: MemPool> HashReadOptimize<T> {
     pub fn new(c_key: ContainerKey, mem_pool: Arc<T>, num_buckets: usize) -> Self {
         if num_buckets == 0 {
             panic!("Number of buckets cannot be 0");
@@ -51,14 +69,14 @@ impl<T: MemPool> HashFosterBtree<T> {
 
         let mut buckets = Vec::with_capacity(num_buckets);
         for _ in 0..num_buckets {
-            // Create a new foster btree
-            let tree = Arc::new(FosterBtree::new(c_key, mem_pool.clone()));
+            // Create a new chain
+            let chain = Arc::new(ReadOptimizedChain::new(c_key, mem_pool.clone()));
 
-            let root_p_id = tree.root_key.p_key().page_id.to_be_bytes();
+            let root_p_id = chain.first_key().p_key().page_id.to_be_bytes();
             meta_page[offset..offset + root_p_id.len()].copy_from_slice(&root_p_id);
             offset += root_p_id.len();
 
-            buckets.push(tree);
+            buckets.push(chain);
         }
 
         let meta_page_id = meta_page.get_id();
@@ -87,7 +105,11 @@ impl<T: MemPool> HashFosterBtree<T> {
             let root_page_id_bytes = &meta_page[offset..offset + std::mem::size_of::<PageId>()];
             offset += root_page_id_bytes.len();
             let root_page_id = PageId::from_be_bytes(root_page_id_bytes.try_into().unwrap());
-            let tree = Arc::new(FosterBtree::load(c_key, mem_pool.clone(), root_page_id));
+            let tree = Arc::new(ReadOptimizedChain::load(
+                c_key,
+                mem_pool.clone(),
+                root_page_id,
+            ));
             buckets.push(tree);
         }
 
@@ -101,10 +123,11 @@ impl<T: MemPool> HashFosterBtree<T> {
     }
 
     pub fn num_kvs(&self) -> usize {
-        self.buckets.iter().map(|b| b.num_kvs()).sum()
+        // self.buckets.iter().map(|b| b.num_kvs()).sum()
+        unimplemented!()
     }
 
-    fn get_bucket(&self, key: &[u8]) -> &Arc<FosterBtree<T>> {
+    fn get_bucket(&self, key: &[u8]) -> &Arc<ReadOptimizedChain<T>> {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         key.hash(&mut hasher);
         let idx = hasher.finish() % self.num_buckets as u64;
@@ -133,30 +156,32 @@ impl<T: MemPool> HashFosterBtree<T> {
         value: &[u8],
         merge_fn: impl Fn(&[u8], &[u8]) -> Vec<u8>,
     ) -> Result<(), AccessMethodError> {
-        self.get_bucket(key).upsert_with_merge(key, value, merge_fn)
+        unimplemented!()
+        // self.get_bucket(key).upsert_with_merge(key, value, merge_fn)
     }
 
     pub fn delete(&self, key: &[u8]) -> Result<(), AccessMethodError> {
-        self.get_bucket(key).delete(key)
+        unimplemented!()
+        // self.get_bucket(key).delete(key)
     }
 
-    pub fn scan(self: &Arc<Self>) -> HashFosterBtreeIter<T> {
+    pub fn scan(self: &Arc<Self>) -> HashReadOptimizedChainIter<T> {
         // Chain the iterators from all the buckets
         let mut scanners = Vec::with_capacity(self.num_buckets);
         for bucket in self.buckets.iter() {
             scanners.push(bucket.scan(&[], &[]));
         }
-        HashFosterBtreeIter::new(scanners)
+        HashReadOptimizedChainIter::new(scanners)
     }
 }
 
-pub struct HashFosterBtreeIter<T: MemPool> {
-    scanners: Vec<FosterBtreeRangeScanner<T>>,
+pub struct HashReadOptimizedChainIter<T: MemPool> {
+    scanners: Vec<ReadOptimizedChainRangeScanner<T>>,
     current: usize,
 }
 
-impl<T: MemPool> HashFosterBtreeIter<T> {
-    pub fn new(scanners: Vec<FosterBtreeRangeScanner<T>>) -> Self {
+impl<T: MemPool> HashReadOptimizedChainIter<T> {
+    pub fn new(scanners: Vec<ReadOptimizedChainRangeScanner<T>>) -> Self {
         Self {
             scanners,
             current: 0,
@@ -164,7 +189,7 @@ impl<T: MemPool> HashFosterBtreeIter<T> {
     }
 }
 
-impl<T: MemPool> Iterator for HashFosterBtreeIter<T> {
+impl<T: MemPool> Iterator for HashReadOptimizedChainIter<T> {
     type Item = (Vec<u8>, Vec<u8>);
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -180,109 +205,6 @@ impl<T: MemPool> Iterator for HashFosterBtreeIter<T> {
     }
 }
 
-pub struct HashFosterBtreeAppendOnly<T: MemPool> {
-    pub mem_pool: Arc<T>,
-    c_key: ContainerKey,
-    num_buckets: usize,
-    meta_page_id: PageId, // Stores the number of buckets and all the page ids of the root of the foster btrees
-    buckets: Vec<Arc<FosterBtreeAppendOnly<T>>>,
-}
-
-impl<T: MemPool> HashFosterBtreeAppendOnly<T> {
-    pub fn new(c_key: ContainerKey, mem_pool: Arc<T>, num_buckets: usize) -> Self {
-        if num_buckets == 0 {
-            panic!("Number of buckets cannot be 0");
-        }
-        // If number of buckets does not fit in the meta_page, panic
-        if num_buckets * std::mem::size_of::<PageId>() + std::mem::size_of::<usize>()
-            > AVAILABLE_PAGE_SIZE
-        {
-            panic!("Number of buckets too large to fit in the meta_page page");
-        }
-
-        let mut meta_page = mem_pool.create_new_page_for_write(c_key).unwrap();
-
-        let mut offset = 0;
-        let num_buckets_bytes = num_buckets.to_be_bytes();
-        meta_page[offset..offset + num_buckets_bytes.len()].copy_from_slice(&num_buckets_bytes);
-        offset += num_buckets_bytes.len();
-
-        let mut buckets = Vec::with_capacity(num_buckets);
-        for _ in 0..num_buckets {
-            // Create a new foster btree
-            let tree = Arc::new(FosterBtreeAppendOnly::new(c_key, mem_pool.clone()));
-
-            let root_p_id = tree.fbt.root_key.p_key().page_id.to_be_bytes();
-            meta_page[offset..offset + root_p_id.len()].copy_from_slice(&root_p_id);
-            offset += root_p_id.len();
-
-            buckets.push(tree);
-        }
-
-        let meta_page_id = meta_page.get_id();
-
-        Self {
-            mem_pool: mem_pool.clone(),
-            c_key,
-            num_buckets,
-            meta_page_id,
-            buckets,
-        }
-    }
-
-    pub fn load(c_key: ContainerKey, mem_pool: Arc<T>, meta_page_id: PageId) -> Self {
-        let meta_page = mem_pool
-            .get_page_for_read(PageFrameKey::new(c_key, meta_page_id))
-            .unwrap();
-
-        let mut offset = 0;
-        let num_buckets_bytes = &meta_page[offset..offset + std::mem::size_of::<usize>()];
-        offset += num_buckets_bytes.len();
-        let num_buckets = usize::from_be_bytes(num_buckets_bytes.try_into().unwrap());
-
-        let mut buckets = Vec::with_capacity(num_buckets);
-        for _ in 0..num_buckets {
-            let root_page_id_bytes = &meta_page[offset..offset + std::mem::size_of::<PageId>()];
-            offset += root_page_id_bytes.len();
-            let root_page_id = PageId::from_be_bytes(root_page_id_bytes.try_into().unwrap());
-            let tree = Arc::new(FosterBtreeAppendOnly::load(
-                c_key,
-                mem_pool.clone(),
-                root_page_id,
-            ));
-            buckets.push(tree);
-        }
-
-        Self {
-            mem_pool: mem_pool.clone(),
-            c_key,
-            num_buckets,
-            meta_page_id,
-            buckets,
-        }
-    }
-
-    pub fn num_kvs(&self) -> usize {
-        self.buckets.iter().map(|b| b.num_kvs()).sum()
-    }
-
-    fn get_bucket(&self, key: &[u8]) -> &Arc<FosterBtreeAppendOnly<T>> {
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        key.hash(&mut hasher);
-        let idx = hasher.finish() % self.num_buckets as u64;
-        &self.buckets[idx as usize]
-    }
-
-    pub fn append(&self, key: &[u8], value: &[u8]) -> Result<(), AccessMethodError> {
-        self.get_bucket(key).append(key, value)
-    }
-
-    pub fn scan_key(self: &Arc<Self>, key: &[u8]) -> FosterBtreeAppendOnlyRangeScanner<T> {
-        // Find the bucket with the prefix
-        self.get_bucket(key).scan_key(key)
-    }
-}
-
 #[cfg(test)]
 mod tests {
 
@@ -295,7 +217,7 @@ mod tests {
         random::RandomKVs,
     };
 
-    use super::{ContainerKey, HashFosterBtree, MemPool};
+    use super::{ContainerKey, HashReadOptimize, MemPool};
 
     fn to_bytes(num: usize) -> Vec<u8> {
         num.to_be_bytes().to_vec()
@@ -307,18 +229,18 @@ mod tests {
 
     use rstest::rstest;
 
-    fn setup_hashbtree_empty<T: MemPool>(bp: Arc<T>) -> HashFosterBtree<T> {
+    fn setup_hashchain_empty<T: MemPool>(bp: Arc<T>) -> HashReadOptimize<T> {
         let (db_id, c_id) = (0, 0);
         let c_key = ContainerKey::new(db_id, c_id);
 
-        HashFosterBtree::new(c_key, bp.clone(), 10)
+        HashReadOptimize::new(c_key, bp.clone(), 10)
     }
 
     #[rstest]
     #[case::bp(get_test_bp(20))]
     #[case::in_mem(get_in_mem_pool())]
     fn test_random_insertion<T: MemPool>(#[case] bp: Arc<T>) {
-        let btree = setup_hashbtree_empty(bp.clone());
+        let chain = setup_hashchain_empty(bp.clone());
         // Insert 1024 bytes
         let val = vec![3_u8; 1024];
         let order = [6, 3, 8, 1, 5, 7, 2, 4, 9, 0];
@@ -328,7 +250,7 @@ mod tests {
                 i
             );
             let key = to_bytes(*i);
-            btree.insert(&key, &val).unwrap();
+            chain.insert(&key, &val).unwrap();
         }
         for i in order.iter() {
             println!(
@@ -336,7 +258,7 @@ mod tests {
                 i
             );
             let key = to_bytes(*i);
-            let current_val = btree.get(&key).unwrap();
+            let current_val = chain.get(&key).unwrap();
             assert_eq!(current_val, val);
         }
     }
@@ -345,7 +267,7 @@ mod tests {
     #[case::bp(get_test_bp(20))]
     #[case::in_mem(get_in_mem_pool())]
     fn test_random_updates<T: MemPool>(#[case] bp: Arc<T>) {
-        let btree = setup_hashbtree_empty(bp.clone());
+        let chain = setup_hashchain_empty(bp.clone());
         // Insert 1024 bytes
         let val = vec![3_u8; 1024];
         let order = [6, 3, 8, 1, 5, 7, 2, 4, 9, 0];
@@ -355,7 +277,7 @@ mod tests {
                 i
             );
             let key = to_bytes(*i);
-            btree.insert(&key, &val).unwrap();
+            chain.insert(&key, &val).unwrap();
         }
         let new_val = vec![4_u8; 128];
         for i in order.iter() {
@@ -364,7 +286,7 @@ mod tests {
                 i
             );
             let key = to_bytes(*i);
-            btree.update(&key, &new_val).unwrap();
+            chain.update(&key, &new_val).unwrap();
         }
         for i in order.iter() {
             println!(
@@ -372,7 +294,7 @@ mod tests {
                 i
             );
             let key = to_bytes(*i);
-            let current_val = btree.get(&key).unwrap();
+            let current_val = chain.get(&key).unwrap();
             assert_eq!(current_val, new_val);
         }
         let new_val = vec![5_u8; 512];
@@ -382,7 +304,7 @@ mod tests {
                 i
             );
             let key = to_bytes(*i);
-            btree.update(&key, &new_val).unwrap();
+            chain.update(&key, &new_val).unwrap();
         }
         for i in order.iter() {
             println!(
@@ -390,51 +312,51 @@ mod tests {
                 i
             );
             let key = to_bytes(*i);
-            let current_val = btree.get(&key).unwrap();
+            let current_val = chain.get(&key).unwrap();
             assert_eq!(current_val, new_val);
         }
     }
 
-    #[rstest]
-    #[case::bp(get_test_bp(20))]
-    #[case::in_mem(get_in_mem_pool())]
-    fn test_random_deletion<T: MemPool>(#[case] bp: Arc<T>) {
-        let btree = setup_hashbtree_empty(bp.clone());
-        // Insert 1024 bytes
-        let val = vec![3_u8; 1024];
-        let order = [6, 3, 8, 1, 5, 7, 2, 4, 9, 0];
-        for i in order.iter() {
-            println!(
-                "**************************** Inserting key {} **************************",
-                i
-            );
-            let key = to_bytes(*i);
-            btree.insert(&key, &val).unwrap();
-        }
-        for i in order.iter() {
-            println!(
-                "**************************** Deleting key {} **************************",
-                i
-            );
-            let key = to_bytes(*i);
-            btree.delete(&key).unwrap();
-        }
-        for i in order.iter() {
-            println!(
-                "**************************** Getting key {} **************************",
-                i
-            );
-            let key = to_bytes(*i);
-            let current_val = btree.get(&key);
-            assert_eq!(current_val, Err(AccessMethodError::KeyNotFound))
-        }
-    }
+    // #[rstest]
+    // #[case::bp(get_test_bp(20))]
+    // #[case::in_mem(get_in_mem_pool())]
+    // fn test_random_deletion<T: MemPool>(#[case] bp: Arc<T>) {
+    //     let chain = setup_hashchain_empty(bp.clone());
+    //     // Insert 1024 bytes
+    //     let val = vec![3_u8; 1024];
+    //     let order = [6, 3, 8, 1, 5, 7, 2, 4, 9, 0];
+    //     for i in order.iter() {
+    //         println!(
+    //             "**************************** Inserting key {} **************************",
+    //             i
+    //         );
+    //         let key = to_bytes(*i);
+    //         chain.insert(&key, &val).unwrap();
+    //     }
+    //     for i in order.iter() {
+    //         println!(
+    //             "**************************** Deleting key {} **************************",
+    //             i
+    //         );
+    //         let key = to_bytes(*i);
+    //         chain.delete(&key).unwrap();
+    //     }
+    //     for i in order.iter() {
+    //         println!(
+    //             "**************************** Getting key {} **************************",
+    //             i
+    //         );
+    //         let key = to_bytes(*i);
+    //         let current_val = chain.get(&key);
+    //         assert_eq!(current_val, Err(AccessMethodError::KeyNotFound))
+    //     }
+    // }
 
     #[rstest]
     #[case::bp(get_test_bp(20))]
     #[case::in_mem(get_in_mem_pool())]
     fn test_random_upserts<T: MemPool>(#[case] bp: Arc<T>) {
-        let btree = setup_hashbtree_empty(bp.clone());
+        let chain = setup_hashchain_empty(bp.clone());
         // Insert 1024 bytes
         let val = vec![3_u8; 1024];
         let order = [6, 3, 8, 1, 5, 7, 2, 4, 9, 0];
@@ -444,7 +366,7 @@ mod tests {
                 i
             );
             let key = to_bytes(*i);
-            btree.upsert(&key, &val).unwrap();
+            chain.upsert(&key, &val).unwrap();
         }
         for i in order.iter() {
             println!(
@@ -452,7 +374,7 @@ mod tests {
                 i
             );
             let key = to_bytes(*i);
-            let current_val = btree.get(&key).unwrap();
+            let current_val = chain.get(&key).unwrap();
             assert_eq!(current_val, val);
         }
         let new_val = vec![4_u8; 128];
@@ -462,7 +384,7 @@ mod tests {
                 i
             );
             let key = to_bytes(*i);
-            btree.upsert(&key, &new_val).unwrap();
+            chain.upsert(&key, &new_val).unwrap();
         }
         for i in order.iter() {
             println!(
@@ -470,7 +392,7 @@ mod tests {
                 i
             );
             let key = to_bytes(*i);
-            let current_val = btree.get(&key).unwrap();
+            let current_val = chain.get(&key).unwrap();
             assert_eq!(current_val, new_val);
         }
         let new_val = vec![5_u8; 512];
@@ -480,7 +402,7 @@ mod tests {
                 i
             );
             let key = to_bytes(*i);
-            btree.upsert(&key, &new_val).unwrap();
+            chain.upsert(&key, &new_val).unwrap();
         }
         for i in order.iter() {
             println!(
@@ -488,44 +410,44 @@ mod tests {
                 i
             );
             let key = to_bytes(*i);
-            let current_val = btree.get(&key).unwrap();
+            let current_val = chain.get(&key).unwrap();
             assert_eq!(current_val, new_val);
         }
     }
 
-    #[rstest]
-    #[case::bp(get_test_bp(3))]
-    #[case::in_mem(get_in_mem_pool())]
-    fn test_upsert_with_merge<T: MemPool>(#[case] bp: Arc<T>) {
-        let btree = setup_hashbtree_empty(bp.clone());
-        // Insert 1024 bytes
-        let key = to_bytes(0);
-        let vals = [6, 3, 8, 1, 5, 7, 2, 4, 9, 0];
-        for i in vals.iter() {
-            println!(
-                "**************************** Upserting key {} **************************",
-                i
-            );
-            let val = to_bytes(*i);
-            btree
-                .upsert_with_merge(&key, &val, |old_val: &[u8], new_val: &[u8]| -> Vec<u8> {
-                    // Deserialize old_val and new_val and add them.
-                    let old_val = from_bytes(old_val);
-                    let new_val = from_bytes(new_val);
-                    to_bytes(old_val + new_val)
-                })
-                .unwrap();
-        }
-        let expected_val = vals.iter().sum::<usize>();
-        let current_val = btree.get(&key).unwrap();
-        assert_eq!(from_bytes(&current_val), expected_val);
-    }
+    // #[rstest]
+    // #[case::bp(get_test_bp(3))]
+    // #[case::in_mem(get_in_mem_pool())]
+    // fn test_upsert_with_merge<T: MemPool>(#[case] bp: Arc<T>) {
+    //     let chain = setup_hashchain_empty(bp.clone());
+    //     // Insert 1024 bytes
+    //     let key = to_bytes(0);
+    //     let vals = [6, 3, 8, 1, 5, 7, 2, 4, 9, 0];
+    //     for i in vals.iter() {
+    //         println!(
+    //             "**************************** Upserting key {} **************************",
+    //             i
+    //         );
+    //         let val = to_bytes(*i);
+    //         chain
+    //             .upsert_with_merge(&key, &val, |old_val: &[u8], new_val: &[u8]| -> Vec<u8> {
+    //                 // Deserialize old_val and new_val and add them.
+    //                 let old_val = from_bytes(old_val);
+    //                 let new_val = from_bytes(new_val);
+    //                 to_bytes(old_val + new_val)
+    //             })
+    //             .unwrap();
+    //     }
+    //     let expected_val = vals.iter().sum::<usize>();
+    //     let current_val = chain.get(&key).unwrap();
+    //     assert_eq!(from_bytes(&current_val), expected_val);
+    // }
 
     #[rstest]
     #[case::bp(get_test_bp(20))]
     #[case::in_mem(get_in_mem_pool())]
     fn test_scan<T: MemPool>(#[case] bp: Arc<T>) {
-        let btree = Arc::new(setup_hashbtree_empty(bp.clone()));
+        let chain = Arc::new(setup_hashchain_empty(bp.clone()));
         // Insert 1024 bytes
         let val = vec![3_u8; 1024];
         let order = [6, 3, 8, 1, 5, 7, 2, 4, 9, 0];
@@ -535,10 +457,10 @@ mod tests {
                 i
             );
             let key = to_bytes(*i);
-            btree.upsert(&key, &val).unwrap();
+            chain.upsert(&key, &val).unwrap();
         }
 
-        let iter = btree.scan();
+        let iter = chain.scan();
         let mut count = 0;
         for (key, current_val) in iter {
             let key = from_bytes(&key);
@@ -571,7 +493,7 @@ mod tests {
         );
         let kvs = kvs.pop().unwrap();
 
-        let btree = Arc::new(setup_hashbtree_empty(bp.clone()));
+        let chain = Arc::new(setup_hashchain_empty(bp.clone()));
 
         // Write kvs to file
         // let kvs_file = "kvs.dat";
@@ -585,10 +507,10 @@ mod tests {
                 "**************************** Inserting {} key={:?} **************************",
                 i, key
             );
-            btree.insert(key, val).unwrap();
+            chain.insert(key, val).unwrap();
         }
 
-        let iter = btree.scan();
+        let iter = chain.scan();
         let mut count = 0;
         for (key, current_val) in iter {
             println!(
@@ -606,11 +528,11 @@ mod tests {
                 "**************************** Getting key {:?} **************************",
                 key
             );
-            let current_val = btree.get(key).unwrap();
+            let current_val = chain.get(key).unwrap();
             assert_eq!(current_val, *val);
         }
 
-        let iter = btree.scan();
+        let iter = chain.scan();
         let mut count = 0;
         for (key, current_val) in iter {
             println!(
@@ -624,7 +546,7 @@ mod tests {
 
         assert_eq!(count, num_keys);
 
-        // println!("{}", btree.page_stats(false));
+        // println!("{}", chain.page_stats(false));
 
         println!("SUCCESS");
     }
@@ -635,7 +557,7 @@ mod tests {
     #[case::in_mem(get_in_mem_pool())]
     #[ignore]
     fn replay_stress<T: MemPool>(#[case] bp: Arc<T>) {
-        let btree = setup_hashbtree_empty(bp.clone());
+        let chain = setup_hashchain_empty(bp.clone());
 
         let kvs_file = "kvs.dat";
         let file = File::open(kvs_file).unwrap();
@@ -650,7 +572,7 @@ mod tests {
                 "**************************** Inserting {} key={:?} **************************",
                 i, key
             );
-            btree.insert(key, val).unwrap();
+            chain.insert(key, val).unwrap();
         }
 
         let (k, v) = &kvs[bug_occurred_at];
@@ -658,7 +580,7 @@ mod tests {
             "BUG INSERT ************** Inserting {} key={:?} **************************",
             bug_occurred_at, k
         );
-        btree.insert(k, v).unwrap();
+        chain.insert(k, v).unwrap();
 
         /*
         for (i, (key, val)) in kvs.iter().enumerate() {
@@ -668,13 +590,13 @@ mod tests {
                 key
             );
             let key = to_bytes(*key);
-            let current_val = btree.get_key(&key).unwrap();
+            let current_val = chain.get_key(&key).unwrap();
             assert_eq!(current_val, *val);
         }
         */
 
-        // let dot_string = btree.generate_dot();
-        // let dot_file = "btree.dot";
+        // let dot_string = chain.generate_dot();
+        // let dot_file = "chain.dot";
         // let mut file = File::create(dot_file).unwrap();
         // // write dot_string as txt
         // file.write_all(dot_string.as_bytes()).unwrap();
@@ -685,7 +607,7 @@ mod tests {
     #[case::in_mem(get_in_mem_pool())]
     fn test_parallel_insertion<T: MemPool>(#[case] bp: Arc<T>) {
         // init_test_logger();
-        let btree = Arc::new(setup_hashbtree_empty(bp.clone()));
+        let chain = Arc::new(setup_hashchain_empty(bp.clone()));
         let num_keys = 5000;
         let key_size = 100;
         let val_min_size = 50;
@@ -710,12 +632,12 @@ mod tests {
             // issue three threads to insert keys into the tree
             |s| {
                 for kvs_i in kvs.iter() {
-                    let btree = btree.clone();
+                    let chain = chain.clone();
                     s.spawn(move || {
                         log_trace!("Spawned");
                         for (key, val) in kvs_i.iter() {
                             log_trace!("Inserting key {:?}", key);
-                            btree.insert(key, val).unwrap();
+                            chain.insert(key, val).unwrap();
                         }
                     });
                 }
@@ -725,7 +647,7 @@ mod tests {
         // Check if all keys have been inserted.
         for kvs_i in verify_kvs {
             for (key, val) in kvs_i.iter() {
-                let current_val = btree.get(key).unwrap();
+                let current_val = chain.get(key).unwrap();
                 assert_eq!(current_val, *val);
             }
         }
@@ -762,7 +684,7 @@ mod tests {
             let bp = Arc::new(BufferPool::new(&temp_dir, 20, false).unwrap());
 
             let c_key = ContainerKey::new(0, 0);
-            let store = Arc::new(HashFosterBtree::new(c_key, bp.clone(), 10));
+            let store = Arc::new(HashReadOptimize::new(c_key, bp.clone(), 10));
 
             for (key, val) in vals.iter() {
                 store.insert(key, val).unwrap();
@@ -776,7 +698,7 @@ mod tests {
             let bp = Arc::new(BufferPool::new(&temp_dir, 10, false).unwrap());
 
             let c_key = ContainerKey::new(0, 0);
-            let store = Arc::new(HashFosterBtree::load(c_key, bp.clone(), 0));
+            let store = Arc::new(HashReadOptimize::load(c_key, bp.clone(), 0));
 
             let mut scanner = store.scan();
             // Remove the keys from the expected_vals set as they are scanned.
