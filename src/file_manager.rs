@@ -1034,12 +1034,15 @@ mod new_async_write {
             }
 
             // Now issue a flush operation.
-            let entry = opcode::Fsync::new(types::Fixed(0))
-                .build()
-                .user_data(IOOpTag::new_flush().as_u64());
-            let ring = &mut *self.ring.lock().unwrap();
-            unsafe { ring.submission().push(&entry).expect("queue is full") };
-            let _res = ring.submit()?;
+            // let entry = opcode::Fsync::new(types::Fixed(0))
+            //     .build()
+            //     .user_data(IOOpTag::new_flush().as_u64());
+            // let ring = &mut *self.ring.lock().unwrap();
+            // unsafe { ring.submission().push(&entry).expect("queue is full") };
+            // let _res = ring.submit()?;
+
+            // Issue a sync flush
+            self._file.sync_all().map_err(|_| FMError::Flush)?;
 
             Ok(())
         }

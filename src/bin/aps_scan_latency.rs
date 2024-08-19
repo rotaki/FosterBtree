@@ -25,7 +25,7 @@ use fbtree::{
 #[derive(Debug, Parser, Clone)]
 pub struct Params {
     /// Buffer pool size. if 0 panic
-    #[clap(short, long, default_value = "1000")]
+    #[clap(short, long, default_value = "100000")]
     pub bp_size: usize,
     /// Number of records. Default 10 M
     #[clap(short, long, default_value = "10000000")]
@@ -133,23 +133,15 @@ pub fn load_table(params: &Params, table: &Arc<AppendOnlyStore<BufferPool>>) {
 }
 
 pub fn execute_workload(params: &Params, table: Arc<AppendOnlyStore<BufferPool>>) -> Duration {
-    // Measure the time taken to scan the entire table
-    // Do it 10 times and take the average
-    let mut total_time = Duration::new(0, 0);
-    let num_scans = 10;
-    for _ in 0..num_scans {
-        let start = std::time::Instant::now();
-        let mut count = 0;
-        let iter = table.scan();
-        for _ in iter {
-            count += 1;
-        }
-        let elapsed = start.elapsed();
-        total_time += elapsed;
-        assert_eq!(count, params.num_keys);
+    let start = std::time::Instant::now();
+    let mut count = 0;
+    let iter = table.scan();
+    for _ in iter {
+        count += 1;
     }
-    // Return the average time taken to scan the table
-    total_time / num_scans
+    let elapsed = start.elapsed();
+    assert_eq!(count, params.num_keys);
+    elapsed
 }
 
 fn get_index(bp: Arc<BufferPool>, _params: &Params) -> Arc<AppendOnlyStore<BufferPool>> {
@@ -173,13 +165,26 @@ fn main() {
     println!("Num KVs: {}", table.num_kvs());
     println!("Num pages: {}", table.num_pages());
 
+    bp.flush_all().unwrap(); // Ensure no dirty pages are left behind
+
     println!("Resetting stats...");
     bp.reset_stats();
 
+    println!("Executing warmup...");
+    let dur = execute_workload(&params, table.clone());
+    println!("Warmup Latency: {:?}", dur);
+    bp.reset_stats();
+
     println!("Executing workload...");
-    let dur = execute_workload(&params, table);
-
-    println!("Buffer pool stats after exec: {:?}", bp.stats());
-
-    println!("Avg Latency: {:?}", dur);
+    let num_scans = 3;
+    let mut total_time = Duration::new(0, 0);
+    for i in 0..num_scans {
+        let dur = execute_workload(&params, table.clone());
+        total_time += dur;
+        println!("Scan {} took {:?}", i, dur);
+        println!("Buffer pool stats after exec: {:?}", bp.stats());
+        bp.flush_all().unwrap();
+        bp.reset_stats();
+    }
+    println!("Avg Latency: {:?}", total_time / num_scans);
 }

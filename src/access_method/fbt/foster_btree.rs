@@ -2015,7 +2015,7 @@ pub struct FosterBtreeRangeScanner<T: MemPool> {
     // States
     initialized: bool,
     finished: bool,
-    prev_high_fence: Option<Vec<u8>>,
+    current_high_fence: Option<Vec<u8>>,
     current_leaf_page: Option<FrameReadGuard<'static>>, // As long as btree is alive, bp is alive so the frame is alive
     current_slot_id: u32,
     parents: Vec<PageFrameKey>,
@@ -2032,7 +2032,7 @@ impl<T: MemPool> FosterBtreeRangeScanner<T> {
 
             initialized: false,
             finished: false,
-            prev_high_fence: None,
+            current_high_fence: None,
             current_leaf_page: None,
             current_slot_id: 0,
             parents: Vec::new(),
@@ -2054,7 +2054,7 @@ impl<T: MemPool> FosterBtreeRangeScanner<T> {
 
             initialized: false,
             finished: false,
-            prev_high_fence: None,
+            current_high_fence: None,
             current_leaf_page: None,
             current_slot_id: 0,
             parents: Vec::new(),
@@ -2077,11 +2077,11 @@ impl<T: MemPool> FosterBtreeRangeScanner<T> {
         }
     }
 
-    fn prev_high_fence(&self) -> BTreeKey {
-        if self.prev_high_fence.as_ref().unwrap().is_empty() {
+    fn high_fence(&self) -> BTreeKey {
+        if self.current_high_fence.as_ref().unwrap().is_empty() {
             BTreeKey::PlusInfty
         } else {
-            BTreeKey::new(self.prev_high_fence.as_ref().unwrap())
+            BTreeKey::new(self.current_high_fence.as_ref().unwrap())
         }
     }
 
@@ -2100,8 +2100,13 @@ impl<T: MemPool> FosterBtreeRangeScanner<T> {
         if slot == 0 {
             slot = 1; // Skip the lower fence
         }
-        self.current_leaf_page = Some(leaf_page);
         self.current_slot_id = slot;
+        self.current_high_fence = Some(
+            leaf_page
+                .get_raw_key(leaf_page.high_fence_slot_id())
+                .to_owned(),
+        );
+        self.current_leaf_page = Some(leaf_page);
     }
 
     #[cfg(feature = "old_iter")]
@@ -2110,11 +2115,16 @@ impl<T: MemPool> FosterBtreeRangeScanner<T> {
         // Current key should NOT be equal to the r_key. Otherwise, we are done.
         let leaf_page = self
             .btree
-            .traverse_to_leaf_for_read(self.prev_high_fence.as_ref().unwrap());
+            .traverse_to_leaf_for_read(self.current_high_fence.as_ref().unwrap());
         let leaf_page =
             unsafe { std::mem::transmute::<FrameReadGuard, FrameReadGuard<'static>>(leaf_page) };
-        self.current_leaf_page = Some(leaf_page);
         self.current_slot_id = 1; // Skip the lower fence
+        self.current_high_fence = Some(
+            leaf_page
+                .get_raw_key(leaf_page.high_fence_slot_id())
+                .to_owned(),
+        );
+        self.current_leaf_page = Some(leaf_page);
     }
 
     /// Traverse to the leaf page to find the page with l_key.
@@ -2158,6 +2168,11 @@ impl<T: MemPool> FosterBtreeRangeScanner<T> {
                         slot = 1; // Skip the lower fence
                     }
                     self.current_slot_id = slot;
+                    self.current_high_fence = Some(
+                        leaf_page
+                            .get_raw_key(leaf_page.high_fence_slot_id())
+                            .to_owned(),
+                    );
                     self.current_leaf_page = Some(leaf_page);
                     return;
                 }
@@ -2168,6 +2183,19 @@ impl<T: MemPool> FosterBtreeRangeScanner<T> {
                 PageFrameKey::new_with_frame_id(self.btree.c_key, val.page_id, val.frame_id);
 
             let next_page = self.btree.read_page(page_key);
+
+            // Do a prefetch for the next next page
+            let prefetch_slot_id = slot_id + 1;
+            if prefetch_slot_id < this_page.high_fence_slot_id() {
+                let prefetch_val = InnerVal::from_bytes(this_page.get_val(prefetch_slot_id));
+                let prefetch_page_key = PageFrameKey::new_with_frame_id(
+                    self.btree.c_key,
+                    prefetch_val.page_id,
+                    prefetch_val.frame_id,
+                );
+                let _ = self.btree.mem_pool.prefetch_page(prefetch_page_key);
+            }
+
             current_page = next_page;
             self.parents.push(page_key); // Push the visiting page to the stack
         }
@@ -2193,7 +2221,7 @@ impl<T: MemPool> FosterBtreeRangeScanner<T> {
         // Pop the current page from the stack
         self.parents.pop().unwrap();
 
-        let key = self.prev_high_fence.as_ref().unwrap();
+        let key = self.current_high_fence.as_ref().unwrap();
 
         // Loop for retrying traversals from internal nodes
         loop {
@@ -2227,8 +2255,13 @@ impl<T: MemPool> FosterBtreeRangeScanner<T> {
                                     this_page,
                                 )
                             };
-                            self.current_leaf_page = Some(leaf_page);
                             self.current_slot_id = 1; // Skip the lower fence
+                            self.current_high_fence = Some(
+                                leaf_page
+                                    .get_raw_key(leaf_page.high_fence_slot_id())
+                                    .to_owned(),
+                            );
+                            self.current_leaf_page = Some(leaf_page);
                             return;
                         }
                     }
@@ -2241,6 +2274,20 @@ impl<T: MemPool> FosterBtreeRangeScanner<T> {
                     );
 
                     let next_page = self.btree.read_page(page_key);
+
+                    // Do a prefetch for the next next page
+                    let prefetch_slot_id = slot_id + 1;
+                    if prefetch_slot_id < this_page.high_fence_slot_id() {
+                        let prefetch_val =
+                            InnerVal::from_bytes(this_page.get_val(prefetch_slot_id));
+                        let prefetch_page_key = PageFrameKey::new_with_frame_id(
+                            self.btree.c_key,
+                            prefetch_val.page_id,
+                            prefetch_val.frame_id,
+                        );
+                        let _ = self.btree.mem_pool.prefetch_page(prefetch_page_key);
+                    }
+
                     current_page = next_page;
                     self.parents.push(page_key); // Push the visiting page to the stack
                 }
@@ -2264,7 +2311,7 @@ impl<T: MemPool> Iterator for FosterBtreeRangeScanner<T> {
             debug_assert!(self.current_slot_id > 0);
             if self.current_leaf_page.is_none() {
                 // If the current leaf page is None, we have to re-traverse to the leaf page using the previous high fence.
-                if self.prev_high_fence() >= self.r_key() {
+                if self.high_fence() >= self.r_key() {
                     self.finish();
                     return None;
                 } else {
@@ -2287,8 +2334,6 @@ impl<T: MemPool> Iterator for FosterBtreeRangeScanner<T> {
                 return None;
             }
             if self.current_slot_id == leaf_page.high_fence_slot_id() {
-                // Reached the high fence. Move to the next leaf page.
-                self.prev_high_fence = Some(key.to_owned());
                 // Evict the page as soon as possible
                 let current_leaf_page = self.current_leaf_page.take().unwrap();
                 // self.btree
@@ -2320,8 +2365,13 @@ impl<T: MemPool> Iterator for FosterBtreeRangeScanner<T> {
                 //     .unwrap();
                 drop(current_page);
 
-                self.current_leaf_page = Some(foster_page);
                 self.current_slot_id = 1;
+                self.current_high_fence = Some(
+                    foster_page
+                        .get_raw_key(foster_page.high_fence_slot_id())
+                        .to_owned(),
+                );
+                self.current_leaf_page = Some(foster_page);
             } else {
                 let val = leaf_page.get_val(self.current_slot_id);
                 if self.filter.is_none() || (self.filter.as_mut().unwrap())(key, val) {
