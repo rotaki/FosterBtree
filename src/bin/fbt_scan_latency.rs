@@ -1,7 +1,7 @@
 use clap::Parser;
 use core::panic;
 use fbtree::{
-    access_method::{OrderedUniqueKeyIndex, UniqueKeyIndex},
+    access_method::prelude::*,
     bp::{get_test_bp, BufferPool},
     prelude::PAGE_SIZE,
     random::gen_random_byte_vec,

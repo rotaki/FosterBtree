@@ -8,6 +8,7 @@ use std::{
 use crate::{
     bp::{ContainerKey, MemPool, PageFrameKey},
     page::{PageId, AVAILABLE_PAGE_SIZE},
+    random::gen_random_int,
 };
 
 use super::{
@@ -115,9 +116,16 @@ impl<T: MemPool> HashFosterBtree<T> {
 
     pub fn page_stats(&self, verbose: bool) -> String {
         let mut stats = String::new();
-        for (i, bucket) in self.buckets.iter().enumerate() {
-            stats.push_str(&format!("Bucket {}:\n", i));
-            stats.push_str(&bucket.page_stats(verbose));
+        // Randomly select stats from 5 buckets
+        let mut bucket_idx = Vec::new();
+        for _ in 0..5 {
+            bucket_idx.push(gen_random_int(0, self.num_buckets - 1));
+        }
+        stats.push_str(&format!("Number of buckets: {}\n", self.num_buckets));
+        stats.push_str("Randomly getting stats from 5 buckets\n");
+        for idx in bucket_idx.iter() {
+            stats.push_str(&format!("Bucket {}:\n", idx));
+            stats.push_str(&self.buckets[*idx].page_stats(verbose));
         }
         stats
     }

@@ -3,6 +3,10 @@
 # Usage: ./run_experiments.sh <number_of_experiments>
 # Example: ./run_experiments.sh 3
 
+cargo build --release --bin ycsb --features ycsb_hash_chain && mv ./target/release/ycsb ./ycsb_hash_chain
+cargo build --release --bin ycsb --features ycsb_fbt && mv ./target/release/ycsb ./ycsb_fbt
+cargo build --release --bin ycsb --features ycsb_hash_fbt && mv ./target/release/ycsb ./ycsb_hash_fbt
+
 NUM_EXPERIMENTS=$1
 
 if [ -z "$NUM_EXPERIMENTS" ]; then
@@ -50,6 +54,7 @@ run_experiment() {
 # Run experiments for both binaries and all skew values
 for SKEW in "${SKEW_VALUES[@]}"
 do
+    run_experiment "ycsb_hash_chain" $SKEW "throughput_results_ycsb_hash_chain_skew_$SKEW.csv"
     run_experiment "ycsb_fbt" $SKEW "throughput_results_ycsb_fbt_skew_$SKEW.csv"
     run_experiment "ycsb_hash_fbt" $SKEW "throughput_results_ycsb_hash_fbt_skew_$SKEW.csv"
 done

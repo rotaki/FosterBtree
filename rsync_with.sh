@@ -9,8 +9,8 @@ fi
 # Assign the input arguments to variables
 REMOTE_USER=$1
 REMOTE_HOST=$2
-# REMOTE_DIR="/mnt/nvme2/FosterBtree" # Replace with the path to the remote directory
-REMOTE_DIR="/tank/local/riki/FosterBtree" # Replace with the path to the remote directory
+REMOTE_DIR="/mnt/nvme1/rotaki/FosterBtree" # Replace with the path to the remote directory
+# REMOTE_DIR="/tank/local/rotaki/FosterBtree" # Replace with the path to the remote directory
 
 # Check if .gitignore file exists
 if [ ! -f .gitignore ]; then

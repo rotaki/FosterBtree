@@ -809,7 +809,11 @@ impl ReadOptimizedPage for Page {
                 return Err(AccessMethodError::OutOfSpaceForUpdate(old_val.to_vec()));
                 // return Err(AccessMethodError::OutOfSpace);
             }
-            self.compact_update(slot_id)?;
+            if new_rec_size > old_rec_size
+                && self.total_free_space() != self.total_free_space_before_compaction()
+            {
+                self.compact_update(slot_id)?;
+            }
         }
 
         let new_rec_offset;

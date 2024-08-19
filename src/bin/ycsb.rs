@@ -221,7 +221,7 @@ pub fn execute_workload(
                         let key = get_key(params.num_keys, params.skew_factor);
                         // Read
                         let _ = table.get(&get_key_bytes(key, params.key_size)).unwrap();
-                        if warmup_flag.load(Ordering::Relaxed) {
+                        if !warmup_flag.load(Ordering::Relaxed) {
                             read_count += 1;
                         }
                     } else if x <= read + update {
@@ -233,7 +233,7 @@ pub fn execute_workload(
                                 &get_new_value(params.record_size),
                             )
                             .unwrap();
-                        if warmup_flag.load(Ordering::Relaxed) {
+                        if !warmup_flag.load(Ordering::Relaxed) {
                             update_count += 1;
                         }
                     } else if x <= read + update + scan {
@@ -251,20 +251,20 @@ pub fn execute_workload(
                         }
 
                         // Scan
-                        if warmup_flag.load(Ordering::Relaxed) {
+                        if !warmup_flag.load(Ordering::Relaxed) {
                             scan_count += 1;
                         }
                         */
                     } else if x <= read + update + scan + insert {
                         // Insert
                         unreachable!();
-                        // if warmup_flag.load(Ordering::Relaxed) {
+                        // if !warmup_flag.load(Ordering::Relaxed) {
                         //     insert_count += 1;
                         // }
                     } else if x <= read + update + scan + insert + rmw {
                         // Read-modify-write
                         unreachable!();
-                        // if warmup_flag.load(Ordering::Relaxed) {
+                        // if !warmup_flag.load(Ordering::Relaxed) {
                         //     rmw_count += 1;
                         // }
                     } else {
