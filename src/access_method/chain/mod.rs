@@ -1,25 +1,6 @@
 mod read_optimized_chain;
 mod read_optimized_page;
 
-#[derive(PartialEq, Eq, PartialOrd, Ord)]
-pub struct Key<'a> {
-    pub prefix: &'a [u8],
-    pub remaining: &'a [u8],
-}
-
-// Override [] operator for Key
-impl<'a> std::ops::Index<usize> for Key<'a> {
-    type Output = u8;
-
-    fn index(&self, index: usize) -> &Self::Output {
-        if index < self.prefix.len() {
-            &self.prefix[index]
-        } else {
-            &self.remaining[index - self.prefix.len()]
-        }
-    }
-}
-
 use std::{
     hash::{Hash, Hasher},
     sync::Arc,
@@ -35,7 +16,10 @@ use super::{
     AccessMethodError, UniqueKeyIndex,
 };
 
-pub mod prelude {}
+pub mod prelude {
+    pub use super::HashReadOptimize;
+    pub use super::HashReadOptimizedChainIter;
+}
 
 pub struct HashReadOptimize<T: MemPool> {
     pub mem_pool: Arc<T>,
@@ -102,12 +86,12 @@ impl<T: MemPool> HashReadOptimize<T> {
             let root_page_id_bytes = &meta_page[offset..offset + std::mem::size_of::<PageId>()];
             offset += root_page_id_bytes.len();
             let root_page_id = PageId::from_be_bytes(root_page_id_bytes.try_into().unwrap());
-            let tree = Arc::new(ReadOptimizedChain::load(
+            let chain = Arc::new(ReadOptimizedChain::load(
                 c_key,
                 mem_pool.clone(),
                 root_page_id,
             ));
-            buckets.push(tree);
+            buckets.push(chain);
         }
 
         Self {
@@ -122,6 +106,15 @@ impl<T: MemPool> HashReadOptimize<T> {
     pub fn num_kvs(&self) -> usize {
         // self.buckets.iter().map(|b| b.num_kvs()).sum()
         unimplemented!()
+    }
+
+    pub fn page_stats(&self, detailed: bool) -> String {
+        let mut stats = String::new();
+        for (i, bucket) in self.buckets.iter().enumerate() {
+            stats.push_str(&format!("Bucket {}:\n", i));
+            stats.push_str(&bucket.page_stats(detailed));
+        }
+        stats
     }
 
     fn get_bucket(&self, key: &[u8]) -> &Arc<ReadOptimizedChain<T>> {
@@ -719,5 +712,36 @@ mod tests {
 
             assert!(expected_vals.is_empty());
         }
+    }
+
+    #[test]
+    fn test_page_stat_generator() {
+        let btree = setup_hashchain_empty(get_in_mem_pool());
+        // Insert 1024 bytes
+        let val = vec![3_u8; 1024];
+        let order = [6, 3, 8, 1, 5, 7, 2];
+        for i in order.iter() {
+            println!(
+                "**************************** Inserting key {} **************************",
+                i
+            );
+            let key = to_bytes(*i);
+            btree.insert(&key, &val).unwrap();
+        }
+        let page_stats = btree.page_stats(true);
+        println!("{}", page_stats);
+
+        for i in order.iter() {
+            println!(
+                "**************************** Getting key {} **************************",
+                i
+            );
+            let key = to_bytes(*i);
+            let current_val = btree.get(&key).unwrap();
+            assert_eq!(current_val, val);
+        }
+
+        let page_stats = btree.page_stats(true);
+        println!("{}", page_stats);
     }
 }

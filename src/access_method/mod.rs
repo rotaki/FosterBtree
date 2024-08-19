@@ -24,6 +24,7 @@ pub enum AccessMethodError {
 
 pub mod prelude {
     pub use super::append_only_store::prelude::*;
+    pub use super::chain::prelude::*;
     pub use super::fbt::prelude::*;
     pub use super::hash_fbt::prelude::*;
     pub use super::hashindex::prelude::*;

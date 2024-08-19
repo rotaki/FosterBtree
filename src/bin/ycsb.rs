@@ -1,6 +1,7 @@
 use clap::Parser;
 use core::panic;
 use fbtree::{
+    access_method::prelude::*,
     access_method::{OrderedUniqueKeyIndex, UniqueKeyIndex},
     bp::{get_test_bp, BufferPool},
     prelude::PAGE_SIZE,
@@ -191,7 +192,7 @@ pub fn load_table(params: &YCSBParams, table: &Arc<impl UniqueKeyIndex + Send + 
 
 pub fn execute_workload(
     params: &YCSBParams,
-    table: Arc<impl OrderedUniqueKeyIndex + Send + Sync + 'static>,
+    table: Arc<impl UniqueKeyIndex + Send + Sync + 'static>,
 ) -> (usize, usize, usize, usize, usize) {
     let warmup_flag = Arc::new(AtomicBool::new(true)); // Flag to stop the warmup
     let exec_flag = Arc::new(AtomicBool::new(true)); // Flag to stop the workload
@@ -210,7 +211,7 @@ pub fn execute_workload(
             move || {
                 let mut read_count = 0;
                 let mut update_count = 0;
-                let mut scan_count = 0;
+                let scan_count = 0;
                 let insert_count = 0;
                 let rmw_count = 0;
 
@@ -236,6 +237,8 @@ pub fn execute_workload(
                             update_count += 1;
                         }
                     } else if x <= read + update + scan {
+                        unreachable!()
+                        /*
                         let start_key = get_key(params.num_keys, params.skew_factor);
                         let end_key = start_key + 100;
                         let start_bytes = get_key_bytes(start_key, params.key_size);
@@ -251,6 +254,7 @@ pub fn execute_workload(
                         if warmup_flag.load(Ordering::Relaxed) {
                             scan_count += 1;
                         }
+                        */
                     } else if x <= read + update + scan + insert {
                         // Insert
                         unreachable!();
@@ -310,7 +314,11 @@ pub fn execute_workload(
     )
 }
 
-#[cfg(not(any(feature = "ycsb_fbt", feature = "ycsb_hash_fbt")))]
+#[cfg(not(any(
+    feature = "ycsb_fbt",
+    feature = "ycsb_hash_fbt",
+    feature = "ycsb_hash_chain"
+)))]
 fn get_index(bp: Arc<BufferPool>, _params: &YCSBParams) -> Arc<FosterBtree<BufferPool>> {
     Arc::new(FosterBtree::new(ContainerKey::new(0, 0), bp))
 }
@@ -325,6 +333,16 @@ fn get_index(bp: Arc<BufferPool>, _params: &YCSBParams) -> Arc<FosterBtree<Buffe
 fn get_index(bp: Arc<BufferPool>, params: &YCSBParams) -> Arc<HashFosterBtree<BufferPool>> {
     println!("Using HashFosterBtree");
     Arc::new(HashFosterBtree::new(
+        ContainerKey::new(0, 0),
+        bp,
+        params.buckets,
+    ))
+}
+
+#[cfg(feature = "ycsb_hash_chain")]
+fn get_index(bp: Arc<BufferPool>, params: &YCSBParams) -> Arc<HashReadOptimize<BufferPool>> {
+    println!("Using HashChain");
+    Arc::new(HashReadOptimize::new(
         ContainerKey::new(0, 0),
         bp,
         params.buckets,
@@ -384,6 +402,9 @@ fn main() {
     println!("Buffer pool stats after load: {:?}", bp.stats());
 
     println!("--- Page stats ---\n{}", table.page_stats(false));
+
+    println!("Flushing buffer pool...");
+    bp.flush_all().unwrap();
 
     println!("Resetting stats...");
     bp.reset_stats();

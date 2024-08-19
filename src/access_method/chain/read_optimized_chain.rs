@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     sync::{atomic::AtomicU32, Arc},
     time::Duration,
 };
@@ -7,7 +8,7 @@ use crate::{
     access_method::AccessMethodError,
     bp::prelude::*,
     log_debug, log_trace, log_warn,
-    page::{PageId, PAGE_SIZE},
+    page::{Page, PageId, PAGE_SIZE},
 };
 
 use super::read_optimized_page::ReadOptimizedPage;
@@ -39,6 +40,13 @@ impl<T: MemPool> ReadOptimizedChain<T> {
             first_page_id,
             first_frame_id: AtomicU32::new(u32::MAX),
         }
+    }
+
+    pub fn page_stats(&self, _verbose: bool) -> String {
+        let mut generator = PageStatsGenerator::new();
+        let traversal = ReadOptimizedChainPageTraversal::new(self);
+        traversal.visit(&mut generator);
+        generator.to_string()
     }
 
     fn read_page(&self, page_key: PageFrameKey) -> FrameReadGuard {
@@ -686,4 +694,146 @@ impl<T: MemPool> Iterator for ReadOptimizedChainRangeScanner<T> {
             }
         }
     }
+}
+
+pub struct ReadOptimizedChainPageTraversal<T: MemPool> {
+    c_key: ContainerKey,
+    first_page: PageFrameKey,
+    mem_pool: Arc<T>,
+}
+
+impl<T: MemPool> ReadOptimizedChainPageTraversal<T> {
+    pub fn new(chain: &ReadOptimizedChain<T>) -> Self {
+        Self {
+            c_key: chain.c_key,
+            first_page: chain.first_key(),
+            mem_pool: chain.bp.clone(),
+        }
+    }
+}
+
+pub trait PageVisitor {
+    fn visit_pre(&mut self, page: &Page);
+    fn visit_post(&mut self, page: &Page);
+}
+
+impl<T: MemPool> ReadOptimizedChainPageTraversal<T> {
+    pub fn visit<V>(&self, visitor: &mut V)
+    where
+        V: PageVisitor,
+    {
+        let mut stack = vec![(self.first_page, false)]; // (page_key, pre_visited)
+        while let Some((next_key, pre_visited)) = stack.last_mut() {
+            let page = self.mem_pool.get_page_for_read(*next_key).unwrap();
+            if *pre_visited {
+                visitor.visit_post(&page);
+                stack.pop();
+                continue;
+            } else {
+                *pre_visited = true;
+                visitor.visit_pre(&page);
+                if let Some((next_page_id, next_frame_id)) = page.next_page() {
+                    stack.push((
+                        PageFrameKey::new_with_frame_id(self.c_key, next_page_id, next_frame_id),
+                        false,
+                    ));
+                }
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+struct PerPageStats {
+    slot_count: usize,
+    bytes_used: usize,
+    free_space: usize,
+}
+
+impl PerPageStats {
+    fn new(slot_count: usize, bytes_used: usize, free_space: usize) -> Self {
+        Self {
+            slot_count,
+            bytes_used,
+            free_space,
+        }
+    }
+}
+
+impl std::fmt::Display for PerPageStats {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut result = String::new();
+        result.push_str(&format!("Slot count: {}\n", self.slot_count));
+        result.push_str(&format!("Total bytes used: {}\n", self.bytes_used));
+        result.push_str(&format!("Total free space: {}\n", self.free_space));
+        write!(f, "{}", result)
+    }
+}
+
+struct PageStatsGenerator {
+    stats: Vec<PerPageStats>,
+}
+
+impl PageStatsGenerator {
+    fn new() -> Self {
+        Self { stats: Vec::new() }
+    }
+
+    fn to_string(&self) -> String {
+        // Print the min, avg, max of slot count, total bytes used, total free space
+
+        let mut slot_count = Vec::new();
+        let mut bytes_used = Vec::new();
+        let mut free_space = Vec::new();
+
+        for stat in &self.stats {
+            slot_count.push(stat.slot_count);
+            bytes_used.push(stat.bytes_used);
+            free_space.push(stat.free_space);
+        }
+
+        let min_slot_count = slot_count.iter().min().unwrap();
+        let avg_slot_count = slot_count.iter().sum::<usize>() / slot_count.len();
+        let max_slot_count = slot_count.iter().max().unwrap();
+
+        let min_bytes_used = bytes_used.iter().min().unwrap();
+        let avg_bytes_used = bytes_used.iter().sum::<usize>() / bytes_used.len();
+        let max_bytes_used = bytes_used.iter().max().unwrap();
+
+        let min_free_space = free_space.iter().min().unwrap();
+        let avg_free_space = free_space.iter().sum::<usize>() / free_space.len();
+        let max_free_space = free_space.iter().max().unwrap();
+
+        let mut result = String::new();
+        result.push_str(&format!("Page count: {}\n", self.stats.len()));
+        result.push_str(&format!(
+            "Slot count: min={}, avg={}, max={}\n",
+            min_slot_count, avg_slot_count, max_slot_count
+        ));
+        result.push_str(&format!(
+            "Total bytes used: min={}, avg={}, max={}\n",
+            min_bytes_used, avg_bytes_used, max_bytes_used
+        ));
+        result.push_str(&format!(
+            "Total free space: min={}, avg={}, max={}\n",
+            min_free_space, avg_free_space, max_free_space
+        ));
+        result
+    }
+}
+
+impl PageVisitor for PageStatsGenerator {
+    fn visit_pre(&mut self, page: &Page) {
+        let slot_count = page.slot_count();
+        let bytes_used = page.total_bytes_used();
+        let free_space = page.total_free_space();
+        let stats = PerPageStats::new(
+            slot_count as usize,
+            bytes_used as usize,
+            free_space as usize,
+        );
+        self.stats.push(stats);
+    }
+
+    fn visit_post(&mut self, _page: &Page) {}
 }
