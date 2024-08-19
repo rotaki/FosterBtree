@@ -256,7 +256,6 @@ pub struct HashFosterBtreeUnorderedIter<T: Iterator<Item = (Vec<u8>, Vec<u8>)>> 
 }
 
 impl<T: Iterator<Item = (Vec<u8>, Vec<u8>)>> HashFosterBtreeUnorderedIter<T> {
-    // If sorted is true, then the iterator will return the keys in sorted order
     pub fn new(scanners: Vec<T>) -> Self {
         Self {
             scanners,
