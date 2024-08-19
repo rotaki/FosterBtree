@@ -542,7 +542,7 @@ impl BufferPool {
                     .ok_or(MemPoolStatus::FileManagerNotFound)?;
 
                 self.runtime_stats.inc_write_count();
-                file.write_page(old_key.page_id, &location)?;
+                file.write_page(old_key.page_id, location)?;
             } else {
                 #[cfg(feature = "stat")]
                 inc_local_bp_clean_victim();
@@ -720,13 +720,11 @@ impl MemPool for BufferPool {
             None => {
                 let mut victim = if let Some(location) = location {
                     location
+                } else if let Some(location) = self.choose_victim() {
+                    location
                 } else {
-                    if let Some(location) = self.choose_victim() {
-                        location
-                    } else {
-                        self.release_exclusive();
-                        return Err(MemPoolStatus::CannotEvictPage);
-                    }
+                    self.release_exclusive();
+                    return Err(MemPoolStatus::CannotEvictPage);
                 };
                 let res = self.handle_page_fault(key.p_key(), false, &mut victim);
                 // If guard is ok, mark the page as dirty
@@ -842,13 +840,11 @@ impl MemPool for BufferPool {
             None => {
                 let mut victim = if let Some(location) = location {
                     location
+                } else if let Some(location) = self.choose_victim() {
+                    location
                 } else {
-                    if let Some(location) = self.choose_victim() {
-                        location
-                    } else {
-                        self.release_exclusive();
-                        return Err(MemPoolStatus::CannotEvictPage);
-                    }
+                    self.release_exclusive();
+                    return Err(MemPoolStatus::CannotEvictPage);
                 };
                 let res = self.handle_page_fault(key.p_key(), false, &mut victim);
                 #[cfg(feature = "stat")]

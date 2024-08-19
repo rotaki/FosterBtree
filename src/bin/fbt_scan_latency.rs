@@ -9,17 +9,13 @@ use fbtree::{
 use rand::prelude::Distribution;
 use rand::Rng;
 use std::{
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    },
+    sync::Arc,
     time::Duration,
 };
 
 use fbtree::{
     bp::{ContainerKey, MemPool},
     prelude::FosterBtree,
-    random::gen_random_int,
 };
 
 #[derive(Debug, Parser, Clone)]
@@ -54,12 +50,12 @@ fn get_key_bytes(key: usize, key_size: usize) -> Vec<u8> {
 
 fn from_key_bytes(key: &[u8]) -> usize {
     // The last 8 bytes of the key is the key
-    let key = usize::from_be_bytes(
+    
+    usize::from_be_bytes(
         key[key.len() - std::mem::size_of::<usize>()..]
             .try_into()
             .unwrap(),
-    );
-    key
+    )
 }
 
 fn get_key(num_keys: usize, skew_factor: f64) -> usize {
