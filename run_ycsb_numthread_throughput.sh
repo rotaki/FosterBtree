@@ -43,7 +43,7 @@ run_experiment() {
         for (( i=0; i<$NUM_EXPERIMENTS; i++ ))
         do
             echo "Running $BINARY with n=$n and skew=$SKEW (experiment $i)..."
-            OUTPUT=$(./target/release/$BINARY -n $n -w A -s $SKEW 2>&1 | tee -a $LOG_FILE)
+            OUTPUT=$(./$BINARY -n $n -p 10000 -w A -s $SKEW 2>&1 | tee -a $LOG_FILE)
             THROUGHPUT=$(echo "$OUTPUT" | grep 'Throughput' | awk '{print $3}')
             LINE="$LINE,$THROUGHPUT"
         done

@@ -48,7 +48,7 @@ pub struct YCSBParams {
     #[clap(short, long, default_value = "0.0")]
     pub skew_factor: f64,
     /// Warmup time in seconds
-    #[clap(short, long, default_value = "3")]
+    #[clap(short, long, default_value = "10")]
     pub warmup_time: usize,
     /// Execution time in seconds
     #[clap(short, long, default_value = "10")]
