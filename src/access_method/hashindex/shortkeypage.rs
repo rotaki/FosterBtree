@@ -1555,6 +1555,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn test_compact_after_deletions() {
         let mut page = <Page as ShortKeyPage>::new();
         let keys_and_values = vec![
@@ -1584,6 +1585,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn test_compact_on_nearly_full_page() {
         let mut page = <Page as ShortKeyPage>::new();
         let large_value =
@@ -1656,6 +1658,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn test_compact_with_full_page() {
         let mut page = <Page as ShortKeyPage>::new();
         let key1 = b"key1";

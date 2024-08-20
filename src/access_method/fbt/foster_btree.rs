@@ -1459,7 +1459,7 @@ impl<T: MemPool> FosterBtree<T> {
     }
 
     fn read_page(&self, page_key: PageFrameKey) -> FrameReadGuard {
-        #[cfg(feature = "stat")]
+        let base = 2;
         let mut attempts = 0;
         loop {
             #[cfg(feature = "stat")]
@@ -1472,11 +1472,13 @@ impl<T: MemPool> FosterBtree<T> {
                     return page;
                 }
                 Err(MemPoolStatus::FrameReadLatchGrantFailed) => {
-                    #[cfg(feature = "stat")]
-                    {
-                        attempts += 1;
-                    }
-                    std::hint::spin_loop();
+                    log_info!(
+                        "Read latch grant failed for page: {}, attempts: {}",
+                        page_key,
+                        attempts
+                    );
+                    std::thread::sleep(Duration::from_nanos(u64::pow(base, attempts)));
+                    attempts += 1;
                 }
                 Err(MemPoolStatus::CannotEvictPage) => {
                     // sleep for a while
@@ -1808,7 +1810,7 @@ impl<T: MemPool> FosterBtree<T> {
     }
 
     fn traverse_to_leaf_for_write(&self, key: &[u8]) -> FrameWriteGuard {
-        let base = Duration::from_millis(1);
+        let base = 2;
         let mut attempts = 0;
         let leaf_page = {
             loop {
@@ -1819,13 +1821,13 @@ impl<T: MemPool> FosterBtree<T> {
                         break leaf_page;
                     }
                     Err(AccessMethodError::PageWriteLatchFailed) => {
-                        attempts += 1;
                         log_info!(
                             "Failed to acquire write lock (#attempt {}). Sleeping for {:?}",
                             attempts,
                             base * attempts
                         );
-                        std::thread::sleep(base * attempts);
+                        std::thread::sleep(Duration::from_nanos(u64::pow(base, attempts)));
+                        attempts += 1;
                     }
                     Err(e) => {
                         panic!("Unexpected error: {:?}", e);
