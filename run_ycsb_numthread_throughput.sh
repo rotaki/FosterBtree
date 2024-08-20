@@ -17,15 +17,15 @@ fi
 LOG_FILE="experiment_output.log"
 
 # Initialize the CSV headers
-HEADER="n"
+HEADER="t"
 for (( i=0; i<$NUM_EXPERIMENTS; i++ ))
 do
     HEADER="$HEADER,throughput$i"
 done
 
-# Define the set of n values to iterate over
-N_VALUES=(1 2 3 4 5 6 7 8 9 10 13 16 19 22 25 28 31 34 37 40)
-# N_VALUES=(1 2)
+# Define the set of t values to iterate over
+T_VALUES=(1 2 3 4 5 6 7 8 9 10 13 16 19 22 25 28 31 34 37 40)
+# T_VALUES=(1 2)
 # Define the set of skew factors to iterate over
 SKEW_VALUES=(0.0 0.8 0.9)
 # SKEW_VALUES=(0.0 0.8)
@@ -37,13 +37,13 @@ run_experiment() {
 
     echo $HEADER > $OUTPUT_FILE
 
-    for n in "${N_VALUES[@]}"
+    for t in "${T_VALUES[@]}"
     do
-        LINE="$n"
+        LINE="$t"
         for (( i=0; i<$NUM_EXPERIMENTS; i++ ))
         do
-            echo "Running $BINARY with n=$n and skew=$SKEW (experiment $i)..."
-            OUTPUT=$(./$BINARY -n $n -p 10000 -w A -s $SKEW 2>&1 | tee -a $LOG_FILE)
+            echo "Running $BINARY with t=$t and skew=$SKEW (experiment $i)..."
+            OUTPUT=$(./$BINARY -t $t -p 10000 -w A -s $SKEW 2>&1 | tee -a $LOG_FILE)
             THROUGHPUT=$(echo "$OUTPUT" | grep 'Throughput' | awk '{print $3}')
             LINE="$LINE,$THROUGHPUT"
         done
