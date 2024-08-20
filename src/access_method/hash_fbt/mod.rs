@@ -488,7 +488,7 @@ mod tests {
     use crate::{
         access_method::AccessMethodError,
         bp::{get_in_mem_pool, get_test_bp, BufferPool},
-        log_trace,
+        log_info,
         random::{gen_random_permutation, RandomKVs},
     };
 
@@ -967,7 +967,7 @@ mod tests {
         );
         let verify_kvs = kvs.clone();
 
-        log_trace!("Number of keys: {}", num_keys);
+        log_info!("Number of keys: {}", num_keys);
 
         // Use 3 threads to insert keys into the tree.
         // Increment the counter for each key inserted and if the counter is equal to the number of keys, then all keys have been inserted.
@@ -977,9 +977,9 @@ mod tests {
                 for kvs_i in kvs.iter() {
                     let btree = btree.clone();
                     s.spawn(move || {
-                        log_trace!("Spawned");
+                        log_info!("Spawned");
                         for (key, val) in kvs_i.iter() {
-                            log_trace!("Inserting key {:?}", key);
+                            log_info!("Inserting key {:?}", key);
                             btree.insert(key, val).unwrap();
                         }
                     });

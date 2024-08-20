@@ -44,7 +44,7 @@ pub mod sync_write {
     use crate::bp::ContainerId;
     #[allow(unused_imports)]
     use crate::log;
-    use crate::log_trace;
+    use crate::log_info;
     use crate::page::{Page, PageId, PAGE_SIZE};
     use std::fs::{File, OpenOptions};
     use std::io::{Read, Seek, SeekFrom, Write};
@@ -113,7 +113,7 @@ pub mod sync_write {
         pub fn read_page(&self, page_id: PageId, page: &mut Page) -> Result<(), FMError> {
             let mut file = self.file.lock().unwrap();
             self.io_count.0.fetch_add(1, Ordering::AcqRel);
-            log_trace!("Reading page: {} from file: {:?}", page_id, self.path);
+            log_info!("Reading page: {} from file: {:?}", page_id, self.path);
             file.seek(SeekFrom::Start(page_id as u64 * PAGE_SIZE as u64))
                 .map_err(|_| FMError::Seek)?;
             file.read_exact(page.get_raw_bytes_mut())
@@ -124,7 +124,7 @@ pub mod sync_write {
 
         pub fn write_page(&self, page_id: PageId, page: &Page) -> Result<(), FMError> {
             let mut file = self.file.lock().unwrap();
-            log_trace!("Writing page: {} to file: {:?}", page_id, self.path);
+            log_info!("Writing page: {} to file: {:?}", page_id, self.path);
             self.io_count.1.fetch_add(1, Ordering::AcqRel);
             debug_assert!(page.get_id() == page_id, "Page id mismatch");
             file.seek(SeekFrom::Start(page_id as u64 * PAGE_SIZE as u64))
@@ -136,7 +136,7 @@ pub mod sync_write {
 
         pub fn flush(&self) -> Result<(), FMError> {
             let mut file = self.file.lock().unwrap();
-            log_trace!("Flushing file: {:?}", self.path);
+            log_info!("Flushing file: {:?}", self.path);
             file.flush().map_err(|_| FMError::Flush)
         }
     }
@@ -149,7 +149,7 @@ pub mod async_write {
     #[allow(unused_imports)]
     use crate::log;
     use crate::page::{Page, PageId, PAGE_SIZE};
-    use crate::{log_debug, log_trace};
+    use crate::{log_debug, log_info};
     use std::cell::UnsafeCell;
     use std::fs::{File, OpenOptions};
     use std::path::PathBuf;
@@ -698,7 +698,7 @@ mod new_async_write {
     use crate::log;
     use crate::page::{Page, PageId, PAGE_SIZE};
     use crate::rwlatch::RwLatch;
-    use crate::{log_debug, log_error, log_trace};
+    use crate::{log_debug, log_error, log_info};
     use std::cell::UnsafeCell;
     use std::fs::{File, OpenOptions};
     use std::path::PathBuf;
@@ -927,21 +927,10 @@ mod new_async_write {
             let (buffer, status, latch) = &self.page_buffer[hash];
             let buffer = unsafe { &*buffer.get() };
 
-            log_error!(
-                "page_id: {}, hash: {}, buffer_id: {}",
-                page_id,
-                hash,
-                buffer.get_id()
-            );
-
-            log_error!("before latch");
-
             // Latch the page for loading.
             while !latch.try_exclusive() {
                 self.poll_once();
             }
-
-            log_error!("after latch");
 
             // While there is on-going work on the page, wait.
             while status.swap(1, Ordering::AcqRel) == 1 {
@@ -956,7 +945,6 @@ mod new_async_write {
                 latch.release_exclusive();
                 Ok(())
             } else {
-                log_error!("Indirect read");
                 // println!("Indirect read");
                 // The page is not in the buffer.
                 // Since no one else is working on page, we can issue the read operation to the file.

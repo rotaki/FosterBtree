@@ -4,10 +4,12 @@ use std::{
     time::Duration,
 };
 
+#[allow(unused_imports)]
+use crate::log;
 use crate::{
     access_method::AccessMethodError,
     bp::prelude::*,
-    log_debug, log_trace, log_warn,
+    log_debug, log_info, log_trace, log_warn,
     page::{Page, PageId, PAGE_SIZE},
 };
 
@@ -50,6 +52,8 @@ impl<T: MemPool> ReadOptimizedChain<T> {
     }
 
     fn read_page(&self, page_key: PageFrameKey) -> FrameReadGuard {
+        let base = 2;
+        let mut attempts = 0;
         loop {
             let page = self.bp.get_page_for_read(page_key);
             match page {
@@ -57,35 +61,19 @@ impl<T: MemPool> ReadOptimizedChain<T> {
                     return page;
                 }
                 Err(MemPoolStatus::FrameReadLatchGrantFailed) => {
-                    log_warn!("Shared page latch grant failed: {:?}. Will retry", page_key);
-                    std::hint::spin_loop();
+                    attempts += 1;
+                    log_info!(
+                        "Failed to acquire read latch (#attempt {}). Sleeping for {:?}",
+                        attempts,
+                        u64::pow(base, attempts)
+                    );
+                    std::thread::sleep(Duration::from_nanos(u64::pow(base, attempts)));
                 }
                 Err(MemPoolStatus::CannotEvictPage) => {
-                    log_warn!("All frames are latched and cannot evict page to read the page: {:?}. Will retry", page_key);
                     std::thread::sleep(Duration::from_millis(1));
                 }
                 Err(e) => {
                     panic!("Unexpected error: {:?}", e);
-                }
-            }
-        }
-    }
-
-    fn write_page(&self, page_key: PageFrameKey) -> FrameWriteGuard {
-        loop {
-            let page = self.bp.get_page_for_write(page_key);
-            match page {
-                Ok(page) => {
-                    return page;
-                }
-                Err(MemPoolStatus::FrameWriteLatchGrantFailed) => {
-                    std::hint::spin_loop();
-                }
-                Err(MemPoolStatus::CannotEvictPage) => {
-                    std::thread::sleep(Duration::from_millis(1));
-                }
-                Err(err) => {
-                    panic!("Write page error: {:?}", err);
                 }
             }
         }
@@ -165,9 +153,9 @@ impl<T: MemPool> ReadOptimizedChain<T> {
                     log_trace!(
                         "Failed to acquire write lock (#attempt {}). Sleeping for {:?}",
                         attempts,
-                        base.pow(attempts)
+                        u64::pow(base, attempts)
                     );
-                    std::thread::sleep(Duration::from_millis(u64::pow(base, attempts)));
+                    std::thread::sleep(Duration::from_nanos(u64::pow(base, attempts)));
                 }
                 Err(AccessMethodError::KeyDuplicate) => {
                     return Err(AccessMethodError::KeyDuplicate);
@@ -279,12 +267,12 @@ impl<T: MemPool> ReadOptimizedChain<T> {
                 }
                 Err(AccessMethodError::PageWriteLatchFailed) => {
                     attempts += 1;
-                    log_trace!(
+                    log_info!(
                         "Failed to acquire write lock (#attempt {}). Sleeping for {:?}",
                         attempts,
-                        base.pow(attempts)
+                        u64::pow(base, attempts)
                     );
-                    std::thread::sleep(Duration::from_millis(u64::pow(base, attempts)));
+                    std::thread::sleep(Duration::from_nanos(u64::pow(base, attempts)));
                 }
                 Err(AccessMethodError::OutOfSpaceForUpdate(old_val)) => {
                     log_debug!(
@@ -382,9 +370,9 @@ impl<T: MemPool> ReadOptimizedChain<T> {
                     log_trace!(
                         "Failed to acquire write lock (#attempt {}). Sleeping for {:?}",
                         attempts,
-                        base.pow(attempts)
+                        u64::pow(base, attempts)
                     );
-                    std::thread::sleep(Duration::from_millis(u64::pow(base, attempts)));
+                    std::thread::sleep(Duration::from_nanos(u64::pow(base, attempts)));
                 }
                 Err(AccessMethodError::OutOfSpaceForUpdate(old_val)) => {
                     log_debug!(

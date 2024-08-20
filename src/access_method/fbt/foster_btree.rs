@@ -13,7 +13,7 @@ use std::{
 use crate::{
     access_method::{AccessMethodError, OrderedUniqueKeyIndex, UniqueKeyIndex},
     bp::prelude::*,
-    log_debug, log_trace, log_warn,
+    log_debug, log_info, log_warn,
     page::{Page, PageId, AVAILABLE_PAGE_SIZE},
 };
 
@@ -1476,11 +1476,9 @@ impl<T: MemPool> FosterBtree<T> {
                     {
                         attempts += 1;
                     }
-                    log_warn!("Shared page latch grant failed: {:?}. Will retry", page_key);
                     std::hint::spin_loop();
                 }
                 Err(MemPoolStatus::CannotEvictPage) => {
-                    log_warn!("All frames are latched and cannot evict page to read the page: {:?}. Will retry", page_key);
                     // sleep for a while
                     std::thread::sleep(Duration::from_millis(1)); // Backoff because there is a lot of contention in the buffer pool
                 }
@@ -1592,7 +1590,7 @@ impl<T: MemPool> FosterBtree<T> {
         op_byte: &mut OpByte,
     ) -> (Option<OpType>, FrameReadGuard<'a>, FrameReadGuard<'a>) {
         if should_split_this(&this, op_byte) {
-            log_trace!("Should split this page: {}", this.get_id());
+            log_info!("Should split this page: {}", this.get_id());
             #[cfg(feature = "stat")]
             inc_local_stat_trigger(OpType::Split);
             let mut this = match this.try_upgrade(true) {
@@ -1611,7 +1609,7 @@ impl<T: MemPool> FosterBtree<T> {
             should_modify_parent_child_relationship(&this, &child, op_byte)
         };
         if let Some(op) = op {
-            log_trace!(
+            log_info!(
                 "Should modify structure: {:?}, This: {}, Child: {}",
                 op,
                 this.get_id(),
@@ -1633,7 +1631,7 @@ impl<T: MemPool> FosterBtree<T> {
                     return (None, this, child);
                 }
             };
-            log_trace!(
+            log_info!(
                 "Ready to modify structure: {:?}, This: {}, Child: {}",
                 op,
                 this.get_id(),
@@ -1695,7 +1693,7 @@ impl<T: MemPool> FosterBtree<T> {
         let mut op_byte = OpByte::new();
         loop {
             let this_page = current_page;
-            log_trace!("Traversal for read, page: {}", this_page.get_id());
+            log_info!("Traversal for read, page: {}", this_page.get_id());
             if this_page.is_leaf() {
                 if this_page.has_foster_child() && this_page.get_foster_key() <= key {
                     // Check whether the foster child should be traversed.
@@ -1822,7 +1820,7 @@ impl<T: MemPool> FosterBtree<T> {
                     }
                     Err(AccessMethodError::PageWriteLatchFailed) => {
                         attempts += 1;
-                        log_trace!(
+                        log_info!(
                             "Failed to acquire write lock (#attempt {}). Sleeping for {:?}",
                             attempts,
                             base * attempts
@@ -1861,7 +1859,7 @@ impl<T: MemPool> UniqueKeyIndex for FosterBtree<T> {
 
     fn insert(&self, key: &[u8], value: &[u8]) -> Result<(), AccessMethodError> {
         let mut leaf_page = self.traverse_to_leaf_for_write(key);
-        log_trace!("Acquired write lock for page {}", leaf_page.get_id());
+        log_info!("Acquired write lock for page {}", leaf_page.get_id());
         let slot_id = leaf_page.upper_bound_slot_id(&BTreeKey::new(key)) - 1;
         if slot_id == 0 {
             // Lower fence so insert is ok. We insert the key-value at the next position of the lower fence.
@@ -1883,7 +1881,7 @@ impl<T: MemPool> UniqueKeyIndex for FosterBtree<T> {
 
     fn update(&self, key: &[u8], value: &[u8]) -> Result<(), AccessMethodError> {
         let mut leaf_page = self.traverse_to_leaf_for_write(key);
-        log_trace!("Acquired write lock for page {}", leaf_page.get_id());
+        log_info!("Acquired write lock for page {}", leaf_page.get_id());
         let slot_id = leaf_page.upper_bound_slot_id(&BTreeKey::new(key)) - 1;
         if slot_id == 0 {
             // We cannot update the lower fence
@@ -1903,7 +1901,7 @@ impl<T: MemPool> UniqueKeyIndex for FosterBtree<T> {
 
     fn upsert(&self, key: &[u8], value: &[u8]) -> Result<(), AccessMethodError> {
         let mut leaf_page = self.traverse_to_leaf_for_write(key);
-        log_trace!("Acquired write lock for page {}", leaf_page.get_id());
+        log_info!("Acquired write lock for page {}", leaf_page.get_id());
         let slot_id = leaf_page.upper_bound_slot_id(&BTreeKey::new(key)) - 1;
         if slot_id == 0 {
             // Lower fence so insert is ok. We insert the key-value at the next position of the lower fence.
@@ -1930,7 +1928,7 @@ impl<T: MemPool> UniqueKeyIndex for FosterBtree<T> {
         merge_func: impl Fn(&[u8], &[u8]) -> Vec<u8>,
     ) -> Result<(), AccessMethodError> {
         let mut leaf_page = self.traverse_to_leaf_for_write(key);
-        log_trace!("Acquired write lock for page {}", leaf_page.get_id());
+        log_info!("Acquired write lock for page {}", leaf_page.get_id());
         let slot_id = leaf_page.upper_bound_slot_id(&BTreeKey::new(key)) - 1;
         if slot_id == 0 {
             // Lower fence so insert is ok. We insert the key-value at the next position of the lower fence.
@@ -1954,7 +1952,7 @@ impl<T: MemPool> UniqueKeyIndex for FosterBtree<T> {
     /// Physical deletion of a key
     fn delete(&self, key: &[u8]) -> Result<(), AccessMethodError> {
         let mut leaf_page = self.traverse_to_leaf_for_write(key);
-        log_trace!("Acquired write lock for page {}", leaf_page.get_id());
+        log_info!("Acquired write lock for page {}", leaf_page.get_id());
         let slot_id = leaf_page.upper_bound_slot_id(&BTreeKey::new(key)) - 1;
         if slot_id == 0 {
             // Lower fence cannot be deleted
@@ -2235,7 +2233,7 @@ impl<T: MemPool> FosterBtreeRangeScanner<T> {
                 // Once we reach this loop, we never go back to the outer loop.
                 loop {
                     let this_page = current_page;
-                    log_trace!("Traversal for read, page: {}", this_page.get_id());
+                    log_info!("Traversal for read, page: {}", this_page.get_id());
                     if this_page.is_leaf() {
                         if this_page.has_foster_child() && this_page.get_foster_key() <= key {
                             // Check whether the foster child should be traversed.
@@ -2738,7 +2736,7 @@ mod tests {
     use crate::access_method::fbt::foster_btree::{deserialize_page_id, InnerVal};
     #[allow(unused_imports)]
     use crate::log;
-    use crate::log_trace;
+    use crate::log_info;
 
     use crate::page::AVAILABLE_PAGE_SIZE;
     use crate::random::gen_random_permutation;
@@ -4459,7 +4457,7 @@ mod tests {
         );
         let verify_kvs = kvs.clone();
 
-        log_trace!("Number of keys: {}", num_keys);
+        log_info!("Number of keys: {}", num_keys);
 
         // Use 3 threads to insert keys into the tree.
         // Increment the counter for each key inserted and if the counter is equal to the number of keys, then all keys have been inserted.
@@ -4469,9 +4467,9 @@ mod tests {
                 for kvs_i in kvs.iter() {
                     let btree = btree.clone();
                     s.spawn(move || {
-                        log_trace!("Spawned");
+                        log_info!("Spawned");
                         for (key, val) in kvs_i.iter() {
-                            log_trace!("Inserting key {:?}", key);
+                            log_info!("Inserting key {:?}", key);
                             btree.insert(key, val).unwrap();
                         }
                     });
@@ -4613,7 +4611,7 @@ mod tests {
             }
         }
 
-        log_trace!("Number of keys: {}", num_keys);
+        log_info!("Number of keys: {}", num_keys);
 
         let key = to_bytes(0);
 
@@ -4626,9 +4624,9 @@ mod tests {
                     let btree = btree.clone();
                     let key = key.clone();
                     s.spawn(move || {
-                        log_trace!("Spawned");
+                        log_info!("Spawned");
                         for (_, val) in kvs_i.iter() {
-                            log_trace!("Appending key {:?}", key);
+                            log_info!("Appending key {:?}", key);
                             btree.append(&key, val).unwrap();
                         }
                     });

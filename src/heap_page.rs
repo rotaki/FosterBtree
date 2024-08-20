@@ -4,7 +4,7 @@ Currently not maintained. Don't use heap page.
 
 #[allow(unused_imports)]
 use crate::log;
-use crate::log_trace;
+use crate::log_info;
 use crate::page::Page;
 
 mod page_header {
@@ -211,7 +211,7 @@ impl<'a> HeapPage<'a> {
     fn shift_recs(&mut self, shift_start_offset: u16, shift_size: u16) {
         // Chunks of recs to be shifted is in the range of [start..end)
         // The new range is [new_start..new_end)
-        log_trace!(
+        log_info!(
             "Shifting recs. Start offset: {}, size: {}",
             shift_start_offset,
             shift_size
@@ -250,7 +250,7 @@ impl<'a> HeapPage<'a> {
 
 impl<'a> HeapPage<'a> {
     pub fn init(page: &mut Page) {
-        log_trace!("[Init] Heap page");
+        log_info!("[Init] Heap page");
         let header = PageHeader::new(page.len() as u16);
         page[0..PAGE_HEADER_SIZE].copy_from_slice(&header.to_bytes());
     }
@@ -262,9 +262,9 @@ impl<'a> HeapPage<'a> {
     pub fn add_value(&mut self, bytes: &[u8]) -> Option<u16> {
         let slot_size = bytes.len();
         if let Some(slot_id) = self.invalid_slot() {
-            log_trace!("[Add] Reusing slot {}", slot_id);
+            log_info!("[Add] Reusing slot {}", slot_id);
             if slot_size > self.free_space() {
-                log_trace!("[Add] Not enough space for slot {}", slot_id);
+                log_info!("[Add] Not enough space for slot {}", slot_id);
                 return None;
             }
 
@@ -287,11 +287,11 @@ impl<'a> HeapPage<'a> {
             Some(slot_id)
         } else {
             if SLOT_SIZE + slot_size > self.free_space() {
-                log_trace!("[Add] Not enough space for new slot");
+                log_info!("[Add] Not enough space for new slot");
                 return None;
             }
             let (slot_id, slot) = self.insert_slot(slot_size);
-            log_trace!(
+            log_info!(
                 "[Add] New slot {}, offset: {}, size: {}",
                 slot_id,
                 slot.offset(),
@@ -307,7 +307,7 @@ impl<'a> HeapPage<'a> {
     pub fn get_value(&self, slot_id: u16) -> Option<&[u8]> {
         if let Some(slot) = self.slot(slot_id) {
             if slot.is_valid() {
-                log_trace!(
+                log_info!(
                     "[Get] Slot {}, offset: {}, size: {}",
                     slot_id,
                     slot.offset(),
@@ -328,7 +328,7 @@ impl<'a> HeapPage<'a> {
     pub fn delete_value(&mut self, slot_id: u16) -> Option<()> {
         if let Some(mut slot) = self.slot(slot_id) {
             if slot.is_valid() {
-                log_trace!(
+                log_info!(
                     "[Delete] Slot {}, offset: {}, size: {}",
                     slot_id,
                     slot.offset(),

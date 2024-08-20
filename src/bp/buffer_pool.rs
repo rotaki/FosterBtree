@@ -1087,7 +1087,7 @@ unsafe impl Sync for BufferPool {}
 mod tests {
     #[allow(unused_imports)]
     use crate::log;
-    use crate::log_trace;
+    use crate::log_info;
 
     use super::*;
     use std::thread::{self, sleep};
@@ -1117,7 +1117,7 @@ mod tests {
                                     break;
                                 } else {
                                     // spin
-                                    log_trace!("Spin");
+                                    log_info!("Spin");
                                     std::hint::spin_loop();
                                 }
                             }
