@@ -18,6 +18,7 @@ use super::{
 };
 
 pub mod prelude {
+    pub use super::read_optimized_page::ReadOptimizedPage;
     pub use super::HashReadOptimize;
     pub use super::HashReadOptimizedChainIter;
 }

@@ -29,6 +29,7 @@ heap_allocated_page = []
 ycsb_fbt = []
 ycsb_hash_fbt = []
 ycsb_hash_chain = []
+ycsb_bloom_chain = []
 
 # Old iterator for foster btree
 old_iter = []
@@ -49,6 +50,7 @@ concurrent-queue = "2.5"
 io-uring = {version = "0.6", optional = true}
 libc = {version = "0.2", optional = true}
 zipf = "7.0.1"
+fastbloom = "0.7"
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"]}

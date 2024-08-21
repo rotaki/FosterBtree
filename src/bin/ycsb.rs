@@ -317,7 +317,8 @@ pub fn execute_workload(
 #[cfg(not(any(
     feature = "ycsb_fbt",
     feature = "ycsb_hash_fbt",
-    feature = "ycsb_hash_chain"
+    feature = "ycsb_hash_chain",
+    feature = "ycsb_bloom_chain"
 )))]
 fn get_index(bp: Arc<BufferPool>, _params: &YCSBParams) -> Arc<FosterBtree<BufferPool>> {
     Arc::new(FosterBtree::new(ContainerKey::new(0, 0), bp))
@@ -343,6 +344,16 @@ fn get_index(bp: Arc<BufferPool>, params: &YCSBParams) -> Arc<HashFosterBtree<Bu
 fn get_index(bp: Arc<BufferPool>, params: &YCSBParams) -> Arc<HashReadOptimize<BufferPool>> {
     println!("Using HashChain");
     Arc::new(HashReadOptimize::new(
+        ContainerKey::new(0, 0),
+        bp,
+        params.buckets,
+    ))
+}
+
+#[cfg(feature = "ycsb_bloom_chain")]
+fn get_index(bp: Arc<BufferPool>, params: &YCSBParams) -> Arc<HashBloomChain<BufferPool>> {
+    println!("Using HashBloomChain");
+    Arc::new(HashBloomChain::new(
         ContainerKey::new(0, 0),
         bp,
         params.buckets,
