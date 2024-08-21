@@ -5,6 +5,7 @@
 
 cargo build --release --bin ycsb --features ycsb_hash_chain && mv ./target/release/ycsb ./ycsb_hash_chain
 cargo build --release --bin ycsb --features ycsb_hash_fbt && mv ./target/release/ycsb ./ycsb_hash_fbt
+cargo build --release --bin ycsb --features ycsb_hash_bloom_chain && mv ./target/release/ycsb ./ycsb_hash_bloom_chain
 
 NUM_EXPERIMENTS=$1
 
@@ -52,6 +53,7 @@ run_experiment() {
 # Run experiments for both binaries and all skew values
 for SKEW in "${SKEW_VALUES[@]}"
 do
+    run_experiment "ycsb_hash_bloom_chain" $SKEW "bucketnum_throughput_results_ycsb_hash_bloom_chain_skew_$SKEW.csv"
     run_experiment "ycsb_hash_chain" $SKEW "bucketnum_throughput_results_ycsb_hash_chain_skew_$SKEW.csv"
     run_experiment "ycsb_hash_fbt" $SKEW "bucketnum_throughput_results_ycsb_hash_fbt_skew_$SKEW.csv"
 done
