@@ -26,10 +26,6 @@ impl HybridLatch {
         self.rwlatch.is_exclusive()
     }
 
-    pub fn exclusive(&self) {
-        self.rwlatch.exclusive();
-    }
-
     pub fn release_exclusive(&self) {
         self.version.fetch_add(1, Ordering::AcqRel);
         self.rwlatch.release_exclusive();
@@ -71,7 +67,15 @@ impl<T: Clone> HybridLatchGuardedStructure<T> {
     }
 
     pub fn write(&self) -> WriteGuard<T> {
-        self.latch.exclusive();
+        let base = 2;
+        let mut attempt = 0;
+
+        while !self.latch.try_exclusive() {
+            // Exponential backoff
+            std::thread::sleep(std::time::Duration::from_nanos(u64::pow(base, attempt)));
+            attempt += 1;
+        }
+
         WriteGuard {
             downgraded: AtomicBool::new(false),
             guarded_struct: self as *const _ as *mut _,
