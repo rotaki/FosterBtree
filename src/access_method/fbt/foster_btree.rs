@@ -1690,7 +1690,7 @@ impl<T: MemPool> FosterBtree<T> {
         }
     }
 
-    fn traverse_to_leaf_for_read(&self, key: &[u8]) -> FrameReadGuard {
+    pub(in crate::access_method) fn traverse_to_leaf_for_read(&self, key: &[u8]) -> FrameReadGuard {
         let mut current_page = self.read_page(self.root_key);
         let mut op_byte = OpByte::new();
         loop {
@@ -1792,7 +1792,7 @@ impl<T: MemPool> FosterBtree<T> {
         }
     }
 
-    fn try_traverse_to_leaf_for_write(
+    pub(in crate::access_method) fn try_traverse_to_leaf_for_write(
         &self,
         key: &[u8],
     ) -> Result<FrameWriteGuard, AccessMethodError> {
@@ -1809,7 +1809,10 @@ impl<T: MemPool> FosterBtree<T> {
         }
     }
 
-    fn traverse_to_leaf_for_write(&self, key: &[u8]) -> FrameWriteGuard {
+    pub(in crate::access_method) fn traverse_to_leaf_for_write(
+        &self,
+        key: &[u8],
+    ) -> FrameWriteGuard {
         let base = 2;
         let mut attempts = 0;
         let leaf_page = {
@@ -1837,21 +1840,44 @@ impl<T: MemPool> FosterBtree<T> {
         };
         leaf_page
     }
+
+    pub(in crate::access_method) fn get_with_physical_address(
+        &self,
+        key: &[u8],
+    ) -> Result<(Vec<u8>, (PageId, u32)), AccessMethodError> {
+        let leaf_page = self.traverse_to_leaf_for_read(key);
+        let slot_id = leaf_page.upper_bound_slot_id(&BTreeKey::new(key)) - 1;
+        if slot_id == 0 {
+            // Lower fence. Non-existent key
+            Err(AccessMethodError::KeyNotFound)
+        } else {
+            // We can get the key if it exists
+            if leaf_page.get_raw_key(slot_id) == key {
+                Ok((
+                    leaf_page.get_val(slot_id).to_vec(),
+                    (leaf_page.get_id(), leaf_page.frame_id()),
+                ))
+            } else {
+                // Non-existent key
+                Err(AccessMethodError::KeyNotFound)
+            }
+        }
+    }
 }
 
 impl<T: MemPool> UniqueKeyIndex for FosterBtree<T> {
     type Iter = FosterBtreeRangeScanner<T>;
 
     fn get(&self, key: &[u8]) -> Result<Vec<u8>, AccessMethodError> {
-        let foster_page = self.traverse_to_leaf_for_read(key);
-        let slot_id = foster_page.upper_bound_slot_id(&BTreeKey::new(key)) - 1;
+        let leaf_page = self.traverse_to_leaf_for_read(key);
+        let slot_id = leaf_page.upper_bound_slot_id(&BTreeKey::new(key)) - 1;
         if slot_id == 0 {
             // Lower fence. Non-existent key
             Err(AccessMethodError::KeyNotFound)
         } else {
             // We can get the key if it exists
-            if foster_page.get_raw_key(slot_id) == key {
-                Ok(foster_page.get_val(slot_id).to_vec())
+            if leaf_page.get_raw_key(slot_id) == key {
+                Ok(leaf_page.get_val(slot_id).to_vec())
             } else {
                 // Non-existent key
                 Err(AccessMethodError::KeyNotFound)

@@ -6,6 +6,7 @@ pub mod append_only_store;
 pub mod bloom_chain;
 pub mod chain;
 pub mod fbt;
+pub mod fbt_secondary;
 pub mod hash_fbt;
 pub mod hashindex;
 

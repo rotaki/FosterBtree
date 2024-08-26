@@ -77,6 +77,26 @@ impl PageFrameKey {
     pub fn set_frame_id(&mut self, frame_id: u32) {
         self.frame_id = frame_id;
     }
+
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&self.p_key.c_key.db_id.to_be_bytes()); // 2 bytes
+        bytes.extend_from_slice(&self.p_key.c_key.c_id.to_be_bytes()); // 2 bytes
+        bytes.extend_from_slice(&self.p_key.page_id.to_be_bytes()); // 4 bytes
+        bytes.extend_from_slice(&self.frame_id.to_be_bytes()); // 4 bytes
+        bytes
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Self {
+        let db_id = u16::from_be_bytes(bytes[0..2].try_into().unwrap());
+        let c_id = u16::from_be_bytes(bytes[2..4].try_into().unwrap());
+        let page_id = PageId::from_be_bytes(bytes[4..8].try_into().unwrap());
+        let frame_id = u32::from_be_bytes(bytes[8..12].try_into().unwrap());
+        PageFrameKey {
+            p_key: PageKey::new(ContainerKey::new(db_id, c_id), page_id),
+            frame_id,
+        }
+    }
 }
 
 impl std::fmt::Display for PageFrameKey {
