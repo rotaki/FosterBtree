@@ -29,6 +29,7 @@ pub mod prelude {
     pub use super::bloom_chain::prelude::*;
     pub use super::chain::prelude::*;
     pub use super::fbt::prelude::*;
+    pub use super::fbt_secondary::prelude::*;
     pub use super::hash_fbt::prelude::*;
     pub use super::hashindex::prelude::*;
     pub use super::AccessMethodError;

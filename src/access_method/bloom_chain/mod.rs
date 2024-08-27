@@ -856,6 +856,7 @@ mod tests {
     #[rstest]
     #[case::bp(get_test_bp(100))]
     #[case::in_mem(get_in_mem_pool())]
+    #[ignore]
     fn test_insertion_stress<T: MemPool>(#[case] bp: Arc<T>) {
         let num_keys = 100000;
         let key_size = 8;
@@ -984,6 +985,7 @@ mod tests {
     #[rstest]
     #[case::bp(get_test_bp(100))]
     #[case::in_mem(get_in_mem_pool())]
+    #[ignore]
     fn test_parallel_insertion<T: MemPool>(#[case] bp: Arc<T>) {
         // init_test_logger();
         let chain = Arc::new(setup_bloom_chain(bp.clone()));

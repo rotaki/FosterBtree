@@ -6,26 +6,17 @@ use crate::{
 };
 
 pub struct FbtSecondaryLogical<T: MemPool> {
-    primary_fbt: Arc<FosterBtree<T>>,
-    secondary_fbt: Arc<FosterBtree<T>>,
-    mempool: Arc<T>,
+    pub primary: Arc<FosterBtree<T>>,
+    pub secondary: Arc<FosterBtree<T>>,
 }
 
 impl<T: MemPool> FbtSecondaryLogical<T> {
-    pub fn new(
-        primary_fbt: Arc<FosterBtree<T>>,
-        secondary_fbt: Arc<FosterBtree<T>>,
-        mempool: Arc<T>,
-    ) -> Self {
-        Self {
-            primary_fbt,
-            secondary_fbt,
-            mempool,
-        }
+    pub fn new(primary: Arc<FosterBtree<T>>, secondary: Arc<FosterBtree<T>>) -> Self {
+        Self { primary, secondary }
     }
 
     pub fn get(&self, key: &[u8]) -> Result<Vec<u8>, AccessMethodError> {
-        let val = self.secondary_fbt.get(key)?;
-        self.primary_fbt.get(&val)
+        let val = self.secondary.get(key)?;
+        self.primary.get(&val)
     }
 }
