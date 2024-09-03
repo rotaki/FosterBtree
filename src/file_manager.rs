@@ -64,7 +64,6 @@ pub mod sync_write {
             db_dir: P,
             c_id: ContainerId,
         ) -> Result<Self, FMError> {
-            println!("Sync write file manager");
             std::fs::create_dir_all(&db_dir).map_err(|_| FMError::DirCreate)?;
             let path = db_dir.as_ref().join(format!("{}", c_id));
             let file = OpenOptions::new()
@@ -175,7 +174,6 @@ pub mod async_write {
             db_dir: P,
             c_id: ContainerId,
         ) -> Result<Self, FMError> {
-            println!("Async write file manager");
             std::fs::create_dir_all(&db_dir).map_err(|_| FMError::DirCreate)?;
             let path = db_dir.as_ref().join(format!("{}", c_id));
             let file = OpenOptions::new()
@@ -808,7 +806,6 @@ mod new_async_write {
             db_dir: P,
             c_id: ContainerId,
         ) -> Result<Self, FMError> {
-            println!("New file manager");
             std::fs::create_dir_all(&db_dir).map_err(|_| FMError::DirCreate)?;
             let path = db_dir.as_ref().join(format!("{}", c_id));
             let file = OpenOptions::new()
