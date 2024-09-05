@@ -140,7 +140,7 @@ impl<T: MemPool> AppendOnlyStore<T> {
         storage
     }
 
-    fn get_page_for_write(&self, page_key: &PageFrameKey) -> FrameWriteGuard {
+    fn write_page(&self, page_key: &PageFrameKey) -> FrameWriteGuard {
         let base = Duration::from_micros(10);
         let mut attempts = 0;
         loop {
@@ -149,6 +149,25 @@ impl<T: MemPool> AppendOnlyStore<T> {
                 Err(MemPoolStatus::FrameWriteLatchGrantFailed) => {
                     attempts += 1;
                     std::thread::sleep(base * attempts);
+                }
+                Err(e) => panic!("Error: {}", e),
+            }
+        }
+    }
+
+    fn read_page(&self, page_key: PageFrameKey) -> FrameReadGuard<'static> {
+        let base: u64 = 2;
+        let mut attempts = 0;
+        loop {
+            match self.mem_pool.get_page_for_read(page_key) {
+                Ok(page) => {
+                    return unsafe {
+                        std::mem::transmute::<FrameReadGuard, FrameReadGuard<'static>>(page)
+                    }
+                }
+                Err(MemPoolStatus::FrameReadLatchGrantFailed) => {
+                    std::thread::sleep(Duration::from_nanos(base.pow(attempts)));
+                    attempts += 1;
                 }
                 Err(e) => panic!("Error: {}", e),
             }
@@ -171,7 +190,7 @@ impl<T: MemPool> AppendOnlyStore<T> {
         self.stats.inc_num_recs();
 
         let mut last_key = self.last_key.lock().unwrap();
-        let mut last_page = self.get_page_for_write(&last_key);
+        let mut last_page = self.write_page(&last_key);
 
         // Try to insert into the last page. If the page is full, create a new page and append to it.
         if last_page.append(key, value) {
@@ -196,7 +215,7 @@ impl<T: MemPool> AppendOnlyStore<T> {
                 bytes.extend_from_slice(&frame_id.to_be_bytes());
                 bytes
             };
-            let mut root_page = self.get_page_for_write(&self.root_key);
+            let mut root_page = self.write_page(&self.root_key);
             root_page.get_mut_val(0).copy_from_slice(&new_key_bytes);
             drop(root_page);
 
@@ -234,14 +253,12 @@ pub struct AppendOnlyStoreScanner<T: MemPool> {
 impl<T: MemPool> AppendOnlyStoreScanner<T> {
     fn initialize(&mut self) {
         let root_key = self.storage.root_key;
-        let root_page = self.storage.mem_pool.get_page_for_read(root_key).unwrap();
+        let root_page = self.storage.read_page(root_key);
         // Read the first data page
         let (data_page_id, data_frame_id) = root_page.next_page().unwrap();
         let data_key =
             PageFrameKey::new_with_frame_id(self.storage.c_key, data_page_id, data_frame_id);
-        let data_page = self.storage.mem_pool.get_page_for_read(data_key).unwrap();
-        let data_page =
-            unsafe { std::mem::transmute::<FrameReadGuard, FrameReadGuard<'static>>(data_page) };
+        let data_page = self.storage.read_page(data_key);
         self.current_page = Some(data_page);
         self.current_slot_id = 0;
     }
@@ -291,10 +308,7 @@ impl<T: MemPool> Iterator for AppendOnlyStoreScanner<T> {
                 Some((page_id, frame_id)) => {
                     let next_key =
                         PageFrameKey::new_with_frame_id(self.storage.c_key, page_id, frame_id);
-                    let next_page = self.storage.mem_pool.get_page_for_read(next_key).unwrap();
-                    let next_page = unsafe {
-                        std::mem::transmute::<FrameReadGuard, FrameReadGuard<'static>>(next_page)
-                    };
+                    let next_page = self.storage.read_page(next_key);
                     // Fast path eviction
                     // self.storage
                     //     .mem_pool
