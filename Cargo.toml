@@ -76,3 +76,7 @@ harness = false
 [[bench]]
 name = "hash_index_insert"
 harness = false
+
+[[bin]]
+name = "hash_join_bench"
+path = "benches/hash_join/hash_join_bench.rs"

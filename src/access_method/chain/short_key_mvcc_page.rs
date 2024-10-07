@@ -161,10 +161,43 @@ mod slot {
         key_prefix: [u8; SLOT_KEY_PREFIX_SIZE],
         val_size: u32,
         offset: u32,
+        start_ts: u64,
         // sts, ets, pid
     }
 
     impl Slot {
+        pub fn to_bytes(&self) -> [u8; SLOT_SIZE] {
+            let mut bytes = [0u8; SLOT_SIZE];
+            let mut current_pos = 0;
+
+            // key_size
+            bytes[current_pos..current_pos + std::mem::size_of::<u32>()]
+                .copy_from_slice(&self.key_size.to_be_bytes());
+            current_pos += std::mem::size_of::<u32>();
+
+            // key_prefix
+            bytes[current_pos..current_pos + SLOT_KEY_PREFIX_SIZE]
+                .copy_from_slice(&self.key_prefix);
+            current_pos += SLOT_KEY_PREFIX_SIZE;
+
+            // val_size
+            bytes[current_pos..current_pos + std::mem::size_of::<u32>()]
+                .copy_from_slice(&self.val_size.to_be_bytes());
+            current_pos += std::mem::size_of::<u32>();
+
+            // offset
+            bytes[current_pos..current_pos + std::mem::size_of::<u32>()]
+                .copy_from_slice(&self.offset.to_be_bytes());
+            current_pos += std::mem::size_of::<u32>();
+
+            // start_ts
+            bytes[current_pos..current_pos + std::mem::size_of::<u64>()]
+                .copy_from_slice(&self.start_ts.to_be_bytes());
+            current_pos += std::mem::size_of::<u64>();
+
+            bytes
+        }
+        
         pub fn from_bytes(bytes: &[u8; SLOT_SIZE]) -> Self {
             let mut current_pos = 0;
 
@@ -192,34 +225,19 @@ mod slot {
                     .unwrap(),
             );
 
+            let start_ts = u64::from_be_bytes(
+                bytes[current_pos..current_pos + std::mem::size_of::<u64>()]
+                    .try_into()
+                    .unwrap(),
+            );
+
             Slot {
                 key_size,
                 key_prefix,
                 val_size,
                 offset,
+                start_ts,
             }
-        }
-
-        pub fn to_bytes(&self) -> [u8; SLOT_SIZE] {
-            let mut bytes = [0u8; SLOT_SIZE];
-            let mut current_pos = 0;
-
-            bytes[current_pos..current_pos + std::mem::size_of::<u32>()]
-                .copy_from_slice(&self.key_size.to_be_bytes());
-            current_pos += std::mem::size_of::<u32>();
-
-            bytes[current_pos..current_pos + SLOT_KEY_PREFIX_SIZE]
-                .copy_from_slice(&self.key_prefix);
-            current_pos += SLOT_KEY_PREFIX_SIZE;
-
-            bytes[current_pos..current_pos + std::mem::size_of::<u32>()]
-                .copy_from_slice(&self.val_size.to_be_bytes());
-            current_pos += std::mem::size_of::<u32>();
-
-            bytes[current_pos..current_pos + std::mem::size_of::<u32>()]
-                .copy_from_slice(&self.offset.to_be_bytes());
-
-            bytes
         }
 
         pub fn new(key: &[u8], val: &[u8], offset: usize) -> Self {
@@ -235,6 +253,24 @@ mod slot {
                 key_prefix,
                 val_size,
                 offset: offset as u32,
+                start_ts: 0,
+            }
+        }
+
+        pub fn new_with_start_ts(key: &[u8], val: &[u8], start_ts: u64, offset: usize) -> Self {
+            let key_size = key.len() as u32;
+            let val_size = val.len() as u32;
+
+            let mut key_prefix = [0u8; SLOT_KEY_PREFIX_SIZE];
+            let copy_len = SLOT_KEY_PREFIX_SIZE.min(key.len());
+            key_prefix[..copy_len].copy_from_slice(&key[..copy_len]);
+
+            Slot {
+                key_size,
+                key_prefix,
+                val_size,
+                offset: offset as u32,
+                start_ts,
             }
         }
 
@@ -260,6 +296,14 @@ mod slot {
 
         pub fn set_offset(&mut self, offset: u32) {
             self.offset = offset;
+        }
+
+        pub fn start_ts(&self) -> u64 {
+            self.start_ts
+        }
+
+        pub fn set_start_ts(&mut self, start_ts: u64) {
+            self.start_ts = start_ts;
         }
     }
 }
@@ -423,7 +467,23 @@ pub trait ReadOptimizedPage {
         slot_id: u32,
     ) -> Result<(), AccessMethodError>;
 
+    /// Insert a new key-value pair into the index with a start timestamp.
+    fn insert_with_ts(
+        &mut self,
+        key: &[u8],
+        val: &[u8],
+        start_ts: u64,
+    ) -> Result<(), AccessMethodError>;
+    fn insert_at_slot_id_with_ts(
+        &mut self,
+        key: &[u8],
+        val: &[u8],
+        start_ts: u64,
+        slot_id: u32,
+    ) -> Result<(), AccessMethodError>;
+
     fn get(&self, key: &[u8]) -> Result<&[u8], AccessMethodError>;
+    fn get_with_ts(&self, key: &[u8], ts: u64) -> Result<&[u8], AccessMethodError>;
 
     /// Update the value of an existing key.
     /// If the key does not exist, it will return an error.
@@ -432,6 +492,17 @@ pub trait ReadOptimizedPage {
         &mut self,
         key: &[u8],
         val: &[u8],
+        slot_id: u32,
+    ) -> Result<(), AccessMethodError>;
+
+    /// Update the value of an existing key with ts.
+    /// If the key does not exist, it will return an error.
+    fn update_with_ts(&mut self, key: &[u8], val: &[u8], ts: u64) -> Result<(), AccessMethodError>;
+    fn update_at_slot_id_with_ts(
+        &mut self,
+        key: &[u8],
+        val: &[u8],
+        ts: u64,
         slot_id: u32,
     ) -> Result<(), AccessMethodError>;
 
@@ -777,6 +848,58 @@ impl ReadOptimizedPage for Page {
         Ok(())
     }
 
+    fn insert_with_ts(
+        &mut self,
+        key: &[u8],
+        val: &[u8],
+        start_ts: u64,
+    ) -> Result<(), AccessMethodError> {
+        if self.rec_size(key, val) > <Page as ReadOptimizedPage>::max_record_size() {
+            return Err(AccessMethodError::RecordTooLarge);
+        }
+
+        let (found, slot_id) = self.binary_search(key);
+        if found {
+            let slot = self.slot(slot_id).unwrap();
+            if !(slot.start_ts() < start_ts) {
+                return Err(AccessMethodError::InvalidTimestamp);
+            }
+            // update ts and return old value
+        }
+        self.insert_at_slot_id_with_ts(key, val, start_ts, slot_id)
+    }
+
+    fn insert_at_slot_id_with_ts(
+        &mut self,
+        key: &[u8],
+        val: &[u8],
+        start_ts: u64,
+        slot_id: u32,
+    ) -> Result<(), AccessMethodError> {
+        let bytes_needed = self.size_require(key, val) as u32;
+
+        if bytes_needed > self.total_free_space_before_compaction() {
+            if bytes_needed > self.total_free_space() {
+                return Err(AccessMethodError::OutOfSpace);
+            }
+            // need to compact the page
+            self.compact()?;
+        }
+
+        let rec_size = self.rec_size(key, val);
+        let rec_start_offset = self.rec_start_offset() as usize - rec_size;
+
+        self.write_record(rec_start_offset, key, val);
+
+        let new_slot = Slot::new_with_start_ts(key, val, start_ts, rec_start_offset);
+        self.insert_slot_at_id(slot_id, &new_slot);
+
+        self.set_rec_start_offset(rec_start_offset as u32);
+        self.increase_total_bytes_used(rec_size as u32);
+
+        Ok(())
+    }
+
     fn update(&mut self, key: &[u8], val: &[u8]) -> Result<(), AccessMethodError> {
         if self.rec_size(key, val) > <Page as ReadOptimizedPage>::max_record_size() {
             return Err(AccessMethodError::RecordTooLarge);
@@ -849,6 +972,18 @@ impl ReadOptimizedPage for Page {
             return Err(AccessMethodError::KeyNotFound);
         }
 
+        Ok(self.get_value_with_slot_id(slot_id))
+    }
+
+    fn get_with_ts(&self, key: &[u8], ts: u64) -> Result<&[u8], AccessMethodError> {
+        let (found, slot_id) = self.binary_search(key);
+        if !found {
+            return Err(AccessMethodError::KeyNotFound);
+        }
+        let slot = self.slot(slot_id).expect("Invalid slot_id");
+        if slot.start_ts() > ts {
+            return Err(AccessMethodError::KeyFoundButInvalidTimestamp);
+        }
         Ok(self.get_value_with_slot_id(slot_id))
     }
 
@@ -1013,6 +1148,20 @@ impl ReadOptimizedPage for Page {
             slot.key_size().saturating_sub(SLOT_KEY_PREFIX_SIZE as u32) + slot.val_size(),
         );
         Ok(())
+    }
+
+    fn update_with_ts(&mut self, key: &[u8], val: &[u8], ts: u64) -> Result<(), AccessMethodError> {
+        todo!()
+    }
+
+    fn update_at_slot_id_with_ts(
+        &mut self,
+        key: &[u8],
+        val: &[u8],
+        ts: u64,
+        slot_id: u32,
+    ) -> Result<(), AccessMethodError> {
+        todo!()
     }
 }
 

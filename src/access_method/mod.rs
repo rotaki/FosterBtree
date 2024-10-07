@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{fmt, sync::Arc};
 
 use crate::bp::MemPoolStatus;
 
@@ -13,6 +13,7 @@ pub mod hashindex;
 #[derive(Debug, PartialEq)]
 pub enum AccessMethodError {
     KeyNotFound,
+    KeyFoundButInvalidTimestamp, // For MVCC
     KeyDuplicate,
     KeyNotInPageRange, // For Btree
     PageReadLatchFailed,
@@ -21,6 +22,8 @@ pub enum AccessMethodError {
     MemPoolStatus(MemPoolStatus),
     OutOfSpace, // For ReadOptimizedPage
     OutOfSpaceForUpdate(Vec<u8>),
+    NeedToUpdateMVCC(u64, Vec<u8>), // For MVCC
+    InvalidTimestamp, // For MVCC
     Other(String),
 }
 
@@ -73,3 +76,25 @@ pub trait NonUniqueKeyIndex {
     fn scan(self: &Arc<Self>) -> impl Iterator<Item = (Vec<u8>, Vec<u8>)>;
     fn scan_key(self: &Arc<Self>, key: &[u8]) -> Self::Iter;
 }
+
+impl fmt::Display for AccessMethodError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            AccessMethodError::KeyNotFound => write!(f, "Key not found"),
+            AccessMethodError::KeyFoundButInvalidTimestamp => write!(f, "Key found but invalid timestamp"),
+            AccessMethodError::KeyDuplicate => write!(f, "Key duplicate"),
+            AccessMethodError::KeyNotInPageRange => write!(f, "Key not in page range"),
+            AccessMethodError::PageReadLatchFailed => write!(f, "Page read latch failed"),
+            AccessMethodError::PageWriteLatchFailed => write!(f, "Page write latch failed"),
+            AccessMethodError::RecordTooLarge => write!(f, "Record too large"),
+            AccessMethodError::MemPoolStatus(status) => write!(f, "MemPool status: {:?}", status),
+            AccessMethodError::OutOfSpace => write!(f, "Out of space"),
+            AccessMethodError::OutOfSpaceForUpdate(key) => write!(f, "Out of space for update: {:?}", key),
+            AccessMethodError::NeedToUpdateMVCC(ts, val) => write!(f, "Need to update MVCC: ts: {}, val: {:?}", ts, val),
+            AccessMethodError::InvalidTimestamp => write!(f, "Invalid timestamp"),
+            AccessMethodError::Other(msg) => write!(f, "{}", msg),
+        }
+    }
+}
+
+impl std::error::Error for AccessMethodError {}
