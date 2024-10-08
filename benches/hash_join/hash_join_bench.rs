@@ -1,7 +1,7 @@
 use std::time::Instant;
 use std::sync::Arc;
 use std::error::Error;
-use fbtree::mvcc_index::hash_join::mvcc_hash_join::MvccIndex;
+use fbtree::mvcc_index::MvccIndex;
 use fbtree::{
     prelude::*,
     mvcc_index::hash_join::mvcc_hash_join::HashJoinTable,
