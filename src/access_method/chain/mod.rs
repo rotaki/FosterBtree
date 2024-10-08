@@ -2,19 +2,6 @@ mod read_optimized_chain;
 mod read_optimized_page;
 mod short_key_mvcc_page;
 
-pub mod mvcc_hash_join;
-
-mod mvcc_hash_join_recent_page;
-mod mvcc_hash_join_recent_chain;
-
-mod mvcc_hash_join_history_page;
-mod mvcc_hash_join_history_chain;
-
-mod mvcc_hash_join_bucket;
-
-pub type Timestamp = u64;
-pub type TxId = u64; // Transaction ID
-
 use std::{
     hash::{Hash, Hasher},
     sync::Arc,

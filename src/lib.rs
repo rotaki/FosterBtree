@@ -1,3 +1,4 @@
+pub mod mvcc_index;
 pub mod access_method;
 pub mod bench_utils;
 pub mod bp;
