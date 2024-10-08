@@ -9,7 +9,7 @@ use crate::{
     access_method::AccessMethodError,
     bp::prelude::*,
     log_debug, log_trace, log_warn,
-    page::{Page, PageId, AVAILABLE_PAGE_SIZE, PAGE_SIZE},
+    page::{Page, PageId, AVAILABLE_PAGE_SIZE},
 };
 
 use super::{

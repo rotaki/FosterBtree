@@ -16,7 +16,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     let data_file = &args[1];
     let ops_file = &args[2];
-
+    println!("{}", data_file);
+    println!("{}", ops_file);
+    
     // Read data and operations
     let data = read_data_file(data_file)?;
     let ops = read_ops_file(ops_file)?;
