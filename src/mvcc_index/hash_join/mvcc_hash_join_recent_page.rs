@@ -440,7 +440,7 @@ pub trait MvccHashJoinRecentPage {
         pkey: &[u8],
         ts: Timestamp,
         val: &[u8],
-    ) -> Result<(), AccessMethodError>;
+    ) -> Result<(Timestamp, Vec<u8>), AccessMethodError>;
     
     fn next_page(&self) -> Option<(PageId, u32)>;
     fn set_next_page(&mut self, next_page_id: PageId, frame_id: u32);
@@ -560,8 +560,116 @@ impl MvccHashJoinRecentPage for Page {
         pkey: &[u8],
         ts: Timestamp,
         val: &[u8],
-    ) -> Result<(), AccessMethodError> {
-        todo!()
+    ) -> Result<(Timestamp, Vec<u8>), AccessMethodError> {
+        let header = self.header();
+        let slot_count = header.slot_count();
+        let mut slot_offset = PAGE_HEADER_SIZE;
+
+        for _ in 0..slot_count {
+            let slot_bytes = &self[slot_offset..slot_offset + SLOT_SIZE];
+            let mut slot = Slot::from_bytes(slot_bytes).unwrap();
+
+            // Check if key and pkey match
+            if slot.key_size() == key.len() as u32
+                && slot.pkey_size() == pkey.len() as u32
+                && slot.key_prefix() == &key[..SLOT_KEY_PREFIX_SIZE.min(key.len())]
+                && slot.pkey_prefix() == &pkey[..SLOT_PKEY_PREFIX_SIZE.min(pkey.len())]
+            {
+                // Retrieve the record
+                let rec_offset = slot.offset() as usize;
+                let rec_size = slot.val_size()
+                    + slot.key_size().saturating_sub(SLOT_KEY_PREFIX_SIZE as u32)
+                    + slot.pkey_size().saturating_sub(SLOT_PKEY_PREFIX_SIZE as u32);
+                let record_bytes = &self[rec_offset..rec_offset + rec_size as usize];
+                let mut record = Record::from_bytes(
+                    record_bytes,
+                    slot.key_size(),
+                    slot.pkey_size(),
+                    slot.val_size(),
+                );
+
+                let mut full_key = slot.key_prefix().to_vec();
+                full_key.extend_from_slice(record.remain_key());
+
+                let mut full_pkey = slot.pkey_prefix().to_vec();
+                full_pkey.extend_from_slice(record.remain_pkey());
+
+                if full_key == key && full_pkey == pkey {
+                    // Check timestamp
+                    if slot.ts() <= ts {
+                        // Save old timestamp and value
+                        let old_ts = slot.ts();
+                        let old_val = record.val().to_vec();
+
+                        let new_val_size = val.len() as u32;
+
+                        if new_val_size <= slot.val_size() {
+                            // Overwrite in place
+                            record.update(val);
+                            let new_rec_size = record.to_bytes().len() as u32;
+
+                            // Write back the record
+                            let record_bytes_new = record.to_bytes();
+                            self[rec_offset..rec_offset + new_rec_size as usize]
+                                .copy_from_slice(&record_bytes_new);
+
+                            // Update slot timestamp
+                            slot.set_ts(ts);
+                            slot.set_val_size(new_val_size as usize);
+
+                            let slot_bytes_new = slot.to_bytes();
+                            self[slot_offset..slot_offset + SLOT_SIZE].copy_from_slice(&slot_bytes_new);
+
+                            return Ok((old_ts, old_val));
+                        } else {
+                            // Need to allocate new space for the record
+                            // Calculate space need for new record
+                            let remain_key_size = key.len().saturating_sub(SLOT_KEY_PREFIX_SIZE);
+                            let remain_pkey_size = pkey.len().saturating_sub(SLOT_PKEY_PREFIX_SIZE);
+                            let new_rec_size =
+                                remain_key_size as u32 + remain_pkey_size as u32 + new_val_size;
+
+                            // Check if there is enough space
+                            let free_space = self.free_space_without_compaction();
+                            if new_rec_size > free_space {
+                                return Err(AccessMethodError::OutOfSpace);
+                            }
+
+                            // Update header
+                            let mut header = self.header();
+                            let new_rec_offset = header.rec_start_offset() - new_rec_size;
+                            header.set_rec_start_offset(new_rec_offset);
+                            header.set_total_bytes_used(
+                                header.total_bytes_used() + new_rec_size - rec_size,
+                            );
+                            self.set_header(&header);
+
+                            // Create new record
+                            let new_record = Record::new(key, pkey, val);
+                            let new_record_bytes = new_record.to_bytes();
+                            self[new_rec_offset as usize
+                                ..(new_rec_offset + new_rec_size) as usize]
+                                .copy_from_slice(&new_record_bytes);
+
+                            // Update slot
+                            slot.set_ts(ts);
+                            slot.set_val_size(new_val_size as usize);
+                            slot.set_offset(new_rec_offset);
+                            let slot_bytes_new = slot.to_bytes();
+                            self[slot_offset..slot_offset + SLOT_SIZE].copy_from_slice(&slot_bytes_new);
+
+                            return Ok((old_ts, old_val));
+                        }
+                    } else {
+                        return Err(AccessMethodError::KeyFoundButInvalidTimestamp);
+                    }
+                }
+            }
+
+            slot_offset += SLOT_SIZE;
+        }
+
+        Err(AccessMethodError::KeyNotFound)
     }
 
     fn next_page(&self) -> Option<(PageId, u32)> {
@@ -777,4 +885,144 @@ mod tests {
         let result = page.insert(key, pkey, ts, val);
         assert!(matches!(result, Err(AccessMethodError::OutOfSpace)));
     }
+
+    #[test]
+    fn test_update_same_size_value() {
+        let key = b"key1";
+        let pkey = b"pkey1";
+        let ts_insert: Timestamp = 100;
+        let ts_update: Timestamp = 200;
+        let val_insert = b"value1"; // Length 6
+        let val_update = b"value2"; // Length 6 (same as val_insert)
+
+        let mut page = Page::new_empty();
+        page.init();
+
+        // Insert the entry
+        page.insert(key, pkey, ts_insert, val_insert).unwrap();
+
+        // Update the entry
+        let (old_ts, old_val) = page.update(key, pkey, ts_update, val_update).unwrap();
+
+        // Verify old timestamp and value
+        assert_eq!(old_ts, ts_insert);
+        assert_eq!(old_val, val_insert);
+
+        // Retrieve the updated entry
+        let retrieved_val = page.get(key, pkey, ts_update).unwrap();
+        assert_eq!(retrieved_val, val_update);
+    }
+
+    #[test]
+    fn test_update_smaller_value() {
+        let key = b"key2";
+        let pkey = b"pkey2";
+        let ts_insert: Timestamp = 100;
+        let ts_update: Timestamp = 200;
+        let val_insert = b"value_longer"; // Length 12
+        let val_update = b"short";        // Length 5 (smaller than val_insert)
+
+        let mut page = Page::new_empty();
+        page.init();
+
+        // Insert the entry
+        page.insert(key, pkey, ts_insert, val_insert).unwrap();
+
+        // Update the entry
+        let (old_ts, old_val) = page.update(key, pkey, ts_update, val_update).unwrap();
+
+        // Verify old timestamp and value
+        assert_eq!(old_ts, ts_insert);
+        assert_eq!(old_val, val_insert);
+
+        // Retrieve the updated entry
+        let retrieved_val = page.get(key, pkey, ts_update).unwrap();
+        assert_eq!(retrieved_val, val_update);
+    }
+
+    #[test]
+    fn test_update_larger_value_enough_space() {
+        let key = b"key3";
+        let pkey = b"pkey3";
+        let ts_insert: Timestamp = 100;
+        let ts_update: Timestamp = 200;
+        let val_insert = b"short";           // Length 5
+        let val_update = b"value_is_longer"; // Length 14 (larger than val_insert)
+
+        let mut page = Page::new_empty();
+        page.init();
+
+        // Insert the entry
+        page.insert(key, pkey, ts_insert, val_insert).unwrap();
+
+        // Update the entry
+        let (old_ts, old_val) = page.update(key, pkey, ts_update, val_update).unwrap();
+
+        // Verify old timestamp and value
+        assert_eq!(old_ts, ts_insert);
+        assert_eq!(old_val, val_insert);
+
+        // Retrieve the updated entry
+        let retrieved_val = page.get(key, pkey, ts_update).unwrap();
+        assert_eq!(retrieved_val, val_update);
+    }
+
+    #[test]
+    fn test_update_larger_value_insufficient_space() {
+        let key = b"key4";
+        let pkey = b"pkey4";
+        let ts_insert: Timestamp = 100;
+        let ts_update: Timestamp = 200;
+        let val_insert = b"val";           // Length 3
+        let val_update = vec![b'a'; (AVAILABLE_PAGE_SIZE / 2) as usize]; // Large value
+
+        let mut page = Page::new_empty();
+        page.init();
+
+        // Fill the page to limit the available space
+        page.insert(b"key_dummy", b"pkey_dummy", 50, &vec![b'b'; (AVAILABLE_PAGE_SIZE / 2) as usize]).unwrap();
+
+        // Insert the entry
+        page.insert(key, pkey, ts_insert, val_insert).unwrap();
+
+        // Attempt to update the entry with a larger value
+        let result = page.update(key, pkey, ts_update, &val_update);
+        assert!(matches!(result, Err(AccessMethodError::OutOfSpace)));
+    }
+
+    #[test]
+    fn test_update_non_existent_key() {
+        let key = b"key_nonexistent";
+        let pkey = b"pkey_nonexistent";
+        let ts_update: Timestamp = 100;
+        let val_update = b"value";
+
+        let mut page = Page::new_empty();
+        page.init();
+
+        // Attempt to update a non-existent key
+        let result = page.update(key, pkey, ts_update, val_update);
+        assert!(matches!(result, Err(AccessMethodError::KeyNotFound)));
+    }
+
+    #[test]
+    fn test_update_invalid_timestamp() {
+        let key = b"key5";
+        let pkey = b"pkey5";
+        let ts_insert: Timestamp = 200;
+        let ts_update: Timestamp = 100; // Less than ts_insert
+        let val_insert = b"value1";
+        let val_update = b"value2";
+
+        let mut page = Page::new_empty();
+        page.init();
+
+        // Insert the entry
+        page.insert(key, pkey, ts_insert, val_insert).unwrap();
+
+        // Attempt to update with an earlier timestamp
+        let result = page.update(key, pkey, ts_update, val_update);
+        assert!(matches!(result, Err(AccessMethodError::KeyFoundButInvalidTimestamp)));
+    }
+
 }
