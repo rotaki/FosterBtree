@@ -15,7 +15,7 @@ rm -f "$SCRIPT_DIR/data.csv" "$SCRIPT_DIR/txs.csv" "$SCRIPT_DIR/ops.csv"
 # DATA_PARAMS="-n 1000 -k 16 -p 8"
 # TXS_PARAMS="-n 500 -minc 50 -maxc 150 -ro 0.2 -i 0.5 -u 0.3 -d 0.2"
 DATA_PARAMS="-n 100"
-TXS_PARAMS="-n 10 -minc 5 -maxc 10 -ro 0.2 -i 0.4 -u 0.4 -d 0.2"
+TXS_PARAMS="-n 10 -minc 5 -maxc 10 -ro 0.5 -i 1.0 -u 0.0 -d 0.0"
 
 # Run gen_data.py with parameters
 echo "Running gen_data.py with parameters: $DATA_PARAMS"
