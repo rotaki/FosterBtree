@@ -563,12 +563,14 @@ impl MvccHashJoinHistoryPage for Page {
     
                 let mut full_pkey = slot.pkey_prefix().to_vec();
                 full_pkey.extend_from_slice(record.remain_pkey());
-    
+
                 if full_key == key && full_pkey == pkey {
                     if slot.start_ts() <= ts && ts < slot.end_ts() {
                         return Ok(record.val().to_vec());
                     } else {
-                        return Err(AccessMethodError::KeyFoundButInvalidTimestamp);
+                        slot_offset += SLOT_SIZE;
+                        continue;
+                        // return Err(AccessMethodError::KeyFoundButInvalidTimestamp);
                     }
                 }
             }
