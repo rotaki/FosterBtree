@@ -433,7 +433,7 @@ impl<T: MemPool> UniqueKeyIndex for BloomChain<T> {
 
     fn scan_with_filter(
         self: &Arc<Self>,
-        filter: Box<dyn FnMut(&[u8], &[u8]) -> bool>,
+        filter: Arc<dyn Fn(&[u8], &[u8]) -> bool + Send + Sync>,
     ) -> Self::Iter {
         unimplemented!()
     }

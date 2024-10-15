@@ -2025,7 +2025,7 @@ impl<T: MemPool> OrderedUniqueKeyIndex for FosterBtree<T> {
     }
 }
 
-type FilterFunc = Box<dyn FnMut(&[u8], &[u8]) -> bool>;
+type FilterFunc = Arc<dyn Fn(&[u8], &[u8]) -> bool + Send + Sync>;
 
 /// Scan the BTree in the range [l_key, r_key)
 /// To specify all keys, use an empty slice.
@@ -2879,7 +2879,7 @@ impl<T: MemPool> FosterBtreeAppendOnly<T> {
             &self.fbt,
             &first_key,
             &last_key,
-            Box::new(move |k, _| k.len() == key_len),
+            Arc::new(move |k, _| k.len() == key_len),
         ))
     }
 
@@ -4607,7 +4607,7 @@ mod tests {
                 btree.upsert(&key, &val1).unwrap();
             }
         }
-        let filter1 = Box::new(|_: &[u8], value: &[u8]| -> bool {
+        let filter1 = Arc::new(|_: &[u8], value: &[u8]| -> bool {
             // Filter by value.
             value.len() == 512
         });
@@ -4623,7 +4623,7 @@ mod tests {
             count += 1;
         }
         assert_eq!(count, 5);
-        let filter2 = Box::new(|key: &[u8], _: &[u8]| -> bool {
+        let filter2 = Arc::new(|key: &[u8], _: &[u8]| -> bool {
             // Filter by key
             from_bytes(key) % 2 == 0
         });

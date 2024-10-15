@@ -174,7 +174,7 @@ impl<T: MemPool> UniqueKeyIndex for HashFosterBtree<T> {
 
     fn scan_with_filter(
         self: &Arc<Self>,
-        filter: Box<dyn FnMut(&[u8], &[u8]) -> bool>,
+        filter: Arc<dyn Fn(&[u8], &[u8]) -> bool + Send + Sync>,
     ) -> Self::Iter {
         // Chain the iterators from all the buckets
         let mut scanners = Vec::with_capacity(self.num_buckets);
@@ -188,7 +188,7 @@ impl<T: MemPool> UniqueKeyIndex for HashFosterBtree<T> {
 pub struct HashFosterBtreeIter<T: Iterator<Item = (Vec<u8>, Vec<u8>)>> {
     scanners: Vec<T>,
     current: usize,
-    filter: Option<Box<dyn FnMut(&[u8], &[u8]) -> bool>>,
+    filter: Option<Arc<dyn Fn(&[u8], &[u8]) -> bool + Send + Sync>>,
 }
 
 impl<T: Iterator<Item = (Vec<u8>, Vec<u8>)>> HashFosterBtreeIter<T> {
@@ -200,7 +200,10 @@ impl<T: Iterator<Item = (Vec<u8>, Vec<u8>)>> HashFosterBtreeIter<T> {
         }
     }
 
-    pub fn new_with_filter(scanners: Vec<T>, filter: Box<dyn FnMut(&[u8], &[u8]) -> bool>) -> Self {
+    pub fn new_with_filter(
+        scanners: Vec<T>,
+        filter: Arc<dyn Fn(&[u8], &[u8]) -> bool + Send + Sync>,
+    ) -> Self {
         Self {
             scanners,
             current: 0,
@@ -246,7 +249,7 @@ impl<T: MemPool> OrderedUniqueKeyIndex for HashFosterBtree<T> {
         self: &Arc<Self>,
         start_key: &[u8],
         end_key: &[u8],
-        filter: Box<dyn FnMut(&[u8], &[u8]) -> bool>,
+        filter: Arc<dyn Fn(&[u8], &[u8]) -> bool + Send + Sync>,
     ) -> Self::RangeIter {
         // Chain the iterators from all the buckets
         let mut scanners = Vec::with_capacity(self.num_buckets);
@@ -260,7 +263,7 @@ impl<T: MemPool> OrderedUniqueKeyIndex for HashFosterBtree<T> {
 pub struct HashFosterBtreeUnorderedIter<T: Iterator<Item = (Vec<u8>, Vec<u8>)>> {
     scanners: Vec<T>,
     current: usize,
-    filter: Option<Box<dyn FnMut(&[u8], &[u8]) -> bool>>,
+    filter: Option<Arc<dyn Fn(&[u8], &[u8]) -> bool + Send + Sync>>,
 }
 
 impl<T: Iterator<Item = (Vec<u8>, Vec<u8>)>> HashFosterBtreeUnorderedIter<T> {
@@ -272,7 +275,10 @@ impl<T: Iterator<Item = (Vec<u8>, Vec<u8>)>> HashFosterBtreeUnorderedIter<T> {
         }
     }
 
-    pub fn new_with_filter(scanners: Vec<T>, filter: Box<dyn FnMut(&[u8], &[u8]) -> bool>) -> Self {
+    pub fn new_with_filter(
+        scanners: Vec<T>,
+        filter: Arc<dyn Fn(&[u8], &[u8]) -> bool + Send + Sync>,
+    ) -> Self {
         Self {
             scanners,
             current: 0,
@@ -305,7 +311,7 @@ impl<T: Iterator<Item = (Vec<u8>, Vec<u8>)>> Iterator for HashFosterBtreeUnorder
 pub struct HashFosterBtreeOrderedIter<T: Iterator<Item = (Vec<u8>, Vec<u8>)>> {
     scanners: Vec<T>,
     current: usize,
-    filter: Option<Box<dyn FnMut(&[u8], &[u8]) -> bool>>,
+    filter: Option<Arc<dyn Fn(&[u8], &[u8]) -> bool + Send + Sync>>,
     heap: BinaryHeap<(Reverse<Vec<u8>>, (usize, Vec<u8>))>, // (key, (tree_index, value))
     initialized: bool,
     finished: bool,
@@ -324,7 +330,10 @@ impl<T: Iterator<Item = (Vec<u8>, Vec<u8>)>> HashFosterBtreeOrderedIter<T> {
         }
     }
 
-    pub fn new_with_filter(scanners: Vec<T>, filter: Box<dyn FnMut(&[u8], &[u8]) -> bool>) -> Self {
+    pub fn new_with_filter(
+        scanners: Vec<T>,
+        filter: Arc<dyn Fn(&[u8], &[u8]) -> bool + Send + Sync>,
+    ) -> Self {
         Self {
             scanners,
             current: 0,

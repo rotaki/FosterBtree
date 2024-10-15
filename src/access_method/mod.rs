@@ -52,7 +52,7 @@ pub trait UniqueKeyIndex {
     fn scan(self: &Arc<Self>) -> Self::Iter;
     fn scan_with_filter(
         self: &Arc<Self>,
-        filter: Box<dyn FnMut(&[u8], &[u8]) -> bool>,
+        filter: Arc<dyn Fn(&[u8], &[u8]) -> bool + Send + Sync>,
     ) -> Self::Iter;
 }
 
@@ -63,7 +63,7 @@ pub trait OrderedUniqueKeyIndex: UniqueKeyIndex {
         self: &Arc<Self>,
         start_key: &[u8],
         end_key: &[u8],
-        filter: Box<dyn FnMut(&[u8], &[u8]) -> bool>,
+        filter: Arc<dyn Fn(&[u8], &[u8]) -> bool + Send + Sync>,
     ) -> Self::RangeIter;
 }
 
