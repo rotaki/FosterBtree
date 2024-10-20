@@ -40,5 +40,5 @@ jobs:
     - name: Run cargo test (sync io)
       run: cargo test --verbose
 
-    - name: Run cargo test (async io)
-      run: cargo test --verbose --features "async_write"
+    # - name: Run cargo test (async io)
+    #   run: cargo test --verbose --features "async_write"

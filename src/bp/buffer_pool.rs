@@ -669,6 +669,7 @@ impl MemPool for BufferPool {
                 None
             }
         };
+        drop(location);
 
         {
             self.shared();
@@ -718,9 +719,12 @@ impl MemPool for BufferPool {
                 guard.ok_or(MemPoolStatus::FrameWriteLatchGrantFailed)
             }
             None => {
-                let mut victim = if let Some(location) = location {
-                    location
-                } else if let Some(location) = self.choose_victim() {
+                // Policy1: Choose a victim frame based on the eviction policy [Default]
+                // Policy2: Prioritize placing the new page in the previously allocated frame
+                // let mut victim = if let Some(location) = location {
+                //    location
+                //} else if let Some(location) = self.choose_victim() {
+                let mut victim = if let Some(location) = self.choose_victim() {
                     location
                 } else {
                     self.release_exclusive();
@@ -790,6 +794,7 @@ impl MemPool for BufferPool {
                 None
             }
         };
+        drop(location);
 
         {
             self.shared();
@@ -838,9 +843,10 @@ impl MemPool for BufferPool {
                 guard.ok_or(MemPoolStatus::FrameReadLatchGrantFailed)
             }
             None => {
-                let mut victim = if let Some(location) = location {
-                    location
-                } else if let Some(location) = self.choose_victim() {
+                // let mut victim = if let Some(location) = location {
+                //     location
+                // } else if let Some(location) = self.choose_victim() {
+                let mut victim = if let Some(location) = self.choose_victim() {
                     location
                 } else {
                     self.release_exclusive();
