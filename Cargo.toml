@@ -5,7 +5,7 @@ edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [features]
-default = ["256k_page"]
+default = ["4k_page"]
 log_trace = []
 log_debug = []
 log_info = []
@@ -47,15 +47,18 @@ chrono = "0.4"
 lazy_static = { version = "1.4" }
 clap = {version = "4.5", features = ["derive"]}
 concurrent-queue = "2.5"
-io-uring = {version = "0.6", optional = true}
+io-uring = {version = "0.7", optional = true}
 libc = {version = "0.2", optional = true}
 zipf = "7.0.1"
 fastbloom = "0.7"
+zerocopy = "0.8"
+zerocopy-derive = "0.8"
+locktable = { git = "https://github.com/rotaki/locktable.git", branch = "master"}
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"]}
 serde_cbor = "0.11"
-rstest = "0.22"
+rstest = "0.23"
 
 # For wasm (uncomment to use)
 # [lib]

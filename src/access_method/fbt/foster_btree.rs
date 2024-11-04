@@ -652,7 +652,7 @@ fn fix_frame_id<'a>(
     slot_id: u32,
     new_frame_key: &PageFrameKey,
 ) -> FrameReadGuard<'a> {
-    match this.try_upgrade(true) {
+    match this.try_upgrade(false) {
         Ok(mut write_guard) => {
             let val = InnerVal::new_with_frame_id(
                 new_frame_key.p_key().page_id,
@@ -684,13 +684,14 @@ fn split_even(this: &mut FrameWriteGuard, foster_child: &mut FrameWriteGuard) ->
     let mut moving_slot_ids = Vec::with_capacity((this.active_slot_count() as usize) / 2); // Roughly half of the slots will be moved to the foster child.
     let mut moving_kvs = Vec::with_capacity((this.active_slot_count() as usize) / 2); // Roughly half of the slots will be moved to the foster child.
     for i in (1..this.high_fence_slot_id()).rev() {
+        let is_ghost = this.is_ghost(i);
         let key = this.get_raw_key(i);
         let val = this.get_val(i);
         let bytes_needed = this.bytes_needed(key, val);
         if half_bytes >= bytes_needed {
             half_bytes -= bytes_needed;
             moving_slot_ids.push(i);
-            moving_kvs.push((key, val));
+            moving_kvs.push((is_ghost, key, val));
         } else {
             break;
         }
@@ -705,7 +706,7 @@ fn split_even(this: &mut FrameWriteGuard, foster_child: &mut FrameWriteGuard) ->
     moving_kvs.reverse();
     moving_slot_ids.reverse();
 
-    let foster_key = moving_kvs[0].0.to_vec();
+    let foster_key = moving_kvs[0].1.to_vec();
 
     foster_child.init();
     foster_child.set_level(this.level());
@@ -720,7 +721,7 @@ fn split_even(this: &mut FrameWriteGuard, foster_child: &mut FrameWriteGuard) ->
     this.remove_range(moving_slot_ids[0], high_fence_slot_id);
     let foster_child_id =
         InnerVal::new_with_frame_id(foster_child.get_id(), foster_child.frame_id());
-    let res = this.insert(&foster_key, &foster_child_id.to_bytes());
+    let res = this.insert(&foster_key, &foster_child_id.to_bytes(), false);
     assert!(res);
     this.set_has_foster_child(true);
 
@@ -739,6 +740,7 @@ fn split_min_move(this: &mut FrameWriteGuard, foster_child: &mut FrameWriteGuard
     }
 
     let moving_slot_id = this.high_fence_slot_id() - 1;
+    let is_ghost = this.is_ghost(moving_slot_id);
     let moving_key = this.get_raw_key(moving_slot_id);
     let moving_val = this.get_val(moving_slot_id);
 
@@ -747,7 +749,7 @@ fn split_min_move(this: &mut FrameWriteGuard, foster_child: &mut FrameWriteGuard
     foster_child.set_low_fence(moving_key);
     foster_child.set_high_fence(this.get_raw_key(this.high_fence_slot_id()));
     foster_child.set_right_most(this.is_right_most());
-    let res = foster_child.insert(moving_key, moving_val);
+    let res = foster_child.insert(moving_key, moving_val, is_ghost);
     assert!(res);
     foster_child.set_has_foster_child(this.has_foster_child());
 
@@ -757,7 +759,7 @@ fn split_min_move(this: &mut FrameWriteGuard, foster_child: &mut FrameWriteGuard
 
     let foster_child_id =
         InnerVal::new_with_frame_id(foster_child.get_id(), foster_child.frame_id());
-    let res = this.insert(&foster_key, &foster_child_id.to_bytes());
+    let res = this.insert(&foster_key, &foster_child_id.to_bytes(), false);
     assert!(res);
     this.set_has_foster_child(true);
 
@@ -777,6 +779,7 @@ fn split_insert(
     foster_child: &mut FrameWriteGuard,
     key: &[u8],
     value: &[u8],
+    is_ghost: bool,
 ) -> bool {
     let foster_key = split_even(this, foster_child);
 
@@ -786,9 +789,9 @@ fn split_insert(
     // Otherwise, we insert the key into the foster child.
 
     let res = if key < &foster_key {
-        this.insert(key, value)
+        this.insert(key, value, is_ghost)
     } else {
-        foster_child.insert(key, value)
+        foster_child.insert(key, value, is_ghost)
     };
     if !res {
         // Need to split the page into three
@@ -918,9 +921,10 @@ fn merge(this: &mut FrameWriteGuard, foster_child: &mut FrameWriteGuard) {
 
     let mut kvs = Vec::new();
     for i in 1..=foster_child.active_slot_count() {
+        let is_ghost = foster_child.is_ghost(i);
         let key = foster_child.get_raw_key(i);
         let val = foster_child.get_val(i);
-        kvs.push((key, val));
+        kvs.push((is_ghost, key, val));
     }
     let foster_child_slot_id = this.foster_child_slot_id();
     this.remove_at(foster_child_slot_id);
@@ -963,15 +967,16 @@ fn balance(this: &mut FrameWriteGuard, foster_child: &mut FrameWriteGuard) {
             // Move some slots from this to foster child.
             let mut diff = (this_total - foster_child_total) / 2;
             let mut moving_slot_ids = Vec::new();
-            let mut moving_kvs: Vec<(&[u8], &[u8])> = Vec::new();
+            let mut moving_kvs: Vec<(bool, &[u8], &[u8])> = Vec::new();
             for i in (1..this.foster_child_slot_id()).rev() {
+                let is_ghost = this.is_ghost(i);
                 let key = this.get_raw_key(i);
                 let val = this.get_val(i);
                 let bytes_needed = this.bytes_needed(key, val);
                 if diff >= bytes_needed {
                     diff -= bytes_needed;
                     moving_slot_ids.push(i);
-                    moving_kvs.push((key, val));
+                    moving_kvs.push((is_ghost, key, val));
                 } else {
                     break;
                 }
@@ -987,9 +992,11 @@ fn balance(this: &mut FrameWriteGuard, foster_child: &mut FrameWriteGuard) {
             // this [l, k0, k1, k2, ..., f(kN), h) --> foster_child [l(kN), kN, kN+1, ..., h)
             // After:
             // this [l, k0, k1, ..., f(kN-m), h) --> foster_child [l(kN-m), kN-m, kN-m+1, ..., h)
-            foster_child.set_low_fence(moving_kvs[0].0);
-            for (key, val) in moving_kvs {
-                let res = foster_child.insert(key, val);
+            foster_child.set_low_fence(moving_kvs[0].1);
+            for (is_ghost, key, val) in moving_kvs {
+                // Pushes the key-value pair to the front. We cannot use append_sorted because
+                // we push the key-value pair to the front.
+                let res = foster_child.insert(key, val, is_ghost);
                 assert!(res);
             }
             // Remove the moved slots from this
@@ -999,6 +1006,7 @@ fn balance(this: &mut FrameWriteGuard, foster_child: &mut FrameWriteGuard) {
                 foster_child.get_raw_key(0),
                 &InnerVal::new_with_frame_id(foster_child.get_id(), foster_child.frame_id())
                     .to_bytes(),
+                false,
             );
             assert!(res);
         }
@@ -1014,13 +1022,14 @@ fn balance(this: &mut FrameWriteGuard, foster_child: &mut FrameWriteGuard) {
                 foster_child.high_fence_slot_id()
             };
             for i in 1..end {
+                let is_ghost = foster_child.is_ghost(i);
                 let key = foster_child.get_raw_key(i);
                 let val = foster_child.get_val(i);
                 let bytes_needed = foster_child.bytes_needed(key, val);
                 if diff >= bytes_needed {
                     diff -= bytes_needed;
                     moving_slot_ids.push(i);
-                    moving_kvs.push((key, val));
+                    moving_kvs.push((is_ghost, key, val));
                 } else {
                     break;
                 }
@@ -1035,8 +1044,8 @@ fn balance(this: &mut FrameWriteGuard, foster_child: &mut FrameWriteGuard) {
             // this [l, k0, k1, ..., f(kN+m), h) --> foster_child [l(kN+m), kN+m, kN+m+1, ..., h)
             let foster_child_slot_id = this.foster_child_slot_id();
             this.remove_at(foster_child_slot_id);
-            for (key, val) in moving_kvs {
-                let res = this.insert(key, val);
+            for (is_ghost, key, val) in moving_kvs {
+                let res = this.insert(key, val, is_ghost);
                 assert!(res);
             }
             // Remove the moved slots from foster child
@@ -1048,7 +1057,7 @@ fn balance(this: &mut FrameWriteGuard, foster_child: &mut FrameWriteGuard) {
             foster_child.set_low_fence(&foster_key);
             let foster_child_id =
                 InnerVal::new_with_frame_id(foster_child.get_id(), foster_child.frame_id());
-            let res = this.insert(&foster_key, &foster_child_id.to_bytes());
+            let res = this.insert(&foster_key, &foster_child_id.to_bytes(), false);
             assert!(res);
         }
     }
@@ -1088,6 +1097,7 @@ fn adopt(parent: &mut FrameWriteGuard, child1: &mut FrameWriteGuard) {
     let res = parent.insert(
         child1.get_foster_key(),
         child1.get_val(child1.foster_child_slot_id()),
+        false,
     );
     assert!(res);
     // Make the foster key the high fence of the child page.
@@ -1139,7 +1149,7 @@ fn anti_adopt(parent: &mut FrameWriteGuard, child1: &mut FrameWriteGuard) {
         // because k2 is the high fence of child1 as well.
         child1.set_right_most(true);
     }
-    let res = child1.insert(k1, child2_ptr);
+    let res = child1.insert(k1, child2_ptr, false);
     if !res {
         panic!("Cannot insert the slot into the child page");
     }
@@ -1177,9 +1187,10 @@ fn descend_root(root: &mut FrameWriteGuard, child: &mut FrameWriteGuard) {
 
     let mut kvs = Vec::new();
     for i in 1..=child.active_slot_count() {
+        let is_ghost = child.is_ghost(i);
         let key = child.get_raw_key(i);
         let val = child.get_val(i);
-        kvs.push((key, val));
+        kvs.push((is_ghost, key, val));
     }
     let res = root.append_sorted(&kvs);
     assert!(res);
@@ -1226,9 +1237,10 @@ fn ascend_root(root: &mut FrameWriteGuard, child: &mut FrameWriteGuard) {
     // Move the root's data to the child
     let mut kvs = Vec::new();
     for i in 1..root.foster_child_slot_id() {
+        let is_ghost = root.is_ghost(i);
         let key = root.get_raw_key(i);
         let val = root.get_val(i);
-        kvs.push((key, val));
+        kvs.push((is_ghost, key, val));
     }
     let res = child.append_sorted(&kvs);
     assert!(res);
@@ -1237,7 +1249,7 @@ fn ascend_root(root: &mut FrameWriteGuard, child: &mut FrameWriteGuard) {
     let foster_child_slot_id = root.foster_child_slot_id();
     root.remove_range(1, foster_child_slot_id);
     let child_id = InnerVal::new_with_frame_id(child.get_id(), child.frame_id());
-    root.insert(&[], &child_id.to_bytes());
+    root.insert(&[], &child_id.to_bytes(), false);
 
     #[cfg(debug_assertions)]
     {
@@ -1364,13 +1376,13 @@ impl<T: MemPool> FosterBtree<T> {
         let mut current_page = root;
         for (key, value) in iter {
             stats.inc_num_keys();
-            if !current_page.insert(key.as_ref(), value.as_ref()) {
+            if !current_page.insert(key.as_ref(), value.as_ref(), false) {
                 // Create a new page and split the current page.
                 let mut new_page = mem_pool.create_new_page_for_write(c_key).unwrap();
                 let foster_key = split_min_move(&mut current_page, &mut new_page);
                 assert!(foster_key.as_slice() < key.as_ref());
                 // Insert it into new page. If it fails, panic.
-                assert!(new_page.insert(key.as_ref(), value.as_ref()));
+                assert!(new_page.insert(key.as_ref(), value.as_ref(), false));
 
                 mem_pool.fast_evict(current_page.frame_id()).unwrap();
                 drop(current_page);
@@ -1491,12 +1503,13 @@ impl<T: MemPool> FosterBtree<T> {
         }
     }
 
-    fn insert_at_slot_or_split(
+    pub fn insert_at_slot_or_split(
         &self,
         this: &mut FrameWriteGuard,
         slot: u32,
         key: &[u8],
         value: &[u8],
+        is_ghost: bool,
     ) {
         // Easy checks to see if we can insert the key-value pair into the page.
         if key.len() + value.len() > AVAILABLE_PAGE_SIZE {
@@ -1507,12 +1520,12 @@ impl<T: MemPool> FosterBtree<T> {
                 AVAILABLE_PAGE_SIZE
             );
         }
-        if !this.insert_at(slot, key, value) {
+        if !this.insert_at(slot, key, value, is_ghost) {
             #[cfg(feature = "stat")]
             inc_local_stat_trigger(OpType::Split);
             // Split the page
             let mut foster_child = self.allocate_page();
-            if !split_insert(this, &mut foster_child, key, value) {
+            if !split_insert(this, &mut foster_child, key, value, is_ghost) {
                 panic!("Split triple required");
                 // let mut new_page1 = self.allocate_page();
                 // let mut new_page2 = self.allocate_page();
@@ -1534,7 +1547,7 @@ impl<T: MemPool> FosterBtree<T> {
         }
     }
 
-    fn update_at_slot_or_split(
+    pub fn update_at_slot_or_split(
         &self,
         this: &mut FrameWriteGuard,
         slot: u32,
@@ -1550,17 +1563,17 @@ impl<T: MemPool> FosterBtree<T> {
                 AVAILABLE_PAGE_SIZE
             );
         }
-
+        let is_ghost = this.is_ghost(slot);
         if !this.update_at(slot, None, value) {
             #[cfg(feature = "stat")]
             inc_local_stat_trigger(OpType::Split);
             // Remove the slot and split insert
             this.remove_at(slot);
             // Try inserting the key-value pair into this page again after removing the slot.
-            if this.insert(key, value) {
+            if this.insert(key, value, is_ghost) {
             } else {
                 let mut foster_child = self.allocate_page();
-                if !split_insert(this, &mut foster_child, key, value) {
+                if !split_insert(this, &mut foster_child, key, value, is_ghost) {
                     panic!("Split triple required");
                     // let mut new_page1 = self.allocate_page();
                     // let mut new_page2 = self.allocate_page();
@@ -1690,7 +1703,27 @@ impl<T: MemPool> FosterBtree<T> {
         }
     }
 
-    pub(in crate::access_method) fn traverse_to_leaf_for_read(&self, key: &[u8]) -> FrameReadGuard {
+    pub fn traverse_to_leaf_for_read_with_hint(
+        &self,
+        key: &[u8],
+        hint: Option<&PageFrameKey>,
+    ) -> FrameReadGuard {
+        // Use the hint to speculatively find the page that contains the key.
+        if let Some(hint) = hint {
+            let page = self.read_page(*hint);
+            if page.is_valid() && page.is_leaf() && page.inside_range(&BTreeKey::Normal(&key)) {
+                return page;
+            } else if page.is_valid() && page.inside_range(&BTreeKey::Normal(&key)) {
+                // Traverse from the hint page
+                println!("Traverse from the hint page (read)");
+            } else {
+                // Traverse from the root
+            }
+        }
+        self.traverse_to_leaf_for_read(key)
+    }
+
+    pub fn traverse_to_leaf_for_read(&self, key: &[u8]) -> FrameReadGuard {
         let mut current_page = self.read_page(self.root_key);
         let mut op_byte = OpByte::new();
         loop {
@@ -1792,7 +1825,47 @@ impl<T: MemPool> FosterBtree<T> {
         }
     }
 
-    pub(in crate::access_method) fn try_traverse_to_leaf_for_write(
+    pub fn traverse_to_leaf_for_write_with_hint(
+        &self,
+        key: &[u8],
+        hint: Option<&PageFrameKey>,
+    ) -> FrameWriteGuard {
+        // Use the hint to speculatively find the page that contains the key.
+        if let Some(hint) = hint {
+            let base = 2;
+            let mut attempts = 0;
+            loop {
+                let page = self.read_page(*hint);
+                if page.is_valid() && page.is_leaf() && page.inside_range(&BTreeKey::Normal(&key)) {
+                    // Try to upgrade the page to write lock
+                    match page.try_upgrade(true) {
+                        Ok(upgraded) => {
+                            return upgraded;
+                        }
+                        Err(_) => {
+                            log_info!(
+                                "Failed to acquire write lock (#attempt {}). Sleeping for {:?}",
+                                attempts,
+                                base * attempts
+                            );
+                            std::thread::sleep(Duration::from_nanos(u64::pow(base, attempts)));
+                            attempts += 1;
+                        }
+                    }
+                } else if page.is_valid() && page.inside_range(&BTreeKey::Normal(&key)) {
+                    // Traverse from the hint page
+                    println!("Traverse from the hint page (write)");
+                    break;
+                } else {
+                    // Traverse from the root
+                    break;
+                }
+            }
+        }
+        self.traverse_to_leaf_for_write(key)
+    }
+
+    pub fn try_traverse_to_leaf_for_write(
         &self,
         key: &[u8],
     ) -> Result<FrameWriteGuard, AccessMethodError> {
@@ -1809,10 +1882,7 @@ impl<T: MemPool> FosterBtree<T> {
         }
     }
 
-    pub(in crate::access_method) fn traverse_to_leaf_for_write(
-        &self,
-        key: &[u8],
-    ) -> FrameWriteGuard {
+    pub fn traverse_to_leaf_for_write(&self, key: &[u8]) -> FrameWriteGuard {
         let base = 2;
         let mut attempts = 0;
         let leaf_page = {
@@ -1863,12 +1933,8 @@ impl<T: MemPool> FosterBtree<T> {
             }
         }
     }
-}
 
-impl<T: MemPool> UniqueKeyIndex for FosterBtree<T> {
-    type Iter = FosterBtreeRangeScanner<T>;
-
-    fn get(&self, key: &[u8]) -> Result<Vec<u8>, AccessMethodError> {
+    pub fn get_kv(&self, key: &[u8]) -> Result<(bool, Vec<u8>), AccessMethodError> {
         let leaf_page = self.traverse_to_leaf_for_read(key);
         let slot_id = leaf_page.upper_bound_slot_id(&BTreeKey::new(key)) - 1;
         if slot_id == 0 {
@@ -1877,7 +1943,10 @@ impl<T: MemPool> UniqueKeyIndex for FosterBtree<T> {
         } else {
             // We can get the key if it exists
             if leaf_page.get_raw_key(slot_id) == key {
-                Ok(leaf_page.get_val(slot_id).to_vec())
+                Ok((
+                    leaf_page.is_ghost(slot_id),
+                    leaf_page.get_val(slot_id).to_vec(),
+                ))
             } else {
                 // Non-existent key
                 Err(AccessMethodError::KeyNotFound)
@@ -1885,14 +1954,18 @@ impl<T: MemPool> UniqueKeyIndex for FosterBtree<T> {
         }
     }
 
-    fn insert(&self, key: &[u8], value: &[u8]) -> Result<(), AccessMethodError> {
+    pub fn insert_kv(
+        &self,
+        key: &[u8],
+        value: &[u8],
+        is_ghost: bool,
+    ) -> Result<(), AccessMethodError> {
         let mut leaf_page = self.traverse_to_leaf_for_write(key);
-        log_info!("Acquired write lock for page {}", leaf_page.get_id());
         let slot_id = leaf_page.upper_bound_slot_id(&BTreeKey::new(key)) - 1;
         if slot_id == 0 {
             // Lower fence so insert is ok. We insert the key-value at the next position of the lower fence.
             self.stats.inc_num_keys();
-            self.insert_at_slot_or_split(&mut leaf_page, slot_id + 1, key, value);
+            self.insert_at_slot_or_split(&mut leaf_page, slot_id + 1, key, value, is_ghost);
             Ok(())
         } else {
             // We can insert the key if it does not exist
@@ -1901,15 +1974,14 @@ impl<T: MemPool> UniqueKeyIndex for FosterBtree<T> {
                 Err(AccessMethodError::KeyDuplicate)
             } else {
                 self.stats.inc_num_keys();
-                self.insert_at_slot_or_split(&mut leaf_page, slot_id + 1, key, value);
+                self.insert_at_slot_or_split(&mut leaf_page, slot_id + 1, key, value, is_ghost);
                 Ok(())
             }
         }
     }
 
-    fn update(&self, key: &[u8], value: &[u8]) -> Result<(), AccessMethodError> {
+    pub fn update_kv(&self, key: &[u8], value: &[u8]) -> Result<(), AccessMethodError> {
         let mut leaf_page = self.traverse_to_leaf_for_write(key);
-        log_info!("Acquired write lock for page {}", leaf_page.get_id());
         let slot_id = leaf_page.upper_bound_slot_id(&BTreeKey::new(key)) - 1;
         if slot_id == 0 {
             // We cannot update the lower fence
@@ -1927,6 +1999,47 @@ impl<T: MemPool> UniqueKeyIndex for FosterBtree<T> {
         }
     }
 
+    pub fn delete_kv(&self, key: &[u8]) -> Result<(), AccessMethodError> {
+        let mut leaf_page = self.traverse_to_leaf_for_write(key);
+        let slot_id = leaf_page.upper_bound_slot_id(&BTreeKey::new(key)) - 1;
+        if slot_id == 0 {
+            // Lower fence so delete is not possible
+            Err(AccessMethodError::KeyNotFound)
+        } else {
+            // We can delete the key if it exists
+            if leaf_page.get_raw_key(slot_id) == key {
+                // Exact match
+                self.stats.dec_num_keys();
+                leaf_page.remove_at(slot_id);
+                Ok(())
+            } else {
+                // Non-existent key
+                Err(AccessMethodError::KeyNotFound)
+            }
+        }
+    }
+}
+
+impl<T: MemPool> UniqueKeyIndex for FosterBtree<T> {
+    type Iter = FosterBtreeRangeScanner<T>;
+
+    fn get(&self, key: &[u8]) -> Result<Vec<u8>, AccessMethodError> {
+        self.get_kv(key).map(|(_, val)| val)
+    }
+
+    fn insert(&self, key: &[u8], value: &[u8]) -> Result<(), AccessMethodError> {
+        self.insert_kv(key, value, false)
+    }
+
+    fn update(&self, key: &[u8], value: &[u8]) -> Result<(), AccessMethodError> {
+        self.update_kv(key, value)
+    }
+
+    /// Physical deletion of a key
+    fn delete(&self, key: &[u8]) -> Result<(), AccessMethodError> {
+        self.delete_kv(key)
+    }
+
     fn upsert(&self, key: &[u8], value: &[u8]) -> Result<(), AccessMethodError> {
         let mut leaf_page = self.traverse_to_leaf_for_write(key);
         log_info!("Acquired write lock for page {}", leaf_page.get_id());
@@ -1934,7 +2047,7 @@ impl<T: MemPool> UniqueKeyIndex for FosterBtree<T> {
         if slot_id == 0 {
             // Lower fence so insert is ok. We insert the key-value at the next position of the lower fence.
             self.stats.inc_num_keys();
-            self.insert_at_slot_or_split(&mut leaf_page, slot_id + 1, key, value);
+            self.insert_at_slot_or_split(&mut leaf_page, slot_id + 1, key, value, false);
         } else {
             // We can insert the key if it does not exist
             if leaf_page.get_raw_key(slot_id) == key {
@@ -1943,7 +2056,7 @@ impl<T: MemPool> UniqueKeyIndex for FosterBtree<T> {
             } else {
                 // Non-existent key
                 self.stats.inc_num_keys();
-                self.insert_at_slot_or_split(&mut leaf_page, slot_id + 1, key, value);
+                self.insert_at_slot_or_split(&mut leaf_page, slot_id + 1, key, value, false);
             }
         }
         Ok(())
@@ -1961,7 +2074,7 @@ impl<T: MemPool> UniqueKeyIndex for FosterBtree<T> {
         if slot_id == 0 {
             // Lower fence so insert is ok. We insert the key-value at the next position of the lower fence.
             self.stats.inc_num_keys();
-            self.insert_at_slot_or_split(&mut leaf_page, slot_id + 1, key, value);
+            self.insert_at_slot_or_split(&mut leaf_page, slot_id + 1, key, value, false);
         } else {
             // We can insert the key if it does not exist
             if leaf_page.get_raw_key(slot_id) == key {
@@ -1971,32 +2084,10 @@ impl<T: MemPool> UniqueKeyIndex for FosterBtree<T> {
             } else {
                 // Non-existent key
                 self.stats.inc_num_keys();
-                self.insert_at_slot_or_split(&mut leaf_page, slot_id + 1, key, value);
+                self.insert_at_slot_or_split(&mut leaf_page, slot_id + 1, key, value, false);
             }
         }
         Ok(())
-    }
-
-    /// Physical deletion of a key
-    fn delete(&self, key: &[u8]) -> Result<(), AccessMethodError> {
-        let mut leaf_page = self.traverse_to_leaf_for_write(key);
-        log_info!("Acquired write lock for page {}", leaf_page.get_id());
-        let slot_id = leaf_page.upper_bound_slot_id(&BTreeKey::new(key)) - 1;
-        if slot_id == 0 {
-            // Lower fence cannot be deleted
-            Err(AccessMethodError::KeyNotFound)
-        } else {
-            // We can delete the key if it exists
-            if leaf_page.get_raw_key(slot_id) == key {
-                // Exact match
-                self.stats.dec_num_keys();
-                leaf_page.remove_at(slot_id);
-                Ok(())
-            } else {
-                // Non-existent key
-                Err(AccessMethodError::KeyNotFound)
-            }
-        }
     }
 
     fn scan(self: &Arc<Self>) -> Self::Iter {
@@ -2862,7 +2953,7 @@ impl<T: MemPool> FosterBtreeAppendOnly<T> {
         suffixed_key[key.len()..].copy_from_slice(&new_suffix.to_be_bytes());
         self.fbt.stats.inc_num_keys();
         self.fbt
-            .insert_at_slot_or_split(&mut leaf_page, slot_id + 1, &suffixed_key, value);
+            .insert_at_slot_or_split(&mut leaf_page, slot_id + 1, &suffixed_key, value, false);
         Ok(())
     }
 
@@ -3233,11 +3324,11 @@ mod tests {
         p0.append_sorted(
             &left
                 .iter()
-                .map(|&x| (to_bytes(x), to_bytes(x)))
+                .map(|&x| (false, to_bytes(x), to_bytes(x)))
                 .collect::<Vec<_>>(),
         );
         let foster_val = InnerVal::new_with_frame_id(p1.get_id(), p1.frame_id());
-        p0.insert(&k1, &foster_val.to_bytes());
+        p0.insert(&k1, &foster_val.to_bytes(), false);
 
         p1.init();
         p1.set_level(0);
@@ -3246,7 +3337,7 @@ mod tests {
         p1.append_sorted(
             &right
                 .iter()
-                .map(|&x| (to_bytes(x), to_bytes(x)))
+                .map(|&x| (false, to_bytes(x), to_bytes(x)))
                 .collect::<Vec<_>>(),
         );
 
@@ -3329,11 +3420,11 @@ mod tests {
         p0.append_sorted(
             &left
                 .iter()
-                .map(|&x| (to_bytes(x), to_bytes(x)))
+                .map(|&x| (false, to_bytes(x), to_bytes(x)))
                 .collect::<Vec<_>>(),
         );
         let foster_val = InnerVal::new_with_frame_id(p1.get_id(), p1.frame_id());
-        p0.insert(&k1, &foster_val.to_bytes());
+        p0.insert(&k1, &foster_val.to_bytes(), false);
 
         p1.init();
         p1.set_level(0);
@@ -3342,7 +3433,7 @@ mod tests {
         p1.append_sorted(
             &right
                 .iter()
-                .map(|&x| (to_bytes(x), to_bytes(x)))
+                .map(|&x| (false, to_bytes(x), to_bytes(x)))
                 .collect::<Vec<_>>(),
         );
 
@@ -3440,7 +3531,7 @@ mod tests {
         parent.set_high_fence(&k2);
         parent.set_level(1);
         let val = InnerVal::new_with_frame_id(child0.get_id(), child0.frame_id());
-        parent.insert(&k0, &val.to_bytes());
+        parent.insert(&k0, &val.to_bytes(), false);
 
         child0.init();
         child0.set_low_fence(&k0);
@@ -3449,12 +3540,12 @@ mod tests {
         child0.append_sorted(
             &left
                 .iter()
-                .map(|&x| (to_bytes(x), to_bytes(x)))
+                .map(|&x| (false, to_bytes(x), to_bytes(x)))
                 .collect::<Vec<_>>(),
         );
         child0.set_has_foster_child(true);
         let foster_val = InnerVal::new_with_frame_id(child1.get_id(), child1.frame_id());
-        child0.insert(&k1, &foster_val.to_bytes());
+        child0.insert(&k1, &foster_val.to_bytes(), false);
 
         child1.init();
         child1.set_low_fence(&k1);
@@ -3463,7 +3554,7 @@ mod tests {
         child1.append_sorted(
             &right
                 .iter()
-                .map(|&x| (to_bytes(x), to_bytes(x)))
+                .map(|&x| (false, to_bytes(x), to_bytes(x)))
                 .collect::<Vec<_>>(),
         );
 
@@ -3566,9 +3657,9 @@ mod tests {
         parent.set_high_fence(&k2);
         parent.set_level(1);
         let val = InnerVal::new_with_frame_id(child0.get_id(), child0.frame_id());
-        parent.insert(&k0, &val.to_bytes());
+        parent.insert(&k0, &val.to_bytes(), false);
         let val = InnerVal::new_with_frame_id(child1.get_id(), child1.frame_id());
-        parent.insert(&k1, &val.to_bytes());
+        parent.insert(&k1, &val.to_bytes(), false);
 
         child0.init();
         child0.set_low_fence(&k0);
@@ -3577,7 +3668,7 @@ mod tests {
         child0.append_sorted(
             &left
                 .iter()
-                .map(|&x| (to_bytes(x), to_bytes(x)))
+                .map(|&x| (false, to_bytes(x), to_bytes(x)))
                 .collect::<Vec<_>>(),
         );
 
@@ -3588,7 +3679,7 @@ mod tests {
         child1.append_sorted(
             &right
                 .iter()
-                .map(|&x| (to_bytes(x), to_bytes(x)))
+                .map(|&x| (false, to_bytes(x), to_bytes(x)))
                 .collect::<Vec<_>>(),
         );
 
@@ -3676,11 +3767,11 @@ mod tests {
         // Insert 10 slots into the root. Add foster child at the end.
         for i in 1..=10 {
             let key = to_bytes(i);
-            root.insert(&key, &key);
+            root.insert(&key, &key, false);
         }
         let foster_key = to_bytes(11);
         let val = InnerVal::new_with_frame_id(foster_child.get_id(), foster_child.frame_id());
-        root.insert(&foster_key, &val.to_bytes());
+        root.insert(&foster_key, &val.to_bytes(), false);
         root.set_has_foster_child(true);
 
         foster_child.init();
@@ -3690,7 +3781,7 @@ mod tests {
         // Insert 10 slots into the foster child
         for i in 11..=20 {
             let key = to_bytes(i);
-            foster_child.insert(&key, &key);
+            foster_child.insert(&key, &key, false);
         }
 
         child.init();
@@ -3759,7 +3850,7 @@ mod tests {
         root.init_as_root();
         root.increment_level();
         let val = InnerVal::new_with_frame_id(child.get_id(), child.frame_id());
-        root.insert(&[], &val.to_bytes());
+        root.insert(&[], &val.to_bytes(), false);
 
         child.init();
         child.set_low_fence(&[]);
@@ -3767,7 +3858,7 @@ mod tests {
         // Insert 10 slots
         for i in 1..=10 {
             let key = to_bytes(i);
-            child.insert(&key, &key);
+            child.insert(&key, &key, false);
         }
         child.set_level(0);
 
@@ -3825,13 +3916,13 @@ mod tests {
         this.set_high_fence(&k2);
         this.set_has_foster_child(true);
         let val = InnerVal::new_with_frame_id(foster.get_id(), foster.frame_id());
-        this.insert(&k1, &val.to_bytes());
+        this.insert(&k1, &val.to_bytes(), false);
         {
             // Insert a slot into this page so that the total size of the page is this_size
             let current_size = this.total_bytes_used();
             let val_size = this_size - current_size - this.bytes_needed(&k0, &[]);
             let val = vec![2_u8; val_size as usize];
-            this.insert(&k0, &val);
+            this.insert(&k0, &val, false);
         }
         assert_eq!(this.total_bytes_used(), this_size);
 
@@ -3845,7 +3936,7 @@ mod tests {
             let current_size = foster.total_bytes_used();
             let val_size = foster_size - current_size - this.bytes_needed(&k1, &[]);
             let val = vec![2_u8; val_size as usize];
-            foster.insert(&k1, &val);
+            foster.insert(&k1, &val, false);
         }
 
         // Run consistency checks
@@ -4002,9 +4093,9 @@ mod tests {
         parent.set_high_fence(&k2);
         parent.set_level(1);
         let val = InnerVal::new_with_frame_id(child0.get_id(), child0.frame_id());
-        parent.insert(&k0, &val.to_bytes());
+        parent.insert(&k0, &val.to_bytes(), false);
         let val = InnerVal::new_with_frame_id(child1.get_id(), child1.frame_id());
-        parent.insert(&k1, &val.to_bytes());
+        parent.insert(&k1, &val.to_bytes(), false);
 
         child0.init();
         child0.set_low_fence(&k0);
@@ -4015,7 +4106,7 @@ mod tests {
             let current_size = child0.total_bytes_used();
             let val_size = child0_size - current_size - child0.bytes_needed(&k0, &[]);
             let val = vec![2_u8; val_size as usize];
-            child0.insert(&k0, &val);
+            child0.insert(&k0, &val, false);
         }
 
         child1.init();
@@ -4061,7 +4152,7 @@ mod tests {
         parent.set_high_fence(&k2);
         parent.set_level(1);
         let val = InnerVal::new_with_frame_id(child0.get_id(), child0.frame_id());
-        parent.insert(&k0, &val.to_bytes());
+        parent.insert(&k0, &val.to_bytes(), false);
 
         child0.init();
         child0.set_low_fence(&k0);
@@ -4069,13 +4160,13 @@ mod tests {
         child0.set_level(0);
         child0.set_has_foster_child(true);
         let val = InnerVal::new_with_frame_id(child1.get_id(), child1.frame_id());
-        child0.insert(&k1, &val.to_bytes());
+        child0.insert(&k1, &val.to_bytes(), false);
         {
             // Insert a slot into child0 page so that the total size of the page is child0_size
             let current_size = child0.total_bytes_used();
             let val_size = child0_size - current_size - child0.bytes_needed(&k0, &[]);
             let val = vec![2_u8; val_size as usize];
-            child0.insert(&k0, &val);
+            child0.insert(&k0, &val, false);
         }
 
         child1.init();
@@ -4120,7 +4211,7 @@ mod tests {
         parent.set_high_fence(&k2);
         parent.set_level(1);
         let val = InnerVal::new_with_frame_id(child0.get_id(), child0.frame_id());
-        parent.insert(&k0, &val.to_bytes());
+        parent.insert(&k0, &val.to_bytes(), false);
 
         child0.init();
         child0.set_low_fence(&k0);
@@ -4133,7 +4224,7 @@ mod tests {
             let current_size = child0.total_bytes_used();
             let val_size = child0_size - current_size - child0.bytes_needed(&k0, &[]);
             let val = vec![2_u8; val_size as usize];
-            child0.insert(&k0, &val);
+            child0.insert(&k0, &val, false);
         }
 
         // Run consistency checks
@@ -4294,6 +4385,100 @@ mod tests {
             let key = to_bytes(*i);
             let current_val = btree.get(&key).unwrap();
             assert_eq!(current_val, val);
+        }
+    }
+
+    #[rstest]
+    #[case::bp(get_test_bp(3))]
+    #[case::in_mem(get_in_mem_pool())]
+    fn test_ghost_insertion<T: MemPool>(#[case] bp: Arc<T>) {
+        let btree = setup_btree_empty(bp.clone());
+        // Insert 1024 bytes
+        let val = vec![3_u8; 1024];
+        let order = [6, 3, 8, 1, 5, 7, 2, 4, 9, 0];
+        for i in order.iter() {
+            println!(
+                "**************************** Inserting key {} **************************",
+                i
+            );
+            let key = to_bytes(*i);
+            btree.insert_kv(&key, &val, true).unwrap();
+        }
+        for i in order.iter() {
+            println!(
+                "**************************** Getting key {} **************************",
+                i
+            );
+            let key = to_bytes(*i);
+            let (is_ghost, current_val) = btree.get_kv(&key).unwrap();
+            assert_eq!(current_val, val);
+            assert_eq!(is_ghost, true);
+        }
+        // Delete half and check if the ghost entries are still there.
+        for i in 0..5 {
+            println!(
+                "**************************** Deleting key {} **************************",
+                i
+            );
+            let key = to_bytes(i);
+            btree.delete(&key).unwrap();
+        }
+        for i in 5..10 {
+            println!(
+                "**************************** Getting key {} **************************",
+                i
+            );
+            let key = to_bytes(i);
+            let (is_ghost, current_val) = btree.get_kv(&key).unwrap();
+            assert_eq!(current_val, val);
+            assert_eq!(is_ghost, true);
+        }
+        // Reinsert the deleted keys and check if the ghost entries are still there
+        for i in 0..5 {
+            println!(
+                "**************************** Reinserting key {} **************************",
+                i
+            );
+            let key = to_bytes(i);
+            btree.insert_kv(&key, &val, true).unwrap();
+        }
+        for i in 0..10 {
+            println!(
+                "**************************** Getting key {} **************************",
+                i
+            );
+            let key = to_bytes(i);
+            let (is_ghost, current_val) = btree.get_kv(&key).unwrap();
+            assert_eq!(current_val, val);
+            assert_eq!(is_ghost, true);
+        }
+        // Delete all and reinsert non-ghost entries
+        for i in 0..10 {
+            println!(
+                "**************************** Deleting key {} **************************",
+                i
+            );
+            let key = to_bytes(i);
+            btree.delete(&key).unwrap();
+        }
+        for i in 0..10 {
+            println!(
+                "**************************** Reinserting key {} **************************",
+                i
+            );
+            let key = to_bytes(i);
+            btree.insert(&key, &val).unwrap();
+        }
+        // Check if the ghost entries are gone
+        for i in 0..10 {
+            println!(
+                "**************************** Getting key {} **************************",
+                i
+            );
+            let key = to_bytes(i);
+            let (is_ghost, current_val) = btree.get_kv(&key).unwrap();
+            assert_eq!(current_val, val);
+            assert_eq!(is_ghost, false);
         }
     }
 

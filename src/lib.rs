@@ -2,6 +2,7 @@ pub mod access_method;
 pub mod bench_utils;
 pub mod bp;
 pub mod random;
+pub mod tpcc;
 pub mod txn_storage;
 pub mod write_ahead_log;
 
