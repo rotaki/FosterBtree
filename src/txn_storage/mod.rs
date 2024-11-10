@@ -1,4 +1,5 @@
 mod inmem;
+mod locktable;
 mod ondisk;
 mod ondisk_2pl;
 mod ondisk_silo;
@@ -154,7 +155,7 @@ mod tests {
 
         let iter_handle = storage.scan_range(&txn, c_id, ScanOptions::new()).unwrap();
 
-        while let Ok(Some((key, val))) = storage.iter_next(&iter_handle) {
+        while let Ok(Some((key, val))) = storage.iter_next(&txn, &iter_handle) {
             let key = key.to_vec();
             let val = val.to_vec();
             assert!(kvs.remove(&(key.clone(), val.clone())));
@@ -215,7 +216,7 @@ mod tests {
         // Check if all values are inserted
         let txn = storage.begin_txn(db_id, TxnOptions::default()).unwrap();
         let iter_handle = storage.scan_range(&txn, c_id, ScanOptions::new()).unwrap();
-        while let Ok(Some((key, val))) = storage.iter_next(&iter_handle) {
+        while let Ok(Some((key, val))) = storage.iter_next(&txn, &iter_handle) {
             let key = key.to_vec();
             let val = val.to_vec();
             assert!(verify_kvs.remove(&(key.clone(), val.clone())));
@@ -278,7 +279,7 @@ mod tests {
                 .scan_range(&txn, *c_id, ScanOptions::new())
                 .unwrap();
             let mut count = 0;
-            while let Ok(Some((key, val))) = storage2.iter_next(&iter_handle) {
+            while let Ok(Some((key, val))) = storage2.iter_next(&txn, &iter_handle) {
                 let key = u8::from_be_bytes(key.as_slice().try_into().unwrap());
                 assert_eq!(key, count);
                 assert_eq!(val, vec![*c_id as u8; 4]);

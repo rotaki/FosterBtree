@@ -6,7 +6,6 @@ pub mod append_only_store;
 pub mod bloom_chain;
 pub mod chain;
 pub mod fbt;
-pub mod fbt_secondary;
 pub mod hash_fbt;
 pub mod hashindex;
 
@@ -29,7 +28,6 @@ pub mod prelude {
     pub use super::bloom_chain::prelude::*;
     pub use super::chain::prelude::*;
     pub use super::fbt::prelude::*;
-    pub use super::fbt_secondary::prelude::*;
     pub use super::hash_fbt::prelude::*;
     pub use super::hashindex::prelude::*;
     pub use super::AccessMethodError;

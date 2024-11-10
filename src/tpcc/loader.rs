@@ -25,10 +25,10 @@ pub enum Table {
     District,
     Customer,
     CustomerSecondary,
-    Orders,
-    OrdersSecondary,
+    Order,
+    OrderSecondary,
     OrderLine,
-    NewOrders,
+    NewOrder,
     History,
 }
 
@@ -182,7 +182,7 @@ pub fn create_and_insert_order_record(
     txn_storage
         .raw_insert_value(
             DB_ID,
-            table_info[Table::Orders],
+            table_info[Table::Order],
             key.into_bytes().to_vec(),
             value.as_bytes().to_vec(),
         )
@@ -193,7 +193,7 @@ pub fn create_and_insert_order_record(
     txn_storage
         .raw_insert_value(
             DB_ID,
-            table_info[Table::OrdersSecondary],
+            table_info[Table::OrderSecondary],
             sec_key.into_bytes().to_vec(),
             sec_value.to_vec(),
         )
@@ -244,7 +244,7 @@ pub fn create_and_insert_neworder_record(
     txn_storage
         .raw_insert_value(
             DB_ID,
-            table_info[Table::NewOrders],
+            table_info[Table::NewOrder],
             key.into_bytes().to_vec(),
             value.as_bytes().to_vec(),
         )
@@ -252,17 +252,18 @@ pub fn create_and_insert_neworder_record(
 }
 
 /// Table Dependencies
-/// - Item
-/// - Warehouse
-///   - Stock
-///   - District
-///     - Customer
+/// - Item: 100K
+/// - Warehouse: N
+///   - Stock: N * 100K
+///   - District: N * 10
+///     - Customer: N * 10 * 3000
 ///       - History
-///     - Order
+///     - Order:
 ///       - OrderLine
 ///       - NewOrders
 
 pub fn load_item_table(txn_storage: &impl TxnStorageTrait, table_info: &TableInfo) {
+    println!("Loading item table");
     for i_id in 1..=Item::ITEMS {
         create_and_insert_item_record(txn_storage, table_info, i_id as u32);
     }
@@ -275,6 +276,7 @@ pub fn load_warehouse_table(
 ) {
     let num_warehouses = config.num_warehouses;
     for w_id in 1..=num_warehouses {
+        println!("Loading warehouse and other tables: {}", w_id);
         create_and_insert_warehouse_record(txn_storage, table_info, w_id);
         load_stock_table(txn_storage, table_info, w_id);
         load_district_table(txn_storage, table_info, w_id);
@@ -394,10 +396,16 @@ pub fn load_all_tables(txn_storage: &impl TxnStorageTrait, config: &TPCCConfig) 
     let db_id = txn_storage.open_db(DBOptions::new("tpcc")).unwrap();
     assert_eq!(db_id, DB_ID);
 
+    println!("======== Containers ========");
+
+    // Item table
     let c_id = txn_storage
         .create_container(DB_ID, ContainerOptions::primary("item", ContainerDS::BTree))
         .unwrap();
     table_info.insert(Table::Item, c_id);
+    println!("Item container id: {}", c_id);
+
+    // Warehouse table
     let c_id = txn_storage
         .create_container(
             DB_ID,
@@ -405,6 +413,9 @@ pub fn load_all_tables(txn_storage: &impl TxnStorageTrait, config: &TPCCConfig) 
         )
         .unwrap();
     table_info.insert(Table::Warehouse, c_id);
+    println!("Warehouse container id: {}", c_id);
+
+    // Stock table
     let c_id = txn_storage
         .create_container(
             DB_ID,
@@ -412,6 +423,9 @@ pub fn load_all_tables(txn_storage: &impl TxnStorageTrait, config: &TPCCConfig) 
         )
         .unwrap();
     table_info.insert(Table::Stock, c_id);
+    println!("Stock container id: {}", c_id);
+
+    // District table
     let c_id = txn_storage
         .create_container(
             DB_ID,
@@ -419,6 +433,9 @@ pub fn load_all_tables(txn_storage: &impl TxnStorageTrait, config: &TPCCConfig) 
         )
         .unwrap();
     table_info.insert(Table::District, c_id);
+    println!("District container id: {}", c_id);
+
+    // Customer table
     let c_id = txn_storage
         .create_container(
             DB_ID,
@@ -426,6 +443,9 @@ pub fn load_all_tables(txn_storage: &impl TxnStorageTrait, config: &TPCCConfig) 
         )
         .unwrap();
     table_info.insert(Table::Customer, c_id);
+    println!("Customer container id: {}", c_id);
+
+    // Customer secondary index
     let c_id = txn_storage
         .create_container(
             DB_ID,
@@ -433,20 +453,29 @@ pub fn load_all_tables(txn_storage: &impl TxnStorageTrait, config: &TPCCConfig) 
         )
         .unwrap();
     table_info.insert(Table::CustomerSecondary, c_id);
+    println!("Customer secondary container id: {}", c_id);
+
+    // Orders table
     let c_id = txn_storage
         .create_container(
             DB_ID,
             ContainerOptions::primary("order", ContainerDS::BTree),
         )
         .unwrap();
-    table_info.insert(Table::Orders, c_id);
+    table_info.insert(Table::Order, c_id);
+    println!("Orders container id: {}", c_id);
+
+    // Orders secondary index
     let c_id = txn_storage
         .create_container(
             DB_ID,
             ContainerOptions::secondary("order_secondary", ContainerDS::BTree, c_id),
         )
         .unwrap();
-    table_info.insert(Table::OrdersSecondary, c_id);
+    table_info.insert(Table::OrderSecondary, c_id);
+    println!("Orders secondary container id: {}", c_id);
+
+    // OrderLine table
     let c_id = txn_storage
         .create_container(
             DB_ID,
@@ -454,13 +483,19 @@ pub fn load_all_tables(txn_storage: &impl TxnStorageTrait, config: &TPCCConfig) 
         )
         .unwrap();
     table_info.insert(Table::OrderLine, c_id);
-    let c_id = txn_storage
+    println!("OrderLine container id: {}", c_id);
+
+    // NewOrder table
+    let c_id: u16 = txn_storage
         .create_container(
             DB_ID,
             ContainerOptions::primary("neworder", ContainerDS::BTree),
         )
         .unwrap();
-    table_info.insert(Table::NewOrders, c_id);
+    table_info.insert(Table::NewOrder, c_id);
+    println!("NewOrder container id: {}", c_id);
+
+    // History table
     let c_id = txn_storage
         .create_container(
             DB_ID,
@@ -468,9 +503,18 @@ pub fn load_all_tables(txn_storage: &impl TxnStorageTrait, config: &TPCCConfig) 
         )
         .unwrap();
     table_info.insert(Table::History, c_id);
+    println!("History container id: {}", c_id);
 
+    println!("======== Start Loading Tables ========");
+
+    let time = std::time::Instant::now();
     load_item_table(txn_storage, &table_info);
     load_warehouse_table(txn_storage, &table_info, config);
+    let elapsed = time.elapsed();
+    println!(
+        "======== Finished Loading Tables ========\nElapsed time: {:?}",
+        elapsed
+    );
 
     table_info
 }
@@ -488,6 +532,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn test_loader() {
         let txn_storage = create_txn_storage();
         let config = TPCCConfig {

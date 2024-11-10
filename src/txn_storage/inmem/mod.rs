@@ -624,6 +624,7 @@ impl TxnStorageTrait for InMemStorage {
     // Iterate next
     fn iter_next(
         &self,
+        _txn: &Self::TxnHandle,
         iter: &Self::IteratorHandle,
     ) -> Result<Option<(Vec<u8>, Vec<u8>)>, TxnStorageStatus> {
         Ok(iter.next())

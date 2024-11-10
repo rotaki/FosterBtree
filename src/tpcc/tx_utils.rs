@@ -13,6 +13,15 @@ use clap::Parser;
 use super::loader::TableInfo;
 use super::record_definitions::urand_int;
 
+#[macro_export]
+macro_rules! write_fields {
+    ($out:expr, $($field:expr),*) => {
+        $(
+            $out.write($field);
+        )*
+    };
+}
+
 /// Configuration settings parsed from command-line arguments.
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -44,6 +53,7 @@ pub enum TPCCStatus {
 }
 
 /// Struct to accumulate output data.
+#[derive(Debug)]
 pub struct Output {
     pub out: u64,
 }
@@ -131,12 +141,25 @@ impl Index<usize> for Permutation {
 #[repr(u8)]
 #[derive(Debug, Clone, Copy)]
 pub enum TxnProfileID {
-    NewOrderTx = 0,
-    PaymentTx = 1,
-    OrderStatusTx = 2,
-    DeliveryTx = 3,
-    StockLevelTx = 4,
+    NewOrderTxn = 0,
+    PaymentTxn = 1,
+    OrderStatusTxn = 2,
+    DeliveryTxn = 3,
+    StockLevelTxn = 4,
     Max = 5,
+}
+
+impl From<u8> for TxnProfileID {
+    fn from(val: u8) -> Self {
+        match val {
+            0 => TxnProfileID::NewOrderTxn,
+            1 => TxnProfileID::PaymentTxn,
+            2 => TxnProfileID::OrderStatusTxn,
+            3 => TxnProfileID::DeliveryTxn,
+            4 => TxnProfileID::StockLevelTxn,
+            _ => panic!("Invalid TxnProfileID"),
+        }
+    }
 }
 
 // Mapping from TxProfileID to transaction profile structs.
@@ -153,6 +176,7 @@ pub trait TxnProfile {
 }
 
 /// Statistics per transaction type.
+#[derive(Debug)]
 pub struct PerTxnType {
     pub num_commits: usize,
     pub num_usr_aborts: usize,
@@ -196,6 +220,8 @@ impl PerTxnType {
 }
 
 /// Overall statistics struct.
+
+#[derive(Debug)]
 pub struct Stat {
     pub per_type: [PerTxnType; TxnProfileID::Max as usize],
 }
@@ -240,6 +266,45 @@ impl Stat {
             out.add(&self.per_type[i], false);
         }
         out
+    }
+}
+
+impl std::fmt::Display for Stat {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        let mut out = String::new();
+        for i in 0..(TxnProfileID::Max as usize) {
+            out.push_str(&format!("TxnType: {:?}\n", TxnProfileID::from(i as u8)));
+            out.push_str(&format!(
+                "  num_commits: {}\n",
+                self.per_type[i].num_commits
+            ));
+            out.push_str(&format!(
+                "  num_usr_aborts: {}\n",
+                self.per_type[i].num_usr_aborts
+            ));
+            out.push_str(&format!(
+                "  num_sys_aborts: {}\n",
+                self.per_type[i].num_sys_aborts
+            ));
+            out.push_str(&format!(
+                "  total_latency: {}\n",
+                self.per_type[i].total_latency
+            ));
+            out.push_str(&format!(
+                "  min_latency: {}\n",
+                self.per_type[i].min_latency
+            ));
+            out.push_str(&format!(
+                "  max_latency: {}\n",
+                self.per_type[i].max_latency
+            ));
+            out.push_str("  abort_details: [");
+            for j in 0..Stat::ABORT_DETAILS_SIZE {
+                out.push_str(&format!("{} ", self.per_type[i].abort_details[j]));
+            }
+            out.push_str("]\n");
+        }
+        write!(f, "{}", out)
     }
 }
 
@@ -295,7 +360,7 @@ impl ThreadLocalData {
 /// Function to check if the transaction did not succeed.
 pub fn not_successful<K>(config: &TPCCConfig, res: &Result<K, TxnStorageStatus>) -> bool {
     if config.random_abort && res.is_ok() && urand_int(1, 100) == 1 {
-        return true; // Randomized abort
+        return true; // Randomized system abort
     } else if res.is_err() {
         return true; // System abort
     } else {
@@ -329,15 +394,11 @@ impl<'a, T: TxnStorageTrait> TxHelper<'a, T> {
         abort_id: u8,
     ) -> TPCCStatus {
         match res {
-            Err(TxnStorageStatus::SystemAbort) => {
+            Err(e) => {
                 self.per_type.num_sys_aborts += 1;
                 self.per_type.abort_details[abort_id as usize] += 1;
                 self.txn_storage.abort_txn(handler).unwrap();
                 TPCCStatus::SystemAbort
-            }
-            Err(e) => {
-                log_info!("Unexpected error: {:?}", e);
-                TPCCStatus::Bug
             }
             _ => panic!("wrong TransactionResult"),
         }
@@ -346,17 +407,23 @@ impl<'a, T: TxnStorageTrait> TxHelper<'a, T> {
     /// Attempts to commit the transaction and updates statistics.
     /// If the transaction fails to commit, it is aborted and statistics are updated.
     pub fn commit(&mut self, handler: &T::TxnHandle, abort_id: u8, time: u64) -> TPCCStatus {
-        if self.txn_storage.commit_txn(handler, false).is_ok() {
-            self.per_type.total_latency += time;
-            self.per_type.min_latency = cmp::min(self.per_type.min_latency, time);
-            self.per_type.max_latency = cmp::max(self.per_type.max_latency, time);
-            self.per_type.num_commits += 1;
-            TPCCStatus::Success
-        } else {
-            self.txn_storage.abort_txn(handler).unwrap();
-            self.per_type.num_sys_aborts += 1;
-            self.per_type.abort_details[abort_id as usize] += 1;
-            TPCCStatus::SystemAbort
+        match self.txn_storage.commit_txn(handler, false) {
+            Ok(_) => {
+                self.per_type.total_latency += time;
+                self.per_type.min_latency = cmp::min(self.per_type.min_latency, time);
+                self.per_type.max_latency = cmp::max(self.per_type.max_latency, time);
+                self.per_type.num_commits += 1;
+                TPCCStatus::Success
+            }
+            Err(TxnStorageStatus::Aborted) => {
+                self.txn_storage.abort_txn(handler).unwrap();
+                self.per_type.num_sys_aborts += 1;
+                self.per_type.abort_details[abort_id as usize] += 1;
+                TPCCStatus::SystemAbort
+            }
+            Err(e) => {
+                panic!("Unexpected error: {:?}", e);
+            }
         }
     }
 
@@ -425,6 +492,24 @@ where
             TPCCStatus::Bug => {
                 panic!("Unexpected result");
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_permutation_elements() {
+        for _ in 0..100 {
+            let min = 0;
+            let max = 9;
+            let perm = Permutation::new(min, max);
+            let mut elements = perm.perm.clone();
+            elements.sort_unstable();
+            let expected: Vec<usize> = (min..=max).collect();
+            assert_eq!(elements, expected);
         }
     }
 }

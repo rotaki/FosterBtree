@@ -6,9 +6,12 @@ use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::Arc;
 
 use clap::ArgAction;
-use locktable::SimpleLockTable;
 
-use crate::access_method::fbt::{BTreeKey, FosterBtreeAppendOnly, FosterBtreeRangeScannerWithPageId};
+use crate::access_method::fbt::{
+    BTreeKey, FosterBtreeAppendOnly, FosterBtreeAppendOnlyCursor,
+    FosterBtreeAppendOnlyRangeScanner, FosterBtreeAppendOnlyRangeScannerWithPageId,
+    FosterBtreeCursor, FosterBtreeRangeScannerWithPageId,
+};
 use crate::bp::{FrameReadGuard, FrameWriteGuard, PageFrameKey};
 use crate::page::PageId;
 use crate::prelude::{FosterBtreePage, UniqueKeyIndex};
@@ -18,8 +21,9 @@ use crate::{
     prelude::{ContainerKey, FosterBtree},
 };
 
+use super::locktable::SingleThreadLockTable as LockTable;
 use super::txn_storage_trait::ContainerType;
-use super::{ContainerOptions, TxnOptions, TxnStorageTrait};
+use super::{ContainerOptions, DBOptions, TxnOptions, TxnStorageTrait};
 
 // Each transaction has a read-write set
 
@@ -29,6 +33,15 @@ pub struct PhysicalAddress {
     frame_id: u32,
 }
 
+impl Default for PhysicalAddress {
+    fn default() -> Self {
+        PhysicalAddress {
+            page_id: 0,
+            frame_id: u32::MAX,
+        }
+    }
+}
+
 impl PhysicalAddress {
     pub fn new(page_id: PageId, frame_id: u32) -> Self {
         PhysicalAddress { page_id, frame_id }
@@ -36,6 +49,19 @@ impl PhysicalAddress {
 
     pub fn to_pf_key(&self, c_id: ContainerId) -> PageFrameKey {
         PageFrameKey::new_with_frame_id(ContainerKey::new(0, c_id), self.page_id, self.frame_id)
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Self {
+        let page_id = u32::from_be_bytes(bytes[0..4].try_into().unwrap());
+        let frame_id = u32::from_be_bytes(bytes[4..8].try_into().unwrap());
+        PhysicalAddress { page_id, frame_id }
+    }
+
+    pub fn to_bytes(&self) -> [u8; 8] {
+        let mut bytes = [0; 8];
+        bytes[0..4].copy_from_slice(&self.page_id.to_be_bytes());
+        bytes[4..8].copy_from_slice(&self.frame_id.to_be_bytes());
+        bytes
     }
 }
 
@@ -180,12 +206,13 @@ impl ReadWriteSet {
     }
 }
 
-const CONTAINER_ID_COUNTER: AtomicU16 = AtomicU16::new(0);
+static CONTAINER_ID_COUNTER: AtomicU16 = AtomicU16::new(0);
 
 // UniqueKeyIndex
 pub struct PrimaryStorage<M: MemPool> {
+    pub c_id: ContainerId,
     pub btree: Arc<FosterBtree<M>>,
-    pub locktable: SimpleLockTable,
+    pub locktable: Arc<LockTable>,
 }
 
 pub struct PrimaryStorages<M: MemPool> {
@@ -206,10 +233,17 @@ impl<M: MemPool> PrimaryStorages<M> {
 
     pub fn create_new(&self, bp: &Arc<M>) -> ContainerId {
         let map: &mut HashMap<u16, Arc<PrimaryStorage<M>>> = unsafe { &mut *self.map.get() };
-        let c_id = CONTAINER_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let c_id = CONTAINER_ID_COUNTER.fetch_add(1, Ordering::AcqRel);
         let btree = Arc::new(FosterBtree::new(ContainerKey::new(0, c_id), bp.clone()));
-        let locktable = SimpleLockTable::new();
-        map.insert(c_id, Arc::new(PrimaryStorage { btree, locktable }));
+        let locktable = Arc::new(LockTable::new());
+        map.insert(
+            c_id,
+            Arc::new(PrimaryStorage {
+                c_id,
+                btree,
+                locktable,
+            }),
+        );
         c_id
     }
 }
@@ -217,7 +251,9 @@ impl<M: MemPool> PrimaryStorages<M> {
 unsafe impl<M: MemPool> Sync for PrimaryStorages<M> {}
 
 pub struct SecondaryStorage<M: MemPool> {
+    pub c_id: ContainerId,
     pub btree: Arc<FosterBtreeAppendOnly<M>>,
+    pub locktable: Arc<LockTable>,
     pub ps: Arc<PrimaryStorage<M>>,
 }
 
@@ -239,15 +275,18 @@ impl<M: MemPool> SecondaryStorages<M> {
 
     pub fn create_new(&self, bp: &Arc<M>, ps: &Arc<PrimaryStorage<M>>) -> ContainerId {
         let map: &mut HashMap<u16, Arc<SecondaryStorage<M>>> = unsafe { &mut *self.map.get() };
-        let c_id = CONTAINER_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let c_id = CONTAINER_ID_COUNTER.fetch_add(1, Ordering::AcqRel);
         let btree = Arc::new(FosterBtreeAppendOnly::new(
             ContainerKey::new(0, c_id),
             bp.clone(),
         ));
+        let locktable = Arc::new(LockTable::new());
         map.insert(
             c_id,
             Arc::new(SecondaryStorage {
+                c_id,
                 btree,
+                locktable,
                 ps: ps.clone(),
             }),
         );
@@ -301,9 +340,10 @@ impl Display for NoWaitTxn {
 
 // Commit:
 // 1. Release all read locks
-// 2. Write all updates and inserts to storage
-// 3. Physically delete all deletes from storage
-// 4. Release all write locks
+// 2. Update: apply the update to storage
+// 3. Insert: flip the ghost bit in storage
+// 4. Delete: remove the record from storage
+// 5. Release all write locks
 
 // Abort:
 // 1. Revert all failed inserts
@@ -312,20 +352,22 @@ impl Display for NoWaitTxn {
 impl NoWaitTxn {
     pub fn read<M: MemPool, K: AsRef<[u8]>>(
         &self,
-        c_id: ContainerId,
         ps: &PrimaryStorage<M>,
         key: K,
-    ) -> Result<Vec<u8>, TxnStorageStatus> {
-        // Get from rwset or insert a new entry
+        hint: Option<PhysicalAddress>,
+    ) -> Result<(Vec<u8>, PhysicalAddress), TxnStorageStatus> {
+        let c_id = ps.c_id;
         let rwset_all = unsafe { &mut *self.rwset.get() };
         let rwset = rwset_all.entry(c_id).or_insert_with(ReadWriteSet::new);
+
         if let Some(e) = rwset.get_mut(key.as_ref()) {
             match e {
                 RWEntry::Read(_, pa) => {
+                    // Prioritize the hint in rwset over the hint from the caller.
                     let storage = &ps.btree;
                     let page = storage.traverse_to_leaf_for_read_with_hint(
                         key.as_ref(),
-                        Some(&pa.to_pf_key(c_id)),
+                        Some(pa.to_pf_key(c_id)),
                     );
                     let slot_id = page.upper_bound_slot_id(&BTreeKey::new(key.as_ref())) - 1;
                     if slot_id == 0 || page.get_raw_key(slot_id) != key.as_ref() {
@@ -334,12 +376,12 @@ impl NoWaitTxn {
                     } else {
                         // Update the physical address
                         let new_pa = PhysicalAddress::new(page.get_id(), page.frame_id());
-                        e.update_physical_address(new_pa);
-                        return Ok(page.get_val(slot_id).to_vec());
+                        e.update_physical_address(new_pa.clone());
+                        return Ok((page.get_val(slot_id).to_vec(), new_pa));
                     }
                 }
-                RWEntry::Update(_, _, value) | RWEntry::Insert(_, _, value) => {
-                    return Ok(value.clone())
+                RWEntry::Update(_, pa, value) | RWEntry::Insert(_, pa, value) => {
+                    return Ok((value.clone(), pa.clone()))
                 }
                 RWEntry::Delete(_, _) => return Err(TxnStorageStatus::KeyNotFound),
             }
@@ -347,7 +389,8 @@ impl NoWaitTxn {
             // Find from index
             let storage = &ps.btree;
             let locktable = &ps.locktable;
-            let page = storage.traverse_to_leaf_for_read_with_hint(key.as_ref(), None);
+            let page = storage
+                .traverse_to_leaf_for_read_with_hint(key.as_ref(), hint.map(|h| h.to_pf_key(c_id)));
             let slot_id = page.upper_bound_slot_id(&BTreeKey::new(key.as_ref())) - 1;
             if slot_id == 0 || page.get_raw_key(slot_id) != key.as_ref() {
                 // Lower fence or non-existent key
@@ -355,33 +398,25 @@ impl NoWaitTxn {
             } else {
                 // Lock the key
                 if !locktable.try_shared(key.as_ref().to_vec()) {
-                    println!("TxnConflict triggered");
                     return Err(TxnStorageStatus::TxnConflict);
                 }
                 // Insert into rwset
                 let new_pa = PhysicalAddress::new(page.get_id(), page.frame_id());
-                rwset.insert(key.as_ref().to_vec(), RWEntry::Read(false, new_pa));
-                return Ok(page.get_val(slot_id).to_vec());
+                rwset.insert(key.as_ref().to_vec(), RWEntry::Read(false, new_pa.clone()));
+                return Ok((page.get_val(slot_id).to_vec(), new_pa));
             }
         }
     }
 
-    pub fn read_for_update<K: AsRef<[u8]>>(
-        &self,
-        c_id: ContainerId,
-        key: K,
-    ) -> Result<Vec<u8>, TxnStorageStatus> {
-        unimplemented!()
-    }
-
     pub fn insert<M: MemPool, K: AsRef<[u8]>, V: AsRef<[u8]>>(
         &self,
-        c_id: ContainerId,
         ps: &PrimaryStorage<M>,
         key: K,
         value: V,
-    ) -> Result<(), TxnStorageStatus> {
+        hint: Option<PhysicalAddress>,
+    ) -> Result<PhysicalAddress, TxnStorageStatus> {
         // Get from rwset or insert a new entry
+        let c_id = ps.c_id;
         let rwset_all = unsafe { &mut *self.rwset.get() };
         let rwset = rwset_all.entry(c_id).or_insert_with(ReadWriteSet::new);
         if let Some(e) = rwset.get_mut(key.as_ref()) {
@@ -390,16 +425,19 @@ impl NoWaitTxn {
                     return Err(TxnStorageStatus::KeyExists)
                 }
                 RWEntry::Delete(inserted_as_ghost, pa) => {
-                    // Change to update
+                    let pa = pa.clone();
                     *e = RWEntry::Update(*inserted_as_ghost, pa.clone(), value.as_ref().to_vec());
-                    Ok(())
+                    Ok(pa)
                 }
             }
         } else {
             // Find from index
             let storage = &ps.btree;
             let locktable = &ps.locktable;
-            let mut page = storage.traverse_to_leaf_for_write_with_hint(key.as_ref(), None);
+            let mut page = storage.traverse_to_leaf_for_write_with_hint(
+                key.as_ref(),
+                hint.map(|h| h.to_pf_key(c_id)),
+            );
             let slot_id = page.upper_bound_slot_id(&BTreeKey::new(key.as_ref())) - 1;
             if slot_id == 0 || page.get_raw_key(slot_id) != key.as_ref() {
                 // Lower fence or non-existent key
@@ -481,9 +519,9 @@ impl NoWaitTxn {
                 let new_pa = PhysicalAddress::new(page.get_id(), page.frame_id());
                 rwset.insert(
                     key.as_ref().to_vec(),
-                    RWEntry::Insert(true, new_pa, value.as_ref().to_vec()),
+                    RWEntry::Insert(true, new_pa.clone(), value.as_ref().to_vec()),
                 );
-                Ok(())
+                Ok(new_pa)
             } else {
                 return Err(TxnStorageStatus::KeyExists);
             }
@@ -492,11 +530,12 @@ impl NoWaitTxn {
 
     pub fn update<M: MemPool, K: AsRef<[u8]>, V: AsRef<[u8]>>(
         &self,
-        c_id: ContainerId,
         ps: &PrimaryStorage<M>,
         key: K,
         value: V,
-    ) -> Result<(), TxnStorageStatus> {
+        hint: Option<PhysicalAddress>,
+    ) -> Result<PhysicalAddress, TxnStorageStatus> {
+        let c_id = ps.c_id;
         let rwset_all = unsafe { &mut *self.rwset.get() };
         let rwset = rwset_all.entry(c_id).or_insert_with(ReadWriteSet::new);
         if let Some(e) = rwset.get_mut(key.as_ref()) {
@@ -508,17 +547,20 @@ impl NoWaitTxn {
                         return Err(TxnStorageStatus::TxnConflict);
                     }
                     // Insert UPDATE entry into rwset
+                    let pa = pa.clone();
                     *e = RWEntry::Update(*inserted_as_ghost, pa.clone(), value.as_ref().to_vec());
-                    Ok(())
+                    Ok(pa)
                 }
-                RWEntry::Update(..) => {
+                RWEntry::Update(_, pa, _) => {
+                    let pa = pa.clone();
                     e.update_value(value.as_ref().to_vec());
-                    Ok(())
+                    Ok(pa)
                 }
                 RWEntry::Insert(inserted_as_ghost, pa, _) => {
                     // Insert UPDATE entry into rwset
+                    let pa = pa.clone();
                     *e = RWEntry::Update(*inserted_as_ghost, pa.clone(), value.as_ref().to_vec());
-                    Ok(())
+                    Ok(pa)
                 }
                 RWEntry::Delete(..) => Err(TxnStorageStatus::KeyNotFound),
             }
@@ -526,7 +568,8 @@ impl NoWaitTxn {
             // Abort if not found in index
             let storage = &ps.btree;
             let locktable = &ps.locktable;
-            let page = storage.traverse_to_leaf_for_read_with_hint(key.as_ref(), None);
+            let page = storage
+                .traverse_to_leaf_for_read_with_hint(key.as_ref(), hint.map(|h| h.to_pf_key(c_id)));
             let slot_id = page.upper_bound_slot_id(&BTreeKey::new(key.as_ref())) - 1;
             if slot_id == 0 || page.get_raw_key(slot_id) != key.as_ref() {
                 return Err(TxnStorageStatus::KeyNotFound);
@@ -539,19 +582,20 @@ impl NoWaitTxn {
                 let new_pa = PhysicalAddress::new(page.get_id(), page.frame_id());
                 rwset.insert(
                     key.as_ref().to_vec(),
-                    RWEntry::Update(false, new_pa, value.as_ref().to_vec()),
+                    RWEntry::Update(false, new_pa.clone(), value.as_ref().to_vec()),
                 );
-                Ok(())
+                Ok(new_pa)
             }
         }
     }
 
     pub fn delete<M: MemPool, K: AsRef<[u8]>>(
         &self,
-        c_id: ContainerId,
         ps: &PrimaryStorage<M>,
         key: K,
-    ) -> Result<(), TxnStorageStatus> {
+        hint: Option<PhysicalAddress>,
+    ) -> Result<PhysicalAddress, TxnStorageStatus> {
+        let c_id = ps.c_id;
         let rwset_all = unsafe { &mut *self.rwset.get() };
         let rwset = rwset_all.entry(c_id).or_insert_with(ReadWriteSet::new);
         if let Some(e) = rwset.get_mut(key.as_ref()) {
@@ -563,15 +607,17 @@ impl NoWaitTxn {
                         return Err(TxnStorageStatus::TxnConflict);
                     }
                     // Insert DELETE entry into rwset
+                    let pa = pa.clone();
                     *e = RWEntry::Delete(*inserted_as_ghost, pa.clone());
-                    Ok(())
+                    Ok(pa)
                 }
                 RWEntry::Update(inserted_as_ghost, pa, _)
                 | RWEntry::Insert(inserted_as_ghost, pa, _) => {
                     // Insert DELETE entry into rwset.
                     // This should physically delete the record from storage on commit.
+                    let pa = pa.clone();
                     *e = RWEntry::Delete(*inserted_as_ghost, pa.clone());
-                    Ok(())
+                    Ok(pa)
                 }
                 RWEntry::Delete(..) => Err(TxnStorageStatus::KeyNotFound),
             }
@@ -579,7 +625,8 @@ impl NoWaitTxn {
             // Abort if not found in index
             let storage = &ps.btree;
             let locktable = &ps.locktable;
-            let page = storage.traverse_to_leaf_for_read_with_hint(key.as_ref(), None);
+            let page = storage
+                .traverse_to_leaf_for_read_with_hint(key.as_ref(), hint.map(|h| h.to_pf_key(c_id)));
             let slot_id = page.upper_bound_slot_id(&BTreeKey::new(key.as_ref())) - 1;
             if slot_id == 0 || page.get_raw_key(slot_id) != key.as_ref() {
                 return Err(TxnStorageStatus::KeyNotFound);
@@ -590,131 +637,90 @@ impl NoWaitTxn {
                 }
                 // Insert into rwset
                 let new_pa = PhysicalAddress::new(page.get_id(), page.frame_id());
-                rwset.insert(key.as_ref().to_vec(), RWEntry::Delete(false, new_pa));
-                Ok(())
+                rwset.insert(
+                    key.as_ref().to_vec(),
+                    RWEntry::Delete(false, new_pa.clone()),
+                );
+                Ok(new_pa)
             }
         }
     }
 
-    pub fn read_scan<M: MemPool>(
-        &self, 
-        c_id: ContainerId,
-        ps: &PrimaryStorage<M>,
-        l_key: &[u8],
-        u_key: &[u8],
-        count: usize,
-        rev: bool,
-    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, TxnStorageStatus> {
-        if rev {
-            panic!("Reverse scan not supported yet")
-        }
+    pub fn iter_next<M: MemPool>(
+        &self,
+        pi: &mut PrimaryIterator<M>,
+    ) -> Result<Option<(Vec<u8>, Vec<u8>)>, TxnStorageStatus> {
+        let c_id = pi.ps.c_id;
+        let locktable = &pi.ps.locktable;
 
         let rwset_all = unsafe { &mut *self.rwset.get() };
         let rwset = rwset_all.entry(c_id).or_insert_with(ReadWriteSet::new);
-
-        let storage = &ps.btree;
-        let locktable = &ps.locktable;
-        let mut current_count = 0;
-
-        let scanner = FosterBtreeRangeScannerWithPageId::new(storage, l_key, u_key);
-        let mut result = Vec::new();
-        for (key, value, (page_id, frame_id)) in scanner {
-            if current_count >= count {
-                break;
-            }
-            current_count += 1;
+        if let Some((key, value)) = pi.cursor.get_kv() {
+            let (page_id, frame_id) = pi.cursor.get_physical_address();
+            pi.cursor.go_to_next_kv();
             if let Some(e) = rwset.get_mut(&key) {
+                e.update_physical_address(PhysicalAddress::new(page_id, frame_id));
                 match e {
                     RWEntry::Read(_, _) => {
-                        result.push((key, value)); 
+                        return Ok(Some((key, value)));
                     }
                     RWEntry::Update(_, _, new_val) | RWEntry::Insert(_, _, new_val) => {
-                        result.push((key, new_val.clone()));
+                        return Ok(Some((key, new_val.clone())));
                     }
                     RWEntry::Delete(_, _) => {
                         // Skip the record
                     }
                 }
-                continue;
             } else {
                 // Lock the key
                 if !locktable.try_shared(key.clone()) {
                     return Err(TxnStorageStatus::TxnConflict);
                 }
                 // Insert into rwset
-                rwset.insert(key.clone(), RWEntry::Read(false, PhysicalAddress::new(page_id, frame_id)));
+                rwset.insert(
+                    key.clone(),
+                    RWEntry::Read(false, PhysicalAddress::new(page_id, frame_id)),
+                );
             }
+            Ok(Some((key, value)))
+        } else {
+            Ok(None)
         }
-        Ok(result)
     }
 
-    pub fn update_scan<M: MemPool>(
-        &self, 
-        c_id: ContainerId,
-        ps: &PrimaryStorage<M>,
-        l_key: &[u8],
-        u_key: &[u8],
-        count: usize,
-        rev: bool,
-        mut func: impl FnMut(&mut [u8]),
+    // Iterates over the secondary index and returns the value in the primary index
+    pub fn iter_next_sec<M: MemPool>(
+        &self,
+        si: &mut SecondaryIterator<M>,
+    ) -> Result<Option<(Vec<u8>, Vec<u8>)>, TxnStorageStatus> {
+        if let Some(((s_key, id), s_value)) = si.cursor.get_kv() {
+            // We got the primary key from the secondary index. Now, we need to get the value from the primary index.
+            let ps = &si.ss.ps;
+            let (p_key, p_hint) = s_value.split_at(s_value.len() - 8);
+            let p_hint = PhysicalAddress::from_bytes(p_hint);
+            let (p_value, p_addr) = self.read(ps, p_key, Some(p_hint.clone()))?;
+            // println!("Hint: {}, Actual: {}", p_hint, p_addr);
+            // Rewrite the physical address in the secondary index. The last 8 bytes should be updated with the new physical address.
+            let new_p_addr = p_addr.to_bytes();
+            let new_s_val = [p_key, &new_p_addr].concat();
+            si.cursor.opportunistic_update(&new_s_val, false);
+            si.cursor.go_to_next_kv();
+
+            Ok(Some((s_key, p_value)))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn commit<M: MemPool>(
+        &self,
+        pss: &PrimaryStorages<M>,
+        sss: &SecondaryStorages<M>,
     ) -> Result<(), TxnStorageStatus> {
-        if rev {
-            panic!("Reverse scan not supported yet")
-        }
-
-        let rwset_all = unsafe { &mut *self.rwset.get() };
-        let rwset = rwset_all.entry(c_id).or_insert_with(ReadWriteSet::new);
-
-        let storage = &ps.btree;
-        let locktable = &ps.locktable;
-        let mut current_count = 0;
-
-        let scanner = FosterBtreeRangeScannerWithPageId::new(storage, l_key, u_key);
-        for (key, mut value, (page_id, frame_id)) in scanner {
-            if current_count >= count {
-                break;
-            }
-            current_count += 1;
-            if let Some(e) = rwset.get_mut(&key) {
-                match e {
-                    RWEntry::Read(inserted_as_ghost, pa) => {
-                        // Upgrade lock
-                        if !locktable.try_upgrade(key.clone()) {
-                            return Err(TxnStorageStatus::TxnConflict);
-                        }
-                        func(&mut value);
-                        *e = RWEntry::Update(*inserted_as_ghost, pa.clone(), value);
-                    }
-                    RWEntry::Update(_, _, value) => {
-                        func(value);
-                    }
-                    RWEntry::Insert(inserted_as_ghost, pa, value) => {
-                        func(value);
-                        *e = RWEntry::Update(*inserted_as_ghost, pa.clone(), value.clone());
-                    }
-                    RWEntry::Delete(_, _) => {
-                        // Skip the record
-                    }
-                }
-                continue;
-            } else {
-                // Lock the key
-                if !locktable.try_exclusive(key.clone()) {
-                    return Err(TxnStorageStatus::TxnConflict);
-                }
-                func(&mut value);
-                // Insert into rwset
-                rwset.insert(key.clone(), RWEntry::Update(false, PhysicalAddress::new(page_id, frame_id), value));
-            }
-        }
-
-        Ok(())
-    }
-
-    pub fn commit<M: MemPool>(&self, pss: &PrimaryStorages<M>) -> Result<(), TxnStorageStatus> {
         // Release read locks first
         for (c_id, rwset) in unsafe { &*self.rwset.get() } {
-            let locktable = &pss.get(*c_id).unwrap().locktable;
+            let ps = pss.get(*c_id).unwrap(); // unwrap is safe because we only buffer updates of primary storages.
+            let locktable = &ps.locktable;
             for (key, e) in rwset.iter() {
                 match e {
                     RWEntry::Read(_, _) => {
@@ -728,7 +734,7 @@ impl NoWaitTxn {
 
         // Write
         for (c_id, rwset) in unsafe { &*self.rwset.get() } {
-            let ps = pss.get(*c_id).unwrap();
+            let ps = pss.get(*c_id).unwrap(); // unwrap is safe because we only consider updates of primary storages
             let storage = &ps.btree;
             let locktable = &ps.locktable;
             for (key, e) in rwset.iter() {
@@ -738,10 +744,10 @@ impl NoWaitTxn {
                     }
                     RWEntry::Update(inserted_as_ghost, pa, value) => {
                         let mut page = storage
-                            .traverse_to_leaf_for_write_with_hint(key, Some(&pa.to_pf_key(*c_id)));
+                            .traverse_to_leaf_for_write_with_hint(key, Some(pa.to_pf_key(*c_id)));
                         let slot_id = page.upper_bound_slot_id(&BTreeKey::new(key)) - 1;
                         if slot_id == 0 || page.get_raw_key(slot_id) != key {
-                            panic!("Key should exist in storage if it is in rwset")
+                            panic!("Key: {:?} of container: {} should exist in storage at slot_id: {} if it is in rwset", key, c_id, slot_id);
                         } else {
                             // Update the record
                             if *inserted_as_ghost {
@@ -756,17 +762,17 @@ impl NoWaitTxn {
                         // Insert is always a ghost record insertion
                         assert!(inserted_as_ghost);
                         let mut page = storage
-                            .traverse_to_leaf_for_write_with_hint(key, Some(&pa.to_pf_key(*c_id)));
+                            .traverse_to_leaf_for_write_with_hint(key, Some(pa.to_pf_key(*c_id)));
                         let slot_id = page.upper_bound_slot_id(&BTreeKey::new(key)) - 1;
                         if slot_id == 0 || page.get_raw_key(slot_id) != key {
-                            panic!("Key should exist in storage if it is in rwset")
+                            panic!("Key: {:?} of container: {} should exist in storage at slot_id: {} if it is in rwset", key, c_id, slot_id);
                         } else {
                             page.unghostify_at(slot_id);
                         }
                     }
                     RWEntry::Delete(_, pa) => {
                         let mut page = storage
-                            .traverse_to_leaf_for_write_with_hint(key, Some(&pa.to_pf_key(*c_id)));
+                            .traverse_to_leaf_for_write_with_hint(key, Some(pa.to_pf_key(*c_id)));
                         let slot_id = page.upper_bound_slot_id(&BTreeKey::new(key)) - 1;
                         if slot_id == 0 || page.get_raw_key(slot_id) != key {
                             panic!("Key should exist in storage if it is in rwset")
@@ -793,7 +799,7 @@ impl NoWaitTxn {
                 if e.ghost_inserted() {
                     let mut page = storage.traverse_to_leaf_for_write_with_hint(
                         key,
-                        Some(&e.physical_address().to_pf_key(*c_id)),
+                        Some(e.physical_address().to_pf_key(*c_id)),
                     );
                     let slot_id = page.upper_bound_slot_id(&BTreeKey::new(key)) - 1;
                     if slot_id == 0 || page.get_raw_key(slot_id) != key {
@@ -821,36 +827,65 @@ impl NoWaitTxn {
     }
 }
 
+pub enum KVIterator<M: MemPool> {
+    Primary(UnsafeCell<PrimaryIterator<M>>),
+    Secondary(UnsafeCell<SecondaryIterator<M>>),
+}
+
+pub struct PrimaryIterator<M: MemPool> {
+    cursor: FosterBtreeCursor<M>,
+    ps: Arc<PrimaryStorage<M>>,
+}
+
+impl<M: MemPool> PrimaryIterator<M> {
+    pub fn new(cursor: FosterBtreeCursor<M>, ps: Arc<PrimaryStorage<M>>) -> Self {
+        PrimaryIterator { cursor, ps }
+    }
+}
+
+pub struct SecondaryIterator<M: MemPool> {
+    cursor: FosterBtreeAppendOnlyCursor<M>,
+    ss: Arc<SecondaryStorage<M>>,
+}
+
+impl<M: MemPool> SecondaryIterator<M> {
+    pub fn new(cursor: FosterBtreeAppendOnlyCursor<M>, ss: Arc<SecondaryStorage<M>>) -> Self {
+        SecondaryIterator { cursor, ss }
+    }
+}
+
 pub struct NoWaitTxnStorage<M: MemPool> {
     bp: Arc<M>,
-    ps: PrimaryStorages<M>,
-    ss: SecondaryStorages<M>,
+    pss: PrimaryStorages<M>,
+    sss: SecondaryStorages<M>,
 }
 
 impl<M: MemPool> NoWaitTxnStorage<M> {
     pub fn new(bp: Arc<M>) -> Self {
         NoWaitTxnStorage {
             bp,
-            ps: PrimaryStorages::new(),
-            ss: SecondaryStorages::new(),
+            pss: PrimaryStorages::new(),
+            sss: SecondaryStorages::new(),
         }
     }
 }
 
 impl<M: MemPool> TxnStorageTrait for NoWaitTxnStorage<M> {
     type TxnHandle = NoWaitTxn;
-    type IteratorHandle = u32;
+    type IteratorHandle = KVIterator<M>;
 
     // Only a single database supported right now.
-    fn open_db(&self, options: super::DBOptions) -> Result<DatabaseId, TxnStorageStatus> {
+    fn open_db(&self, options: DBOptions) -> Result<DatabaseId, TxnStorageStatus> {
         Ok(0)
     }
 
     fn close_db(&self, db_id: DatabaseId) -> Result<(), TxnStorageStatus> {
+        assert_eq!(db_id, 0);
         Ok(())
     }
 
     fn delete_db(&self, db_id: DatabaseId) -> Result<(), TxnStorageStatus> {
+        assert_eq!(db_id, 0);
         panic!("Delete db not supported")
     }
 
@@ -862,10 +897,10 @@ impl<M: MemPool> TxnStorageTrait for NoWaitTxnStorage<M> {
     ) -> Result<ContainerId, TxnStorageStatus> {
         debug_assert_eq!(db_id, 0);
         match options.container_type() {
-            ContainerType::Primary => Ok(self.ps.create_new(&self.bp)),
+            ContainerType::Primary => Ok(self.pss.create_new(&self.bp)),
             ContainerType::Secondary(primary_c_id) => {
-                let ps = self.ps.get(primary_c_id).unwrap();
-                Ok(self.ss.create_new(&self.bp, ps))
+                let ps = self.pss.get(primary_c_id).unwrap();
+                Ok(self.sss.create_new(&self.bp, ps))
             }
         }
     }
@@ -890,13 +925,14 @@ impl<M: MemPool> TxnStorageTrait for NoWaitTxnStorage<M> {
         key: Vec<u8>,
         value: Vec<u8>,
     ) -> Result<(), TxnStorageStatus> {
-        match self.ps.get(c_id) {
+        match self.pss.get(c_id) {
             Some(ps) => {
                 ps.btree.insert(&key, &value).unwrap();
                 Ok(())
             }
-            None => match self.ss.get(c_id) {
+            None => match self.sss.get(c_id) {
                 Some(ss) => {
+                    let value = [value, PhysicalAddress::default().to_bytes().to_vec()].concat();
                     ss.btree.append(&key, &value).unwrap();
                     Ok(())
                 }
@@ -922,18 +958,18 @@ impl<M: MemPool> TxnStorageTrait for NoWaitTxnStorage<M> {
         async_commit: bool,
     ) -> Result<(), TxnStorageStatus> {
         assert!(!async_commit);
-        if let Ok(_) = txn.commit(&self.ps) {
+        if let Ok(_) = txn.commit(&self.pss, &self.sss) {
             return Ok(());
         }
-        if let Ok(_) = txn.abort(&self.ps) {
-            Err(TxnStorageStatus::SystemAbort)
+        if let Ok(_) = txn.abort(&self.pss) {
+            Err(TxnStorageStatus::Aborted)
         } else {
             Err(TxnStorageStatus::AbortFailed)
         }
     }
 
     fn abort_txn(&self, txn: &Self::TxnHandle) -> Result<(), TxnStorageStatus> {
-        if let Ok(_) = txn.abort(&self.ps) {
+        if let Ok(_) = txn.abort(&self.pss) {
             return Ok(());
         } else {
             Err(TxnStorageStatus::AbortFailed)
@@ -971,9 +1007,9 @@ impl<M: MemPool> TxnStorageTrait for NoWaitTxnStorage<M> {
         c_id: ContainerId,
         key: K,
     ) -> Result<Vec<u8>, TxnStorageStatus> {
-        match self.ps.get(c_id) {
-            Some(ps) => txn.read(c_id, ps, key),
-            None => match self.ss.get(c_id) {
+        match self.pss.get(c_id) {
+            Some(ps) => txn.read(ps, key, None).map(|(v, _)| v),
+            None => match self.sss.get(c_id) {
                 Some(ss) => {
                     unimplemented!()
                 }
@@ -989,9 +1025,9 @@ impl<M: MemPool> TxnStorageTrait for NoWaitTxnStorage<M> {
         key: Vec<u8>,
         value: Vec<u8>,
     ) -> Result<(), TxnStorageStatus> {
-        match self.ps.get(c_id) {
-            Some(ps) => txn.insert(c_id, ps, key, value),
-            None => match self.ss.get(c_id) {
+        match self.pss.get(c_id) {
+            Some(ps) => txn.insert(ps, key, value, None).map(|_| ()),
+            None => match self.sss.get(c_id) {
                 Some(ss) => {
                     unimplemented!()
                 }
@@ -1006,13 +1042,13 @@ impl<M: MemPool> TxnStorageTrait for NoWaitTxnStorage<M> {
         c_id: ContainerId,
         kvs: Vec<(Vec<u8>, Vec<u8>)>,
     ) -> Result<(), TxnStorageStatus> {
-        match self.ps.get(c_id) {
+        match self.pss.get(c_id) {
             Some(ps) => {
                 for (key, value) in kvs {
-                    txn.insert(c_id, ps, key, value)?;
+                    txn.insert(ps, key, value, None)?;
                 }
             }
-            None => match self.ss.get(c_id) {
+            None => match self.sss.get(c_id) {
                 Some(ss) => {
                     unimplemented!()
                 }
@@ -1029,9 +1065,9 @@ impl<M: MemPool> TxnStorageTrait for NoWaitTxnStorage<M> {
         key: K,
         value: Vec<u8>,
     ) -> Result<(), TxnStorageStatus> {
-        match self.ps.get(c_id) {
-            Some(ps) => txn.update(c_id, ps, key, value),
-            None => match self.ss.get(c_id) {
+        match self.pss.get(c_id) {
+            Some(ps) => txn.update(ps, key, value, None).map(|_| ()),
+            None => match self.sss.get(c_id) {
                 Some(ss) => {
                     unimplemented!()
                 }
@@ -1047,13 +1083,13 @@ impl<M: MemPool> TxnStorageTrait for NoWaitTxnStorage<M> {
         key: K,
         func: F,
     ) -> Result<(), TxnStorageStatus> {
-        match self.ps.get(c_id) {
+        match self.pss.get(c_id) {
             Some(ps) => {
-                let mut value = txn.read(c_id, ps, key.as_ref())?;
+                let (mut value, addr) = txn.read(ps, key.as_ref(), None)?;
                 func(&mut value);
-                txn.update(c_id, ps, key, value)
+                txn.update(ps, key, value, Some(addr)).map(|_| ())
             }
-            None => match self.ss.get(c_id) {
+            None => match self.sss.get(c_id) {
                 Some(ss) => {
                     unimplemented!()
                 }
@@ -1068,9 +1104,9 @@ impl<M: MemPool> TxnStorageTrait for NoWaitTxnStorage<M> {
         c_id: ContainerId,
         key: K,
     ) -> Result<(), TxnStorageStatus> {
-        match self.ps.get(c_id) {
-            Some(ps) => txn.delete(c_id, ps, key),
-            None => match self.ss.get(c_id) {
+        match self.pss.get(c_id) {
+            Some(ps) => txn.delete(ps, key, None).map(|_| ()),
+            None => match self.sss.get(c_id) {
                 Some(ss) => {
                     unimplemented!()
                 }
@@ -1085,14 +1121,39 @@ impl<M: MemPool> TxnStorageTrait for NoWaitTxnStorage<M> {
         c_id: ContainerId,
         options: super::ScanOptions,
     ) -> Result<Self::IteratorHandle, TxnStorageStatus> {
-        unimplemented!()
+        match self.pss.get(c_id) {
+            Some(ps) => {
+                let cursor = FosterBtreeCursor::new(&ps.btree, &options.lower, &options.upper);
+                let iter = PrimaryIterator::new(cursor, ps.clone());
+                Ok(KVIterator::Primary(UnsafeCell::new(iter)))
+            }
+            None => match self.sss.get(c_id) {
+                Some(ss) => {
+                    let cursor =
+                        FosterBtreeAppendOnlyCursor::new(&ss.btree, &options.lower, &options.upper);
+                    let iter = SecondaryIterator::new(cursor, ss.clone());
+                    Ok(KVIterator::Secondary(UnsafeCell::new(iter)))
+                }
+                None => Err(TxnStorageStatus::ContainerNotFound),
+            },
+        }
     }
 
     fn iter_next(
         &self,
+        txn: &Self::TxnHandle,
         iter: &Self::IteratorHandle,
     ) -> Result<Option<(Vec<u8>, Vec<u8>)>, TxnStorageStatus> {
-        unimplemented!()
+        match iter {
+            KVIterator::Primary(iter) => {
+                let iter = unsafe { &mut *iter.get() };
+                txn.iter_next(iter)
+            }
+            KVIterator::Secondary(iter) => {
+                let iter = unsafe { &mut *iter.get() };
+                txn.iter_next_sec(iter)
+            }
+        }
     }
 
     fn drop_iterator_handle(&self, iter: Self::IteratorHandle) -> Result<(), TxnStorageStatus> {
@@ -1116,8 +1177,8 @@ mod tests {
         let bp = get_test_bp(10);
         let storage = NoWaitTxnStorage {
             bp: bp.clone(),
-            ps: PrimaryStorages::new(),
-            ss: SecondaryStorages::new(),
+            pss: PrimaryStorages::new(),
+            sss: SecondaryStorages::new(),
         };
 
         // Open a database
@@ -1163,8 +1224,8 @@ mod tests {
         let bp = get_test_bp(10);
         let storage = NoWaitTxnStorage {
             bp: bp.clone(),
-            ps: PrimaryStorages::new(),
-            ss: SecondaryStorages::new(),
+            pss: PrimaryStorages::new(),
+            sss: SecondaryStorages::new(),
         };
 
         // Open a database
@@ -1218,8 +1279,8 @@ mod tests {
         let bp = get_test_bp(10);
         let storage = NoWaitTxnStorage {
             bp: bp.clone(),
-            ps: PrimaryStorages::new(),
-            ss: SecondaryStorages::new(),
+            pss: PrimaryStorages::new(),
+            sss: SecondaryStorages::new(),
         };
 
         // Open a database
@@ -1270,8 +1331,8 @@ mod tests {
         let bp = get_test_bp(10);
         let storage = NoWaitTxnStorage {
             bp: bp.clone(),
-            ps: PrimaryStorages::new(),
-            ss: SecondaryStorages::new(),
+            pss: PrimaryStorages::new(),
+            sss: SecondaryStorages::new(),
         };
 
         // Open a database
@@ -1318,8 +1379,8 @@ mod tests {
         let bp = get_test_bp(10);
         let storage = NoWaitTxnStorage {
             bp: bp.clone(),
-            ps: PrimaryStorages::new(),
-            ss: SecondaryStorages::new(),
+            pss: PrimaryStorages::new(),
+            sss: SecondaryStorages::new(),
         };
 
         // Open a database

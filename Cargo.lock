@@ -363,20 +363,19 @@ dependencies = [
  "clap",
  "concurrent-queue",
  "criterion",
+ "dashmap",
  "fastbloom",
  "getrandom",
  "io-uring",
  "lazy_static",
  "libc",
- "locktable",
+ "memchr",
  "rand",
  "rstest",
  "serde",
  "serde_cbor",
  "tempfile",
  "wasm-bindgen",
- "zerocopy 0.8.7",
- "zerocopy-derive 0.8.7",
  "zipf",
 ]
 
@@ -648,14 +647,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "locktable"
-version = "0.1.0"
-source = "git+https://github.com/rotaki/locktable.git?branch=master#5ec2fad079418eb77eaef71cb7afeb571743b36b"
-dependencies = [
- "dashmap",
-]
-
-[[package]]
 name = "log"
 version = "0.4.22"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -747,7 +738,7 @@ version = "0.2.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "77957b295656769bb8ad2b6a6b09d897d94f05c41b069aede1fcdaa675eaea04"
 dependencies = [
- "zerocopy 0.7.35",
+ "zerocopy",
 ]
 
 [[package]]
@@ -1304,16 +1295,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1b9b4fd18abc82b8136838da5d50bae7bdea537c574d8dc1a34ed098d6c166f0"
 dependencies = [
  "byteorder",
- "zerocopy-derive 0.7.35",
-]
-
-[[package]]
-name = "zerocopy"
-version = "0.8.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bb3da5f7220f919a6c7af7c856435a68ee1582fd7a77aa72936257d8335bd6f6"
-dependencies = [
- "zerocopy-derive 0.8.7",
+ "zerocopy-derive",
 ]
 
 [[package]]
@@ -1321,17 +1303,6 @@ name = "zerocopy-derive"
 version = "0.7.35"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fa4f8080344d4671fb4e831a13ad1e68092748387dfc4f55e356242fae12ce3e"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn",
-]
-
-[[package]]
-name = "zerocopy-derive"
-version = "0.8.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2e5f54f3cc93cd80745404626681b4b9fca9a867bad5a8424b618eb0db1ae6ea"
 dependencies = [
  "proc-macro2",
  "quote",

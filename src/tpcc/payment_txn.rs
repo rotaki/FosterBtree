@@ -1,55 +1,31 @@
 use std::time::SystemTime;
 
 use crate::log_info;
+use crate::prelude::ScanOptions;
 use crate::prelude::TxnOptions;
 use crate::prelude::TxnStorageStatus;
 use crate::prelude::TxnStorageTrait;
 use crate::tpcc::loader::Table;
+use crate::write_fields;
 use rand::Rng;
 
 use super::loader::TableInfo;
 use super::record_definitions::*;
 use super::tx_utils::*;
 
-macro_rules! write_fields {
-    ($out:expr, $($field:expr),*) => {
-        $(
-            $out.write($field);
-        )*
-    };
+pub struct PaymentTxn {
+    input: PaymentTxnInput,
 }
 
-/// The PaymentTx struct
-pub struct PaymentTx {
-    input: PaymentTxInput,
-}
-
-impl PaymentTx {
+impl PaymentTxn {
     pub const NAME: &'static str = "Payment";
-    pub const ID: TxnProfileID = TxnProfileID::PaymentTx;
-
-    /// Function to get the abort reason as a static string
-    pub fn abort_reason(a: AbortID) -> &'static str {
-        match a {
-            AbortID::PrepareUpdateWarehouse => "PREPARE_UPDATE_WAREHOUSE",
-            AbortID::FinishUpdateWarehouse => "FINISH_UPDATE_WAREHOUSE",
-            AbortID::PrepareUpdateDistrict => "PREPARE_UPDATE_DISTRICT",
-            AbortID::FinishUpdateDistrict => "FINISH_UPDATE_DISTRICT",
-            AbortID::PrepareUpdateCustomerByLastName => "PREPARE_UPDATE_CUSTOMER_BY_LAST_NAME",
-            AbortID::PrepareUpdateCustomer => "PREPARE_UPDATE_CUSTOMER",
-            AbortID::FinishUpdateCustomer => "FINISH_UPDATE_CUSTOMER",
-            AbortID::PrepareInsertHistory => "PREPARE_INSERT_HISTORY",
-            AbortID::FinishInsertHistory => "FINISH_INSERT_HISTORY",
-            AbortID::Precommit => "PRECOMMIT",
-            _ => panic!("Invalid AbortID"),
-        }
-    }
+    pub const ID: TxnProfileID = TxnProfileID::PaymentTxn;
 }
 
-impl TxnProfile for PaymentTx {
+impl TxnProfile for PaymentTxn {
     fn new(config: &TPCCConfig, w_id: u16) -> Self {
-        let input: PaymentTxInput = PaymentTxInput::new(config, w_id);
-        PaymentTx { input }
+        let input: PaymentTxnInput = PaymentTxnInput::new(config, w_id);
+        PaymentTxn { input }
     }
     /// The run method translated into Rust
     fn run<T: TxnStorageTrait>(
@@ -61,8 +37,7 @@ impl TxnProfile for PaymentTx {
         out: &mut Output,
     ) -> TPCCStatus {
         let start = SystemTime::now();
-        let mut res: TxnStorageStatus;
-        let mut helper = TxHelper::new(txn_storage, &mut stat[PaymentTx::ID]);
+        let mut helper = TxHelper::new(txn_storage, &mut stat[PaymentTxn::ID]);
         let txn = txn_storage.begin_txn(0, TxnOptions::default()).unwrap();
 
         let w_id = self.input.w_id;
@@ -110,73 +85,97 @@ impl TxnProfile for PaymentTx {
         }
 
         // Fetch and update Customer
-        /*
-        let res = if by_last_name {
-            todo!("Implement get_customer_by_last_name_and_prepare_for_update");
+        let c_key = if by_last_name {
+            debug_assert!(c_id == Customer::UNUSED_ID);
+
+            let mut customer_recs = Vec::new();
+            let sec_key = CustomerSecondaryKey::create_key(c_w_id, c_d_id, c_last);
+            let sec_key_bytes = sec_key.into_bytes();
+            let res = txn_storage.scan_range(
+                &txn,
+                tbl_info[Table::CustomerSecondary],
+                ScanOptions {
+                    lower: sec_key_bytes.to_vec(),
+                    upper: vec![],
+                    limit: 0,
+                },
+            );
+            if not_successful(config, &res) {
+                return helper.kill(&txn, &res, AbortID::PrepareUpdateCustomerByLastName as u8);
+            }
+            let iter = res.unwrap();
+
+            while let Ok(Some((s_key, p_value))) = txn_storage.iter_next(&txn, &iter) {
+                if s_key != sec_key_bytes {
+                    break;
+                } else {
+                    // Push the customer record to the vector
+                    customer_recs.push(p_value);
+                }
+            }
+
+            if customer_recs.is_empty() {
+                return helper.kill::<()>(
+                    &txn,
+                    &Err(TxnStorageStatus::KeyNotFound),
+                    AbortID::PrepareUpdateCustomerByLastName as u8,
+                );
+            }
+
+            // Sort the customer records by c_first
+            customer_recs.sort_by(|a, b| {
+                let a = Customer::from_bytes(a);
+                let b = Customer::from_bytes(b);
+                a.c_first.cmp(&b.c_first)
+            });
+
+            // Select the middle record
+            let c =
+                Customer::from_bytes(customer_recs[(customer_recs.len() + 1) / 2 - 1].as_slice());
+            CustomerKey::create_key_from_customer(c)
         } else {
             // Customer is selected based on customer number
-            let c_key = CustomerKey::create_key(c_w_id, c_d_id, c_id);
-            txn_storage.update_value_with_func(
-                &txn,
-                &(TableID::Customer as u16),
-                &c_key.into_bytes(),
-                |bytes| {
-                    let c = Customer::from_bytes_mut(bytes);
-                    write_fields!(
-                        out,
-                        &c.c_first,
-                        &c.c_middle,
-                        &c.c_last,
-                        &c.c_address,
-                        &c.c_phone,
-                        &c.c_since,
-                        &c.c_credit,
-                        &c.c_credit_lim,
-                        &c.c_discount,
-                        &c.c_balance
-                    );
-                    c_id = c.c_id;
-                    c.c_balance -= h_amount;
-                    c.c_ytd_payment += h_amount;
-                    c.c_payment_cnt += 1;
-                    if c.c_credit.starts_with(b"BC") {
-                        todo!("Implement modify_customer_data");
-                    }
-                },
-            )
+            CustomerKey::create_key(c_w_id, c_d_id, c_id)
         };
+        let res = txn_storage.update_value_with_func(
+            &txn,
+            tbl_info[Table::Customer],
+            &c_key.into_bytes(),
+            |bytes| {
+                let c = Customer::from_bytes_mut(bytes);
+                write_fields!(
+                    out,
+                    &c.c_first,
+                    &c.c_middle,
+                    &c.c_last,
+                    &c.c_address,
+                    &c.c_phone,
+                    &c.c_since,
+                    &c.c_credit,
+                    &c.c_credit_lim,
+                    &c.c_discount,
+                    &c.c_balance
+                );
+                c_id = c.c_id;
+                c.c_balance -= h_amount;
+                c.c_ytd_payment += h_amount;
+                c.c_payment_cnt += 1;
+                if c.c_credit.starts_with(b"BC") {
+                    write_fields!(out, &c.c_data);
+                    self.modify_customer_data(c, w_id, d_id, c_w_id, c_d_id, h_amount);
+                }
+            },
+        );
         if not_successful(config, &res) {
             return helper.kill(&txn, &res, AbortID::FinishUpdateCustomer as u8);
         }
-        */
 
         // Insert History
+        // Ignore it for now as it is not used for the output.
 
         let duration = start.elapsed().unwrap().as_nanos() as u64;
         return helper.commit(&txn, AbortID::Precommit as u8, duration);
     }
-
-    // Modify customer data
-    // fn modify_customer_data(
-    //     &self,
-    //     c: &mut Customer,
-    //     w_id: u16,
-    //     d_id: u8,
-    //     c_w_id: u16,
-    //     c_d_id: u8,
-    //     h_amount: f64,
-    // ) {
-    //     let new_data = format!(
-    //         "| {:4} {:2} {:4} {:2} {:4} ${:7.2}",
-    //         c.c_id, c_d_id, c_w_id, d_id, w_id, h_amount
-    //     );
-    //     let new_data_bytes = new_data.as_bytes();
-    //     let len = new_data_bytes.len();
-    //     let total_len = len + c.c_data.len();
-    //     if total_len <= c.c_data.len() {
-    //         c.c_data[..len].copy_from_slice(new_data_bytes);
-    //     }
-    // }
 
     // Create history record
     // fn create_history(
@@ -204,9 +203,31 @@ impl TxnProfile for PaymentTx {
     // }
 }
 
+impl PaymentTxn {
+    // Modify customer data
+    fn modify_customer_data(
+        &self,
+        c: &mut Customer,
+        w_id: u16,
+        d_id: u8,
+        c_w_id: u16,
+        c_d_id: u8,
+        h_amount: f64,
+    ) {
+        let new_data = format!(
+            "| {:4} {:2} {:4} {:2} {:4} ${:7.2}",
+            c.c_id, c_d_id, c_w_id, d_id, w_id, h_amount
+        );
+        let new_data_bytes = new_data.as_bytes();
+        let len = new_data_bytes.len();
+        c.c_data.copy_within(0..Customer::MAX_DATA - len, len);
+        c.c_data[..len].copy_from_slice(new_data_bytes);
+    }
+}
+
 /// The Input struct for PaymentTx
 #[derive(Default)]
-pub struct PaymentTxInput {
+pub struct PaymentTxnInput {
     w_id: u16,
     d_id: u8,
     c_id: u32,
@@ -218,10 +239,10 @@ pub struct PaymentTxInput {
     c_last: [u8; Customer::MAX_LAST + 1],
 }
 
-impl PaymentTxInput {
+impl PaymentTxnInput {
     pub fn new(config: &TPCCConfig, w_id: u16) -> Self {
         let num_warehouses = config.num_warehouses;
-        let mut this = PaymentTxInput::default();
+        let mut this = PaymentTxnInput::default();
         this.w_id = w_id;
         this.d_id = urand_int(1, District::DISTS_PER_WARE as u64) as u8;
         this.h_amount = urand_double(100, 500000, 100);
@@ -288,34 +309,21 @@ pub enum AbortID {
     Max = 10,
 }
 
-#[cfg(test)]
-mod tests {
-    use crate::{bp::get_test_bp, tpcc::loader::load_all_tables, txn_storage::NoWaitTxnStorage};
-
-    use super::*;
-
-    fn create_nowait_txn_storage() -> impl TxnStorageTrait {
-        let bp = get_test_bp(100);
-        let txn_storage = NoWaitTxnStorage::new(bp);
-        txn_storage
-    }
-
-    #[test]
-    fn test_payment_tx() {
-        let txn_storage = create_nowait_txn_storage();
-        let config = TPCCConfig {
-            num_warehouses: 1,
-            num_threads: 1,
-            random_abort: false,
-            fixed_warehouse_per_thread: false,
-        };
-        let tbl_info = load_all_tables(&txn_storage, &config);
-        println!("Loaded all tables");
-
-        let w_id = 1;
-        let payment_tx = PaymentTx::new(&config, w_id);
-        let mut stat = Stat::new();
-        let mut out = Output::new();
-        payment_tx.run(&config, &txn_storage, &tbl_info, &mut stat, &mut out);
+/// Function to get the abort reason as a static string
+impl AbortID {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            AbortID::PrepareUpdateWarehouse => "PREPARE_UPDATE_WAREHOUSE",
+            AbortID::FinishUpdateWarehouse => "FINISH_UPDATE_WAREHOUSE",
+            AbortID::PrepareUpdateDistrict => "PREPARE_UPDATE_DISTRICT",
+            AbortID::FinishUpdateDistrict => "FINISH_UPDATE_DISTRICT",
+            AbortID::PrepareUpdateCustomerByLastName => "PREPARE_UPDATE_CUSTOMER_BY_LAST_NAME",
+            AbortID::PrepareUpdateCustomer => "PREPARE_UPDATE_CUSTOMER",
+            AbortID::FinishUpdateCustomer => "FINISH_UPDATE_CUSTOMER",
+            AbortID::PrepareInsertHistory => "PREPARE_INSERT_HISTORY",
+            AbortID::FinishInsertHistory => "FINISH_INSERT_HISTORY",
+            AbortID::Precommit => "PRECOMMIT",
+            _ => panic!("Invalid AbortID"),
+        }
     }
 }

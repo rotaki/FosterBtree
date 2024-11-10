@@ -410,7 +410,7 @@ fn main() {
     println!("Loading table...");
     load_table(&params, &table);
 
-    println!("Buffer pool stats after load: {:?}", bp.stats());
+    println!("Buffer pool stats after load: {}", bp.stats());
 
     println!("--- Page stats ---\n{}", table.page_stats(false));
 
@@ -423,7 +423,7 @@ fn main() {
     println!("Executing workload...");
     let (r, u, s, i, m) = execute_workload(&params, table);
 
-    println!("Buffer pool stats after exec: {:?}", bp.stats());
+    println!("Buffer pool stats after exec: {}", bp.stats());
 
     print_stats(r, u, s, i, m, r + u + s + i + m, params.exec_time);
 }

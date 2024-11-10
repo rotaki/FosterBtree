@@ -9,7 +9,7 @@ pub enum TxnStorageStatus {
     // Not found
     DBNotFound,
     ContainerNotFound,
-    TxNotFound,
+    TxnNotFound,
     KeyNotFound,
 
     // Already exists
@@ -20,13 +20,7 @@ pub enum TxnStorageStatus {
     // Transaction errors
     TxnConflict,
 
-    // System errors
-    SystemAbort,
-
-    // User abort
-    UserAbort,
-
-    // Abort failed
+    Aborted,
     AbortFailed,
 
     // Other errors
@@ -42,14 +36,13 @@ impl From<TxnStorageStatus> for String {
         match status {
             TxnStorageStatus::DBNotFound => "DB not found".to_string(),
             TxnStorageStatus::ContainerNotFound => "Container not found".to_string(),
-            TxnStorageStatus::TxNotFound => "Tx not found".to_string(),
+            TxnStorageStatus::TxnNotFound => "Tx not found".to_string(),
             TxnStorageStatus::KeyNotFound => "Key not found".to_string(),
             TxnStorageStatus::DBExists => "DB already exists".to_string(),
             TxnStorageStatus::ContainerExists => "Container already exists".to_string(),
             TxnStorageStatus::KeyExists => "Key already exists".to_string(),
             TxnStorageStatus::TxnConflict => "Txn conflict".to_string(),
-            TxnStorageStatus::SystemAbort => "System abort".to_string(),
-            TxnStorageStatus::UserAbort => "User abort".to_string(),
+            TxnStorageStatus::Aborted => "Aborted".to_string(),
             TxnStorageStatus::AbortFailed => "Abort failed".to_string(),
             TxnStorageStatus::Error => "Error".to_string(),
             TxnStorageStatus::AccessError(status) => format!("Access error: {:?}", status),
@@ -157,7 +150,9 @@ pub struct TxnOptions {}
 
 #[derive(Default)]
 pub struct ScanOptions {
-    // currently scans all keys
+    pub lower: Vec<u8>,
+    pub upper: Vec<u8>,
+    pub limit: usize,
 }
 
 impl ScanOptions {
@@ -214,7 +209,10 @@ pub trait TxnStorageTrait: Send + Sync {
         options: TxnOptions,
     ) -> Result<Self::TxnHandle, TxnStorageStatus>;
 
-    // Commit a transaction
+    // Commit a transaction.
+    // If transaction has been committed safely, it returns Ok(()).
+    // If transaction aborted, it returns Err(TxnStorageStatus::Aborted).
+    // If transaction is not committed safely, it returns Err(TxnStorageStatus::AbortFailed).
     fn commit_txn(&self, txn: &Self::TxnHandle, async_commit: bool)
         -> Result<(), TxnStorageStatus>;
 
@@ -306,6 +304,7 @@ pub trait TxnStorageTrait: Send + Sync {
     // Iterate next
     fn iter_next(
         &self,
+        txn: &Self::TxnHandle,
         iter: &Self::IteratorHandle,
     ) -> Result<Option<(Vec<u8>, Vec<u8>)>, TxnStorageStatus>;
 

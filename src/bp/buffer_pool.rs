@@ -6,7 +6,7 @@ use crate::{log_debug, random::gen_random_int, rwlatch::RwLatch};
 use super::{
     buffer_frame::{BufferFrame, FrameReadGuard, FrameWriteGuard},
     eviction_policy::EvictionPolicy,
-    mem_pool_trait::{ContainerKey, MemPool, MemPoolStatus, PageFrameKey, PageKey},
+    mem_pool_trait::{ContainerKey, MemPool, MemPoolStatus, MemoryStats, PageFrameKey, PageKey},
 };
 
 use crate::file_manager::FileManager;
@@ -946,8 +946,14 @@ impl MemPool for BufferPool {
     }
 
     // Just return the runtime stats
-    fn stats(&self) -> (usize, usize, usize) {
-        self.runtime_stats.get()
+    fn stats(&self) -> MemoryStats {
+        let (new_page, read_count, write_count) = self.runtime_stats.get();
+        MemoryStats {
+            num_frames_in_mem: unsafe { &*self.frames.get() }.len(),
+            new_count: new_page,
+            read_count,
+            write_count,
+        }
     }
 
     // Reset the runtime stats

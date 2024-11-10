@@ -140,6 +140,41 @@ impl std::fmt::Display for MemPoolStatus {
     }
 }
 
+pub struct MemoryStats {
+    pub num_frames_in_mem: usize,
+    pub new_count: usize,   // Number of new pages created
+    pub read_count: usize,  // Number of pages read
+    pub write_count: usize, // Number of pages written
+}
+
+impl std::fmt::Display for MemoryStats {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Write the stats in a different line for better readability.
+        // If usize::MAX, set to N/A
+        let new_count = if self.new_count == usize::MAX {
+            "N/A".to_string()
+        } else {
+            self.new_count.to_string()
+        };
+        let read_count = if self.read_count == usize::MAX {
+            "N/A".to_string()
+        } else {
+            self.read_count.to_string()
+        };
+        let write_count = if self.write_count == usize::MAX {
+            "N/A".to_string()
+        } else {
+            self.write_count.to_string()
+        };
+
+        write!(
+            f,
+            "Frames in memory: {}\nNew pages created: {}\nPages read: {}\nPages written: {}",
+            self.num_frames_in_mem, new_count, read_count, write_count
+        )
+    }
+}
+
 pub trait MemPool: Sync + Send {
     /// Create a new page for write.
     /// This function will allocate a new page in memory and return a FrameWriteGuard.
@@ -188,7 +223,7 @@ pub trait MemPool: Sync + Send {
     fn fast_evict(&self, frame_id: u32) -> Result<(), MemPoolStatus>;
 
     /// Return the runtime statistics of the memory pool.
-    fn stats(&self) -> (usize, usize, usize);
+    fn stats(&self) -> MemoryStats;
 
     /// Reset the runtime statistics of the memory pool.
     fn reset_stats(&self);

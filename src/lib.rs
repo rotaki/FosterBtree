@@ -19,5 +19,6 @@ pub mod prelude {
     pub use crate::access_method::prelude::*;
     pub use crate::bp::prelude::*;
     pub use crate::page::*;
+    pub use crate::tpcc::prelude::*;
     pub use crate::txn_storage::prelude::*;
 }

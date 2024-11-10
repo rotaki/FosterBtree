@@ -203,7 +203,7 @@ impl CustomerKey {
         CustomerKey { c_key }
     }
 
-    fn create_key_from_customer(c: &Customer) -> Self {
+    pub fn create_key_from_customer(c: &Customer) -> Self {
         CustomerKey::create_key(c.c_w_id, c.c_d_id, c.c_id)
     }
 }
@@ -259,6 +259,13 @@ impl CustomerSecondaryKey {
         bytes[..4].copy_from_slice(&self.num.to_be_bytes());
         bytes[4..].copy_from_slice(&self.c_last);
         bytes
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Self {
+        let num = u32::from_be_bytes(bytes[..4].try_into().unwrap());
+        let mut c_last = [0; Customer::MAX_LAST];
+        c_last.copy_from_slice(&bytes[4..]);
+        CustomerSecondaryKey { num, c_last }
     }
 
     pub fn create_key(w_id: u16, d_id: u8, c_last_in: &[u8]) -> Self {
@@ -748,8 +755,12 @@ impl Stock {
         }
     }
 
-    pub fn from_bytes(bytes: &[u8]) -> &mut Stock {
-        unsafe { &mut *(bytes.as_ptr() as *mut Stock) }
+    pub fn from_bytes(bytes: &[u8]) -> &Stock {
+        unsafe { &*(bytes.as_ptr() as *const Stock) }
+    }
+
+    pub fn from_bytes_mut(bytes: &mut [u8]) -> &mut Stock {
+        unsafe { &mut *(bytes.as_mut_ptr() as *mut Stock) }
     }
 
     // Method to print the Stock
@@ -919,6 +930,7 @@ impl Customer {
         customer.c_middle[0] = 'O' as u8;
         customer.c_middle[1] = 'E' as u8;
         if customer.c_id <= 1000 {
+            // This makes sure that all the c_last patterns are used.
             make_clast(&mut customer.c_last, (customer.c_id - 1) as usize);
         } else {
             make_clast(
@@ -946,6 +958,10 @@ impl Customer {
                 std::mem::size_of::<Customer>(),
             )
         }
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> &Customer {
+        unsafe { &*(bytes.as_ptr() as *const Customer) }
     }
 
     pub fn from_bytes_mut(bytes: &mut [u8]) -> &mut Customer {

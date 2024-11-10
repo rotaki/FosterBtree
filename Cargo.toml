@@ -51,9 +51,8 @@ io-uring = {version = "0.7", optional = true}
 libc = {version = "0.2", optional = true}
 zipf = "7.0.1"
 fastbloom = "0.7"
-zerocopy = "0.8"
-zerocopy-derive = "0.8"
-locktable = { git = "https://github.com/rotaki/locktable.git", branch = "master"}
+memchr = "2.7.4"
+dashmap = "6.1"
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"]}

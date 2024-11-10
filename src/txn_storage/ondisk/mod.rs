@@ -510,6 +510,7 @@ impl<M: MemPool> TxnStorageTrait for OnDiskStorage<M> {
     // Iterate next
     fn iter_next(
         &self,
+        txn: &Self::TxnHandle,
         iter: &Self::IteratorHandle,
     ) -> Result<Option<(Vec<u8>, Vec<u8>)>, TxnStorageStatus> {
         Ok(iter.next())

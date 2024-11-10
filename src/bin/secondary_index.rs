@@ -1,3 +1,7 @@
+fn main() {
+    unimplemented!();
+}
+/*
 // Define two indices.
 // One index is a primary index and the other is a secondary index.
 // The primary index stores (key_1, value) pairs.
@@ -213,7 +217,7 @@ fn bench_secondary_index_logical(
     }
     avg /= exec as u128;
     println!("Average time: {} ms", avg);
-    println!("BP stats: \n{:?}", primary.mem_pool.stats());
+    println!("BP stats: \n{}", primary.mem_pool.stats());
     avg
 }
 
@@ -261,7 +265,7 @@ fn bench_secondary_index_lipah(
     }
     avg /= exec as u128;
     println!("Average time: {} ms", avg);
-    println!("BP stats: \n{:?}", primary.mem_pool.stats());
+    println!("BP stats: \n{}", primary.mem_pool.stats());
     avg
 }
 
@@ -271,7 +275,7 @@ fn main() {
     let table = Arc::new(FosterBtree::new(ContainerKey::new(0, 0), Arc::clone(&bp)));
     load_table(&params, &table);
     // Print the page stats
-    println!("BP stats: \n{:?}", bp.stats());
+    println!("BP stats: \n{}", bp.stats());
     println!("Tree stats: \n{}", table.page_stats(false));
 
     println!("Measure the time for the logical access method");
@@ -285,3 +289,4 @@ fn main() {
     println!("Logical access method: {} ms", logical_time);
     println!("Lipah access method: {} ms", lipah_time);
 }
+*/

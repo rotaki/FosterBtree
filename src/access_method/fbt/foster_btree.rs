@@ -2,6 +2,7 @@
 use crate::log;
 
 use std::{
+    cell::UnsafeCell,
     collections::BTreeMap,
     sync::{
         atomic::{AtomicUsize, Ordering},
@@ -18,6 +19,13 @@ use crate::{
 };
 
 use super::foster_btree_page::{BTreeKey, FosterBtreePage};
+
+pub static READ_HINT_ACCESS: AtomicUsize = AtomicUsize::new(0);
+pub static READ_HINT_ASSISTED_ACCESS: AtomicUsize = AtomicUsize::new(0);
+pub static READ_NORMAL_ACCESS: AtomicUsize = AtomicUsize::new(0);
+pub static WRITE_HINT_ACCESS: AtomicUsize = AtomicUsize::new(0);
+pub static WRITE_HINT_ASSISTED_ACCESS: AtomicUsize = AtomicUsize::new(0);
+pub static WRITE_NORMAL_ACCESS: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Clone, Copy, Debug)]
 enum OpType {
@@ -1706,29 +1714,50 @@ impl<T: MemPool> FosterBtree<T> {
     pub fn traverse_to_leaf_for_read_with_hint(
         &self,
         key: &[u8],
-        hint: Option<&PageFrameKey>,
+        hint: Option<PageFrameKey>,
     ) -> FrameReadGuard {
         // Use the hint to speculatively find the page that contains the key.
-        if let Some(hint) = hint {
-            let page = self.read_page(*hint);
+        if let Some(hint) = &hint {
+            let page = self.read_page(hint.clone());
+            // Check if
+            // 1. The page is valid
+            // 2. The page is a leaf
+            // 3. The key is inside the range of the page
+            // 4. The slot is not the foster child slot
             if page.is_valid() && page.is_leaf() && page.inside_range(&BTreeKey::Normal(&key)) {
-                return page;
-            } else if page.is_valid() && page.inside_range(&BTreeKey::Normal(&key)) {
-                // Traverse from the hint page
-                println!("Traverse from the hint page (read)");
-            } else {
-                // Traverse from the root
+                let slot = page.upper_bound_slot_id(&BTreeKey::Normal(&key)) - 1;
+                if !page.has_foster_child() && slot != page.foster_child_slot_id() {
+                    READ_HINT_ACCESS.fetch_add(1, Ordering::AcqRel);
+                    return page;
+                }
             }
+            READ_HINT_ASSISTED_ACCESS.fetch_add(1, Ordering::AcqRel);
         }
-        self.traverse_to_leaf_for_read(key)
+        READ_NORMAL_ACCESS.fetch_add(1, Ordering::AcqRel);
+        self.traverse_to_leaf_for_read_from(key, hint.unwrap_or(self.root_key))
     }
 
-    pub fn traverse_to_leaf_for_read(&self, key: &[u8]) -> FrameReadGuard {
-        let mut current_page = self.read_page(self.root_key);
+    fn traverse_to_leaf_for_read(&self, key: &[u8]) -> FrameReadGuard {
+        self.traverse_to_leaf_for_read_from(key, self.root_key)
+    }
+
+    fn traverse_to_leaf_for_read_from(
+        &self,
+        key: &[u8],
+        start_key: PageFrameKey,
+    ) -> FrameReadGuard {
+        let mut current_page = {
+            let start_page = self.read_page(start_key);
+            if start_page.is_valid() && start_page.inside_range(&BTreeKey::Normal(&key)) {
+                start_page
+            } else {
+                self.read_page(self.root_key)
+            }
+        };
+
         let mut op_byte = OpByte::new();
         loop {
             let this_page = current_page;
-            log_info!("Traversal for read, page: {}", this_page.get_id());
             if this_page.is_leaf() {
                 if this_page.has_foster_child() && this_page.get_foster_key() <= key {
                     // Check whether the foster child should be traversed.
@@ -1738,11 +1767,6 @@ impl<T: MemPool> FosterBtree<T> {
                     let foster_page = self.read_page(foster_page_key);
 
                     let this_page = if foster_page.frame_id() != val.frame_id {
-                        log_debug!(
-                            "Frame ID mismatch: Expected: {}, Actual: {}.",
-                            val.frame_id,
-                            foster_page.frame_id()
-                        );
                         let foster_child_slot_id = this_page.foster_child_slot_id();
                         fix_frame_id(
                             this_page,
@@ -1780,6 +1804,10 @@ impl<T: MemPool> FosterBtree<T> {
                 }
             }
             let slot_id = this_page.upper_bound_slot_id(&BTreeKey::new(key)) - 1;
+            debug_assert!(
+                slot_id > 0,
+                "Internal node should have at least one active slot"
+            );
             let is_foster_relationship =
                 this_page.has_foster_child() && slot_id == this_page.foster_child_slot_id();
             let val = InnerVal::from_bytes(this_page.get_val(slot_id));
@@ -1789,11 +1817,6 @@ impl<T: MemPool> FosterBtree<T> {
 
             // Check if the frame_id is the same
             let this_page = if next_page.frame_id() != val.frame_id {
-                log_debug!(
-                    "Frame ID mismatch: Expected: {}, Actual: {}.",
-                    val.frame_id,
-                    next_page.frame_id()
-                );
                 fix_frame_id(this_page, slot_id, &next_page.page_frame_key().unwrap())
             } else {
                 this_page
@@ -1828,48 +1851,50 @@ impl<T: MemPool> FosterBtree<T> {
     pub fn traverse_to_leaf_for_write_with_hint(
         &self,
         key: &[u8],
-        hint: Option<&PageFrameKey>,
+        hint: Option<PageFrameKey>,
     ) -> FrameWriteGuard {
         // Use the hint to speculatively find the page that contains the key.
-        if let Some(hint) = hint {
+        if let Some(hint) = &hint {
             let base = 2;
             let mut attempts = 0;
             loop {
-                let page = self.read_page(*hint);
+                let page = self.read_page(hint.clone());
+                // Check if
+                // 1. The page is valid
+                // 2. The page is a leaf
+                // 3. The key is inside the range of the page
+                // 4. The slot is not the foster child slot
                 if page.is_valid() && page.is_leaf() && page.inside_range(&BTreeKey::Normal(&key)) {
-                    // Try to upgrade the page to write lock
-                    match page.try_upgrade(true) {
-                        Ok(upgraded) => {
-                            return upgraded;
-                        }
-                        Err(_) => {
-                            log_info!(
-                                "Failed to acquire write lock (#attempt {}). Sleeping for {:?}",
-                                attempts,
-                                base * attempts
-                            );
-                            std::thread::sleep(Duration::from_nanos(u64::pow(base, attempts)));
-                            attempts += 1;
+                    let slot_id = page.upper_bound_slot_id(&BTreeKey::Normal(&key)) - 1;
+                    if !page.has_foster_child() && slot_id != page.foster_child_slot_id() {
+                        match page.try_upgrade(true) {
+                            Ok(upgraded) => {
+                                WRITE_HINT_ACCESS.fetch_add(1, Ordering::AcqRel);
+                                return upgraded;
+                            }
+                            Err(_) => {
+                                std::thread::sleep(Duration::from_nanos(u64::pow(base, attempts)));
+                                attempts += 1;
+                                continue;
+                            }
                         }
                     }
-                } else if page.is_valid() && page.inside_range(&BTreeKey::Normal(&key)) {
-                    // Traverse from the hint page
-                    println!("Traverse from the hint page (write)");
-                    break;
-                } else {
-                    // Traverse from the root
-                    break;
                 }
+                // Traverse from the root or the hint
+                WRITE_HINT_ASSISTED_ACCESS.fetch_add(1, Ordering::AcqRel);
+                break;
             }
         }
-        self.traverse_to_leaf_for_write(key)
+        WRITE_NORMAL_ACCESS.fetch_add(1, Ordering::AcqRel);
+        self.traverse_to_leaf_for_write_from(key, hint.unwrap_or(self.root_key))
     }
 
-    pub fn try_traverse_to_leaf_for_write(
+    fn try_traverse_to_leaf_for_write_from(
         &self,
         key: &[u8],
+        start_key: PageFrameKey,
     ) -> Result<FrameWriteGuard, AccessMethodError> {
-        let leaf_page = self.traverse_to_leaf_for_read(key);
+        let leaf_page = self.traverse_to_leaf_for_read_from(key, start_key);
         #[cfg(feature = "stat")]
         inc_exclusive_page_latch_count();
         match leaf_page.try_upgrade(true) {
@@ -1882,12 +1907,16 @@ impl<T: MemPool> FosterBtree<T> {
         }
     }
 
-    pub fn traverse_to_leaf_for_write(&self, key: &[u8]) -> FrameWriteGuard {
+    fn traverse_to_leaf_for_write_from(
+        &self,
+        key: &[u8],
+        start_key: PageFrameKey,
+    ) -> FrameWriteGuard {
         let base = 2;
         let mut attempts = 0;
         let leaf_page = {
             loop {
-                match self.try_traverse_to_leaf_for_write(key) {
+                match self.try_traverse_to_leaf_for_write_from(key, start_key) {
                     Ok(leaf_page) => {
                         #[cfg(feature = "stat")]
                         inc_local_additional_traversals(attempts);
@@ -1911,27 +1940,8 @@ impl<T: MemPool> FosterBtree<T> {
         leaf_page
     }
 
-    pub(in crate::access_method) fn get_with_physical_address(
-        &self,
-        key: &[u8],
-    ) -> Result<(Vec<u8>, (PageId, u32)), AccessMethodError> {
-        let leaf_page = self.traverse_to_leaf_for_read(key);
-        let slot_id = leaf_page.upper_bound_slot_id(&BTreeKey::new(key)) - 1;
-        if slot_id == 0 {
-            // Lower fence. Non-existent key
-            Err(AccessMethodError::KeyNotFound)
-        } else {
-            // We can get the key if it exists
-            if leaf_page.get_raw_key(slot_id) == key {
-                Ok((
-                    leaf_page.get_val(slot_id).to_vec(),
-                    (leaf_page.get_id(), leaf_page.frame_id()),
-                ))
-            } else {
-                // Non-existent key
-                Err(AccessMethodError::KeyNotFound)
-            }
-        }
+    fn traverse_to_leaf_for_write(&self, key: &[u8]) -> FrameWriteGuard {
+        self.traverse_to_leaf_for_write_from(key, self.root_key)
     }
 
     pub fn get_kv(&self, key: &[u8]) -> Result<(bool, Vec<u8>), AccessMethodError> {
@@ -2118,297 +2128,28 @@ impl<T: MemPool> OrderedUniqueKeyIndex for FosterBtree<T> {
 
 type FilterFunc = Arc<dyn Fn(&[u8], &[u8]) -> bool + Send + Sync>;
 
-/// Scan the BTree in the range [l_key, r_key)
-/// To specify all keys, use an empty slice.
-/// (l_key, r_key) = (&[], &[]) means [-inf, +inf)
 pub struct FosterBtreeRangeScanner<T: MemPool> {
-    btree: Arc<FosterBtree<T>>, // Holds the reference to the btree
-
-    // Scan parameters
-    l_key: Vec<u8>,
-    r_key: Vec<u8>,
+    cursor: FosterBtreeCursor<T>,
     filter: Option<FilterFunc>,
-
-    // States
-    initialized: bool,
-    finished: bool,
-    current_high_fence: Option<Vec<u8>>,
-    current_leaf_page: Option<FrameReadGuard<'static>>, // As long as btree is alive, bp is alive so the frame is alive
-    current_slot_id: u32,
-    parents: Vec<PageFrameKey>,
 }
 
 impl<T: MemPool> FosterBtreeRangeScanner<T> {
-    fn new(btree: &Arc<FosterBtree<T>>, l_key: &[u8], r_key: &[u8]) -> Self {
-        Self {
-            btree: btree.clone(),
-
-            l_key: l_key.to_vec(),
-            r_key: r_key.to_vec(),
+    pub fn new(btree: &Arc<FosterBtree<T>>, l_key: &[u8], r_key: &[u8]) -> Self {
+        FosterBtreeRangeScanner {
+            cursor: FosterBtreeCursor::new(btree, l_key, r_key),
             filter: None,
-
-            initialized: false,
-            finished: false,
-            current_high_fence: None,
-            current_leaf_page: None,
-            current_slot_id: 0,
-            parents: Vec::new(),
         }
     }
 
-    fn new_with_filter(
+    pub fn new_with_filter(
         btree: &Arc<FosterBtree<T>>,
         l_key: &[u8],
         r_key: &[u8],
         filter: FilterFunc,
     ) -> Self {
-        Self {
-            btree: btree.clone(),
-
-            l_key: l_key.to_vec(),
-            r_key: r_key.to_vec(),
+        FosterBtreeRangeScanner {
+            cursor: FosterBtreeCursor::new(btree, l_key, r_key),
             filter: Some(filter),
-
-            initialized: false,
-            finished: false,
-            current_high_fence: None,
-            current_leaf_page: None,
-            current_slot_id: 0,
-            parents: Vec::new(),
-        }
-    }
-
-    fn l_key(&self) -> BTreeKey {
-        if self.l_key.is_empty() {
-            BTreeKey::MinusInfty
-        } else {
-            BTreeKey::new(&self.l_key)
-        }
-    }
-
-    fn r_key(&self) -> BTreeKey {
-        if self.r_key.is_empty() {
-            BTreeKey::PlusInfty
-        } else {
-            BTreeKey::new(&self.r_key)
-        }
-    }
-
-    fn high_fence(&self) -> BTreeKey {
-        if self.current_high_fence.as_ref().unwrap().is_empty() {
-            BTreeKey::PlusInfty
-        } else {
-            BTreeKey::new(self.current_high_fence.as_ref().unwrap())
-        }
-    }
-
-    fn finish(&mut self) {
-        self.finished = true;
-        self.current_leaf_page = None;
-    }
-
-    #[cfg(feature = "old_iter")]
-    fn initialize(&mut self) {
-        // Traverse to the leaf page that contains the l_key
-        let leaf_page = self.btree.traverse_to_leaf_for_read(self.l_key.as_slice());
-        let leaf_page =
-            unsafe { std::mem::transmute::<FrameReadGuard, FrameReadGuard<'static>>(leaf_page) };
-        let mut slot = leaf_page.lower_bound_slot_id(&self.l_key());
-        if slot == 0 {
-            slot = 1; // Skip the lower fence
-        }
-        self.current_slot_id = slot;
-        self.current_high_fence = Some(
-            leaf_page
-                .get_raw_key(leaf_page.high_fence_slot_id())
-                .to_owned(),
-        );
-        self.current_leaf_page = Some(leaf_page);
-    }
-
-    #[cfg(feature = "old_iter")]
-    fn go_to_next_leaf(&mut self) {
-        // Traverse to the leaf page that contains the current key (high fence of the previous leaf page)
-        // Current key should NOT be equal to the r_key. Otherwise, we are done.
-        let leaf_page = self
-            .btree
-            .traverse_to_leaf_for_read(self.current_high_fence.as_ref().unwrap());
-        let leaf_page =
-            unsafe { std::mem::transmute::<FrameReadGuard, FrameReadGuard<'static>>(leaf_page) };
-        self.current_slot_id = 1; // Skip the lower fence
-        self.current_high_fence = Some(
-            leaf_page
-                .get_raw_key(leaf_page.high_fence_slot_id())
-                .to_owned(),
-        );
-        self.current_leaf_page = Some(leaf_page);
-    }
-
-    /// Traverse to the leaf page to find the page with l_key.
-    /// Creates a parents stack to keep track of the traversal path.
-    /// At the end of the function, the stack will contain the path from the root to the leaf page
-    /// including the foster pages.
-    #[cfg(not(feature = "old_iter"))]
-    fn initialize(&mut self) {
-        // Push the root page to the stack
-        self.parents.push(self.btree.root_key);
-        let page_frame_key = self.parents.last().unwrap();
-        let mut current_page = self.btree.read_page(*page_frame_key);
-
-        // Loop for traversing from the current page to the leaf page
-        // Once we reach this loop, we never go back to the outer loop.
-        loop {
-            let this_page = current_page;
-            if this_page.is_leaf() {
-                if this_page.has_foster_child()
-                    && this_page.get_foster_key() <= self.l_key.as_slice()
-                {
-                    // Check whether the foster child should be traversed.
-                    let val = InnerVal::from_bytes(this_page.get_foster_val());
-                    let foster_page_key = PageFrameKey::new_with_frame_id(
-                        self.btree.c_key,
-                        val.page_id,
-                        val.frame_id,
-                    );
-                    let foster_page = self.btree.read_page(foster_page_key);
-                    current_page = foster_page;
-                    self.parents.push(foster_page_key); // Push the visiting page to the stack
-                    continue;
-                } else {
-                    let leaf_page = unsafe {
-                        std::mem::transmute::<FrameReadGuard, FrameReadGuard<'static>>(this_page)
-                    };
-
-                    // Initialize the slot to the lower bound of the l_key
-                    let mut slot = leaf_page.lower_bound_slot_id(&self.l_key());
-                    if slot == 0 {
-                        slot = 1; // Skip the lower fence
-                    }
-                    self.current_slot_id = slot;
-                    self.current_high_fence = Some(
-                        leaf_page
-                            .get_raw_key(leaf_page.high_fence_slot_id())
-                            .to_owned(),
-                    );
-                    self.current_leaf_page = Some(leaf_page);
-                    return;
-                }
-            }
-            let slot_id = this_page.upper_bound_slot_id(&self.l_key()) - 1;
-            let val = InnerVal::from_bytes(this_page.get_val(slot_id));
-            let page_key =
-                PageFrameKey::new_with_frame_id(self.btree.c_key, val.page_id, val.frame_id);
-
-            let next_page = self.btree.read_page(page_key);
-
-            // Do a prefetch for the next next page
-            let prefetch_slot_id = slot_id + 1;
-            if prefetch_slot_id < this_page.high_fence_slot_id() {
-                let prefetch_val = InnerVal::from_bytes(this_page.get_val(prefetch_slot_id));
-                let prefetch_page_key = PageFrameKey::new_with_frame_id(
-                    self.btree.c_key,
-                    prefetch_val.page_id,
-                    prefetch_val.frame_id,
-                );
-                let _ = self.btree.mem_pool.prefetch_page(prefetch_page_key);
-            }
-
-            current_page = next_page;
-            self.parents.push(page_key); // Push the visiting page to the stack
-        }
-    }
-
-    /// Traverse to the leaf page.
-    /// This is done by checking the parent page and check if the page is valid.
-    /// The validity is checked by checking the valid bit as well as whether the next leaf page
-    /// is in the range of this parent page.
-    /// If concurrent operations removes the parent page by merging or load balancing, it will
-    /// set the valid bit to false before releasing the latch. Therefore, we can check the valid
-    /// bit to see if the parent page is still valid. If valid bit is true, the page contains
-    /// a fence keys that can be used for comparison. Even if the page is valid, it may be possible that
-    /// the page is no longer the parent page of the current leaf page due to the recycling of the
-    /// removed page. Therefore, we still need to check the range of the parent page to see if the
-    /// current leaf page is still in the range of the parent page.
-    /// In addition, the traversal happens from leaf to root. We need to ensure that no deadlocks occur
-    /// during the traversal. Deadlocks are not a problem in this case because the traversal only
-    /// takes a read latch. If taking the read latch fails, there is a concurrent write operation
-    /// that is modifying the page. If we detect this situation, we can wait for a while.
-    #[cfg(not(feature = "old_iter"))]
-    fn go_to_next_leaf(&mut self) {
-        // Pop the current page from the stack
-        self.parents.pop().unwrap();
-
-        let key = self.current_high_fence.as_ref().unwrap();
-
-        // Loop for retrying traversals from internal nodes
-        loop {
-            let page_frame_key = self.parents.last().unwrap();
-            let mut current_page = self.btree.read_page(*page_frame_key);
-            if !current_page.is_valid() || !current_page.inside_range(&BTreeKey::Normal(key)) {
-                self.parents.pop().unwrap(); // The previous page was invalidated by concurrent operations. Go one level up.
-                continue;
-            } else {
-                // Loop for traversing from the current page to the leaf page
-                // Once we reach this loop, we never go back to the outer loop.
-                loop {
-                    let this_page = current_page;
-                    log_info!("Traversal for read, page: {}", this_page.get_id());
-                    if this_page.is_leaf() {
-                        if this_page.has_foster_child() && this_page.get_foster_key() <= key {
-                            // Check whether the foster child should be traversed.
-                            let val = InnerVal::from_bytes(this_page.get_foster_val());
-                            let foster_page_key = PageFrameKey::new_with_frame_id(
-                                self.btree.c_key,
-                                val.page_id,
-                                val.frame_id,
-                            );
-                            let foster_page = self.btree.read_page(foster_page_key);
-                            current_page = foster_page;
-                            self.parents.push(foster_page_key); // Push the visiting page to the stack
-                            continue;
-                        } else {
-                            let leaf_page = unsafe {
-                                std::mem::transmute::<FrameReadGuard, FrameReadGuard<'static>>(
-                                    this_page,
-                                )
-                            };
-                            self.current_slot_id = 1; // Skip the lower fence
-                            self.current_high_fence = Some(
-                                leaf_page
-                                    .get_raw_key(leaf_page.high_fence_slot_id())
-                                    .to_owned(),
-                            );
-                            self.current_leaf_page = Some(leaf_page);
-                            return;
-                        }
-                    }
-                    let slot_id = this_page.upper_bound_slot_id(&BTreeKey::new(key)) - 1;
-                    let val = InnerVal::from_bytes(this_page.get_val(slot_id));
-                    let page_key = PageFrameKey::new_with_frame_id(
-                        self.btree.c_key,
-                        val.page_id,
-                        val.frame_id,
-                    );
-
-                    let next_page = self.btree.read_page(page_key);
-
-                    // Do a prefetch for the next next page
-                    let prefetch_slot_id = slot_id + 1;
-                    if prefetch_slot_id < this_page.high_fence_slot_id() {
-                        let prefetch_val =
-                            InnerVal::from_bytes(this_page.get_val(prefetch_slot_id));
-                        let prefetch_page_key = PageFrameKey::new_with_frame_id(
-                            self.btree.c_key,
-                            prefetch_val.page_id,
-                            prefetch_val.frame_id,
-                        );
-                        let _ = self.btree.mem_pool.prefetch_page(prefetch_page_key);
-                    }
-
-                    current_page = next_page;
-                    self.parents.push(page_key); // Push the visiting page to the stack
-                }
-            }
         }
     }
 }
@@ -2416,149 +2157,192 @@ impl<T: MemPool> FosterBtreeRangeScanner<T> {
 impl<T: MemPool> Iterator for FosterBtreeRangeScanner<T> {
     type Item = (Vec<u8>, Vec<u8>);
 
-    fn next(&mut self) -> Option<(Vec<u8>, Vec<u8>)> {
-        if self.finished {
-            return None;
-        }
-        if !self.initialized {
-            self.initialize();
-            self.initialized = true;
-        }
+    fn next(&mut self) -> Option<Self::Item> {
         loop {
-            debug_assert!(self.current_slot_id > 0);
-            if self.current_leaf_page.is_none() {
-                // If the current leaf page is None, we have to re-traverse to the leaf page using the previous high fence.
-                if self.high_fence() >= self.r_key() {
-                    self.finish();
-                    return None;
-                } else {
-                    self.go_to_next_leaf();
+            let (key, value) = match self.cursor.get_kv() {
+                Some(kv) => kv,
+                None => return None,
+            };
+            self.cursor.go_to_next_kv();
+            if let Some(filter) = &self.filter {
+                if filter(&key, &value) {
+                    return Some((key, value));
                 }
-            }
-            debug_assert!(self.current_leaf_page.is_some());
-            let leaf_page = self.current_leaf_page.as_ref().unwrap();
-            let key = leaf_page.get_raw_key(self.current_slot_id);
-            if BTreeKey::new(key) >= self.r_key() {
-                // Evict the page as soon as possible
-                let current_leaf_page = self.current_leaf_page.take().unwrap();
-                // self.btree
-                //     .mem_pool
-                //     .fast_evict(current_leaf_page.frame_id())
-                //     .unwrap();
-                drop(current_leaf_page);
-
-                self.finish();
-                return None;
-            }
-            if self.current_slot_id == leaf_page.high_fence_slot_id() {
-                // Evict the page as soon as possible
-                let current_leaf_page = self.current_leaf_page.take().unwrap();
-                // self.btree
-                //     .mem_pool
-                //     .fast_evict(current_leaf_page.frame_id())
-                //     .unwrap();
-                drop(current_leaf_page);
-            } else if leaf_page.has_foster_child()
-                && self.current_slot_id == leaf_page.foster_child_slot_id()
-            {
-                // If the current slot is the foster child slot, move to the foster child.
-                // Before releasing the current page, we need to get the read-latch of the foster child.
-                let current_page = self.current_leaf_page.take().unwrap();
-                let val = InnerVal::from_bytes(current_page.get_foster_val());
-                let foster_page_key =
-                    PageFrameKey::new_with_frame_id(self.btree.c_key, val.page_id, val.frame_id);
-                let foster_page = self
-                    .btree
-                    .mem_pool
-                    .get_page_for_read(foster_page_key)
-                    .unwrap();
-                let foster_page = unsafe {
-                    std::mem::transmute::<FrameReadGuard, FrameReadGuard<'static>>(foster_page)
-                };
-                // Evict the current page as soon as possible
-                // self.btree
-                //     .mem_pool
-                //     .fast_evict(current_page.frame_id())
-                //     .unwrap();
-                drop(current_page);
-
-                self.current_slot_id = 1;
-                self.current_high_fence = Some(
-                    foster_page
-                        .get_raw_key(foster_page.high_fence_slot_id())
-                        .to_owned(),
-                );
-                self.current_leaf_page = Some(foster_page);
             } else {
-                let val = leaf_page.get_val(self.current_slot_id);
-                if self.filter.is_none() || (self.filter.as_mut().unwrap())(key, val) {
-                    self.current_slot_id += 1;
-                    return Some((key.to_owned(), val.to_owned()));
-                } else {
-                    self.current_slot_id += 1;
-                }
+                return Some((key, value));
             }
         }
     }
 }
 
-/// Scan the BTree in the range [l_key, r_key)
-/// To specify all keys, use an empty slice.
-/// (l_key, r_key) = (&[], &[]) means [-inf, +inf)
 pub struct FosterBtreeRangeScannerWithPageId<T: MemPool> {
-    btree: Arc<FosterBtree<T>>, // Holds the reference to the btree
-
-    // Scan parameters
-    l_key: Vec<u8>,
-    r_key: Vec<u8>,
+    cursor: FosterBtreeCursor<T>,
     filter: Option<FilterFunc>,
-
-    // States
-    initialized: bool,
-    finished: bool,
-    current_high_fence: Option<Vec<u8>>,
-    current_leaf_page: Option<FrameReadGuard<'static>>, // As long as btree is alive, bp is alive so the frame is alive
-    current_slot_id: u32,
-    parents: Vec<PageFrameKey>,
 }
 
 impl<T: MemPool> FosterBtreeRangeScannerWithPageId<T> {
     pub fn new(btree: &Arc<FosterBtree<T>>, l_key: &[u8], r_key: &[u8]) -> Self {
-        Self {
-            btree: btree.clone(),
-
-            l_key: l_key.to_vec(),
-            r_key: r_key.to_vec(),
+        FosterBtreeRangeScannerWithPageId {
+            cursor: FosterBtreeCursor::new(btree, l_key, r_key),
             filter: None,
-
-            initialized: false,
-            finished: false,
-            current_high_fence: None,
-            current_leaf_page: None,
-            current_slot_id: 0,
-            parents: Vec::new(),
         }
     }
 
-    fn new_with_filter(
+    pub fn new_with_filter(
         btree: &Arc<FosterBtree<T>>,
         l_key: &[u8],
         r_key: &[u8],
         filter: FilterFunc,
     ) -> Self {
-        Self {
-            btree: btree.clone(),
+        FosterBtreeRangeScannerWithPageId {
+            cursor: FosterBtreeCursor::new(btree, l_key, r_key),
+            filter: Some(filter),
+        }
+    }
+}
 
+impl<T: MemPool> Iterator for FosterBtreeRangeScannerWithPageId<T> {
+    type Item = (Vec<u8>, Vec<u8>, (PageId, u32));
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            let (key, value) = match self.cursor.get_kv() {
+                Some(kv) => kv,
+                None => return None,
+            };
+            let (page_id, frame_id) = self.cursor.get_physical_address();
+            self.cursor.go_to_next_kv();
+
+            if let Some(filter) = &self.filter {
+                if filter(&key, &value) {
+                    return Some((key, value, (page_id, frame_id)));
+                }
+            } else {
+                return Some((key, value, (page_id, frame_id)));
+            }
+        }
+    }
+}
+
+pub struct FosterBtreeCursor<T: MemPool> {
+    btree: Arc<FosterBtree<T>>,
+
+    // Scan parameters
+    l_key: Vec<u8>,
+    r_key: Vec<u8>,
+
+    // States
+    current_leaf_page: Option<FrameReadGuard<'static>>,
+    current_slot_id: u32,
+    current_high_fence: Option<Vec<u8>>,
+    visited: Vec<PageFrameKey>,
+    finished: bool,
+}
+
+impl<T: MemPool> FosterBtreeCursor<T> {
+    pub fn new(btree: &Arc<FosterBtree<T>>, l_key: &[u8], r_key: &[u8]) -> Self {
+        let mut cursor = Self {
+            btree: btree.clone(),
             l_key: l_key.to_vec(),
             r_key: r_key.to_vec(),
-            filter: Some(filter),
-
-            initialized: false,
-            finished: false,
-            current_high_fence: None,
             current_leaf_page: None,
             current_slot_id: 0,
-            parents: Vec::new(),
+            current_high_fence: None,
+            visited: Vec::new(),
+            finished: false,
+        };
+        cursor.initialize();
+        cursor
+    }
+
+    fn initialize(&mut self) {
+        // Push the root page to the stack
+        self.visited.push(self.btree.root_key);
+        let page_frame_key = self.visited.last().unwrap();
+        let mut current_page = self.btree.read_page(*page_frame_key);
+
+        // Loop for traversing from the current page to the leaf page
+        // Once we reach this loop, we never go back to the outer loop.
+        loop {
+            let this_page = current_page;
+            // Check if the current page is a leaf page
+            if this_page.is_leaf() {
+                let mut slot = this_page.lower_bound_slot_id(&self.l_key());
+
+                // Leaf page [LO:0] 1 3 F5 [HI:8]
+                // If query is 3 -> Read the key-value pair at slot 1
+                // If query is 4 -> Go to the foster child
+                // If query is 5 -> Go to the foster child
+                // If query is 6 -> Go to the foster child
+                // If query is 7 -> Go to the foster child
+                if this_page.has_foster_child() && this_page.foster_child_slot_id() <= slot {
+                    // We need to traverse the foster child
+                    let val = InnerVal::from_bytes(this_page.get_foster_val());
+                    let foster_page_key = PageFrameKey::new_with_frame_id(
+                        self.btree.c_key,
+                        val.page_id,
+                        val.frame_id,
+                    );
+                    let foster_page = self.btree.read_page(foster_page_key);
+                    current_page = foster_page;
+                    self.visited.push(foster_page_key); // Push the visiting page to the stack
+                    continue; // Go to the foster child
+                }
+                // We have reached the wanted leaf page.
+                let leaf_page = unsafe {
+                    std::mem::transmute::<FrameReadGuard, FrameReadGuard<'static>>(this_page)
+                };
+
+                if slot == 0 {
+                    slot = 1; // Skip the lower fence
+                }
+                let is_high_fence = leaf_page.high_fence_slot_id() == slot;
+                // The slot should not be a foster child slot. Otherwise it should have been traversed.
+                debug_assert!(
+                    !leaf_page.has_foster_child() || leaf_page.foster_child_slot_id() != slot
+                );
+
+                // Initialize the cursor states
+                self.current_slot_id = slot;
+                self.current_high_fence = Some(
+                    leaf_page
+                        .get_raw_key(leaf_page.high_fence_slot_id())
+                        .to_owned(),
+                );
+                self.current_leaf_page = Some(leaf_page);
+
+                if is_high_fence {
+                    return self.go_to_next_kv();
+                } else {
+                    // We read the key-value pair in this page at the current slot
+                    return;
+                }
+            }
+            // The current page is an internal node
+            let slot_id = this_page.upper_bound_slot_id(&self.l_key()) - 1;
+            debug_assert!(
+                slot_id > 0,
+                "Internal node should have at least one active slot"
+            );
+            let val = InnerVal::from_bytes(this_page.get_val(slot_id));
+            let page_key =
+                PageFrameKey::new_with_frame_id(self.btree.c_key, val.page_id, val.frame_id);
+            let next_page = self.btree.read_page(page_key);
+
+            // Do a prefetch for the next next page
+            let prefetch_slot_id = slot_id + 1;
+            if prefetch_slot_id < this_page.high_fence_slot_id() {
+                let prefetch_val = InnerVal::from_bytes(this_page.get_val(prefetch_slot_id));
+                let prefetch_page_key = PageFrameKey::new_with_frame_id(
+                    self.btree.c_key,
+                    prefetch_val.page_id,
+                    prefetch_val.frame_id,
+                );
+                let _ = self.btree.mem_pool.prefetch_page(prefetch_page_key);
+            }
+
+            current_page = next_page;
+            self.visited.push(page_key); // Push the visiting page to the stack
         }
     }
 
@@ -2578,7 +2362,7 @@ impl<T: MemPool> FosterBtreeRangeScannerWithPageId<T> {
         }
     }
 
-    fn high_fence(&self) -> BTreeKey {
+    fn current_high_fence(&self) -> BTreeKey {
         if self.current_high_fence.as_ref().unwrap().is_empty() {
             BTreeKey::PlusInfty
         } else {
@@ -2586,150 +2370,133 @@ impl<T: MemPool> FosterBtreeRangeScannerWithPageId<T> {
         }
     }
 
-    fn finish(&mut self) {
-        self.finished = true;
-        self.current_leaf_page = None;
-    }
-
-    #[cfg(feature = "old_iter")]
-    fn initialize(&mut self) {
-        // Traverse to the leaf page that contains the l_key
-        let leaf_page = self.btree.traverse_to_leaf_for_read(self.l_key.as_slice());
-        let leaf_page =
-            unsafe { std::mem::transmute::<FrameReadGuard, FrameReadGuard<'static>>(leaf_page) };
-        let mut slot = leaf_page.lower_bound_slot_id(&self.l_key());
-        if slot == 0 {
-            slot = 1; // Skip the lower fence
+    // Return None if the current slot is not in the range [l_key, r_key)
+    // Returns Some((key, val)) if the current slot is in the range.
+    pub fn get_kv(&self) -> Option<(Vec<u8>, Vec<u8>)> {
+        if self.finished {
+            return None;
         }
-        self.current_slot_id = slot;
-        self.current_high_fence = Some(
-            leaf_page
-                .get_raw_key(leaf_page.high_fence_slot_id())
-                .to_owned(),
-        );
-        self.current_leaf_page = Some(leaf_page);
+        debug_assert!(self.current_slot_id > 0);
+        debug_assert!(self.current_leaf_page.is_some());
+        let leaf_page = self.current_leaf_page.as_ref().unwrap();
+        let key = leaf_page.get_raw_key(self.current_slot_id);
+        if BTreeKey::new(key) >= self.r_key() {
+            // No more keys in the range
+            return None;
+        } else if self.current_slot_id == leaf_page.high_fence_slot_id() {
+            panic!("Cursor should not point to the high fence slot");
+        } else if leaf_page.has_foster_child()
+            && self.current_slot_id == leaf_page.foster_child_slot_id()
+        {
+            panic!("Cursor should not point to the foster child slot");
+        } else {
+            let val = leaf_page.get_val(self.current_slot_id);
+            Some((key.to_owned(), val.to_owned()))
+        }
     }
 
-    #[cfg(feature = "old_iter")]
-    fn go_to_next_leaf(&mut self) {
-        // Traverse to the leaf page that contains the current key (high fence of the previous leaf page)
-        // Current key should NOT be equal to the r_key. Otherwise, we are done.
-        let leaf_page = self
-            .btree
-            .traverse_to_leaf_for_read(self.current_high_fence.as_ref().unwrap());
-        let leaf_page =
-            unsafe { std::mem::transmute::<FrameReadGuard, FrameReadGuard<'static>>(leaf_page) };
-        self.current_slot_id = 1; // Skip the lower fence
-        self.current_high_fence = Some(
-            leaf_page
-                .get_raw_key(leaf_page.high_fence_slot_id())
-                .to_owned(),
-        );
-        self.current_leaf_page = Some(leaf_page);
+    pub fn get_physical_address(&self) -> (PageId, u32) {
+        let leaf_page = self.current_leaf_page.as_ref().unwrap();
+        (leaf_page.get_id(), leaf_page.frame_id())
     }
 
-    /// Traverse to the leaf page to find the page with l_key.
-    /// Creates a parents stack to keep track of the traversal path.
-    /// At the end of the function, the stack will contain the path from the root to the leaf page
-    /// including the foster pages.
-    #[cfg(not(feature = "old_iter"))]
-    fn initialize(&mut self) {
-        // Push the root page to the stack
-        self.parents.push(self.btree.root_key);
-        let page_frame_key = self.parents.last().unwrap();
-        let mut current_page = self.btree.read_page(*page_frame_key);
+    pub fn opportunistic_update(&mut self, val: &[u8], make_dirty: bool) {
+        let frame_read_guard = self.current_leaf_page.take().unwrap();
 
-        // Loop for traversing from the current page to the leaf page
-        // Once we reach this loop, we never go back to the outer loop.
-        loop {
-            let this_page = current_page;
-            if this_page.is_leaf() {
-                if this_page.has_foster_child()
-                    && this_page.get_foster_key() <= self.l_key.as_slice()
-                {
-                    // Check whether the foster child should be traversed.
-                    let val = InnerVal::from_bytes(this_page.get_foster_val());
-                    let foster_page_key = PageFrameKey::new_with_frame_id(
-                        self.btree.c_key,
-                        val.page_id,
-                        val.frame_id,
-                    );
-                    let foster_page = self.btree.read_page(foster_page_key);
-                    current_page = foster_page;
-                    self.parents.push(foster_page_key); // Push the visiting page to the stack
-                    continue;
+        let read_guard = match frame_read_guard.try_upgrade(make_dirty) {
+            Ok(mut write_guard) => {
+                let current_val = write_guard.get_val(self.current_slot_id);
+                if val == current_val {
+                    // No need to update
+                } else if val.len() != write_guard.get_val(self.current_slot_id).len() {
+                    panic!("Value length mismatch");
                 } else {
-                    let leaf_page = unsafe {
-                        std::mem::transmute::<FrameReadGuard, FrameReadGuard<'static>>(this_page)
-                    };
-
-                    // Initialize the slot to the lower bound of the l_key
-                    let mut slot = leaf_page.lower_bound_slot_id(&self.l_key());
-                    if slot == 0 {
-                        slot = 1; // Skip the lower fence
-                    }
-                    self.current_slot_id = slot;
-                    self.current_high_fence = Some(
-                        leaf_page
-                            .get_raw_key(leaf_page.high_fence_slot_id())
-                            .to_owned(),
-                    );
-                    self.current_leaf_page = Some(leaf_page);
-                    return;
+                    // Step 4: Perform the update
+                    write_guard.update_at(self.current_slot_id, None, val);
                 }
+                write_guard.downgrade()
             }
-            let slot_id = this_page.upper_bound_slot_id(&self.l_key()) - 1;
-            let val = InnerVal::from_bytes(this_page.get_val(slot_id));
-            let page_key =
+            Err(read_guard) => read_guard,
+        };
+
+        // Place the FrameReadGuard back into the Option
+        self.current_leaf_page = Some(read_guard);
+    }
+
+    // Sets the cursor to the next key-value pair.
+    // If there is no more leaf pages in the range, the current_leaf_page is set to None.
+    pub fn go_to_next_kv(&mut self) {
+        if self.finished {
+            return;
+        }
+
+        let leaf_page = self.current_leaf_page.take().unwrap();
+
+        self.current_slot_id += 1;
+        if self.current_slot_id >= leaf_page.high_fence_slot_id() {
+            // Check if we should go to the next leaf page
+            if self.current_high_fence() >= self.r_key() {
+                // No more keys in the range.
+                self.current_leaf_page = None;
+                self.current_high_fence = None;
+                self.finished = true;
+                return;
+            } else {
+                // Traverse to the next leaf page.
+                return self.go_to_next_leaf_page();
+            }
+        } else if leaf_page.has_foster_child()
+            && self.current_slot_id == leaf_page.foster_child_slot_id()
+        {
+            // If the current slot is the foster child slot, move to the foster child.
+            // Before releasing the current page, we need to get the read-latch of the foster child.
+            let val = InnerVal::from_bytes(leaf_page.get_foster_val());
+            let foster_page_key =
                 PageFrameKey::new_with_frame_id(self.btree.c_key, val.page_id, val.frame_id);
+            let foster_page = self
+                .btree
+                .mem_pool
+                .get_page_for_read(foster_page_key)
+                .unwrap();
+            let foster_page = unsafe {
+                std::mem::transmute::<FrameReadGuard, FrameReadGuard<'static>>(foster_page)
+            };
+            // Evict the current page as soon as possible
+            // self.btree
+            //     .mem_pool
+            //     .fast_evict(current_page.frame_id())
+            //     .unwrap();
+            drop(leaf_page);
 
-            let next_page = self.btree.read_page(page_key);
-
-            // Do a prefetch for the next next page
-            let prefetch_slot_id = slot_id + 1;
-            if prefetch_slot_id < this_page.high_fence_slot_id() {
-                let prefetch_val = InnerVal::from_bytes(this_page.get_val(prefetch_slot_id));
-                let prefetch_page_key = PageFrameKey::new_with_frame_id(
-                    self.btree.c_key,
-                    prefetch_val.page_id,
-                    prefetch_val.frame_id,
-                );
-                let _ = self.btree.mem_pool.prefetch_page(prefetch_page_key);
-            }
-
-            current_page = next_page;
-            self.parents.push(page_key); // Push the visiting page to the stack
+            self.current_slot_id = 1;
+            self.current_high_fence = Some(
+                foster_page
+                    .get_raw_key(foster_page.high_fence_slot_id())
+                    .to_owned(),
+            );
+            self.current_leaf_page = Some(foster_page);
+        } else {
+            // Same leaf page
+            self.current_leaf_page = Some(leaf_page);
         }
     }
 
-    /// Traverse to the leaf page.
-    /// This is done by checking the parent page and check if the page is valid.
-    /// The validity is checked by checking the valid bit as well as whether the next leaf page
-    /// is in the range of this parent page.
-    /// If concurrent operations removes the parent page by merging or load balancing, it will
-    /// set the valid bit to false before releasing the latch. Therefore, we can check the valid
-    /// bit to see if the parent page is still valid. If valid bit is true, the page contains
-    /// a fence keys that can be used for comparison. Even if the page is valid, it may be possible that
-    /// the page is no longer the parent page of the current leaf page due to the recycling of the
-    /// removed page. Therefore, we still need to check the range of the parent page to see if the
-    /// current leaf page is still in the range of the parent page.
-    /// In addition, the traversal happens from leaf to root. We need to ensure that no deadlocks occur
-    /// during the traversal. Deadlocks are not a problem in this case because the traversal only
-    /// takes a read latch. If taking the read latch fails, there is a concurrent write operation
-    /// that is modifying the page. If we detect this situation, we can wait for a while.
-    #[cfg(not(feature = "old_iter"))]
-    fn go_to_next_leaf(&mut self) {
+    // Sets the cursor to the next leaf page
+    fn go_to_next_leaf_page(&mut self) {
         // Pop the current page from the stack
-        self.parents.pop().unwrap();
+        let _ = self.visited.pop();
+        if self.visited.is_empty() {
+            self.visited.push(self.btree.root_key);
+        }
 
         let key = self.current_high_fence.as_ref().unwrap();
 
         // Loop for retrying traversals from internal nodes
         loop {
-            let page_frame_key = self.parents.last().unwrap();
+            let page_frame_key = self.visited.last().unwrap();
             let mut current_page = self.btree.read_page(*page_frame_key);
             if !current_page.is_valid() || !current_page.inside_range(&BTreeKey::Normal(key)) {
-                self.parents.pop().unwrap(); // The previous page was invalidated by concurrent operations. Go one level up.
+                self.visited.pop().unwrap(); // The previous page was invalidated by concurrent operations. Go one level up.
                 continue;
             } else {
                 // Loop for traversing from the current page to the leaf page
@@ -2748,7 +2515,7 @@ impl<T: MemPool> FosterBtreeRangeScannerWithPageId<T> {
                             );
                             let foster_page = self.btree.read_page(foster_page_key);
                             current_page = foster_page;
-                            self.parents.push(foster_page_key); // Push the visiting page to the stack
+                            self.visited.push(foster_page_key); // Push the visiting page to the stack
                             continue;
                         } else {
                             let leaf_page = unsafe {
@@ -2790,104 +2557,42 @@ impl<T: MemPool> FosterBtreeRangeScannerWithPageId<T> {
                     }
 
                     current_page = next_page;
-                    self.parents.push(page_key); // Push the visiting page to the stack
+                    self.visited.push(page_key); // Push the visiting page to the stack
                 }
             }
         }
     }
 }
 
-impl<T: MemPool> Iterator for FosterBtreeRangeScannerWithPageId<T> {
-    type Item = (Vec<u8>, Vec<u8>, (PageId, u32));
-
-    fn next(&mut self) -> Option<(Vec<u8>, Vec<u8>, (PageId, u32))> {
-        if self.finished {
-            return None;
-        }
-        if !self.initialized {
-            self.initialize();
-            self.initialized = true;
-        }
-        loop {
-            debug_assert!(self.current_slot_id > 0);
-            if self.current_leaf_page.is_none() {
-                // If the current leaf page is None, we have to re-traverse to the leaf page using the previous high fence.
-                if self.high_fence() >= self.r_key() {
-                    self.finish();
-                    return None;
-                } else {
-                    self.go_to_next_leaf();
-                }
-            }
-            debug_assert!(self.current_leaf_page.is_some());
-            let leaf_page = self.current_leaf_page.as_ref().unwrap();
-            let key = leaf_page.get_raw_key(self.current_slot_id);
-            if BTreeKey::new(key) >= self.r_key() {
-                // Evict the page as soon as possible
-                let current_leaf_page = self.current_leaf_page.take().unwrap();
-                // self.btree
-                //     .mem_pool
-                //     .fast_evict(current_leaf_page.frame_id())
-                //     .unwrap();
-                drop(current_leaf_page);
-
-                self.finish();
-                return None;
-            }
-            if self.current_slot_id == leaf_page.high_fence_slot_id() {
-                // Evict the page as soon as possible
-                let current_leaf_page = self.current_leaf_page.take().unwrap();
-                // self.btree
-                //     .mem_pool
-                //     .fast_evict(current_leaf_page.frame_id())
-                //     .unwrap();
-                drop(current_leaf_page);
-            } else if leaf_page.has_foster_child()
-                && self.current_slot_id == leaf_page.foster_child_slot_id()
-            {
-                // If the current slot is the foster child slot, move to the foster child.
-                // Before releasing the current page, we need to get the read-latch of the foster child.
-                let current_page = self.current_leaf_page.take().unwrap();
-                let val = InnerVal::from_bytes(current_page.get_foster_val());
-                let foster_page_key =
-                    PageFrameKey::new_with_frame_id(self.btree.c_key, val.page_id, val.frame_id);
-                let foster_page = self
-                    .btree
-                    .mem_pool
-                    .get_page_for_read(foster_page_key)
-                    .unwrap();
-                let foster_page = unsafe {
-                    std::mem::transmute::<FrameReadGuard, FrameReadGuard<'static>>(foster_page)
-                };
-                // Evict the current page as soon as possible
-                // self.btree
-                //     .mem_pool
-                //     .fast_evict(current_page.frame_id())
-                //     .unwrap();
-                drop(current_page);
-
-                self.current_slot_id = 1;
-                self.current_high_fence = Some(
-                    foster_page
-                        .get_raw_key(foster_page.high_fence_slot_id())
-                        .to_owned(),
-                );
-                self.current_leaf_page = Some(foster_page);
-            } else {
-                let val = leaf_page.get_val(self.current_slot_id);
-                let page_id = leaf_page.get_id();
-                let frame_id = leaf_page.frame_id();
-                if self.filter.is_none() || (self.filter.as_mut().unwrap())(key, val) {
-                    self.current_slot_id += 1;
-                    return Some((key.to_owned(), val.to_owned(), (page_id, frame_id)));
-                } else {
-                    self.current_slot_id += 1;
-                }
-            }
-        }
-    }
+pub struct FosterBtreeAppendOnlyCursor<T: MemPool> {
+    cursor: FosterBtreeCursor<T>,
 }
 
+impl<T: MemPool> FosterBtreeAppendOnlyCursor<T> {
+    pub fn new(btree: &Arc<FosterBtreeAppendOnly<T>>, l_key: &[u8], r_key: &[u8]) -> Self {
+        let cursor = FosterBtreeCursor::new(&btree.fbt, &l_key, &r_key);
+        FosterBtreeAppendOnlyCursor { cursor }
+    }
+
+    pub fn get_kv(&self) -> Option<((Vec<u8>, u32), Vec<u8>)> {
+        let (key, val) = self.cursor.get_kv()?;
+        let (key, suffix) = key.split_at(key.len() - 4);
+        let suffix = u32::from_be_bytes(suffix.try_into().unwrap());
+        Some(((key.to_vec(), suffix), val))
+    }
+
+    pub fn opportunistic_update(&mut self, val: &[u8], make_dirty: bool) {
+        self.cursor.opportunistic_update(val, make_dirty);
+    }
+
+    pub fn go_to_next_kv(&mut self) {
+        self.cursor.go_to_next_kv();
+    }
+
+    pub fn get_physical_address(&self) -> (PageId, u32) {
+        self.cursor.get_physical_address()
+    }
+}
 /// Tree index for non-unique keys.
 ///
 /// The key is appended with a suffix to make it unique.
@@ -2923,6 +2628,28 @@ impl<T: MemPool> FosterBtreeAppendOnly<T> {
 
     pub fn num_kvs(&self) -> usize {
         self.fbt.num_kvs()
+    }
+
+    pub fn traverse_to_leaf_for_read_with_hint(
+        &self,
+        key: &[u8],
+        hint: Option<PageFrameKey>,
+    ) -> FrameReadGuard {
+        let mut suffixed_key = key.to_vec();
+        suffixed_key.extend(0_u32.to_be_bytes());
+        self.fbt
+            .traverse_to_leaf_for_read_with_hint(&suffixed_key, hint)
+    }
+
+    pub fn traverse_to_leaf_for_write_with_hint(
+        &self,
+        key: &[u8],
+        hint: Option<PageFrameKey>,
+    ) -> FrameWriteGuard {
+        let mut suffixed_key = key.to_vec();
+        suffixed_key.extend(0_u32.to_be_bytes());
+        self.fbt
+            .traverse_to_leaf_for_write_with_hint(&suffixed_key, hint)
     }
 
     pub fn append(&self, key: &[u8], value: &[u8]) -> Result<(), AccessMethodError> {
@@ -3013,6 +2740,30 @@ impl<T: MemPool> Iterator for FosterBtreeAppendOnlyRangeScanner<T> {
             key.truncate(key.len() - 4);
             (key, value)
         })
+    }
+}
+
+pub struct FosterBtreeAppendOnlyRangeScannerWithPageId<T: MemPool> {
+    scanner: FosterBtreeRangeScannerWithPageId<T>,
+}
+
+impl<T: MemPool> FosterBtreeAppendOnlyRangeScannerWithPageId<T> {
+    pub fn new(fbt: &Arc<FosterBtreeAppendOnly<T>>, l_key: &[u8], r_key: &[u8]) -> Self {
+        let scanner = FosterBtreeRangeScannerWithPageId::new(&fbt.fbt, l_key, r_key);
+        Self { scanner }
+    }
+}
+
+impl<T: MemPool> Iterator for FosterBtreeAppendOnlyRangeScannerWithPageId<T> {
+    type Item = (Vec<u8>, Vec<u8>, (PageId, u32));
+
+    fn next(&mut self) -> Option<(Vec<u8>, Vec<u8>, (PageId, u32))> {
+        self.scanner
+            .next()
+            .map(|(mut key, value, (page_id, frame_id))| {
+                key.truncate(key.len() - 4);
+                (key, value, (page_id, frame_id))
+            })
     }
 }
 
@@ -3238,6 +2989,7 @@ mod tests {
     use std::collections::HashSet;
     use std::{fs::File, sync::Arc, thread};
 
+    use crate::access_method::fbt::foster_btree::FosterBtreeCursor;
     use crate::access_method::fbt::foster_btree::{deserialize_page_id, InnerVal};
     #[allow(unused_imports)]
     use crate::log;
@@ -4663,10 +4415,23 @@ mod tests {
     }
 
     #[rstest]
-    #[case::bp(get_test_bp(3))]
+    #[case::bp(get_test_bp(5))]
     #[case::in_mem(get_in_mem_pool())]
     fn test_scan<T: MemPool>(#[case] bp: Arc<T>) {
         let btree = Arc::new(setup_btree_empty(bp.clone()));
+        // Scan empty
+        let iter = btree.scan_range(&[], &[]);
+        let mut count = 0;
+        for (key, current_val) in iter {
+            let key = from_bytes(&key);
+            println!(
+                "**************************** Scanning key {} **************************",
+                key
+            );
+            count += 1;
+        }
+        assert_eq!(count, 0);
+
         // Insert 1024 bytes
         let val = vec![3_u8; 1024];
         let order = [6, 3, 8, 1, 5, 7, 2, 4, 9, 0];
@@ -4725,6 +4490,71 @@ mod tests {
     }
 
     #[rstest]
+    #[case::bp(get_test_bp(5))]
+    #[case::in_mem(get_in_mem_pool())]
+    fn test_cursor<T: MemPool>(#[case] bp: Arc<T>) {
+        let btree = Arc::new(setup_btree_empty(bp.clone()));
+        // Insert 1024 bytes
+        let val = vec![3_u8; 1024];
+        let order = [6, 3, 8, 1, 5, 7, 2, 4, 9, 0];
+        for i in order.iter() {
+            println!(
+                "**************************** Upserting key {} **************************",
+                i
+            );
+            let key = to_bytes(*i);
+            btree.upsert(&key, &val).unwrap();
+        }
+        let start_key = to_bytes(2);
+        let end_key = to_bytes(7);
+        let mut cursor = FosterBtreeCursor::new(&btree, &start_key, &end_key);
+        let mut count = 0;
+        while let Some((key, current_val)) = cursor.get_kv() {
+            let key = from_bytes(&key);
+            println!(
+                "**************************** Scanning key {} **************************",
+                key
+            );
+            assert_eq!(current_val, val);
+            count += 1;
+            cursor.go_to_next_kv();
+        }
+        assert_eq!(count, 5);
+
+        let start_key = to_bytes(0);
+        let end_key = to_bytes(10);
+        let mut cursor = FosterBtreeCursor::new(&btree, &start_key, &end_key);
+        let mut count = 0;
+        while let Some((key, current_val)) = cursor.get_kv() {
+            let key = from_bytes(&key);
+            println!(
+                "**************************** Scanning key {} **************************",
+                key
+            );
+            assert_eq!(current_val, val);
+            count += 1;
+            cursor.go_to_next_kv();
+        }
+        assert_eq!(count, 10);
+
+        let start_key = [];
+        let end_key = [];
+        let mut cursor = FosterBtreeCursor::new(&btree, &start_key, &end_key);
+        let mut count = 0;
+        while let Some((key, current_val)) = cursor.get_kv() {
+            let key = from_bytes(&key);
+            println!(
+                "**************************** Scanning key {} **************************",
+                key
+            );
+            assert_eq!(current_val, val);
+            count += 1;
+            cursor.go_to_next_kv();
+        }
+        assert_eq!(count, 10);
+    }
+
+    #[rstest]
     #[case::in_mem(get_in_mem_pool())]
     #[ignore]
     fn test_scan_heavy<T: MemPool>(#[case] bp: Arc<T>) {
@@ -4772,7 +4602,56 @@ mod tests {
     }
 
     #[rstest]
-    #[case::bp(get_test_bp(3))]
+    #[case::in_mem(get_in_mem_pool())]
+    #[ignore]
+    fn test_cursor_heavy<T: MemPool>(#[case] bp: Arc<T>) {
+        let btree = Arc::new(setup_btree_empty(bp.clone()));
+        let val = vec![1; 1024];
+        // Insert num_keys values in random order
+        let num_keys = 200000;
+        let order = gen_random_permutation((0..num_keys).into_iter().collect::<Vec<_>>());
+        for i in order.iter() {
+            println!(
+                "**************************** Upserting key {} **************************",
+                i
+            );
+            let key = to_bytes(*i);
+            btree.upsert(&key, &val).unwrap();
+        }
+        let mut cursor = FosterBtreeCursor::new(&btree, &[], &[]);
+        let mut count = 0;
+        while let Some((key, _)) = cursor.get_kv() {
+            let key = from_bytes(&key);
+            println!(
+                "**************************** Scanning key {} **************************",
+                key
+            );
+            assert_eq!(key, count);
+            count += 1;
+            cursor.go_to_next_kv();
+        }
+        assert_eq!(count, num_keys);
+
+        // Scan with range
+        let start_key = to_bytes(1000);
+        let end_key = to_bytes(2000);
+        let mut cursor = FosterBtreeCursor::new(&btree, &start_key, &end_key);
+        let mut count = 0;
+        while let Some((key, _)) = cursor.get_kv() {
+            let key = from_bytes(&key);
+            println!(
+                "**************************** Scanning key {} **************************",
+                key
+            );
+            assert_eq!(key, count + 1000);
+            count += 1;
+            cursor.go_to_next_kv();
+        }
+        assert_eq!(count, 1000);
+    }
+
+    #[rstest]
+    #[case::bp(get_test_bp(5))]
     #[case::in_mem(get_in_mem_pool())]
     fn test_scan_with_filter<T: MemPool>(#[case] bp: Arc<T>) {
         let btree = Arc::new(setup_btree_empty(bp.clone()));
