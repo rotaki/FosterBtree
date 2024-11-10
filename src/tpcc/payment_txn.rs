@@ -33,8 +33,8 @@ impl TxnProfile for PaymentTxn {
         config: &TPCCConfig,
         txn_storage: &T,
         tbl_info: &TableInfo,
-        stat: &mut Stat,
-        out: &mut Output,
+        stat: &mut TPCCStat,
+        out: &mut TPCCOutput,
     ) -> TPCCStatus {
         let start = SystemTime::now();
         let mut helper = TxHelper::new(txn_storage, &mut stat[PaymentTxn::ID]);
@@ -97,7 +97,6 @@ impl TxnProfile for PaymentTxn {
                 ScanOptions {
                     lower: sec_key_bytes.to_vec(),
                     upper: vec![],
-                    limit: 0,
                 },
             );
             if not_successful(config, &res) {
@@ -105,16 +104,30 @@ impl TxnProfile for PaymentTxn {
             }
             let iter = res.unwrap();
 
-            while let Ok(Some((s_key, p_value))) = txn_storage.iter_next(&txn, &iter) {
-                if s_key != sec_key_bytes {
-                    break;
-                } else {
-                    // Push the customer record to the vector
-                    customer_recs.push(p_value);
+            loop {
+                match txn_storage.iter_next(&txn, &iter) {
+                    Ok(Some((s_key, p_value))) => {
+                        if s_key != sec_key_bytes {
+                            break;
+                        } else {
+                            customer_recs.push(p_value);
+                        }
+                    }
+                    Ok(None) => break,
+                    Err(e) => {
+                        return helper.kill::<()>(
+                            &txn,
+                            &Err(e),
+                            AbortID::PrepareUpdateCustomerByLastName as u8,
+                        )
+                    }
                 }
             }
+            drop(iter);
 
             if customer_recs.is_empty() {
+                // This should not happen if iteration is correct as we should have at least one record
+                // with any pattern of last name.
                 return helper.kill::<()>(
                     &txn,
                     &Err(TxnStorageStatus::KeyNotFound),
@@ -173,7 +186,7 @@ impl TxnProfile for PaymentTxn {
         // Insert History
         // Ignore it for now as it is not used for the output.
 
-        let duration = start.elapsed().unwrap().as_nanos() as u64;
+        let duration = start.elapsed().unwrap().as_micros() as u64;
         return helper.commit(&txn, AbortID::Precommit as u8, duration);
     }
 
@@ -222,6 +235,17 @@ impl PaymentTxn {
         let len = new_data_bytes.len();
         c.c_data.copy_within(0..Customer::MAX_DATA - len, len);
         c.c_data[..len].copy_from_slice(new_data_bytes);
+    }
+
+    pub fn print_abort_details(stat: &[usize]) {
+        println!("PaymentTxn Abort Details:");
+        for i in 0..AbortID::Max as usize {
+            println!(
+                "        {:<45}: {}",
+                AbortID::from(i as u8).as_str(),
+                stat[i]
+            );
+        }
     }
 }
 
@@ -295,7 +319,7 @@ impl PaymentTxnInput {
 /// Enum representing different abort reasons
 #[derive(Debug, Clone, Copy)]
 #[repr(u8)]
-pub enum AbortID {
+enum AbortID {
     PrepareUpdateWarehouse = 0,
     FinishUpdateWarehouse = 1,
     PrepareUpdateDistrict = 2,
@@ -307,6 +331,24 @@ pub enum AbortID {
     FinishInsertHistory = 8,
     Precommit = 9,
     Max = 10,
+}
+
+impl From<u8> for AbortID {
+    fn from(val: u8) -> Self {
+        match val {
+            0 => AbortID::PrepareUpdateWarehouse,
+            1 => AbortID::FinishUpdateWarehouse,
+            2 => AbortID::PrepareUpdateDistrict,
+            3 => AbortID::FinishUpdateDistrict,
+            4 => AbortID::PrepareUpdateCustomerByLastName,
+            5 => AbortID::PrepareUpdateCustomer,
+            6 => AbortID::FinishUpdateCustomer,
+            7 => AbortID::PrepareInsertHistory,
+            8 => AbortID::FinishInsertHistory,
+            9 => AbortID::Precommit,
+            _ => panic!("Invalid AbortID"),
+        }
+    }
 }
 
 /// Function to get the abort reason as a static string

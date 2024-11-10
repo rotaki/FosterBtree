@@ -21,7 +21,7 @@ use crate::{
     prelude::{ContainerKey, FosterBtree},
 };
 
-use super::locktable::SingleThreadLockTable as LockTable;
+use super::locktable::ConcurrentLockTable as LockTable;
 use super::txn_storage_trait::ContainerType;
 use super::{ContainerOptions, DBOptions, TxnOptions, TxnStorageTrait};
 
@@ -861,9 +861,9 @@ pub struct NoWaitTxnStorage<M: MemPool> {
 }
 
 impl<M: MemPool> NoWaitTxnStorage<M> {
-    pub fn new(bp: Arc<M>) -> Self {
+    pub fn new(bp: &Arc<M>) -> Self {
         NoWaitTxnStorage {
-            bp,
+            bp: bp.clone(),
             pss: PrimaryStorages::new(),
             sss: SecondaryStorages::new(),
         }

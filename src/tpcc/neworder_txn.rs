@@ -33,8 +33,8 @@ impl TxnProfile for NewOrderTxn {
         config: &TPCCConfig,
         txn_storage: &T,
         tbl_info: &TableInfo,
-        stat: &mut Stat,
-        out: &mut Output,
+        stat: &mut TPCCStat,
+        out: &mut TPCCOutput,
     ) -> TPCCStatus {
         let start = SystemTime::now();
         let mut helper = TxHelper::new(txn_storage, &mut stat[NewOrderTxn::ID]);
@@ -212,7 +212,7 @@ impl TxnProfile for NewOrderTxn {
         total *= (1.0 - c.c_discount) * (1.0 + w.w_tax + d_tax);
         out.write(&total);
 
-        let duration = start.elapsed().unwrap().as_nanos() as u64;
+        let duration = start.elapsed().unwrap().as_micros() as u64;
         return helper.commit(&txn, AbortID::Precommit as u8, duration);
     }
 }
@@ -281,6 +281,17 @@ impl NewOrderTxn {
         ol.ol_amount = ol_amount;
         ol.ol_dist_info
             .copy_from_slice(&s.s_dist[(d_id - 1) as usize]);
+    }
+
+    pub fn print_abort_details(stat: &[usize]) {
+        println!("NewOrderTxn Abort Details:");
+        for i in 0..AbortID::Max as usize {
+            println!(
+                "        {:<45}: {}",
+                AbortID::from(i as u8).as_str(),
+                stat[i]
+            );
+        }
     }
 }
 
@@ -386,6 +397,28 @@ enum AbortID {
     FinishInsertOrderLine = 12,
     Precommit = 13,
     Max = 14,
+}
+
+impl From<u8> for AbortID {
+    fn from(val: u8) -> Self {
+        match val {
+            0 => AbortID::GetWarehouse,
+            1 => AbortID::PrepareUpdateDistrict,
+            2 => AbortID::FinishUpdateDistrict,
+            3 => AbortID::GetCustomer,
+            4 => AbortID::PrepareInsertNewOrder,
+            5 => AbortID::FinishInsertNewOrder,
+            6 => AbortID::PrepareInsertOrder,
+            7 => AbortID::FinishInsertOrder,
+            8 => AbortID::GetItem,
+            9 => AbortID::PrepareUpdateStock,
+            10 => AbortID::FinishUpdateStock,
+            11 => AbortID::PrepareInsertOrderLine,
+            12 => AbortID::FinishInsertOrderLine,
+            13 => AbortID::Precommit,
+            _ => panic!("Invalid AbortID"),
+        }
+    }
 }
 
 /// Function to get the abort reason as a static string

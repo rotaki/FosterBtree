@@ -27,8 +27,8 @@ impl TxnProfile for OrderStatusTxn {
         config: &TPCCConfig,
         txn_storage: &T,
         tbl_info: &TableInfo,
-        stat: &mut Stat,
-        out: &mut Output,
+        stat: &mut TPCCStat,
+        out: &mut TPCCOutput,
     ) -> TPCCStatus {
         let start = SystemTime::now();
         let mut helper = TxHelper::new(txn_storage, &mut stat[OrderStatusTxn::ID]);
@@ -54,14 +54,12 @@ impl TxnProfile for OrderStatusTxn {
                 ScanOptions {
                     lower: sec_key_bytes.to_vec(),
                     upper: vec![],
-                    limit: 0,
                 },
             );
             if not_successful(config, &res) {
                 return helper.kill(&txn, &res, AbortID::GetCustomerByLastName as u8);
             }
             let iter = res.unwrap();
-
             loop {
                 match txn_storage.iter_next(&txn, &iter) {
                     Ok(Some((s_key, p_value))) => {
@@ -81,8 +79,11 @@ impl TxnProfile for OrderStatusTxn {
                     }
                 }
             }
+            drop(iter);
 
             if customer_recs.is_empty() {
+                // This should not happen if the iterator is working correctly
+                // as we should get at least one record for the matching last name
                 return helper.kill::<()>(
                     &txn,
                     &Err(TxnStorageStatus::KeyNotFound),
@@ -124,7 +125,6 @@ impl TxnProfile for OrderStatusTxn {
             ScanOptions {
                 lower: o_sec_low_key.into_bytes().to_vec(),
                 upper: o_sec_high_key.into_bytes().to_vec(),
-                limit: 0,
             },
         );
         if not_successful(config, &res) {
@@ -145,7 +145,10 @@ impl TxnProfile for OrderStatusTxn {
                 }
             }
         }
+        drop(iter);
+
         if last_order.is_empty() {
+            // This should not happen as we should have at least one order for the customer
             return helper.kill::<()>(
                 &txn,
                 &Err(TxnStorageStatus::KeyNotFound),
@@ -165,14 +168,12 @@ impl TxnProfile for OrderStatusTxn {
             ScanOptions {
                 lower: low_key.into_bytes().to_vec(),
                 upper: up_key.into_bytes().to_vec(),
-                limit: 0,
             },
         );
         if not_successful(config, &res) {
             return helper.kill(&txn, &res, AbortID::RangeGetOrderLine as u8);
         }
         let iter = res.unwrap();
-
         loop {
             match txn_storage.iter_next(&txn, &iter) {
                 Ok(Some((_, val))) => {
@@ -192,9 +193,23 @@ impl TxnProfile for OrderStatusTxn {
                 }
             }
         }
+        drop(iter);
 
-        let duration = start.elapsed().unwrap().as_nanos() as u64;
+        let duration = start.elapsed().unwrap().as_micros() as u64;
         return helper.commit(&txn, AbortID::Precommit as u8, duration);
+    }
+}
+
+impl OrderStatusTxn {
+    pub fn print_abort_details(stat: &[usize]) {
+        println!("OrderStatusTxn Abort Details:");
+        for i in 0..AbortID::Max as usize {
+            println!(
+                "        {:<45}: {}",
+                AbortID::from(i as u8).as_str(),
+                stat[i]
+            );
+        }
     }
 }
 
@@ -258,6 +273,19 @@ enum AbortID {
     RangeGetOrderLine = 3,
     Precommit = 4,
     Max = 5,
+}
+
+impl From<u8> for AbortID {
+    fn from(val: u8) -> Self {
+        match val {
+            0 => AbortID::GetCustomerByLastName,
+            1 => AbortID::GetCustomer,
+            2 => AbortID::GetOrderByCustomerId,
+            3 => AbortID::RangeGetOrderLine,
+            4 => AbortID::Precommit,
+            _ => panic!("Invalid AbortID"),
+        }
+    }
 }
 
 /// Function to get the abort reason as a static string

@@ -518,29 +518,3 @@ pub fn load_all_tables(txn_storage: &impl TxnStorageTrait, config: &TPCCConfig) 
 
     table_info
 }
-
-#[cfg(test)]
-mod tests {
-    use crate::{bp::get_test_bp, txn_storage::NoWaitTxnStorage};
-
-    use super::*;
-
-    fn create_txn_storage() -> impl TxnStorageTrait {
-        let bp = get_test_bp(100);
-        let txn_storage = NoWaitTxnStorage::new(bp);
-        txn_storage
-    }
-
-    #[test]
-    #[ignore]
-    fn test_loader() {
-        let txn_storage = create_txn_storage();
-        let config = TPCCConfig {
-            num_warehouses: 1,
-            num_threads: 1,
-            random_abort: false,
-            fixed_warehouse_per_thread: false,
-        };
-        let table_info = load_all_tables(&txn_storage, &config);
-    }
-}

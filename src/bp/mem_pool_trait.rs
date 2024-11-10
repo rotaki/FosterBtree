@@ -1,6 +1,6 @@
 use super::buffer_frame::{FrameReadGuard, FrameWriteGuard};
 
-use crate::{file_manager::FMError, page::PageId};
+use crate::page::PageId;
 
 pub type DatabaseId = u16;
 pub type ContainerId = u16;
@@ -108,16 +108,16 @@ impl std::fmt::Display for PageFrameKey {
 #[derive(Debug, PartialEq)]
 pub enum MemPoolStatus {
     FileManagerNotFound,
-    FileManagerError(FMError),
+    FileManagerError(String),
     PageNotFound,
     FrameReadLatchGrantFailed,
     FrameWriteLatchGrantFailed,
     CannotEvictPage,
 }
 
-impl From<FMError> for MemPoolStatus {
-    fn from(s: FMError) -> Self {
-        MemPoolStatus::FileManagerError(s)
+impl From<std::io::Error> for MemPoolStatus {
+    fn from(s: std::io::Error) -> Self {
+        MemPoolStatus::FileManagerError(s.to_string())
     }
 }
 
@@ -149,29 +149,24 @@ pub struct MemoryStats {
 
 impl std::fmt::Display for MemoryStats {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Write the stats in a different line for better readability.
-        // If usize::MAX, set to N/A
-        let new_count = if self.new_count == usize::MAX {
-            "N/A".to_string()
-        } else {
-            self.new_count.to_string()
-        };
-        let read_count = if self.read_count == usize::MAX {
-            "N/A".to_string()
-        } else {
-            self.read_count.to_string()
-        };
-        let write_count = if self.write_count == usize::MAX {
-            "N/A".to_string()
-        } else {
-            self.write_count.to_string()
+        // Set to "N/A" if usize::MAX, otherwise format as a right-aligned string
+        let format_count = |count| {
+            if count == usize::MAX {
+                "N/A".to_string()
+            } else {
+                format!("{:>10}", count)
+            }
         };
 
-        write!(
-            f,
-            "Frames in memory: {}\nNew pages created: {}\nPages read: {}\nPages written: {}",
-            self.num_frames_in_mem, new_count, read_count, write_count
-        )
+        let num_frames_in_mem = format_count(self.num_frames_in_mem);
+        let new_count = format_count(self.new_count);
+        let read_count = format_count(self.read_count);
+        let write_count = format_count(self.write_count);
+
+        writeln!(f, "Frames in memory:  {}", num_frames_in_mem)?;
+        writeln!(f, "New pages created: {}", new_count)?;
+        writeln!(f, "Pages read:        {}", read_count)?;
+        writeln!(f, "Pages written:     {}", write_count)
     }
 }
 

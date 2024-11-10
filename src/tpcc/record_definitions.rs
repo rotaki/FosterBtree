@@ -478,20 +478,25 @@ pub struct NewOrderKey {
 }
 
 impl NewOrderKey {
-    fn o_id(&self) -> u32 {
+    pub fn o_id(&self) -> u32 {
         (self.no_key & 0xFFFF_FFFF) as u32
     }
 
-    fn d_id(&self) -> u8 {
+    pub fn d_id(&self) -> u8 {
         ((self.no_key >> 32) & 0xFF) as u8
     }
 
-    fn w_id(&self) -> u16 {
+    pub fn w_id(&self) -> u16 {
         ((self.no_key >> 40) & 0xFFFF) as u16
     }
 
     pub fn into_bytes(&self) -> [u8; 8] {
         self.no_key.to_be_bytes()
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Self {
+        let no_key = u64::from_be_bytes(bytes.try_into().unwrap());
+        NewOrderKey { no_key }
     }
 
     pub fn create_key(w_id: u16, d_id: u8, o_id: u32) -> Self {
@@ -535,7 +540,7 @@ impl Item {
     pub const MAX_NAME: usize = 24;
     pub const MIN_DATA: usize = 26;
     pub const MAX_DATA: usize = 50;
-    pub const UNUSED_ID: u32 = 1;
+    pub const UNUSED_ID: u32 = 0;
 
     pub fn new() -> Self {
         Item {
@@ -833,6 +838,10 @@ impl District {
         }
     }
 
+    pub fn from_bytes(bytes: &[u8]) -> &District {
+        unsafe { &*(bytes.as_ptr() as *const District) }
+    }
+
     pub fn from_bytes_mut(bytes: &mut [u8]) -> &mut District {
         unsafe { &mut *(bytes.as_mut_ptr() as *mut District) }
     }
@@ -1103,6 +1112,10 @@ impl Order {
         unsafe { &mut *(bytes.as_ptr() as *mut Order) }
     }
 
+    pub fn from_bytes_mut(bytes: &mut [u8]) -> &mut Order {
+        unsafe { &mut *(bytes.as_mut_ptr() as *mut Order) }
+    }
+
     // Method to print the Order
     pub fn print(&self) -> String {
         format!(
@@ -1235,8 +1248,12 @@ impl OrderLine {
         }
     }
 
-    pub fn from_bytes(bytes: &[u8]) -> &mut OrderLine {
-        unsafe { &mut *(bytes.as_ptr() as *mut OrderLine) }
+    pub fn from_bytes(bytes: &[u8]) -> &OrderLine {
+        unsafe { &*(bytes.as_ptr() as *const OrderLine) }
+    }
+
+    pub fn from_bytes_mut(bytes: &mut [u8]) -> &mut OrderLine {
+        unsafe { &mut *(bytes.as_mut_ptr() as *mut OrderLine) }
     }
 
     pub fn print(&self) -> String {

@@ -1,16 +1,19 @@
+use core::panic;
 use rand::Rng;
 use std::cmp;
 use std::hash::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::ops::{Index, IndexMut, Shl};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
 
 use crate::log_info;
-use crate::prelude::{TxnOptions, TxnStorageStatus, TxnStorageTrait};
+use crate::prelude::{AccessMethodError, TxnOptions, TxnStorageStatus, TxnStorageTrait};
 use crate::tpcc::record_definitions::Customer;
 use clap::Parser;
 
 use super::loader::TableInfo;
+use super::prelude::{DeliveryTxn, NewOrderTxn, OrderStatusTxn, PaymentTxn, StockLevelTxn};
 use super::record_definitions::urand_int;
 
 #[macro_export]
@@ -23,7 +26,7 @@ macro_rules! write_fields {
 }
 
 /// Configuration settings parsed from command-line arguments.
-#[derive(Parser, Debug)]
+#[derive(Parser, Debug, Clone)]
 #[command(version, about, long_about = None)]
 pub struct TPCCConfig {
     /// Number of warehouses.
@@ -41,6 +44,14 @@ pub struct TPCCConfig {
     /// Use fixed warehouse per thread.
     #[arg(short = 'f', long, default_value_t = false)]
     pub fixed_warehouse_per_thread: bool,
+
+    /// Warmup duration in seconds.
+    #[arg(short = 'd', long, default_value_t = 3)]
+    pub warmup: u64,
+
+    /// Test duration in seconds.
+    #[arg(short = 'D', long, default_value_t = 10)]
+    pub duration: u64,
 }
 
 /// Enumeration representing the status of a transaction.
@@ -49,19 +60,19 @@ pub enum TPCCStatus {
     Success,     // if all stages of transaction return Result::Success
     UserAbort,   // if rollback defined in the specification occurs (e.g. 1% of NewOrder Tx)
     SystemAbort, // if any stage of a transaction returns Result::Abort
-    Bug,         // if any stage of a transaction returns unexpected Result::Fail
+    Bug(String), // if any stage of a transaction returns unexpected Result::Fail
 }
 
 /// Struct to accumulate output data.
 #[derive(Debug)]
-pub struct Output {
+pub struct TPCCOutput {
     pub out: u64,
 }
 
-impl Output {
+impl TPCCOutput {
     /// Creates a new `Output` instance.
     pub fn new() -> Self {
-        Output { out: 0 }
+        TPCCOutput { out: 0 }
     }
 
     /// Writes any type `T` into the output by merging its bytes.
@@ -162,6 +173,19 @@ impl From<u8> for TxnProfileID {
     }
 }
 
+impl std::fmt::Display for TxnProfileID {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            TxnProfileID::NewOrderTxn => write!(f, "NewOrderTxn"),
+            TxnProfileID::PaymentTxn => write!(f, "PaymentTxn"),
+            TxnProfileID::OrderStatusTxn => write!(f, "OrderStatusTxn"),
+            TxnProfileID::DeliveryTxn => write!(f, "DeliveryTxn"),
+            TxnProfileID::StockLevelTxn => write!(f, "StockLevelTxn"),
+            TxnProfileID::Max => write!(f, "Max"),
+        }
+    }
+}
+
 // Mapping from TxProfileID to transaction profile structs.
 pub trait TxnProfile {
     fn new(config: &TPCCConfig, w_id: u16) -> Self;
@@ -170,8 +194,8 @@ pub trait TxnProfile {
         config: &TPCCConfig,
         txn_storage: &T,
         tbl_info: &TableInfo,
-        stat: &mut Stat,
-        out: &mut Output,
+        stat: &mut TPCCStat,
+        out: &mut TPCCOutput,
     ) -> TPCCStatus;
 }
 
@@ -181,7 +205,7 @@ pub struct PerTxnType {
     pub num_commits: usize,
     pub num_usr_aborts: usize,
     pub num_sys_aborts: usize,
-    pub abort_details: [usize; Stat::ABORT_DETAILS_SIZE],
+    pub abort_details: [usize; TPCCStat::ABORT_DETAILS_SIZE],
     pub total_latency: u64,
     pub min_latency: u64,
     pub max_latency: u64,
@@ -194,7 +218,7 @@ impl PerTxnType {
             num_commits: 0,
             num_usr_aborts: 0,
             num_sys_aborts: 0,
-            abort_details: [0; Stat::ABORT_DETAILS_SIZE],
+            abort_details: [0; TPCCStat::ABORT_DETAILS_SIZE],
             total_latency: 0,
             min_latency: u64::MAX,
             max_latency: 0,
@@ -208,7 +232,7 @@ impl PerTxnType {
         self.num_sys_aborts += rhs.num_sys_aborts;
 
         if with_abort_details {
-            for i in 0..Stat::ABORT_DETAILS_SIZE {
+            for i in 0..TPCCStat::ABORT_DETAILS_SIZE {
                 self.abort_details[i] += rhs.abort_details[i];
             }
         }
@@ -222,16 +246,16 @@ impl PerTxnType {
 /// Overall statistics struct.
 
 #[derive(Debug)]
-pub struct Stat {
+pub struct TPCCStat {
     pub per_type: [PerTxnType; TxnProfileID::Max as usize],
 }
 
-impl Stat {
+impl TPCCStat {
     pub const ABORT_DETAILS_SIZE: usize = 20;
 
     /// Creates a new `Stat` instance.
     pub fn new() -> Self {
-        Stat {
+        TPCCStat {
             per_type: [
                 PerTxnType::new(),
                 PerTxnType::new(),
@@ -253,7 +277,7 @@ impl Stat {
     }
 
     /// Adds statistics from another `Stat`.
-    pub fn add(&mut self, rhs: &Stat) {
+    pub fn add(&mut self, rhs: &TPCCStat) {
         for i in 0..(TxnProfileID::Max as usize) {
             self.per_type[i].add(&rhs.per_type[i], true);
         }
@@ -269,7 +293,7 @@ impl Stat {
     }
 }
 
-impl std::fmt::Display for Stat {
+impl std::fmt::Display for TPCCStat {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         let mut out = String::new();
         for i in 0..(TxnProfileID::Max as usize) {
@@ -299,7 +323,7 @@ impl std::fmt::Display for Stat {
                 self.per_type[i].max_latency
             ));
             out.push_str("  abort_details: [");
-            for j in 0..Stat::ABORT_DETAILS_SIZE {
+            for j in 0..TPCCStat::ABORT_DETAILS_SIZE {
                 out.push_str(&format!("{} ", self.per_type[i].abort_details[j]));
             }
             out.push_str("]\n");
@@ -308,7 +332,7 @@ impl std::fmt::Display for Stat {
     }
 }
 
-impl Index<TxnProfileID> for Stat {
+impl Index<TxnProfileID> for TPCCStat {
     type Output = PerTxnType;
 
     fn index(&self, index: TxnProfileID) -> &Self::Output {
@@ -316,7 +340,7 @@ impl Index<TxnProfileID> for Stat {
     }
 }
 
-impl IndexMut<TxnProfileID> for Stat {
+impl IndexMut<TxnProfileID> for TPCCStat {
     fn index_mut(&mut self, index: TxnProfileID) -> &mut Self::Output {
         &mut self.per_type[index as usize]
     }
@@ -324,15 +348,15 @@ impl IndexMut<TxnProfileID> for Stat {
 
 /// Thread-local data struct.
 pub struct ThreadLocalData {
-    pub stat: Stat,
-    pub out: Output,
+    pub stat: TPCCStat,
+    pub out: TPCCOutput,
 }
 
 impl ThreadLocalData {
     pub fn new() -> Self {
         ThreadLocalData {
-            stat: Stat::new(),
-            out: Output::new(),
+            stat: TPCCStat::new(),
+            out: TPCCOutput::new(),
         }
     }
 }
@@ -394,13 +418,16 @@ impl<'a, T: TxnStorageTrait> TxHelper<'a, T> {
         abort_id: u8,
     ) -> TPCCStatus {
         match res {
-            Err(e) => {
+            Err(TxnStorageStatus::TxnConflict) => {
                 self.per_type.num_sys_aborts += 1;
                 self.per_type.abort_details[abort_id as usize] += 1;
                 self.txn_storage.abort_txn(handler).unwrap();
                 TPCCStatus::SystemAbort
             }
-            _ => panic!("wrong TransactionResult"),
+            Err(e) => TPCCStatus::Bug(e.clone().into()),
+            Ok(_) => {
+                panic!("Not a failed transaction");
+            }
         }
     }
 
@@ -439,8 +466,8 @@ pub fn run<T, P>(
     config: &TPCCConfig,
     txn_storage: &T,
     tbl_info: &TableInfo,
-    stat: &mut Stat,
-    out: &mut Output,
+    stat: &mut TPCCStat,
+    out: &mut TPCCOutput,
 ) -> TPCCStatus
 where
     T: TxnStorageTrait,
@@ -467,8 +494,8 @@ pub fn run_with_retry<T, P>(
     config: &TPCCConfig,
     txn_storage: &T,
     tbl_info: &TableInfo,
-    stat: &mut Stat,
-    out: &mut Output,
+    stat: &mut TPCCStat,
+    out: &mut TPCCOutput,
 ) -> bool
 where
     T: TxnStorageTrait,
@@ -489,11 +516,39 @@ where
                 log_info!("SystemAbort");
                 // Retry the transaction
             }
-            TPCCStatus::Bug => {
-                panic!("Unexpected result");
+            TPCCStatus::Bug(reason) => {
+                panic!("Unexpected error: {}", reason);
             }
         }
     }
+}
+
+pub fn run_benchmark_for_thread<T>(
+    config: &TPCCConfig,
+    txn_storage: &T,
+    tbl_info: &TableInfo,
+    flag: &AtomicBool, // while flag is true, keep running transactions
+) -> (TPCCStat, TPCCOutput)
+where
+    T: TxnStorageTrait,
+{
+    let mut stat = TPCCStat::new();
+    let mut out = TPCCOutput::new();
+    while flag.load(Ordering::Relaxed) {
+        let x = urand_int(1, 100);
+        if x <= 4 {
+            run_with_retry::<T, StockLevelTxn>(config, txn_storage, tbl_info, &mut stat, &mut out);
+        } else if x <= 4 + 4 {
+            run_with_retry::<T, DeliveryTxn>(config, txn_storage, tbl_info, &mut stat, &mut out);
+        } else if x <= 4 + 4 + 4 {
+            run_with_retry::<T, OrderStatusTxn>(config, txn_storage, tbl_info, &mut stat, &mut out);
+        } else if x <= 4 + 4 + 4 + 43 {
+            run_with_retry::<T, PaymentTxn>(config, txn_storage, tbl_info, &mut stat, &mut out);
+        } else {
+            run_with_retry::<T, NewOrderTxn>(config, txn_storage, tbl_info, &mut stat, &mut out);
+        }
+    }
+    (stat, out)
 }
 
 #[cfg(test)]

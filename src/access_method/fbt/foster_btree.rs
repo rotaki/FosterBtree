@@ -2429,55 +2429,63 @@ impl<T: MemPool> FosterBtreeCursor<T> {
         if self.finished {
             return;
         }
-
-        let leaf_page = self.current_leaf_page.take().unwrap();
-
+        // The caller of this function can place the cursor to
+        // 1. valid key-value pair
+        // 2. high fence slot (only after the call to initialize)
         self.current_slot_id += 1;
-        if self.current_slot_id >= leaf_page.high_fence_slot_id() {
-            // Check if we should go to the next leaf page
-            if self.current_high_fence() >= self.r_key() {
-                // No more keys in the range.
-                self.current_leaf_page = None;
-                self.current_high_fence = None;
-                self.finished = true;
-                return;
-            } else {
-                // Traverse to the next leaf page.
-                return self.go_to_next_leaf_page();
-            }
-        } else if leaf_page.has_foster_child()
-            && self.current_slot_id == leaf_page.foster_child_slot_id()
-        {
-            // If the current slot is the foster child slot, move to the foster child.
-            // Before releasing the current page, we need to get the read-latch of the foster child.
-            let val = InnerVal::from_bytes(leaf_page.get_foster_val());
-            let foster_page_key =
-                PageFrameKey::new_with_frame_id(self.btree.c_key, val.page_id, val.frame_id);
-            let foster_page = self
-                .btree
-                .mem_pool
-                .get_page_for_read(foster_page_key)
-                .unwrap();
-            let foster_page = unsafe {
-                std::mem::transmute::<FrameReadGuard, FrameReadGuard<'static>>(foster_page)
-            };
-            // Evict the current page as soon as possible
-            // self.btree
-            //     .mem_pool
-            //     .fast_evict(current_page.frame_id())
-            //     .unwrap();
-            drop(leaf_page);
 
-            self.current_slot_id = 1;
-            self.current_high_fence = Some(
-                foster_page
-                    .get_raw_key(foster_page.high_fence_slot_id())
-                    .to_owned(),
-            );
-            self.current_leaf_page = Some(foster_page);
-        } else {
-            // Same leaf page
-            self.current_leaf_page = Some(leaf_page);
+        loop {
+            let leaf_page = self.current_leaf_page.take().unwrap();
+
+            if self.current_slot_id >= leaf_page.high_fence_slot_id() {
+                // Check if we should go to the next leaf page
+                if self.current_high_fence() >= self.r_key() {
+                    // No more keys in the range.
+                    self.current_leaf_page = None;
+                    self.current_high_fence = None;
+                    self.finished = true;
+                    return;
+                } else {
+                    // Traverse to the next leaf page.
+                    self.go_to_next_leaf_page();
+                    // We need to check if the next page is not an empty page which is done by the outer loop
+                }
+            } else if leaf_page.has_foster_child()
+                && self.current_slot_id == leaf_page.foster_child_slot_id()
+            {
+                // If the current slot is the foster child slot, move to the foster child.
+                // Before releasing the current page, we need to get the read-latch of the foster child.
+                let val = InnerVal::from_bytes(leaf_page.get_foster_val());
+                let foster_page_key =
+                    PageFrameKey::new_with_frame_id(self.btree.c_key, val.page_id, val.frame_id);
+                let foster_page = self
+                    .btree
+                    .mem_pool
+                    .get_page_for_read(foster_page_key)
+                    .unwrap();
+                let foster_page = unsafe {
+                    std::mem::transmute::<FrameReadGuard, FrameReadGuard<'static>>(foster_page)
+                };
+                // Evict the current page as soon as possible
+                // self.btree
+                //     .mem_pool
+                //     .fast_evict(current_page.frame_id())
+                //     .unwrap();
+                drop(leaf_page);
+
+                self.current_slot_id = 1;
+                self.current_high_fence = Some(
+                    foster_page
+                        .get_raw_key(foster_page.high_fence_slot_id())
+                        .to_owned(),
+                );
+                self.current_leaf_page = Some(foster_page);
+                // We need to check if the foster child is not an empty page which is done by the outer loop
+            } else {
+                // Same leaf page
+                self.current_leaf_page = Some(leaf_page);
+                return;
+            }
         }
     }
 
@@ -2523,7 +2531,7 @@ impl<T: MemPool> FosterBtreeCursor<T> {
                                     this_page,
                                 )
                             };
-                            self.current_slot_id = 1; // Skip the lower fence
+                            self.current_slot_id = 1; // Skip the lower fence. This could be a high fence slot.
                             self.current_high_fence = Some(
                                 leaf_page
                                     .get_raw_key(leaf_page.high_fence_slot_id())

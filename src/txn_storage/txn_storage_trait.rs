@@ -4,7 +4,7 @@ use crate::{
 };
 use std::collections::HashSet;
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone, Copy)]
 pub enum TxnStorageStatus {
     // Not found
     DBNotFound,
@@ -22,12 +22,6 @@ pub enum TxnStorageStatus {
 
     Aborted,
     AbortFailed,
-
-    // Other errors
-    Error,
-
-    // Access method errrors
-    AccessError(AccessMethodError),
 }
 
 // To String conversion
@@ -44,8 +38,6 @@ impl From<TxnStorageStatus> for String {
             TxnStorageStatus::TxnConflict => "Txn conflict".to_string(),
             TxnStorageStatus::Aborted => "Aborted".to_string(),
             TxnStorageStatus::AbortFailed => "Abort failed".to_string(),
-            TxnStorageStatus::Error => "Error".to_string(),
-            TxnStorageStatus::AccessError(status) => format!("Access error: {:?}", status),
         }
     }
 }
@@ -55,7 +47,12 @@ impl From<AccessMethodError> for TxnStorageStatus {
         match status {
             AccessMethodError::KeyNotFound => TxnStorageStatus::KeyNotFound,
             AccessMethodError::KeyDuplicate => TxnStorageStatus::KeyExists,
-            _ => TxnStorageStatus::AccessError(status),
+            AccessMethodError::PageReadLatchFailed
+            | AccessMethodError::PageWriteLatchFailed
+            | AccessMethodError::NotEnoughMemory => TxnStorageStatus::TxnConflict,
+            other => {
+                panic!("Unexpected AccessMethodError: {:?}", other)
+            }
         }
     }
 }
@@ -152,7 +149,6 @@ pub struct TxnOptions {}
 pub struct ScanOptions {
     pub lower: Vec<u8>,
     pub upper: Vec<u8>,
-    pub limit: usize,
 }
 
 impl ScanOptions {
