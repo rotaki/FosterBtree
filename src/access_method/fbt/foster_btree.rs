@@ -2,7 +2,6 @@
 use crate::log;
 
 use std::{
-    cell::UnsafeCell,
     collections::BTreeMap,
     sync::{
         atomic::{AtomicUsize, Ordering},
@@ -14,7 +13,7 @@ use std::{
 use crate::{
     access_method::{AccessMethodError, OrderedUniqueKeyIndex, UniqueKeyIndex},
     bp::prelude::*,
-    log_debug, log_info, log_warn,
+    log_debug, log_info,
     page::{Page, PageId, AVAILABLE_PAGE_SIZE},
 };
 
@@ -1718,14 +1717,14 @@ impl<T: MemPool> FosterBtree<T> {
     ) -> FrameReadGuard {
         // Use the hint to speculatively find the page that contains the key.
         if let Some(hint) = &hint {
-            let page = self.read_page(hint.clone());
+            let page = self.read_page(*hint);
             // Check if
             // 1. The page is valid
             // 2. The page is a leaf
             // 3. The key is inside the range of the page
             // 4. The slot is not the foster child slot
-            if page.is_valid() && page.is_leaf() && page.inside_range(&BTreeKey::Normal(&key)) {
-                let slot = page.upper_bound_slot_id(&BTreeKey::Normal(&key)) - 1;
+            if page.is_valid() && page.is_leaf() && page.inside_range(&BTreeKey::Normal(key)) {
+                let slot = page.upper_bound_slot_id(&BTreeKey::Normal(key)) - 1;
                 if !page.has_foster_child() && slot != page.foster_child_slot_id() {
                     READ_HINT_ACCESS.fetch_add(1, Ordering::AcqRel);
                     return page;
@@ -1748,7 +1747,7 @@ impl<T: MemPool> FosterBtree<T> {
     ) -> FrameReadGuard {
         let mut current_page = {
             let start_page = self.read_page(start_key);
-            if start_page.is_valid() && start_page.inside_range(&BTreeKey::Normal(&key)) {
+            if start_page.is_valid() && start_page.inside_range(&BTreeKey::Normal(key)) {
                 start_page
             } else {
                 self.read_page(self.root_key)
@@ -1858,14 +1857,14 @@ impl<T: MemPool> FosterBtree<T> {
             let base = 2;
             let mut attempts = 0;
             loop {
-                let page = self.read_page(hint.clone());
+                let page = self.read_page(*hint);
                 // Check if
                 // 1. The page is valid
                 // 2. The page is a leaf
                 // 3. The key is inside the range of the page
                 // 4. The slot is not the foster child slot
-                if page.is_valid() && page.is_leaf() && page.inside_range(&BTreeKey::Normal(&key)) {
-                    let slot_id = page.upper_bound_slot_id(&BTreeKey::Normal(&key)) - 1;
+                if page.is_valid() && page.is_leaf() && page.inside_range(&BTreeKey::Normal(key)) {
+                    let slot_id = page.upper_bound_slot_id(&BTreeKey::Normal(key)) - 1;
                     if !page.has_foster_child() && slot_id != page.foster_child_slot_id() {
                         match page.try_upgrade(true) {
                             Ok(upgraded) => {
@@ -2382,7 +2381,7 @@ impl<T: MemPool> FosterBtreeCursor<T> {
         let key = leaf_page.get_raw_key(self.current_slot_id);
         if BTreeKey::new(key) >= self.r_key() {
             // No more keys in the range
-            return None;
+            None
         } else if self.current_slot_id == leaf_page.high_fence_slot_id() {
             panic!("Cursor should not point to the high fence slot");
         } else if leaf_page.has_foster_child()
@@ -2578,7 +2577,7 @@ pub struct FosterBtreeAppendOnlyCursor<T: MemPool> {
 
 impl<T: MemPool> FosterBtreeAppendOnlyCursor<T> {
     pub fn new(btree: &Arc<FosterBtreeAppendOnly<T>>, l_key: &[u8], r_key: &[u8]) -> Self {
-        let cursor = FosterBtreeCursor::new(&btree.fbt, &l_key, &r_key);
+        let cursor = FosterBtreeCursor::new(&btree.fbt, l_key, r_key);
         FosterBtreeAppendOnlyCursor { cursor }
     }
 
@@ -2993,7 +2992,7 @@ impl PageVisitor for PageStatsGenerator {
 
 #[cfg(test)]
 mod tests {
-    use core::num;
+
     use std::collections::HashSet;
     use std::{fs::File, sync::Arc, thread};
 
@@ -4172,7 +4171,7 @@ mod tests {
             let key = to_bytes(*i);
             let (is_ghost, current_val) = btree.get_kv(&key).unwrap();
             assert_eq!(current_val, val);
-            assert_eq!(is_ghost, true);
+            assert!(is_ghost);
         }
         // Delete half and check if the ghost entries are still there.
         for i in 0..5 {
@@ -4191,7 +4190,7 @@ mod tests {
             let key = to_bytes(i);
             let (is_ghost, current_val) = btree.get_kv(&key).unwrap();
             assert_eq!(current_val, val);
-            assert_eq!(is_ghost, true);
+            assert!(is_ghost);
         }
         // Reinsert the deleted keys and check if the ghost entries are still there
         for i in 0..5 {
@@ -4210,7 +4209,7 @@ mod tests {
             let key = to_bytes(i);
             let (is_ghost, current_val) = btree.get_kv(&key).unwrap();
             assert_eq!(current_val, val);
-            assert_eq!(is_ghost, true);
+            assert!(is_ghost);
         }
         // Delete all and reinsert non-ghost entries
         for i in 0..10 {
@@ -4238,7 +4237,7 @@ mod tests {
             let key = to_bytes(i);
             let (is_ghost, current_val) = btree.get_kv(&key).unwrap();
             assert_eq!(current_val, val);
-            assert_eq!(is_ghost, false);
+            assert!(!is_ghost);
         }
     }
 
@@ -4570,7 +4569,7 @@ mod tests {
         let val = vec![1; 1024];
         // Insert num_keys values in random order
         let num_keys = 200000;
-        let order = gen_random_permutation((0..num_keys).into_iter().collect::<Vec<_>>());
+        let order = gen_random_permutation((0..num_keys).collect::<Vec<_>>());
         for i in order.iter() {
             println!(
                 "**************************** Upserting key {} **************************",
@@ -4617,7 +4616,7 @@ mod tests {
         let val = vec![1; 1024];
         // Insert num_keys values in random order
         let num_keys = 200000;
-        let order = gen_random_permutation((0..num_keys).into_iter().collect::<Vec<_>>());
+        let order = gen_random_permutation((0..num_keys).collect::<Vec<_>>());
         for i in order.iter() {
             println!(
                 "**************************** Upserting key {} **************************",
@@ -4848,7 +4847,7 @@ mod tests {
         // Insert 1024 bytes
         let val = vec![3_u8; 1024];
         let num_keys = 10000;
-        let order = gen_random_permutation((0..num_keys).into_iter().collect::<Vec<_>>());
+        let order = gen_random_permutation((0..num_keys).collect::<Vec<_>>());
         for i in order.iter() {
             println!(
                 "**************************** Inserting key {} **************************",

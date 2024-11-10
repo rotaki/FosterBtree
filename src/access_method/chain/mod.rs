@@ -221,7 +221,6 @@ mod tests {
     use std::{collections::HashSet, fs::File, sync::Arc};
 
     use crate::{
-        access_method::AccessMethodError,
         bp::{get_in_mem_pool, get_test_bp, BufferPool},
         log_info,
         prelude::UniqueKeyIndex,
@@ -713,7 +712,7 @@ mod tests {
 
             let mut scanner = store.scan();
             // Remove the keys from the expected_vals set as they are scanned.
-            while let Some((key, val)) = scanner.next() {
+            for (key, val) in scanner {
                 let key = key.to_vec();
                 let val = val.to_vec();
                 assert!(expected_vals.remove(&(key, val)));

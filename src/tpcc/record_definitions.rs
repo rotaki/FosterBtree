@@ -8,7 +8,7 @@ use std::thread_local;
 
 pub fn get_timestamp() -> Timestamp {
     thread_local! {
-        static TIMESTAMP: RefCell<Timestamp> = RefCell::new(0);
+        static TIMESTAMP: RefCell<Timestamp> = const { RefCell::new(0) };
     }
     TIMESTAMP.with(|i| {
         let mut val = i.borrow_mut();
@@ -365,6 +365,12 @@ pub struct OrderSecondaryKey {
     o_sec_key: u64,
 }
 
+impl Default for OrderSecondaryKey {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl OrderSecondaryKey {
     // Constructor that initializes the key to zero
     pub fn new() -> Self {
@@ -533,6 +539,12 @@ pub struct Item {
     pub i_data: [u8; Item::MAX_DATA], // Fixed-size byte array
 }
 
+impl Default for Item {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Item {
     // Associated constants
     pub const ITEMS: usize = 100_000;
@@ -602,6 +614,12 @@ pub struct Address {
     pub zip: [u8; Address::ZIP],
 }
 
+impl Default for Address {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Address {
     // Associated constants
     pub const MIN_STREET: usize = 10;
@@ -641,6 +659,12 @@ pub struct Warehouse {
     pub w_ytd: f64, // signed numeric(12, 2)
     pub w_name: [u8; Warehouse::MAX_NAME],
     pub w_address: Address,
+}
+
+impl Default for Warehouse {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Warehouse {
@@ -710,6 +734,12 @@ pub struct Stock {
     pub s_remote_cnt: u16, // numeric(4)
     pub s_dist: [[u8; Stock::DIST]; 10],
     pub s_data: [u8; Stock::MAX_DATA],
+}
+
+impl Default for Stock {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Stock {
@@ -791,6 +821,12 @@ pub struct District {
     pub d_ytd: f64,       // signed numeric(12, 2)
     pub d_name: [u8; District::MAX_NAME],
     pub d_address: Address,
+}
+
+impl Default for District {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl District {
@@ -877,6 +913,12 @@ pub struct Customer {
     pub c_address: Address,
 }
 
+impl Default for Customer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Customer {
     // Associated constants
     pub const CUSTS_PER_DIST: usize = 3000;
@@ -936,8 +978,8 @@ impl Customer {
             Customer::MIN_FIRST,
             Customer::MAX_FIRST,
         );
-        customer.c_middle[0] = 'O' as u8;
-        customer.c_middle[1] = 'E' as u8;
+        customer.c_middle[0] = b'O';
+        customer.c_middle[1] = b'E';
         if customer.c_id <= 1000 {
             // This makes sure that all the c_last patterns are used.
             make_clast(&mut customer.c_last, (customer.c_id - 1) as usize);
@@ -949,11 +991,11 @@ impl Customer {
         }
         make_random_nstring(&mut customer.c_phone, Customer::PHONE, Customer::PHONE);
         if urand_int(0, 99) < 10 {
-            customer.c_credit[0] = 'B' as u8;
-            customer.c_credit[1] = 'C' as u8;
+            customer.c_credit[0] = b'B';
+            customer.c_credit[1] = b'C';
         } else {
-            customer.c_credit[0] = 'G' as u8;
-            customer.c_credit[1] = 'C' as u8;
+            customer.c_credit[0] = b'G';
+            customer.c_credit[1] = b'C';
         }
         make_random_astring(&mut customer.c_data, Customer::MIN_DATA, Customer::MAX_DATA);
         make_random_address(&mut customer.c_address);
@@ -997,6 +1039,12 @@ pub struct History {
     pub h_date: Timestamp, // date and time
     pub h_amount: f64,     // signed numeric(6, 2)
     pub h_data: [u8; History::MAX_DATA],
+}
+
+impl Default for History {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl History {
@@ -1066,6 +1114,12 @@ pub struct Order {
     pub o_entry_d: Timestamp, // date and time
 }
 
+impl Default for Order {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Order {
     // Associated constants
     pub const ORDS_PER_DIST: usize = 3000;
@@ -1133,6 +1187,12 @@ pub struct NewOrder {
     pub no_o_id: u32,
 }
 
+impl Default for NewOrder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl NewOrder {
     pub fn new() -> Self {
         NewOrder {
@@ -1185,6 +1245,12 @@ pub struct OrderLine {
     pub ol_quantity: u8, // numeric(2)
     pub ol_amount: f64,  // signed numeric(6, 2)
     pub ol_dist_info: [u8; OrderLine::DIST_INFO],
+}
+
+impl Default for OrderLine {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl OrderLine {

@@ -1,7 +1,4 @@
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
-};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use clap::Parser;
 use fbtree::{
@@ -9,14 +6,13 @@ use fbtree::{
         READ_HINT_ACCESS, READ_HINT_ASSISTED_ACCESS, READ_NORMAL_ACCESS, WRITE_HINT_ACCESS,
         WRITE_HINT_ASSISTED_ACCESS, WRITE_NORMAL_ACCESS,
     },
-    bp::{get_in_mem_pool, get_test_bp, BufferPool, MemPool},
+    bp::{get_test_bp, MemPool},
     prelude::{
-        load_all_tables, run_benchmark_for_thread, Customer, CustomerSecondaryKey, DeliveryTxn,
-        NewOrderTxn, OrderStatusTxn, PageId, PaymentTxn, ScanOptions, StockLevelTxn, TPCCConfig,
-        TPCCOutput, TPCCStat, Table, TableInfo, TxnOptions, TxnProfile, TxnProfileID,
-        TxnStorageTrait, DB_ID,
+        load_all_tables, run_benchmark_for_thread, DeliveryTxn, NewOrderTxn, OrderStatusTxn,
+        PaymentTxn, StockLevelTxn, TPCCConfig, TPCCOutput, TPCCStat, TableInfo, TxnProfile,
+        TxnProfileID, TxnStorageTrait,
     },
-    txn_storage::{self, NoWaitTxnStorage},
+    txn_storage::NoWaitTxnStorage,
 };
 
 pub fn main() {
@@ -155,27 +151,27 @@ pub fn test_all_transactions<T: TxnStorageTrait>(
     w_id: u16,
 ) {
     for _ in 0..10000 {
-        let txn = PaymentTxn::new(&config, w_id);
+        let txn = PaymentTxn::new(config, w_id);
         txn.run(config, txn_storage, tbl_info, stat, out);
     }
 
     for _ in 0..10000 {
-        let txn = NewOrderTxn::new(&config, w_id);
+        let txn = NewOrderTxn::new(config, w_id);
         txn.run(config, txn_storage, tbl_info, stat, out);
     }
 
     for _ in 0..10000 {
-        let txn = OrderStatusTxn::new(&config, w_id);
+        let txn = OrderStatusTxn::new(config, w_id);
         txn.run(config, txn_storage, tbl_info, stat, out);
     }
 
     for _ in 0..10000 {
-        let txn = DeliveryTxn::new(&config, w_id);
+        let txn = DeliveryTxn::new(config, w_id);
         txn.run(config, txn_storage, tbl_info, stat, out);
     }
 
     for _ in 0..10000 {
-        let txn = StockLevelTxn::new(&config, w_id);
+        let txn = StockLevelTxn::new(config, w_id);
         txn.run(config, txn_storage, tbl_info, stat, out);
     }
 }

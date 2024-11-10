@@ -1,14 +1,13 @@
 use std::collections::HashSet;
 use std::time::SystemTime;
 
-use crate::prelude::{ScanOptions, TxnOptions, TxnStorageStatus, TxnStorageTrait};
+use crate::prelude::{ScanOptions, TxnOptions, TxnStorageTrait};
 use crate::tpcc::loader::Table;
 use crate::tpcc::tx_utils::*;
 use crate::{log_trace, write_fields};
 
 use super::loader::TableInfo;
 use super::record_definitions::*;
-use super::tx_utils::*;
 
 pub struct StockLevelTxn {
     input: StockLevelTxnInput,
@@ -46,7 +45,7 @@ impl TxnProfile for StockLevelTxn {
 
         // Fetch District record
         let d_key = DistrictKey::create_key(w_id, d_id);
-        let res = txn_storage.get_value(&txn, tbl_info[Table::District], &d_key.into_bytes());
+        let res = txn_storage.get_value(&txn, tbl_info[Table::District], d_key.into_bytes());
         if not_successful(config, &res) {
             return helper.kill(&txn, &res, AbortID::GetDistrict as u8);
         }
@@ -76,7 +75,7 @@ impl TxnProfile for StockLevelTxn {
             match item {
                 Ok(Some((_key_bytes, value_bytes))) => {
                     let ol = OrderLine::from_bytes(&value_bytes);
-                    debug_assert_ne!(ol.ol_i_id, Item::UNUSED_ID as u32);
+                    debug_assert_ne!(ol.ol_i_id, { Item::UNUSED_ID });
                     s_i_ids.insert(ol.ol_i_id);
                 }
                 Ok(None) => break,
@@ -90,7 +89,7 @@ impl TxnProfile for StockLevelTxn {
         let mut count = 0;
         for &i_id in &s_i_ids {
             let s_key = StockKey::create_key(w_id, i_id);
-            let res = txn_storage.get_value(&txn, tbl_info[Table::Stock], &s_key.into_bytes());
+            let res = txn_storage.get_value(&txn, tbl_info[Table::Stock], s_key.into_bytes());
             if not_successful(config, &res) {
                 return helper.kill(&txn, &res, AbortID::GetStock as u8);
             }
@@ -104,7 +103,7 @@ impl TxnProfile for StockLevelTxn {
         write_fields!(out, &count);
 
         let duration = start.elapsed().unwrap().as_nanos() as u64;
-        return helper.commit(&txn, AbortID::Precommit as u8, duration);
+        helper.commit(&txn, AbortID::Precommit as u8, duration)
     }
 }
 

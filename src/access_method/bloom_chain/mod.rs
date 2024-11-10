@@ -1,17 +1,6 @@
 mod hash_bloom_chain;
 
-use std::{
-    cell::UnsafeCell,
-    fmt::write,
-    marker::PhantomData,
-    ops::{Deref, DerefMut},
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    },
-    time::Duration,
-    u32,
-};
+use std::{sync::Arc, time::Duration, u32};
 
 use fastbloom::BloomFilter;
 
@@ -22,7 +11,6 @@ use crate::{
     hybrid_latch::HybridLatchGuardedStructure,
     log_info,
     page::{PageId, AVAILABLE_PAGE_SIZE},
-    rwlatch::RwLatch,
 };
 
 pub use hash_bloom_chain::HashBloomChain;
@@ -54,7 +42,7 @@ impl PageSketch {
     }
 
     pub fn page_frame_key(&self, c_key: &ContainerKey) -> PageFrameKey {
-        PageFrameKey::new_with_frame_id(c_key.clone(), self.page_id, self.frame_id)
+        PageFrameKey::new_with_frame_id(*c_key, self.page_id, self.frame_id)
     }
 
     pub fn get_frame_id(&self) -> u32 {
@@ -447,7 +435,7 @@ pub struct BloomChainPageTraversal<T: MemPool> {
 
 impl<T: MemPool> BloomChainPageTraversal<T> {
     pub fn new(chain: &BloomChain<T>) -> Self {
-        let c_key = chain.c_key.clone();
+        let c_key = chain.c_key;
         let first_page = chain.first_key();
         Self {
             c_key,
@@ -586,17 +574,16 @@ impl PageVisitor for PageStatsGenerator {
 #[cfg(test)]
 mod tests {
 
-    use std::{collections::HashSet, fs::File, sync::Arc};
+    use std::{fs::File, sync::Arc};
 
     use crate::{
-        access_method::AccessMethodError,
-        bp::{get_in_mem_pool, get_test_bp, BufferPool},
+        bp::{get_in_mem_pool, get_test_bp},
         log_info,
         prelude::UniqueKeyIndex,
         random::RandomKVs,
     };
 
-    use super::{BloomChain, ContainerKey, HashReadOptimize, MemPool};
+    use super::{BloomChain, ContainerKey, MemPool};
 
     fn to_bytes(num: usize) -> Vec<u8> {
         num.to_be_bytes().to_vec()

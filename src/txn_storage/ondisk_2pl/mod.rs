@@ -1,18 +1,14 @@
 use core::panic;
 use std::cell::UnsafeCell;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::Arc;
 
-use clap::ArgAction;
-
 use crate::access_method::fbt::{
-    BTreeKey, FosterBtreeAppendOnly, FosterBtreeAppendOnlyCursor,
-    FosterBtreeAppendOnlyRangeScanner, FosterBtreeAppendOnlyRangeScannerWithPageId,
-    FosterBtreeCursor, FosterBtreeRangeScannerWithPageId,
+    BTreeKey, FosterBtreeAppendOnly, FosterBtreeAppendOnlyCursor, FosterBtreeCursor,
 };
-use crate::bp::{FrameReadGuard, FrameWriteGuard, PageFrameKey};
+use crate::bp::PageFrameKey;
 use crate::page::PageId;
 use crate::prelude::{FosterBtreePage, UniqueKeyIndex};
 use crate::txn_storage::TxnStorageStatus;
@@ -167,7 +163,7 @@ impl Display for ReadWriteSet {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let rwset = unsafe { &*self.rwset.get() };
         for (key, e) in rwset.iter() {
-            write!(f, "{}: {}\n", String::from_utf8_lossy(key), e)?;
+            writeln!(f, "{}: {}", String::from_utf8_lossy(key), e)?;
         }
         Ok(())
     }
@@ -219,6 +215,12 @@ pub struct PrimaryStorages<M: MemPool> {
     pub map: UnsafeCell<HashMap<ContainerId, Arc<PrimaryStorage<M>>>>,
 }
 
+impl<M: MemPool> Default for PrimaryStorages<M> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<M: MemPool> PrimaryStorages<M> {
     pub fn new() -> Self {
         PrimaryStorages {
@@ -259,6 +261,12 @@ pub struct SecondaryStorage<M: MemPool> {
 
 pub struct SecondaryStorages<M: MemPool> {
     map: UnsafeCell<HashMap<ContainerId, Arc<SecondaryStorage<M>>>>,
+}
+
+impl<M: MemPool> Default for SecondaryStorages<M> {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl<M: MemPool> SecondaryStorages<M> {
@@ -304,8 +312,8 @@ impl Display for NoWaitTxn {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let rwset_all = unsafe { &*self.rwset.get() };
         for (c_id, rwset) in rwset_all.iter() {
-            write!(f, "ContainerId: {}\n", c_id)?;
-            write!(f, "{}\n", rwset)?;
+            writeln!(f, "ContainerId: {}", c_id)?;
+            writeln!(f, "{}", rwset)?;
         }
         Ok(())
     }
@@ -377,13 +385,13 @@ impl NoWaitTxn {
                         // Update the physical address
                         let new_pa = PhysicalAddress::new(page.get_id(), page.frame_id());
                         e.update_physical_address(new_pa.clone());
-                        return Ok((page.get_val(slot_id).to_vec(), new_pa));
+                        Ok((page.get_val(slot_id).to_vec(), new_pa))
                     }
                 }
                 RWEntry::Update(_, pa, value) | RWEntry::Insert(_, pa, value) => {
-                    return Ok((value.clone(), pa.clone()))
+                    Ok((value.clone(), pa.clone()))
                 }
-                RWEntry::Delete(_, _) => return Err(TxnStorageStatus::KeyNotFound),
+                RWEntry::Delete(_, _) => Err(TxnStorageStatus::KeyNotFound),
             }
         } else {
             // Find from index
@@ -394,7 +402,7 @@ impl NoWaitTxn {
             let slot_id = page.upper_bound_slot_id(&BTreeKey::new(key.as_ref())) - 1;
             if slot_id == 0 || page.get_raw_key(slot_id) != key.as_ref() {
                 // Lower fence or non-existent key
-                return Err(TxnStorageStatus::KeyNotFound);
+                Err(TxnStorageStatus::KeyNotFound)
             } else {
                 // Lock the key
                 if !locktable.try_shared(key.as_ref().to_vec()) {
@@ -403,7 +411,7 @@ impl NoWaitTxn {
                 // Insert into rwset
                 let new_pa = PhysicalAddress::new(page.get_id(), page.frame_id());
                 rwset.insert(key.as_ref().to_vec(), RWEntry::Read(false, new_pa.clone()));
-                return Ok((page.get_val(slot_id).to_vec(), new_pa));
+                Ok((page.get_val(slot_id).to_vec(), new_pa))
             }
         }
     }
@@ -422,7 +430,7 @@ impl NoWaitTxn {
         if let Some(e) = rwset.get_mut(key.as_ref()) {
             match e {
                 RWEntry::Read(_, _) | RWEntry::Update(_, _, _) | RWEntry::Insert(_, _, _) => {
-                    return Err(TxnStorageStatus::KeyExists)
+                    Err(TxnStorageStatus::KeyExists)
                 }
                 RWEntry::Delete(inserted_as_ghost, pa) => {
                     let pa = pa.clone();
@@ -523,7 +531,7 @@ impl NoWaitTxn {
                 );
                 Ok(new_pa)
             } else {
-                return Err(TxnStorageStatus::KeyExists);
+                Err(TxnStorageStatus::KeyExists)
             }
         }
     }
@@ -572,7 +580,7 @@ impl NoWaitTxn {
                 .traverse_to_leaf_for_read_with_hint(key.as_ref(), hint.map(|h| h.to_pf_key(c_id)));
             let slot_id = page.upper_bound_slot_id(&BTreeKey::new(key.as_ref())) - 1;
             if slot_id == 0 || page.get_raw_key(slot_id) != key.as_ref() {
-                return Err(TxnStorageStatus::KeyNotFound);
+                Err(TxnStorageStatus::KeyNotFound)
             } else {
                 // Lock the key
                 if !locktable.try_exclusive(key.as_ref().to_vec()) {
@@ -629,7 +637,7 @@ impl NoWaitTxn {
                 .traverse_to_leaf_for_read_with_hint(key.as_ref(), hint.map(|h| h.to_pf_key(c_id)));
             let slot_id = page.upper_bound_slot_id(&BTreeKey::new(key.as_ref())) - 1;
             if slot_id == 0 || page.get_raw_key(slot_id) != key.as_ref() {
-                return Err(TxnStorageStatus::KeyNotFound);
+                Err(TxnStorageStatus::KeyNotFound)
             } else {
                 // Lock the key
                 if !locktable.try_exclusive(key.as_ref().to_vec()) {
@@ -958,10 +966,10 @@ impl<M: MemPool> TxnStorageTrait for NoWaitTxnStorage<M> {
         async_commit: bool,
     ) -> Result<(), TxnStorageStatus> {
         assert!(!async_commit);
-        if let Ok(_) = txn.commit(&self.pss, &self.sss) {
+        if txn.commit(&self.pss, &self.sss).is_ok() {
             return Ok(());
         }
-        if let Ok(_) = txn.abort(&self.pss) {
+        if txn.abort(&self.pss).is_ok() {
             Err(TxnStorageStatus::Aborted)
         } else {
             Err(TxnStorageStatus::AbortFailed)
@@ -969,8 +977,8 @@ impl<M: MemPool> TxnStorageTrait for NoWaitTxnStorage<M> {
     }
 
     fn abort_txn(&self, txn: &Self::TxnHandle) -> Result<(), TxnStorageStatus> {
-        if let Ok(_) = txn.abort(&self.pss) {
-            return Ok(());
+        if txn.abort(&self.pss).is_ok() {
+            Ok(())
         } else {
             Err(TxnStorageStatus::AbortFailed)
         }
@@ -1164,12 +1172,11 @@ impl<M: MemPool> TxnStorageTrait for NoWaitTxnStorage<M> {
 #[cfg(test)]
 mod tests {
     use crate::{
-        bp::{get_test_bp, BufferPool},
+        bp::get_test_bp,
         prelude::{ContainerDS, ContainerOptions, DBOptions, TxnOptions},
     };
 
     use super::*;
-    use std::sync::Arc;
 
     #[test]
     fn test_insert_and_read_back() {

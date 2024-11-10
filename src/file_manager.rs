@@ -1,5 +1,3 @@
-use std::io;
-
 #[cfg(not(any(feature = "async_write", feature = "new_async_write")))]
 pub type FileManager = sync_write::FileManager;
 #[cfg(feature = "async_write")]
@@ -38,6 +36,7 @@ pub mod sync_write {
                 .read(true)
                 .write(true)
                 .create(true)
+                .truncate(false)
                 .open(&path)?;
             let num_pages = file.metadata().unwrap().len() as usize / PAGE_SIZE;
             Ok(FileManager {

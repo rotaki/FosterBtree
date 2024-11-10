@@ -9,7 +9,6 @@ use crate::prelude::TxnOptions;
 use crate::prelude::TxnStorageTrait;
 use crate::tpcc::loader::Table;
 use crate::write_fields;
-use memchr::memmem;
 
 use super::loader::TableInfo;
 use super::record_definitions::*;
@@ -88,7 +87,7 @@ impl TxnProfile for DeliveryTxn {
             drop(iter);
 
             let res =
-                txn_storage.delete_value(&txn, tbl_info[Table::NewOrder], &no_key.into_bytes());
+                txn_storage.delete_value(&txn, tbl_info[Table::NewOrder], no_key.into_bytes());
             if not_successful(config, &res) {
                 return helper.kill(&txn, &res, AbortID::DeleteNewOrder as u8);
             }
@@ -99,7 +98,7 @@ impl TxnProfile for DeliveryTxn {
             let res = txn_storage.update_value_with_func(
                 &txn,
                 tbl_info[Table::Order],
-                &o_key.into_bytes(),
+                o_key.into_bytes(),
                 |bytes| {
                     let o = Order::from_bytes_mut(bytes);
                     o.o_carrier_id = o_carrier_id;
@@ -167,7 +166,7 @@ impl TxnProfile for DeliveryTxn {
             let res = txn_storage.update_value_with_func(
                 &txn,
                 tbl_info[Table::Customer],
-                &c_key.into_bytes(),
+                c_key.into_bytes(),
                 |bytes| {
                     let c = Customer::from_bytes_mut(bytes);
                     c.c_balance += total_ol_amount;
@@ -182,7 +181,7 @@ impl TxnProfile for DeliveryTxn {
         }
 
         let duration = start.elapsed().unwrap().as_micros() as u64;
-        return helper.commit(&txn, AbortID::Precommit as u8, duration);
+        helper.commit(&txn, AbortID::Precommit as u8, duration)
     }
 }
 

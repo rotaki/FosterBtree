@@ -1036,7 +1036,7 @@ mod tests {
         rand::thread_rng()
             .sample_iter(&Alphanumeric)
             .take(length)
-            .map(|c| c as u8)
+            .map(|c| c)
             .collect()
     }
 

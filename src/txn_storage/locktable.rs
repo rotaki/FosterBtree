@@ -18,12 +18,18 @@ impl Display for ConcurrentLockTable {
         let mut keys = vec![];
         for key in self.hashmap.iter() {
             // Stringify the key
-            let key_str = String::from_utf8_lossy(&key.key());
+            let key_str = String::from_utf8_lossy(key.key());
             keys.push(key_str.to_string());
             let latch = key.value();
-            write!(f, "Key: {}, Latch: {}\n", key_str, latch)?;
+            writeln!(f, "Key: {}, Latch: {}", key_str, latch)?;
         }
         Ok(())
+    }
+}
+
+impl Default for ConcurrentLockTable {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -132,9 +138,9 @@ impl Display for SingleThreadLockTable {
         let mut keys = vec![];
         for (key, value) in self.hashmap.lock().unwrap().iter() {
             // Stringify the key
-            let key_str = String::from_utf8_lossy(&key);
+            let key_str = String::from_utf8_lossy(key);
             keys.push(key_str.to_string());
-            write!(f, "Key: {}, Latch: {}\n", key_str, value)?;
+            writeln!(f, "Key: {}, Latch: {}", key_str, value)?;
         }
         Ok(())
     }
@@ -231,7 +237,7 @@ impl SingleThreadLockTable {
 
     pub fn check_state(&self, key: &[u8]) {
         if let Some(lock) = self.hashmap.lock().unwrap().get(key) {
-            let latch = &*lock;
+            let latch = lock;
             println!("Key: {:?}, Lock: {:?}", key, latch);
         } else {
             println!("Key: {:?}, Lock: None", key);
@@ -427,11 +433,11 @@ mod tests {
                             }
                         }
                         4 => {
-                            if held_shared_locks.contains_key(&key) {
-                                if lock_table.try_upgrade(key.clone()) {
-                                    held_shared_locks.remove(&key);
-                                    held_exclusive_locks.insert(key.clone(), true);
-                                }
+                            if held_shared_locks.contains_key(&key)
+                                && lock_table.try_upgrade(key.clone())
+                            {
+                                held_shared_locks.remove(&key);
+                                held_exclusive_locks.insert(key.clone(), true);
                             }
                         }
                         _ => {}

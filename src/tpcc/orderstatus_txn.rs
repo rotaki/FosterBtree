@@ -106,7 +106,7 @@ impl TxnProfile for OrderStatusTxn {
         } else {
             debug_assert!(c_id != Customer::UNUSED_ID);
             let c_key = CustomerKey::create_key(c_w_id, c_d_id, c_id);
-            let res = txn_storage.get_value(&txn, tbl_info[Table::Customer], &c_key.into_bytes());
+            let res = txn_storage.get_value(&txn, tbl_info[Table::Customer], c_key.into_bytes());
             if not_successful(config, &res) {
                 return helper.kill(&txn, &res, AbortID::GetCustomer as u8);
             }
@@ -196,7 +196,7 @@ impl TxnProfile for OrderStatusTxn {
         drop(iter);
 
         let duration = start.elapsed().unwrap().as_micros() as u64;
-        return helper.commit(&txn, AbortID::Precommit as u8, duration);
+        helper.commit(&txn, AbortID::Precommit as u8, duration)
     }
 }
 

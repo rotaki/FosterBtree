@@ -119,7 +119,7 @@ pub struct HeapPage<'a> {
     page: &'a mut Page,
 }
 
-impl<'a> HeapPage<'a> {
+impl HeapPage<'_> {
     fn header(&self) -> PageHeader {
         let header_bytes: [u8; PAGE_HEADER_SIZE] =
             self.page[0..PAGE_HEADER_SIZE].try_into().unwrap();

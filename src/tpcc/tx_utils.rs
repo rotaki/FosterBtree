@@ -3,13 +3,11 @@ use rand::Rng;
 use std::cmp;
 use std::hash::DefaultHasher;
 use std::hash::{Hash, Hasher};
-use std::ops::{Index, IndexMut, Shl};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::ops::{Index, IndexMut};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::log_info;
-use crate::prelude::{AccessMethodError, TxnOptions, TxnStorageStatus, TxnStorageTrait};
-use crate::tpcc::record_definitions::Customer;
+use crate::prelude::{TxnStorageStatus, TxnStorageTrait};
 use clap::Parser;
 
 use super::loader::TableInfo;
@@ -67,6 +65,12 @@ pub enum TPCCStatus {
 #[derive(Debug)]
 pub struct TPCCOutput {
     pub out: u64,
+}
+
+impl Default for TPCCOutput {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl TPCCOutput {
@@ -211,6 +215,12 @@ pub struct PerTxnType {
     pub max_latency: u64,
 }
 
+impl Default for PerTxnType {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PerTxnType {
     /// Creates a new `PerTxType` instance.
     pub fn new() -> Self {
@@ -248,6 +258,12 @@ impl PerTxnType {
 #[derive(Debug)]
 pub struct TPCCStat {
     pub per_type: [PerTxnType; TxnProfileID::Max as usize],
+}
+
+impl Default for TPCCStat {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl TPCCStat {
@@ -352,6 +368,12 @@ pub struct ThreadLocalData {
     pub out: TPCCOutput,
 }
 
+impl Default for ThreadLocalData {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ThreadLocalData {
     pub fn new() -> Self {
         ThreadLocalData {
@@ -384,7 +406,7 @@ impl ThreadLocalData {
 /// Function to check if the transaction did not succeed.
 pub fn not_successful<K>(config: &TPCCConfig, res: &Result<K, TxnStorageStatus>) -> bool {
     if config.random_abort && res.is_ok() && urand_int(1, 100) == 1 {
-        return true; // Randomized system abort
+        true // Randomized system abort
     } else if res.is_err() {
         return true; // System abort
     } else {
@@ -424,7 +446,7 @@ impl<'a, T: TxnStorageTrait> TxHelper<'a, T> {
                 self.txn_storage.abort_txn(handler).unwrap();
                 TPCCStatus::SystemAbort
             }
-            Err(e) => TPCCStatus::Bug(e.clone().into()),
+            Err(e) => TPCCStatus::Bug((*e).into()),
             Ok(_) => {
                 panic!("Not a failed transaction");
             }

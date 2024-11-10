@@ -1,4 +1,3 @@
-use core::num;
 use std::{
     cell::UnsafeCell,
     collections::{hash_map::Entry, HashMap},

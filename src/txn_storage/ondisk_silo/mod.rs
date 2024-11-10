@@ -1,22 +1,10 @@
-use std::{
-    cell::UnsafeCell,
-    collections::HashSet,
-    sync::{Arc, Mutex, RwLock},
-};
+use std::{cell::UnsafeCell, sync::Arc};
 
-use super::{
-    ContainerDS, ContainerOptions, DBOptions, ScanOptions, TxnOptions, TxnStorageStatus,
-    TxnStorageTrait,
-};
+use super::{ContainerDS, TxnStorageStatus};
+use crate::{access_method::prelude::AppendOnlyStore, access_method::UniqueKeyIndex, bp::MemPool};
 use crate::{
-    access_method::fbt::FosterBtreeRangeScanner,
     bp::prelude::{ContainerId, DatabaseId},
     prelude::{ContainerKey, FosterBtree},
-};
-use crate::{
-    access_method::prelude::{AppendOnlyStore, AppendOnlyStoreScanner},
-    access_method::UniqueKeyIndex,
-    bp::MemPool,
 };
 
 pub enum Storage<M: MemPool> {

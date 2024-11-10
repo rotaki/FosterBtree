@@ -294,7 +294,7 @@ mod record {
         }
 
         pub fn new(key: &[u8], val: &[u8]) -> Self {
-            let remain_key = if (key.len() as usize) > SLOT_KEY_PREFIX_SIZE {
+            let remain_key = if key.len() > SLOT_KEY_PREFIX_SIZE {
                 key[SLOT_KEY_PREFIX_SIZE..].to_vec()
             } else {
                 Vec::new()
@@ -606,7 +606,7 @@ impl ReadOptimizedPage for Page {
         let key_prefix = slot.key_prefix();
         let key_size = slot.key_size() as usize;
 
-        if !(key_size > SLOT_KEY_PREFIX_SIZE) {
+        if key_size <= SLOT_KEY_PREFIX_SIZE {
             return key_prefix[..key_size].to_vec();
         }
 
@@ -662,7 +662,7 @@ impl ReadOptimizedPage for Page {
             return (false, 0);
         }
 
-        high = high - 1;
+        high -= 1;
         let high_key = self.get_key_with_slot_id(high);
 
         if key > high_key.as_slice() {
@@ -883,7 +883,7 @@ impl ReadOptimizedPage for Page {
     }
 
     fn compact(&mut self) -> Result<(), AccessMethodError> {
-        let mut current_offset = AVAILABLE_PAGE_SIZE as usize;
+        let mut current_offset = AVAILABLE_PAGE_SIZE;
         let mut records_buffer = Vec::new();
 
         // Step 1: Collect all records based on their offsets, update slot offsets, and prepare the buffer
@@ -912,7 +912,7 @@ impl ReadOptimizedPage for Page {
         self.write_bytes(current_offset, &records_buffer);
 
         // Step 3: Zero-pad the space between the end of the slots and the start of the records
-        let slot_area_end = self.slot_offset(self.slot_count()) as usize;
+        let slot_area_end = self.slot_offset(self.slot_count());
         if slot_area_end > current_offset {
             return Err(AccessMethodError::OutOfSpace);
         }
@@ -925,7 +925,7 @@ impl ReadOptimizedPage for Page {
     }
 
     fn compact_update(&mut self, target_slot_id: u32) -> Result<(), AccessMethodError> {
-        let mut current_offset = AVAILABLE_PAGE_SIZE as usize;
+        let mut current_offset = AVAILABLE_PAGE_SIZE;
         let mut records_buffer = Vec::new();
         let mut target_slot = None;
 
@@ -981,7 +981,7 @@ impl ReadOptimizedPage for Page {
         self.write_bytes(current_offset, &records_buffer);
 
         // Step 4: Zero-pad the space between the end of the slots and the start of the records
-        let slot_area_end = self.slot_offset(self.slot_count()) as usize;
+        let slot_area_end = self.slot_offset(self.slot_count());
         if slot_area_end > current_offset {
             return Err(AccessMethodError::OutOfSpace);
         }
@@ -1347,13 +1347,13 @@ mod tests {
         page.init();
 
         // Insert multiple key-value pairs
-        let keys = vec![
+        let keys = [
             vec![1, 2, 3],
             vec![4, 5, 6],
             vec![7, 8, 9],
             vec![10, 11, 12],
         ];
-        let values = vec![
+        let values = [
             vec![10, 20, 30],
             vec![40, 50, 60],
             vec![70, 80, 90],
@@ -1366,7 +1366,7 @@ mod tests {
         }
 
         // Update the values
-        let new_values = vec![
+        let new_values = [
             vec![13, 14, 15],
             vec![16, 17, 18],
             vec![19, 20, 21],
@@ -1390,8 +1390,8 @@ mod tests {
         page.init();
 
         // Insert multiple key-value pairs
-        let keys = vec![vec![1, 2, 3], vec![4, 5, 6], vec![7, 8, 9]];
-        let values = vec![vec![10, 20, 30], vec![40, 50, 60], vec![70, 80, 90]];
+        let keys = [vec![1, 2, 3], vec![4, 5, 6], vec![7, 8, 9]];
+        let values = [vec![10, 20, 30], vec![40, 50, 60], vec![70, 80, 90]];
 
         for (key, value) in keys.iter().zip(values.iter()) {
             page.insert(key, value)
@@ -1399,10 +1399,10 @@ mod tests {
         }
 
         // Update the values with mixed sizes
-        let new_values = vec![
-            vec![13, 14],             // Smaller
-            vec![16, 17, 18],         // Same size
-            vec![19, 20, 21, 22, 23], // Larger
+        let new_values = [
+            vec![13, 14],     // Smaller
+            vec![16, 17, 18], // Same size
+            vec![19, 20, 21, 22, 23],
         ];
 
         for (key, new_value) in keys.iter().zip(new_values.iter()) {
@@ -1410,10 +1410,10 @@ mod tests {
         }
 
         // Retrieve the updated values and verify correctness
-        let expected_values = vec![
-            vec![13, 14],             // Padded with zeros
-            vec![16, 17, 18],         // Same size
-            vec![19, 20, 21, 22, 23], // Larger, no padding needed
+        let expected_values = [
+            vec![13, 14],     // Padded with zeros
+            vec![16, 17, 18], // Same size
+            vec![19, 20, 21, 22, 23],
         ];
 
         for (key, expected_value) in keys.iter().zip(expected_values.iter()) {
@@ -1428,8 +1428,8 @@ mod tests {
         page.init();
 
         // Insert initial key-value pairs
-        let initial_keys = vec![vec![1, 1, 1], vec![2, 2, 2]];
-        let initial_values = vec![vec![11, 12, 13], vec![21, 22, 23]];
+        let initial_keys = [vec![1, 1, 1], vec![2, 2, 2]];
+        let initial_values = [vec![11, 12, 13], vec![21, 22, 23]];
 
         for (key, value) in initial_keys.iter().zip(initial_values.iter()) {
             page.insert(key, value)
@@ -1437,11 +1437,8 @@ mod tests {
         }
 
         // Update existing and insert new key-value pairs
-        let keys_to_update = vec![vec![1, 1, 1], vec![2, 2, 2]];
-        let new_values = vec![
-            vec![14, 15, 16],
-            vec![24, 25], // Smaller, expect padding
-        ];
+        let keys_to_update = [vec![1, 1, 1], vec![2, 2, 2]];
+        let new_values = [vec![14, 15, 16], vec![24, 25]];
 
         for (key, new_value) in keys_to_update.iter().zip(new_values.iter()) {
             page.update(key, new_value).expect("Failed to update value");
@@ -1454,13 +1451,13 @@ mod tests {
             .expect("Failed to insert new key-value pair");
 
         // Verify updates and new insertions
-        let retrieved_values = vec![
+        let retrieved_values = [
             vec![14, 15, 16], // Updated
             vec![24, 25],     // Updated with padding
-            vec![31, 32, 33], // Newly inserted
+            vec![31, 32, 33],
         ];
 
-        let all_keys = vec![vec![1, 1, 1], vec![2, 2, 2], vec![3, 3, 3]];
+        let all_keys = [vec![1, 1, 1], vec![2, 2, 2], vec![3, 3, 3]];
 
         for (key, expected_value) in all_keys.iter().zip(retrieved_values.iter()) {
             let retrieved_value = page.get(key).expect("Failed to get value");
@@ -1474,12 +1471,12 @@ mod tests {
         page.init();
 
         // Key sizes larger than SLOT_KEY_PREFIX_SIZE (8 bytes)
-        let keys = vec![
-            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10],                  // 10 bytes
-            vec![11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21],     // 11 bytes
-            vec![21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32], // 12 bytes
+        let keys = [
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10],              // 10 bytes
+            vec![11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21], // 11 bytes
+            vec![21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32],
         ];
-        let values = vec![
+        let values = [
             vec![101, 102, 103],
             vec![201, 202, 203],
             vec![251, 252, 253],
@@ -1536,12 +1533,12 @@ mod tests {
         page.init();
 
         // Insert multiple key-value pairs with keys larger than 8 bytes
-        let keys = vec![
-            vec![1, 2, 3, 4, 5, 6, 7, 8, 9],                      // 9 bytes
-            vec![10, 11, 12, 13, 14, 15, 16, 17, 18, 19],         // 10 bytes
-            vec![20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31], // 12 bytes
+        let keys = [
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9],              // 9 bytes
+            vec![10, 11, 12, 13, 14, 15, 16, 17, 18, 19], // 10 bytes
+            vec![20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31],
         ];
-        let initial_values = vec![
+        let initial_values = [
             vec![101, 102],
             vec![201, 202, 203],
             vec![251, 252, 253, 254],
@@ -1553,10 +1550,10 @@ mod tests {
         }
 
         // Update some of the values with new data
-        let new_values = vec![
+        let new_values = [
             vec![103, 104, 105], // Update with a larger value
             vec![206],           // Update with a smaller value
-            vec![208, 209],      // Update with a smaller value
+            vec![208, 209],
         ];
 
         for (key, new_value) in keys.iter().zip(new_values.iter()) {
@@ -1564,10 +1561,10 @@ mod tests {
         }
 
         // Retrieve and verify all values
-        let expected_values = vec![
+        let expected_values = [
             vec![103, 104, 105], // Updated with a larger value
             vec![206],           // Updated with a smaller value, no padding
-            vec![208, 209],      // Updated with a smaller value, no padding
+            vec![208, 209],
         ];
 
         for (key, expected_value) in keys.iter().zip(expected_values.iter()) {

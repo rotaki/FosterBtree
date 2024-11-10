@@ -152,7 +152,7 @@ impl<'a> BTreeKey<'a> {
     }
 }
 
-impl<'a> PartialEq for BTreeKey<'a> {
+impl PartialEq for BTreeKey<'_> {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (BTreeKey::MinusInfty, BTreeKey::MinusInfty) => true,
@@ -171,7 +171,7 @@ impl<'a> PartialEq for BTreeKey<'a> {
 impl Eq for BTreeKey<'_> {}
 
 #[allow(clippy::non_canonical_partial_ord_impl)]
-impl<'a> PartialOrd for BTreeKey<'a> {
+impl PartialOrd for BTreeKey<'_> {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         match (self, other) {
             (BTreeKey::MinusInfty, BTreeKey::MinusInfty) => Some(std::cmp::Ordering::Equal),
@@ -206,7 +206,7 @@ impl std::fmt::Debug for BTreeKey<'_> {
     }
 }
 
-impl<'a> AsRef<[u8]> for BTreeKey<'a> {
+impl AsRef<[u8]> for BTreeKey<'_> {
     fn as_ref(&self) -> &[u8] {
         match self {
             BTreeKey::MinusInfty => &[],
@@ -1790,12 +1790,12 @@ mod tests {
         assert_eq!(fbt_page.get_val(1), "bb".as_bytes());
         assert_eq!(fbt_page.find_slot_id(&BTreeKey::str("c")), Some(2));
         assert_eq!(fbt_page.get_val(2), "cc".as_bytes());
-        assert_eq!(fbt_page.is_ghost(1), true);
-        assert_eq!(fbt_page.is_ghost(2), true);
+        assert!(fbt_page.is_ghost(1));
+        assert!(fbt_page.is_ghost(2));
         fbt_page.unghostify_at(1);
         fbt_page.unghostify_at(2);
         fbt_page.run_consistency_checks(true);
-        assert_eq!(fbt_page.is_ghost(1), false);
-        assert_eq!(fbt_page.is_ghost(2), false);
+        assert!(!fbt_page.is_ghost(1));
+        assert!(!fbt_page.is_ghost(2));
     }
 }

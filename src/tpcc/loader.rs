@@ -3,7 +3,6 @@ use std::{collections::HashMap, ops::Index};
 use crate::{
     bp::ContainerId,
     prelude::{ContainerDS, ContainerOptions, DBOptions, TxnStorageTrait},
-    txn_storage,
 };
 
 use super::{
@@ -34,6 +33,12 @@ pub enum Table {
 
 pub struct TableInfo {
     map: HashMap<Table, ContainerId>,
+}
+
+impl Default for TableInfo {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl TableInfo {

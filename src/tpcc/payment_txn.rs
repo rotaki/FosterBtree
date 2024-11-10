@@ -7,7 +7,6 @@ use crate::prelude::TxnStorageStatus;
 use crate::prelude::TxnStorageTrait;
 use crate::tpcc::loader::Table;
 use crate::write_fields;
-use rand::Rng;
 
 use super::loader::TableInfo;
 use super::record_definitions::*;
@@ -57,7 +56,7 @@ impl TxnProfile for PaymentTxn {
         let res = txn_storage.update_value_with_func(
             &txn,
             tbl_info[Table::Warehouse],
-            &w_key.into_bytes(),
+            w_key.into_bytes(),
             |bytes| {
                 let w = Warehouse::from_bytes_mut(bytes);
                 write_fields!(out, &w.w_name);
@@ -73,7 +72,7 @@ impl TxnProfile for PaymentTxn {
         let res = txn_storage.update_value_with_func(
             &txn,
             tbl_info[Table::District],
-            &d_key.into_bytes(),
+            d_key.into_bytes(),
             |bytes| {
                 let d = District::from_bytes_mut(bytes);
                 write_fields!(out, &d.d_name);
@@ -153,7 +152,7 @@ impl TxnProfile for PaymentTxn {
         let res = txn_storage.update_value_with_func(
             &txn,
             tbl_info[Table::Customer],
-            &c_key.into_bytes(),
+            c_key.into_bytes(),
             |bytes| {
                 let c = Customer::from_bytes_mut(bytes);
                 write_fields!(
@@ -187,7 +186,7 @@ impl TxnProfile for PaymentTxn {
         // Ignore it for now as it is not used for the output.
 
         let duration = start.elapsed().unwrap().as_micros() as u64;
-        return helper.commit(&txn, AbortID::Precommit as u8, duration);
+        helper.commit(&txn, AbortID::Precommit as u8, duration)
     }
 
     // Create history record

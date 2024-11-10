@@ -51,7 +51,7 @@ impl TxnProfile for NewOrderTxn {
 
         // Fetch warehouse record
         let w_key = WarehouseKey::create_key(w_id);
-        let res = txn_storage.get_value(&txn, tbl_info[Table::Warehouse], &w_key.into_bytes());
+        let res = txn_storage.get_value(&txn, tbl_info[Table::Warehouse], w_key.into_bytes());
         if not_successful(config, &res) {
             return helper.kill(&txn, &res, AbortID::GetWarehouse as u8);
         }
@@ -66,7 +66,7 @@ impl TxnProfile for NewOrderTxn {
         let res = txn_storage.update_value_with_func(
             &txn,
             tbl_info[Table::District],
-            &d_key.into_bytes(),
+            d_key.into_bytes(),
             |bytes| {
                 let d = District::from_bytes_mut(bytes);
                 o_id = d.d_next_o_id;
@@ -81,7 +81,7 @@ impl TxnProfile for NewOrderTxn {
 
         // Fetch customer record
         let c_key = CustomerKey::create_key(w_id, d_id, c_id);
-        let res = txn_storage.get_value(&txn, tbl_info[Table::Customer], &c_key.into_bytes());
+        let res = txn_storage.get_value(&txn, tbl_info[Table::Customer], c_key.into_bytes());
         if not_successful(config, &res) {
             return helper.kill(&txn, &res, AbortID::GetCustomer as u8);
         }
@@ -140,7 +140,7 @@ impl TxnProfile for NewOrderTxn {
 
             // Fetch Item record
             let i_key = ItemKey::create_key(ol_i_id);
-            let res = txn_storage.get_value(&txn, tbl_info[Table::Item], &i_key.into_bytes());
+            let res = txn_storage.get_value(&txn, tbl_info[Table::Item], i_key.into_bytes());
             if not_successful(config, &res) {
                 return helper.kill(&txn, &res, AbortID::GetItem as u8);
             }
@@ -156,16 +156,16 @@ impl TxnProfile for NewOrderTxn {
             let res = txn_storage.update_value_with_func(
                 &txn,
                 tbl_info[Table::Stock],
-                &s_key.into_bytes(),
+                s_key.into_bytes(),
                 |bytes| {
-                    let mut s = Stock::from_bytes_mut(bytes);
+                    let s = Stock::from_bytes_mut(bytes);
                     // Modify stock
                     if memmem::find(&s.s_data, b"ORIGINAL").is_some()
                         && memmem::find(&i.i_data, b"ORIGINAL").is_some()
                     {
                         brand_generic = 'B';
                     }
-                    self.modify_stock(&mut s, ol_quantity, is_remote);
+                    self.modify_stock(s, ol_quantity, is_remote);
                     self.create_orderline(
                         &mut ol,
                         w_id,
@@ -176,7 +176,7 @@ impl TxnProfile for NewOrderTxn {
                         ol_supply_w_id,
                         ol_quantity,
                         ol_amount,
-                        &s,
+                        s,
                     );
                     write_fields!(out, &s.s_quantity);
                 },
@@ -213,7 +213,7 @@ impl TxnProfile for NewOrderTxn {
         out.write(&total);
 
         let duration = start.elapsed().unwrap().as_micros() as u64;
-        return helper.commit(&txn, AbortID::Precommit as u8, duration);
+        helper.commit(&txn, AbortID::Precommit as u8, duration)
     }
 }
 
@@ -329,11 +329,11 @@ impl NewOrderTxnInput {
         input.o_entry_d = get_timestamp();
         input.rbk = urand_int(1, 100) == 1;
         input.is_remote = urand_int(1, 100) == 1;
-        input.items = Vec::with_capacity(OrderLine::MAX_ORDLINES_PER_ORD as usize);
+        input.items = Vec::with_capacity(OrderLine::MAX_ORDLINES_PER_ORD);
         for i in 1..=input.ol_cnt {
             let mut item = NewOrderItem::default();
             if i == input.ol_cnt && input.rbk {
-                item.ol_i_id = Item::UNUSED_ID as u32; /* set to an unused value */
+                item.ol_i_id = Item::UNUSED_ID; /* set to an unused value */
             } else {
                 item.ol_i_id = nurand_int::<8191, false>(1, Item::ITEMS as u64) as u32;
             }
