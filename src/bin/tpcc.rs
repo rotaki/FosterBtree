@@ -2,10 +2,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use clap::Parser;
 use fbtree::{
-    access_method::fbt::{
-        READ_HINT_ACCESS, READ_HINT_ASSISTED_ACCESS, READ_NORMAL_ACCESS, WRITE_HINT_ACCESS,
-        WRITE_HINT_ASSISTED_ACCESS, WRITE_NORMAL_ACCESS,
-    },
     bp::{get_test_bp, MemPool},
     prelude::{
         load_all_tables, run_benchmark_for_thread, DeliveryTxn, NewOrderTxn, OrderStatusTxn,
@@ -36,14 +32,14 @@ pub fn main() {
         }
         // Start timer for config duration
         std::thread::sleep(std::time::Duration::from_secs(config.warmup));
-        flag.store(false, Ordering::Relaxed);
+        flag.store(false, Ordering::Release);
 
         // Automatically join all threads
     });
 
     println!("BP stats after warmup: \n{}", bp.stats());
 
-    flag.store(true, Ordering::Relaxed);
+    flag.store(true, Ordering::Release);
     // Run the benchmark
     std::thread::scope(|s| {
         let mut handlers = Vec::with_capacity(config.num_threads);
@@ -54,37 +50,12 @@ pub fn main() {
         }
         // Start timer for config duration
         std::thread::sleep(std::time::Duration::from_secs(config.duration));
-        flag.store(false, Ordering::Relaxed);
+        flag.store(false, Ordering::Release);
 
         for handler in handlers {
             stats_and_outs.push(handler.join().unwrap());
         }
     });
-
-    println!(
-        "Read Hint access: {}",
-        READ_HINT_ACCESS.load(Ordering::Relaxed)
-    );
-    println!(
-        "Read Normal access: {}",
-        READ_NORMAL_ACCESS.load(Ordering::Relaxed)
-    );
-    println!(
-        "Read Hint Assisted access: {}",
-        READ_HINT_ASSISTED_ACCESS.load(Ordering::Relaxed)
-    );
-    println!(
-        "Write Hint access: {}",
-        WRITE_HINT_ACCESS.load(Ordering::Relaxed)
-    );
-    println!(
-        "Write Normal access: {}",
-        WRITE_NORMAL_ACCESS.load(Ordering::Relaxed)
-    );
-    println!(
-        "Write Hint Assisted access: {}",
-        WRITE_HINT_ASSISTED_ACCESS.load(Ordering::Relaxed)
-    );
 
     let mut final_stat = TPCCStat::new();
     for (stat, _) in stats_and_outs {
@@ -126,7 +97,11 @@ pub fn main() {
         final_stat[p].num_sys_aborts,
         (final_stat[p].num_sys_aborts as f64) / (tries as f64) * 100.0,
         (final_stat[p].total_latency as f64) / (final_stat[p].num_commits as f64),
-        final_stat[p].min_latency,
+        if final_stat[p].min_latency == std::u64::MAX {
+            0
+        } else {
+            final_stat[p].min_latency
+        },
         final_stat[p].max_latency
     );
     }

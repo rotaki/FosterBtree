@@ -950,9 +950,9 @@ impl MemPool for BufferPool {
         let (new_page, read_count, write_count) = self.runtime_stats.get();
         MemoryStats {
             num_frames_in_mem: unsafe { &*self.frames.get() }.len(),
-            new_count: new_page,
-            read_count,
-            write_count,
+            new_page_created: new_page,
+            read_page_from_disk: read_count,
+            write_page_to_disk: write_count,
         }
     }
 
@@ -1096,7 +1096,7 @@ mod tests {
     use crate::log_info;
 
     use super::*;
-    use std::thread::{self};
+    use std::thread::{self, sleep};
     use tempfile::TempDir;
 
     #[test]

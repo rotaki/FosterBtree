@@ -3,9 +3,11 @@ use std::time::SystemTime;
 use super::loader::TableInfo;
 use super::record_definitions::*;
 use super::tx_utils::*;
+#[allow(unused_imports)]
+use crate::log;
 use crate::prelude::{ScanOptions, TxnOptions, TxnStorageStatus, TxnStorageTrait};
 use crate::tpcc::loader::Table;
-use crate::{log_trace, write_fields};
+use crate::{log_info, log_trace, write_fields};
 
 pub struct OrderStatusTxn {
     input: OrderStatusTxnInput,
@@ -30,6 +32,7 @@ impl TxnProfile for OrderStatusTxn {
         stat: &mut TPCCStat,
         out: &mut TPCCOutput,
     ) -> TPCCStatus {
+        self.input.print();
         let start = SystemTime::now();
         let mut helper = TxHelper::new(txn_storage, &mut stat[OrderStatusTxn::ID]);
         let txn = txn_storage.begin_txn(0, TxnOptions::default()).unwrap();
@@ -246,15 +249,15 @@ impl OrderStatusTxnInput {
 
     pub fn print(&self) {
         if self.by_last_name {
-            log_trace!(
-                "ordstts: w_id={} d_id={} by_last_name=t c_last={}",
+            log_info!(
+                "[ORDERSTATUS]: w_id={} d_id={} by_last_name=t c_last={}",
                 self.w_id,
                 self.d_id,
                 String::from_utf8_lossy(&self.c_last)
             );
         } else {
-            log_trace!(
-                "ordstts: w_id={} d_id={} by_last_name=f c_id={}",
+            log_info!(
+                "[ORDERSTATUS]: w_id={} d_id={} by_last_name=f c_id={}",
                 self.w_id,
                 self.d_id,
                 self.c_id

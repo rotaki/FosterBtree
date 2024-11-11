@@ -1051,7 +1051,7 @@ mod tests {
             let c_key = ContainerKey::new(0, 0);
             let store = Arc::new(HashFosterBtree::load(c_key, bp.clone(), 0));
 
-            let mut scanner = store.scan();
+            let scanner = store.scan();
             // Remove the keys from the expected_vals set as they are scanned.
             for (key, val) in scanner {
                 let key = key.to_vec();

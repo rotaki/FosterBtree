@@ -6,6 +6,9 @@ use std::hash::{Hash, Hasher};
 use std::ops::{Index, IndexMut};
 use std::sync::atomic::{AtomicBool, Ordering};
 
+// do not warn about unused imports
+#[allow(unused_imports)]
+use crate::log;
 use crate::log_info;
 use crate::prelude::{TxnStorageStatus, TxnStorageTrait};
 use clap::Parser;
@@ -40,7 +43,7 @@ pub struct TPCCConfig {
     pub random_abort: bool,
 
     /// Use fixed warehouse per thread.
-    #[arg(short = 'f', long, default_value_t = false)]
+    #[arg(short = 'f', long, default_value_t = true)]
     pub fixed_warehouse_per_thread: bool,
 
     /// Warmup duration in seconds.
@@ -405,12 +408,20 @@ impl ThreadLocalData {
 
 /// Function to check if the transaction did not succeed.
 pub fn not_successful<K>(config: &TPCCConfig, res: &Result<K, TxnStorageStatus>) -> bool {
-    if config.random_abort && res.is_ok() && urand_int(1, 100) == 1 {
-        true // Randomized system abort
-    } else if res.is_err() {
-        return true; // System abort
-    } else {
-        return false; // Success
+    match res {
+        Err(e) => {
+            log_info!("Error: {:?}", e);
+            true // System abort
+        }
+        Ok(_) => {
+            if config.random_abort && urand_int(1, 100) == 1 {
+                log_info!("Result OK but random abort");
+                true // Randomized system abort
+            } else {
+                log_info!("Result OK");
+                false // Success
+            }
+        }
     }
 }
 
@@ -440,13 +451,12 @@ impl<'a, T: TxnStorageTrait> TxHelper<'a, T> {
         abort_id: u8,
     ) -> TPCCStatus {
         match res {
-            Err(TxnStorageStatus::TxnConflict) => {
+            Err(e) => {
                 self.per_type.num_sys_aborts += 1;
                 self.per_type.abort_details[abort_id as usize] += 1;
                 self.txn_storage.abort_txn(handler).unwrap();
                 TPCCStatus::SystemAbort
             }
-            Err(e) => TPCCStatus::Bug((*e).into()),
             Ok(_) => {
                 panic!("Not a failed transaction");
             }
@@ -539,7 +549,8 @@ where
                 // Retry the transaction
             }
             TPCCStatus::Bug(reason) => {
-                panic!("Unexpected error: {}", reason);
+                log_info!("Other: {}", reason);
+                return false;
             }
         }
     }
@@ -556,7 +567,7 @@ where
 {
     let mut stat = TPCCStat::new();
     let mut out = TPCCOutput::new();
-    while flag.load(Ordering::Relaxed) {
+    while flag.load(Ordering::Acquire) {
         let x = urand_int(1, 100);
         if x <= 4 {
             run_with_retry::<T, StockLevelTxn>(config, txn_storage, tbl_info, &mut stat, &mut out);

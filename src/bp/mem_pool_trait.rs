@@ -142,9 +142,9 @@ impl std::fmt::Display for MemPoolStatus {
 
 pub struct MemoryStats {
     pub num_frames_in_mem: usize,
-    pub new_count: usize,   // Number of new pages created
-    pub read_count: usize,  // Number of pages read
-    pub write_count: usize, // Number of pages written
+    pub new_page_created: usize,    // Number of new pages created
+    pub read_page_from_disk: usize, // Number of pages read
+    pub write_page_to_disk: usize,  // Number of pages written
 }
 
 impl std::fmt::Display for MemoryStats {
@@ -159,9 +159,9 @@ impl std::fmt::Display for MemoryStats {
         };
 
         let num_frames_in_mem = format_count(self.num_frames_in_mem);
-        let new_count = format_count(self.new_count);
-        let read_count = format_count(self.read_count);
-        let write_count = format_count(self.write_count);
+        let new_count = format_count(self.new_page_created);
+        let read_count = format_count(self.read_page_from_disk);
+        let write_count = format_count(self.write_page_to_disk);
 
         writeln!(f, "Frames in memory:  {}", num_frames_in_mem)?;
         writeln!(f, "New pages created: {}", new_count)?;

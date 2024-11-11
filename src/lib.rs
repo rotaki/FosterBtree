@@ -7,7 +7,6 @@ pub mod txn_storage;
 pub mod write_ahead_log;
 
 mod file_manager;
-mod heap_page;
 mod hybrid_latch;
 mod logger;
 mod page;

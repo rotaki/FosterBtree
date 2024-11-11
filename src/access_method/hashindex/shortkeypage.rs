@@ -930,7 +930,6 @@ mod tests {
         rand::thread_rng()
             .sample_iter(&rand::distributions::Alphanumeric)
             .take(length)
-            .map(|c| c)
             .collect()
     }
 

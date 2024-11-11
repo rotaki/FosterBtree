@@ -10,8 +10,8 @@ pub mod sync_write {
     use crate::bp::ContainerId;
     #[allow(unused_imports)]
     use crate::log;
-    use crate::log_info;
     use crate::page::{Page, PageId, PAGE_SIZE};
+    use crate::{log_info, log_trace};
     use std::fs::{File, OpenOptions};
     use std::io::{Read, Seek, SeekFrom, Write};
     use std::path::PathBuf;
@@ -78,7 +78,7 @@ pub mod sync_write {
         pub fn read_page(&self, page_id: PageId, page: &mut Page) -> Result<(), std::io::Error> {
             let mut file = self.file.lock().unwrap();
             self.io_count.0.fetch_add(1, Ordering::AcqRel);
-            log_info!("Reading page: {} from file: {:?}", page_id, self.path);
+            log_trace!("Reading page: {} from file: {:?}", page_id, self.path);
             file.seek(SeekFrom::Start(page_id as u64 * PAGE_SIZE as u64))?;
             file.read_exact(page.get_raw_bytes_mut())?;
             debug_assert!(page.get_id() == page_id, "Page id mismatch");
@@ -87,7 +87,7 @@ pub mod sync_write {
 
         pub fn write_page(&self, page_id: PageId, page: &Page) -> Result<(), std::io::Error> {
             let mut file = self.file.lock().unwrap();
-            log_info!("Writing page: {} to file: {:?}", page_id, self.path);
+            log_trace!("Writing page: {} to file: {:?}", page_id, self.path);
             self.io_count.1.fetch_add(1, Ordering::AcqRel);
             debug_assert!(page.get_id() == page_id, "Page id mismatch");
             file.seek(SeekFrom::Start(page_id as u64 * PAGE_SIZE as u64))?;
@@ -97,7 +97,7 @@ pub mod sync_write {
 
         pub fn flush(&self) -> Result<(), std::io::Error> {
             let mut file = self.file.lock().unwrap();
-            log_info!("Flushing file: {:?}", self.path);
+            log_trace!("Flushing file: {:?}", self.path);
             file.flush()
         }
     }

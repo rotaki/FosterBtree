@@ -18,8 +18,13 @@ use crate::{
 };
 
 use super::locktable::ConcurrentLockTable as LockTable;
+// use super::locktable::SingleThreadLockTable as LockTable;
 use super::txn_storage_trait::ContainerType;
 use super::{ContainerOptions, DBOptions, TxnOptions, TxnStorageTrait};
+
+#[allow(unused_imports)]
+use crate::log;
+use crate::log_info;
 
 // Each transaction has a read-write set
 
@@ -726,6 +731,8 @@ impl NoWaitTxn {
         sss: &SecondaryStorages<M>,
     ) -> Result<(), TxnStorageStatus> {
         // Release read locks first
+        log_info!("NO-WAIT-TXN: Committing transaction");
+        log_info!(" 1. Releasing read locks");
         for (c_id, rwset) in unsafe { &*self.rwset.get() } {
             let ps = pss.get(*c_id).unwrap(); // unwrap is safe because we only buffer updates of primary storages.
             let locktable = &ps.locktable;
@@ -741,6 +748,7 @@ impl NoWaitTxn {
         }
 
         // Write
+        log_info!(" 2. Releasing write locks and applying updates");
         for (c_id, rwset) in unsafe { &*self.rwset.get() } {
             let ps = pss.get(*c_id).unwrap(); // unwrap is safe because we only consider updates of primary storages
             let storage = &ps.btree;
@@ -793,6 +801,8 @@ impl NoWaitTxn {
                 locktable.release_exclusive(key.clone());
             }
         }
+
+        log_info!("  Done committing transaction");
 
         Ok(())
     }
@@ -883,7 +893,7 @@ impl<M: MemPool> TxnStorageTrait for NoWaitTxnStorage<M> {
     type IteratorHandle = KVIterator<M>;
 
     // Only a single database supported right now.
-    fn open_db(&self, options: DBOptions) -> Result<DatabaseId, TxnStorageStatus> {
+    fn open_db(&self, _: DBOptions) -> Result<DatabaseId, TxnStorageStatus> {
         Ok(0)
     }
 

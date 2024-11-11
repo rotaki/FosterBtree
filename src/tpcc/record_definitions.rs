@@ -98,11 +98,11 @@ pub struct StockKey {
 
 impl StockKey {
     // Extract i_id and w_id using bit manipulation
-    fn i_id(&self) -> u32 {
+    pub fn i_id(&self) -> u32 {
         (self.s_key & 0xFFFF_FFFF) as u32
     }
 
-    fn w_id(&self) -> u16 {
+    pub fn w_id(&self) -> u16 {
         ((self.s_key >> 32) & 0xFFFF) as u16
     }
 
@@ -115,7 +115,7 @@ impl StockKey {
         StockKey { s_key }
     }
 
-    fn create_key_from_stock(s: &Stock) -> Self {
+    pub fn create_key_from_stock(s: &Stock) -> Self {
         StockKey::create_key(s.s_w_id, s.s_i_id)
     }
 }

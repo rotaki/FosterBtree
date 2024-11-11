@@ -1,9 +1,11 @@
 use super::prelude::TxnProfileID;
 
 use std::time::SystemTime;
-use std::u32;
 
+#[allow(unused_imports)]
+use crate::log;
 use crate::log_info;
+
 use crate::prelude::ScanOptions;
 use crate::prelude::TxnOptions;
 use crate::prelude::TxnStorageTrait;
@@ -37,6 +39,7 @@ impl TxnProfile for DeliveryTxn {
         stat: &mut TPCCStat,
         out: &mut TPCCOutput,
     ) -> TPCCStatus {
+        self.input.print();
         let start = SystemTime::now();
         let mut helper = TxHelper::new(txn_storage, &mut stat[DeliveryTxn::ID]);
         let txn = txn_storage.begin_txn(0, TxnOptions::default()).unwrap();
@@ -217,7 +220,7 @@ impl DeliveryTxnInput {
 
     pub fn print(&self) {
         log_info!(
-            "del: w_id={} o_carrier_id={} ol_delivery_d={}",
+            "[DELIVERY]: w_id={} o_carrier_id={} ol_delivery_d={}",
             self.w_id,
             self.o_carrier_id,
             self.ol_delivery_d

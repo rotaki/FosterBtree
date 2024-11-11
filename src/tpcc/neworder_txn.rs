@@ -2,6 +2,8 @@ use super::prelude::TxnProfileID;
 
 use std::time::SystemTime;
 
+#[allow(unused_imports)]
+use crate::log;
 use crate::log_info;
 use crate::prelude::TxnOptions;
 use crate::prelude::TxnStorageTrait;
@@ -36,6 +38,7 @@ impl TxnProfile for NewOrderTxn {
         stat: &mut TPCCStat,
         out: &mut TPCCOutput,
     ) -> TPCCStatus {
+        self.input.print();
         let start = SystemTime::now();
         let mut helper = TxHelper::new(txn_storage, &mut stat[NewOrderTxn::ID]);
         let txn = txn_storage.begin_txn(0, TxnOptions::default()).unwrap();
@@ -358,7 +361,7 @@ impl NewOrderTxnInput {
 
     pub fn print(&self) {
         log_info!(
-            "nod: w_id={} d_id={} c_id={} rbk={} remote={} ol_cnt={}",
+            "[NEWORDER]: w_id={} d_id={} c_id={} rbk={} remote={} ol_cnt={}",
             self.w_id,
             self.d_id,
             self.c_id,
@@ -368,7 +371,7 @@ impl NewOrderTxnInput {
         );
         for (i, item) in self.items.iter().enumerate() {
             log_info!(
-                " [{}]: ol_i_id={} ol_supply_w_id={} c_quantity={}",
+                " ({}): ol_i_id={} ol_supply_w_id={} c_quantity={}",
                 i + 1,
                 item.ol_i_id,
                 item.ol_supply_w_id,

@@ -69,7 +69,7 @@ wasm-bindgen = "0.2"
 lto = true
 panic = "abort"
 codegen-units = 1
-debug = true # For perf
+# debug = true # For perf
 
 [[bench]]
 name = "foster_btree_insert"

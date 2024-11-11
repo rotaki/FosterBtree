@@ -143,9 +143,9 @@ impl MemPool for InMemPool {
         let num_frames = unsafe { &*self.frames.get() }.len();
         MemoryStats {
             num_frames_in_mem: num_frames,
-            new_count: num_frames,
-            read_count: num_frames,
-            write_count: num_frames,
+            new_page_created: num_frames,
+            read_page_from_disk: num_frames,
+            write_page_to_disk: num_frames,
         }
     }
 

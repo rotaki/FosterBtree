@@ -4,7 +4,10 @@ use std::time::SystemTime;
 use crate::prelude::{ScanOptions, TxnOptions, TxnStorageTrait};
 use crate::tpcc::loader::Table;
 use crate::tpcc::tx_utils::*;
-use crate::{log_trace, write_fields};
+
+#[allow(unused_imports)]
+use crate::log;
+use crate::{log_info, log_trace, write_fields};
 
 use super::loader::TableInfo;
 use super::record_definitions::*;
@@ -33,6 +36,7 @@ impl TxnProfile for StockLevelTxn {
         stat: &mut TPCCStat,
         out: &mut TPCCOutput,
     ) -> TPCCStatus {
+        self.input.print();
         let start = SystemTime::now();
         let mut helper = TxHelper::new(txn_storage, &mut stat[StockLevelTxn::ID]);
         let txn = txn_storage.begin_txn(0, TxnOptions::default()).unwrap();
@@ -137,8 +141,8 @@ impl StockLevelTxnInput {
     }
 
     pub fn print(&self) {
-        log_trace!(
-            "stklvl: w_id={} d_id={} threshold={}",
+        log_info!(
+            "[STOCKLEVEL]: w_id={} d_id={} threshold={}",
             self.w_id,
             self.d_id,
             self.threshold

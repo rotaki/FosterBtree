@@ -1,5 +1,7 @@
 use std::time::SystemTime;
 
+#[allow(unused_imports)]
+use crate::log;
 use crate::log_info;
 use crate::prelude::ScanOptions;
 use crate::prelude::TxnOptions;
@@ -35,6 +37,7 @@ impl TxnProfile for PaymentTxn {
         stat: &mut TPCCStat,
         out: &mut TPCCOutput,
     ) -> TPCCStatus {
+        self.input.print();
         let start = SystemTime::now();
         let mut helper = TxHelper::new(txn_storage, &mut stat[PaymentTxn::ID]);
         let txn = txn_storage.begin_txn(0, TxnOptions::default()).unwrap();
@@ -297,7 +300,7 @@ impl PaymentTxnInput {
     pub fn print(&self) {
         if self.by_last_name {
             log_info!(
-                "pay: w_id={} d_id={} c_w_id={} c_d_id={} h_amount={:.2} h_date={} by_last_name=t c_last={}",
+                "[PAYMENT] w_id={} d_id={} c_w_id={} c_d_id={} h_amount={:.2} h_date={} by_last_name=t c_last={}",
                 self.w_id,
                 self.d_id,
                 self.c_w_id,
@@ -308,7 +311,7 @@ impl PaymentTxnInput {
             );
         } else {
             log_info!(
-                "pay: w_id={} d_id={} c_w_id={} c_d_id={} h_amount={:.2} h_date={} by_last_name=f c_id={}",
+                "[PAYMENT] w_id={} d_id={} c_w_id={} c_d_id={} h_amount={:.2} h_date={} by_last_name=f c_id={}",
                 self.w_id, self.d_id, self.c_w_id, self.c_d_id, self.h_amount, self.h_date, self.c_id
             );
         }

@@ -19,13 +19,6 @@ use crate::{
 
 use super::foster_btree_page::{BTreeKey, FosterBtreePage};
 
-pub static READ_HINT_ACCESS: AtomicUsize = AtomicUsize::new(0);
-pub static READ_HINT_ASSISTED_ACCESS: AtomicUsize = AtomicUsize::new(0);
-pub static READ_NORMAL_ACCESS: AtomicUsize = AtomicUsize::new(0);
-pub static WRITE_HINT_ACCESS: AtomicUsize = AtomicUsize::new(0);
-pub static WRITE_HINT_ASSISTED_ACCESS: AtomicUsize = AtomicUsize::new(0);
-pub static WRITE_NORMAL_ACCESS: AtomicUsize = AtomicUsize::new(0);
-
 #[derive(Clone, Copy, Debug)]
 enum OpType {
     Split,
@@ -1726,13 +1719,10 @@ impl<T: MemPool> FosterBtree<T> {
             if page.is_valid() && page.is_leaf() && page.inside_range(&BTreeKey::Normal(key)) {
                 let slot = page.upper_bound_slot_id(&BTreeKey::Normal(key)) - 1;
                 if !page.has_foster_child() && slot != page.foster_child_slot_id() {
-                    READ_HINT_ACCESS.fetch_add(1, Ordering::AcqRel);
                     return page;
                 }
             }
-            READ_HINT_ASSISTED_ACCESS.fetch_add(1, Ordering::AcqRel);
         }
-        READ_NORMAL_ACCESS.fetch_add(1, Ordering::AcqRel);
         self.traverse_to_leaf_for_read_from(key, hint.unwrap_or(self.root_key))
     }
 
@@ -1868,10 +1858,10 @@ impl<T: MemPool> FosterBtree<T> {
                     if !page.has_foster_child() && slot_id != page.foster_child_slot_id() {
                         match page.try_upgrade(true) {
                             Ok(upgraded) => {
-                                WRITE_HINT_ACCESS.fetch_add(1, Ordering::AcqRel);
                                 return upgraded;
                             }
-                            Err(_) => {
+                            Err(page) => {
+                                drop(page);
                                 std::thread::sleep(Duration::from_nanos(u64::pow(base, attempts)));
                                 attempts += 1;
                                 continue;
@@ -1880,11 +1870,9 @@ impl<T: MemPool> FosterBtree<T> {
                     }
                 }
                 // Traverse from the root or the hint
-                WRITE_HINT_ASSISTED_ACCESS.fetch_add(1, Ordering::AcqRel);
                 break;
             }
         }
-        WRITE_NORMAL_ACCESS.fetch_add(1, Ordering::AcqRel);
         self.traverse_to_leaf_for_write_from(key, hint.unwrap_or(self.root_key))
     }
 
@@ -1898,7 +1886,8 @@ impl<T: MemPool> FosterBtree<T> {
         inc_exclusive_page_latch_count();
         match leaf_page.try_upgrade(true) {
             Ok(upgraded) => Ok(upgraded),
-            Err(_) => {
+            Err(page) => {
+                drop(page);
                 #[cfg(feature = "stat")]
                 inc_exclusive_page_latch_failures(true);
                 Err(AccessMethodError::PageWriteLatchFailed)
@@ -1925,7 +1914,7 @@ impl<T: MemPool> FosterBtree<T> {
                         log_info!(
                             "Failed to acquire write lock (#attempt {}). Sleeping for {:?}",
                             attempts,
-                            base * attempts
+                            base * attempts as u64
                         );
                         std::thread::sleep(Duration::from_nanos(u64::pow(base, attempts)));
                         attempts += 1;
