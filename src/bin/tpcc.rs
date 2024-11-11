@@ -25,9 +25,20 @@ pub fn main() {
 
     // Warmup
     std::thread::scope(|s| {
-        for _ in 0..config.num_threads {
-            s.spawn(|| {
-                run_benchmark_for_thread(&config, &txn_storage, &tbl_info, &flag);
+        for i in 0..config.num_threads {
+            let thread_id = i;
+            let config_ref = &config;
+            let txn_storage_ref = &txn_storage;
+            let tbl_info_ref = &tbl_info;
+            let flag_ref = &flag;
+            s.spawn(move || {
+                run_benchmark_for_thread(
+                    thread_id,
+                    config_ref,
+                    txn_storage_ref,
+                    tbl_info_ref,
+                    flag_ref,
+                );
             });
         }
         // Start timer for config duration
@@ -43,9 +54,21 @@ pub fn main() {
     // Run the benchmark
     std::thread::scope(|s| {
         let mut handlers = Vec::with_capacity(config.num_threads);
-        for _ in 0..config.num_threads {
-            let handler =
-                s.spawn(|| run_benchmark_for_thread(&config, &txn_storage, &tbl_info, &flag));
+        for i in 0..config.num_threads {
+            let thread_id = i;
+            let config_ref = &config;
+            let txn_storage_ref = &txn_storage;
+            let tbl_info_ref = &tbl_info;
+            let flag_ref = &flag;
+            let handler = s.spawn(move || {
+                run_benchmark_for_thread(
+                    thread_id,
+                    config_ref,
+                    txn_storage_ref,
+                    tbl_info_ref,
+                    flag_ref,
+                )
+            });
             handlers.push(handler);
         }
         // Start timer for config duration

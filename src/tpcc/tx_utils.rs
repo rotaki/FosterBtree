@@ -495,6 +495,7 @@ impl<'a, T: TxnStorageTrait> TxHelper<'a, T> {
 }
 
 pub fn run<T, P>(
+    thread_id: usize,
     config: &TPCCConfig,
     txn_storage: &T,
     tbl_info: &TableInfo,
@@ -507,13 +508,7 @@ where
 {
     // Begin a transaction
     let w_id = if config.fixed_warehouse_per_thread {
-        // A temporary workaround to avoid using nightly features
-        // to convert thread id to u16
-        let thread_id = std::thread::current().id();
-        let mut hasher = DefaultHasher::new();
-        thread_id.hash(&mut hasher);
-        let thread_id_u64 = hasher.finish();
-        ((thread_id_u64 % config.num_warehouses as u64) + 1) as u16
+        ((thread_id % config.num_warehouses as usize) + 1) as u16
     } else {
         urand_int(1, config.num_warehouses as u64) as u16
     };
@@ -523,6 +518,7 @@ where
 }
 
 pub fn run_with_retry<T, P>(
+    thread_id: usize,
     config: &TPCCConfig,
     txn_storage: &T,
     tbl_info: &TableInfo,
@@ -534,7 +530,7 @@ where
     P: TxnProfile,
 {
     loop {
-        let status = run::<T, P>(config, txn_storage, tbl_info, stat, out);
+        let status = run::<T, P>(thread_id, config, txn_storage, tbl_info, stat, out);
         match status {
             TPCCStatus::Success => {
                 log_info!("Success");
@@ -557,6 +553,7 @@ where
 }
 
 pub fn run_benchmark_for_thread<T>(
+    thread_id: usize,
     config: &TPCCConfig,
     txn_storage: &T,
     tbl_info: &TableInfo,
@@ -570,15 +567,50 @@ where
     while flag.load(Ordering::Acquire) {
         let x = urand_int(1, 100);
         if x <= 4 {
-            run_with_retry::<T, StockLevelTxn>(config, txn_storage, tbl_info, &mut stat, &mut out);
+            run_with_retry::<T, StockLevelTxn>(
+                thread_id,
+                config,
+                txn_storage,
+                tbl_info,
+                &mut stat,
+                &mut out,
+            );
         } else if x <= 4 + 4 {
-            run_with_retry::<T, DeliveryTxn>(config, txn_storage, tbl_info, &mut stat, &mut out);
+            run_with_retry::<T, DeliveryTxn>(
+                thread_id,
+                config,
+                txn_storage,
+                tbl_info,
+                &mut stat,
+                &mut out,
+            );
         } else if x <= 4 + 4 + 4 {
-            run_with_retry::<T, OrderStatusTxn>(config, txn_storage, tbl_info, &mut stat, &mut out);
+            run_with_retry::<T, OrderStatusTxn>(
+                thread_id,
+                config,
+                txn_storage,
+                tbl_info,
+                &mut stat,
+                &mut out,
+            );
         } else if x <= 4 + 4 + 4 + 43 {
-            run_with_retry::<T, PaymentTxn>(config, txn_storage, tbl_info, &mut stat, &mut out);
+            run_with_retry::<T, PaymentTxn>(
+                thread_id,
+                config,
+                txn_storage,
+                tbl_info,
+                &mut stat,
+                &mut out,
+            );
         } else {
-            run_with_retry::<T, NewOrderTxn>(config, txn_storage, tbl_info, &mut stat, &mut out);
+            run_with_retry::<T, NewOrderTxn>(
+                thread_id,
+                config,
+                txn_storage,
+                tbl_info,
+                &mut stat,
+                &mut out,
+            );
         }
     }
     (stat, out)
