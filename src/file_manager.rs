@@ -1,36 +1,3 @@
-use std::io;
-
-#[derive(Debug, PartialEq)]
-pub enum FMError {
-    DirCreate,
-    Open,
-    Seek,
-    Read,
-    Write,
-    Flush,
-    Other(String),
-}
-
-impl std::fmt::Display for FMError {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        match self {
-            FMError::DirCreate => write!(f, "[FM] Error creating directory"),
-            FMError::Open => write!(f, "[FM] Error opening file"),
-            FMError::Seek => write!(f, "[FM] Error seeking in file"),
-            FMError::Read => write!(f, "[FM] Error reading from file"),
-            FMError::Write => write!(f, "[FM] Error writing to file"),
-            FMError::Flush => write!(f, "[FM] Error flushing file"),
-            FMError::Other(e) => write!(f, "[FM] Other IO error: {}", e),
-        }
-    }
-}
-
-impl From<io::Error> for FMError {
-    fn from(err: io::Error) -> Self {
-        FMError::Other(err.to_string())
-    }
-}
-
 #[cfg(not(any(feature = "async_write", feature = "new_async_write")))]
 pub type FileManager = sync_write::FileManager;
 #[cfg(feature = "async_write")]
@@ -40,12 +7,11 @@ pub type FileManager = new_async_write::FileManager;
 
 #[cfg(not(any(feature = "async_write", feature = "new_async_write")))]
 pub mod sync_write {
-    use super::FMError;
     use crate::bp::ContainerId;
     #[allow(unused_imports)]
     use crate::log;
-    use crate::log_info;
     use crate::page::{Page, PageId, PAGE_SIZE};
+    use crate::{log_info, log_trace};
     use std::fs::{File, OpenOptions};
     use std::io::{Read, Seek, SeekFrom, Write};
     use std::path::PathBuf;
@@ -63,15 +29,15 @@ pub mod sync_write {
         pub fn new<P: AsRef<std::path::Path>>(
             db_dir: P,
             c_id: ContainerId,
-        ) -> Result<Self, FMError> {
-            std::fs::create_dir_all(&db_dir).map_err(|_| FMError::DirCreate)?;
+        ) -> Result<Self, std::io::Error> {
+            std::fs::create_dir_all(&db_dir)?;
             let path = db_dir.as_ref().join(format!("{}", c_id));
             let file = OpenOptions::new()
                 .read(true)
                 .write(true)
                 .create(true)
-                .open(&path)
-                .map_err(|_| FMError::Open)?;
+                .truncate(false)
+                .open(&path)?;
             let num_pages = file.metadata().unwrap().len() as usize / PAGE_SIZE;
             Ok(FileManager {
                 _path: path,
@@ -105,50 +71,45 @@ pub mod sync_write {
             self.io_count.1.store(0, Ordering::Release);
         }
 
-        pub fn prefetch_page(&self, _page_id: PageId) -> Result<(), FMError> {
+        pub fn prefetch_page(&self, _page_id: PageId) -> Result<(), std::io::Error> {
             Ok(())
         }
 
-        pub fn read_page(&self, page_id: PageId, page: &mut Page) -> Result<(), FMError> {
+        pub fn read_page(&self, page_id: PageId, page: &mut Page) -> Result<(), std::io::Error> {
             let mut file = self.file.lock().unwrap();
             self.io_count.0.fetch_add(1, Ordering::AcqRel);
-            log_info!("Reading page: {} from file: {:?}", page_id, self.path);
-            file.seek(SeekFrom::Start(page_id as u64 * PAGE_SIZE as u64))
-                .map_err(|_| FMError::Seek)?;
-            file.read_exact(page.get_raw_bytes_mut())
-                .map_err(|_| FMError::Read)?;
+            log_trace!("Reading page: {} from file: {:?}", page_id, self.path);
+            file.seek(SeekFrom::Start(page_id as u64 * PAGE_SIZE as u64))?;
+            file.read_exact(page.get_raw_bytes_mut())?;
             debug_assert!(page.get_id() == page_id, "Page id mismatch");
             Ok(())
         }
 
-        pub fn write_page(&self, page_id: PageId, page: &Page) -> Result<(), FMError> {
+        pub fn write_page(&self, page_id: PageId, page: &Page) -> Result<(), std::io::Error> {
             let mut file = self.file.lock().unwrap();
-            log_info!("Writing page: {} to file: {:?}", page_id, self.path);
+            log_trace!("Writing page: {} to file: {:?}", page_id, self.path);
             self.io_count.1.fetch_add(1, Ordering::AcqRel);
             debug_assert!(page.get_id() == page_id, "Page id mismatch");
-            file.seek(SeekFrom::Start(page_id as u64 * PAGE_SIZE as u64))
-                .map_err(|_| FMError::Seek)?;
-            file.write_all(page.get_raw_bytes())
-                .map_err(|_| FMError::Write)?;
+            file.seek(SeekFrom::Start(page_id as u64 * PAGE_SIZE as u64))?;
+            file.write_all(page.get_raw_bytes())?;
             Ok(())
         }
 
-        pub fn flush(&self) -> Result<(), FMError> {
+        pub fn flush(&self) -> Result<(), std::io::Error> {
             let mut file = self.file.lock().unwrap();
-            log_info!("Flushing file: {:?}", self.path);
-            file.flush().map_err(|_| FMError::Flush)
+            log_trace!("Flushing file: {:?}", self.path);
+            file.flush()
         }
     }
 }
 
 #[cfg(feature = "async_write")]
 pub mod async_write {
-    use super::FMError;
     use crate::bp::ContainerId;
     #[allow(unused_imports)]
     use crate::log;
     use crate::page::{Page, PageId, PAGE_SIZE};
-    use crate::{log_debug, log_info};
+    use crate::{log_debug, log_info, log_trace};
     use std::cell::UnsafeCell;
     use std::fs::{File, OpenOptions};
     use std::path::PathBuf;
@@ -173,16 +134,15 @@ pub mod async_write {
         pub fn new<P: AsRef<std::path::Path>>(
             db_dir: P,
             c_id: ContainerId,
-        ) -> Result<Self, FMError> {
-            std::fs::create_dir_all(&db_dir).map_err(|_| FMError::DirCreate)?;
+        ) -> Result<Self, std::io::Error> {
+            std::fs::create_dir_all(&db_dir)?;
             let path = db_dir.as_ref().join(format!("{}", c_id));
             let file = OpenOptions::new()
                 .read(true)
                 .write(true)
                 .create(true)
                 .truncate(false)
-                .open(&path)
-                .map_err(|_| FMError::Open)?;
+                .open(&path)?;
             let num_pages = file.metadata().unwrap().len() as usize / PAGE_SIZE;
             let file_inner = FileManagerInner::new(file)?;
             Ok(FileManager {
@@ -217,23 +177,23 @@ pub mod async_write {
             }
         }
 
-        pub fn prefetch_page(&self, page_id: PageId) -> Result<(), FMError> {
+        pub fn prefetch_page(&self, page_id: PageId) -> Result<(), std::io::Error> {
             Ok(())
         }
 
-        pub fn read_page(&self, page_id: PageId, page: &mut Page) -> Result<(), FMError> {
+        pub fn read_page(&self, page_id: PageId, page: &mut Page) -> Result<(), std::io::Error> {
             log_trace!("Reading page: {} from file: {:?}", page_id, self.path);
             let mut file_inner = self.file_inner.lock().unwrap();
             file_inner.read_page(page_id, page)
         }
 
-        pub fn write_page(&self, page_id: PageId, page: &Page) -> Result<(), FMError> {
+        pub fn write_page(&self, page_id: PageId, page: &Page) -> Result<(), std::io::Error> {
             log_trace!("Writing page: {} to file: {:?}", page_id, self.path);
             let mut file_inner = self.file_inner.lock().unwrap();
             file_inner.write_page(page_id, page)
         }
 
-        pub fn flush(&self) -> Result<(), FMError> {
+        pub fn flush(&self) -> Result<(), std::io::Error> {
             log_trace!("Flushing file: {:?}", self.path);
             let mut file_inner = self.file_inner.lock().unwrap();
             file_inner.flush_page()
@@ -480,7 +440,7 @@ pub mod async_write {
     }
 
     impl FileManagerInner {
-        fn new(file: File) -> Result<Self, FMError> {
+        fn new(file: File) -> Result<Self, std::io::Error> {
             let ring = IoUring::builder()
                 .setup_sqpoll(1)
                 .build(PAGE_BUFFER_SIZE as _)?;
@@ -517,7 +477,7 @@ pub mod async_write {
             hasher.finish() as usize % PAGE_BUFFER_SIZE
         }
 
-        fn read_page(&mut self, page_id: PageId, page: &mut Page) -> Result<(), FMError> {
+        fn read_page(&mut self, page_id: PageId, page: &mut Page) -> Result<(), std::io::Error> {
             // Check the entry in the page_buffer
             let hash = FileManagerInner::compute_hash(page_id);
             let mut _count = 0;
@@ -571,7 +531,7 @@ pub mod async_write {
             Ok(())
         }
 
-        fn write_page(&mut self, page_id: PageId, page: &Page) -> Result<(), FMError> {
+        fn write_page(&mut self, page_id: PageId, page: &Page) -> Result<(), std::io::Error> {
             // Check the entry in the page_buffer
             let hash = FileManagerInner::compute_hash(page_id);
             let mut _count = 0;
@@ -635,7 +595,7 @@ pub mod async_write {
             }
         }
 
-        fn flush_page(&mut self) -> Result<(), FMError> {
+        fn flush_page(&mut self) -> Result<(), std::io::Error> {
             // Find the first entry in the page_buffer that is not written. Wait for it to be written.
             for i in 0..PAGE_BUFFER_SIZE {
                 if !self.page_buffer_status[i] {
@@ -690,7 +650,6 @@ pub mod async_write {
 
 #[cfg(feature = "new_async_write")]
 mod new_async_write {
-    use super::FMError;
     use crate::bp::ContainerId;
     #[allow(unused_imports)]
     use crate::log;
@@ -805,16 +764,15 @@ mod new_async_write {
         pub fn new<P: AsRef<std::path::Path>>(
             db_dir: P,
             c_id: ContainerId,
-        ) -> Result<Self, FMError> {
-            std::fs::create_dir_all(&db_dir).map_err(|_| FMError::DirCreate)?;
+        ) -> Result<Self, std::io::Error> {
+            std::fs::create_dir_all(&db_dir)?;
             let path = db_dir.as_ref().join(format!("{}", c_id));
             let file = OpenOptions::new()
                 .read(true)
                 .write(true)
                 .create(true)
                 .truncate(false)
-                .open(&path)
-                .map_err(|_| FMError::Open)?;
+                .open(&path)?;
             let num_pages = file.metadata().unwrap().len() as usize / PAGE_SIZE;
 
             let ring = IoUring::builder()
@@ -880,7 +838,7 @@ mod new_async_write {
             }
         }
 
-        pub fn prefetch_page(&self, page_id: PageId) -> Result<(), FMError> {
+        pub fn prefetch_page(&self, page_id: PageId) -> Result<(), std::io::Error> {
             let hash = FileManager::compute_hash(page_id);
             let (buffer, status, latch) = &self.page_buffer[hash];
             let buffer = unsafe { &mut *buffer.get() };
@@ -918,7 +876,7 @@ mod new_async_write {
             }
         }
 
-        pub fn read_page(&self, page_id: PageId, page: &mut Page) -> Result<(), FMError> {
+        pub fn read_page(&self, page_id: PageId, page: &mut Page) -> Result<(), std::io::Error> {
             // Check the entry in the page_buffer
             let hash = FileManager::compute_hash(page_id);
             let (buffer, status, latch) = &self.page_buffer[hash];
@@ -969,7 +927,7 @@ mod new_async_write {
             }
         }
 
-        pub fn write_page(&self, page_id: PageId, page: &Page) -> Result<(), FMError> {
+        pub fn write_page(&self, page_id: PageId, page: &Page) -> Result<(), std::io::Error> {
             // Check the entry in the page_buffer
             let hash = FileManager::compute_hash(page_id);
             let (buffer, status, latch) = &self.page_buffer[hash];
@@ -1003,7 +961,7 @@ mod new_async_write {
             Ok(()) // This is the only return point.
         }
 
-        pub fn flush(&self) -> Result<(), FMError> {
+        pub fn flush(&self) -> Result<(), std::io::Error> {
             // Find the first entry in the page_buffer that is not written. Wait for it to be written.
             for i in 0..PAGE_BUFFER_SIZE {
                 let (_, status, latch) = &self.page_buffer[i];
@@ -1027,7 +985,7 @@ mod new_async_write {
             // let _res = ring.submit()?;
 
             // Issue a sync flush
-            self._file.sync_all().map_err(|_| FMError::Flush)?;
+            self._file.sync_all()?;
 
             Ok(())
         }

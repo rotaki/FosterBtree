@@ -2,7 +2,7 @@ use clap::Parser;
 use core::panic;
 use fbtree::{
     access_method::prelude::*,
-    access_method::{OrderedUniqueKeyIndex, UniqueKeyIndex},
+    access_method::UniqueKeyIndex,
     bp::{get_test_bp, BufferPool},
     prelude::PAGE_SIZE,
     random::gen_random_byte_vec,
@@ -410,7 +410,7 @@ fn main() {
     println!("Loading table...");
     load_table(&params, &table);
 
-    println!("Buffer pool stats after load: {:?}", bp.stats());
+    println!("Buffer pool stats after load: {}", bp.stats());
 
     println!("--- Page stats ---\n{}", table.page_stats(false));
 
@@ -423,7 +423,7 @@ fn main() {
     println!("Executing workload...");
     let (r, u, s, i, m) = execute_workload(&params, table);
 
-    println!("Buffer pool stats after exec: {:?}", bp.stats());
+    println!("Buffer pool stats after exec: {}", bp.stats());
 
     print_stats(r, u, s, i, m, r + u + s + i + m, params.exec_time);
 }

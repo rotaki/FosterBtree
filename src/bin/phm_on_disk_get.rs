@@ -18,11 +18,11 @@ fn main() {
         insert_params.val_max_size,
     );
     run_bench_for_paged_hash_map(insert_params, kvs, &phm);
-    println!("After Insertion\n{:?}", phm.bp.stats());
+    println!("After Insertion\n{}", phm.bp.stats());
     phm.bp.flush_all().unwrap();
-    println!("After Flushing\n{:?}", phm.bp.stats());
+    println!("After Flushing\n{}", phm.bp.stats());
     phm.bp.reset_stats();
-    println!("After Resetting Stats\n{:?}", phm.bp.stats());
+    println!("After Resetting Stats\n{}", phm.bp.stats());
     #[cfg(feature = "stat")]
     {
         println!("BP stats: ");
@@ -41,11 +41,11 @@ fn main() {
     );
     // Done inserting
     run_bench_for_paged_hash_map(get_params, kvs, &phm);
-    println!("After Get\n{:?}", phm.bp.stats());
+    println!("After Get\n{}", phm.bp.stats());
     phm.bp.flush_all().unwrap();
-    println!("After Flushing\n{:?}", phm.bp.stats());
+    println!("After Flushing\n{}", phm.bp.stats());
     phm.bp.reset_stats();
-    println!("After Resetting Stats\n{:?}", phm.bp.stats());
+    println!("After Resetting Stats\n{}", phm.bp.stats());
     #[cfg(feature = "stat")]
     {
         println!("BP stats: ");

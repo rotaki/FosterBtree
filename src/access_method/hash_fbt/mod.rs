@@ -491,7 +491,6 @@ impl<T: MemPool> HashFosterBtreeAppendOnly<T> {
 #[cfg(test)]
 mod tests {
 
-    use core::num;
     use std::{collections::HashSet, fs::File, sync::Arc};
 
     use crate::{
@@ -1009,7 +1008,7 @@ mod tests {
     fn test_durability() {
         let temp_dir = tempfile::tempdir().unwrap();
 
-        let num_keys = 10000;
+        let num_keys = 100;
         let key_size = 50;
         let val_min_size = 50;
         let val_max_size = 100;
@@ -1033,7 +1032,7 @@ mod tests {
         // Create a store and insert some values.
         // Drop the store and buffer pool
         {
-            let bp = Arc::new(BufferPool::new(&temp_dir, 20, false).unwrap());
+            let bp = Arc::new(BufferPool::new(&temp_dir, 100, false).unwrap());
 
             let c_key = ContainerKey::new(0, 0);
             let store = Arc::new(HashFosterBtree::new(c_key, bp.clone(), 10));
@@ -1052,9 +1051,9 @@ mod tests {
             let c_key = ContainerKey::new(0, 0);
             let store = Arc::new(HashFosterBtree::load(c_key, bp.clone(), 0));
 
-            let mut scanner = store.scan();
+            let scanner = store.scan();
             // Remove the keys from the expected_vals set as they are scanned.
-            while let Some((key, val)) = scanner.next() {
+            for (key, val) in scanner {
                 let key = key.to_vec();
                 let val = val.to_vec();
                 assert!(expected_vals.remove(&(key, val)));

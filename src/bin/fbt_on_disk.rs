@@ -31,9 +31,9 @@ fn main() {
         println!("Btree page stats: ");
         println!("{}", tree.page_stats(false));
     }
-    println!("After Insertion\n{:?}", tree.mem_pool.stats());
+    println!("After Insertion\n{}", tree.mem_pool.stats());
     tree.mem_pool.flush_all().unwrap();
-    println!("After Flushing\n{:?}", tree.mem_pool.stats());
+    println!("After Flushing\n{}", tree.mem_pool.stats());
     tree.mem_pool.reset_stats();
-    println!("After Resetting Stats\n{:?}", tree.mem_pool.stats());
+    println!("After Resetting Stats\n{}", tree.mem_pool.stats());
 }

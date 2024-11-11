@@ -191,7 +191,7 @@ fn main() {
     println!("Loading table...");
     load_table(&params, &table);
 
-    println!("Buffer pool stats after load: {:?}", bp.stats());
+    println!("Buffer pool stats after load: {}", bp.stats());
 
     println!("--- Page stats ---\n{}", table.page_stats(false));
 
@@ -212,7 +212,7 @@ fn main() {
         let dur = execute_workload(&params, table.clone());
         total_time += dur;
         println!("Scan {} took {:?}", i, dur);
-        println!("Buffer pool stats after exec: {:?}", bp.stats());
+        println!("Buffer pool stats after exec: {}", bp.stats());
         bp.flush_all().unwrap();
         bp.reset_stats();
     }

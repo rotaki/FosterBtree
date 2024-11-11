@@ -3,8 +3,9 @@ mod foster_btree_page;
 mod foster_btree_visualizer_wasm;
 
 pub use foster_btree::{
-    FosterBtree, FosterBtreeAppendOnly, FosterBtreeAppendOnlyRangeScanner, FosterBtreeRangeScanner,
-    FosterBtreeRangeScannerWithPageId,
+    FosterBtree, FosterBtreeAppendOnly, FosterBtreeAppendOnlyCursor,
+    FosterBtreeAppendOnlyRangeScanner, FosterBtreeAppendOnlyRangeScannerWithPageId,
+    FosterBtreeCursor, FosterBtreeRangeScanner, FosterBtreeRangeScannerWithPageId,
 };
 pub(crate) use foster_btree_page::BTreeKey;
 pub use foster_btree_page::FosterBtreePage;

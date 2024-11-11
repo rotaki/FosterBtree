@@ -7,7 +7,7 @@ use crate::{page::Page, rwlatch::RwLatch};
 
 use super::{
     buffer_frame::BufferFrame,
-    mem_pool_trait::{MemPool, PageKey},
+    mem_pool_trait::{MemPool, MemoryStats, PageKey},
     prelude::{ContainerKey, FrameReadGuard, FrameWriteGuard, MemPoolStatus, PageFrameKey},
 };
 
@@ -139,15 +139,14 @@ impl MemPool for InMemPool {
         Ok(())
     }
 
-    fn stats(&self) -> (usize, usize, usize) {
-        unimplemented!("stats")
-        // "Num pages: ".to_string()
-        //     + &unsafe { &*self.frames.get() }.len().to_string()
-        //     + "\n"
-        //     + "Num containers: "
-        //     + &unsafe { &*self.container_page_count.get() }
-        //         .len()
-        //         .to_string()
+    fn stats(&self) -> MemoryStats {
+        let num_frames = unsafe { &*self.frames.get() }.len();
+        MemoryStats {
+            num_frames_in_mem: num_frames,
+            new_page_created: num_frames,
+            read_page_from_disk: num_frames,
+            write_page_to_disk: num_frames,
+        }
     }
 
     fn reset_stats(&self) {

@@ -93,10 +93,8 @@ impl<T: Clone> OptimisticReadGuard<T> {
         let guarded_struct = unsafe { &*self.guarded_struct };
         if guarded_struct.latch.is_exclusive() {
             false
-        } else if guarded_struct.latch.version() != self.seen_version {
-            false
         } else {
-            true
+            guarded_struct.latch.version() == self.seen_version
         }
     }
 

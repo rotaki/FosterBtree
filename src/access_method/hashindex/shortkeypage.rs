@@ -930,7 +930,6 @@ mod tests {
         rand::thread_rng()
             .sample_iter(&rand::distributions::Alphanumeric)
             .take(length)
-            .map(|c| c as u8)
             .collect()
     }
 
@@ -985,7 +984,7 @@ mod tests {
     #[test]
     fn test_upsert_multiple_keys_ordering() {
         let mut page = <Page as ShortKeyPage>::new();
-        let keys = vec![
+        let keys = [
             (b"alpha", b"value_alpha"),
             (b"gamma", b"value_gamma"),
             (b"betaa", b"value_betaa"),
@@ -1135,7 +1134,7 @@ mod tests {
         let keys: Vec<&[u8]> = vec![b"delta", b"alpha", b"echo", b"bravo", b"charlie"];
 
         for key in keys.iter() {
-            page.upsert(*key, b"value");
+            page.upsert(key, b"value");
         }
 
         let mut retrieved_keys = vec![];
@@ -1338,7 +1337,7 @@ mod tests {
         let keys: Vec<&[u8]> = vec![b"delta", b"alpha", b"echo", b"bravo", b"charlie"];
 
         for key in keys.iter() {
-            page.upsert_with_merge(*key, b"value", update_fn);
+            page.upsert_with_merge(key, b"value", update_fn);
         }
 
         let mut retrieved_keys = vec![];
@@ -1514,7 +1513,7 @@ mod tests {
                     if !inserted_keys.is_empty() {
                         let key_to_update = &inserted_keys[rng.gen_range(0..inserted_keys.len())];
                         let new_value = random_string(20);
-                        if page.update(&key_to_update, &new_value).is_ok() {
+                        if page.update(key_to_update, &new_value).is_ok() {
                             keys_and_values.retain(|(k, _)| k != key_to_update);
                             keys_and_values.push((key_to_update.clone(), new_value.clone()));
                         }
@@ -1528,7 +1527,7 @@ mod tests {
                             .iter()
                             .find(|(k, _)| k == key_to_get)
                             .map(|(_, v)| v.clone());
-                        assert_eq!(page.get(&key_to_get), expected_value);
+                        assert_eq!(page.get(key_to_get), expected_value);
                     }
                 }
                 3 => {
