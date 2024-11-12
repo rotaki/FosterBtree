@@ -6,15 +6,20 @@ use fbtree::{
     prelude::{
         load_all_tables, run_benchmark_for_thread, DeliveryTxn, NewOrderTxn, OrderStatusTxn,
         PaymentTxn, StockLevelTxn, TPCCConfig, TPCCOutput, TPCCStat, TableInfo, TxnProfile,
-        TxnProfileID, TxnStorageTrait,
+        TxnProfileID, TxnStorageTrait, PAGE_SIZE,
     },
     txn_storage::NoWaitTxnStorage,
 };
 
+#[global_allocator]
+static ALLOC: rpmalloc::RpMalloc = rpmalloc::RpMalloc;
+
 pub fn main() {
     let config = TPCCConfig::parse();
 
-    let bp = get_test_bp(1000000);
+    // Set frames for 4GB memory
+    let num_frames = 4 * 1024 * 1024 * 1024 / PAGE_SIZE;
+    let bp = get_test_bp(num_frames);
     let txn_storage = NoWaitTxnStorage::new(&bp);
     let tbl_info = load_all_tables(&txn_storage, &config);
 
