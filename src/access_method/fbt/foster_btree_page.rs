@@ -27,13 +27,17 @@ mod slot {
     pub const SLOT_SIZE: usize = std::mem::size_of::<u8>()
         + std::mem::size_of::<u32>()
         + std::mem::size_of::<u32>()
-        + std::mem::size_of::<u32>();
+        + std::mem::size_of::<u32>()
+        + KEY_PREFIX_SIZE;
+
+    pub const KEY_PREFIX_SIZE: usize = 8;
 
     pub struct Slot {
-        ghost: u8,       // 0 if the slot is active, 1 if the slot is a ghost
-        offset: u32,     // The offset of the key-value pair in the page
-        key_size: u32,   // The size of the key
-        value_size: u32, // The size of the value
+        ghost: u8,            // 0 if the slot is active, 1 if the slot is a ghost
+        offset: u32,          // The offset of the key-value pair in the page
+        key_suffix_size: u32, // The size of the key suffix
+        value_size: u32,      // The size of the value
+        key_prefix: [u8; KEY_PREFIX_SIZE],
     }
 
     impl Slot {
@@ -59,17 +63,22 @@ mod slot {
                     .try_into()
                     .unwrap(),
             );
+            current_pos += std::mem::size_of::<u32>();
+            let mut key_prefix = [0; KEY_PREFIX_SIZE];
+            key_prefix.copy_from_slice(&bytes[current_pos..current_pos + KEY_PREFIX_SIZE]);
+
             Slot {
                 ghost,
                 offset,
-                key_size,
+                key_suffix_size: key_size,
                 value_size,
+                key_prefix,
             }
         }
 
         pub fn to_bytes(&self) -> [u8; SLOT_SIZE] {
             let offset_bytes = self.offset.to_be_bytes();
-            let key_size_bytes = self.key_size.to_be_bytes();
+            let key_size_bytes = self.key_suffix_size.to_be_bytes();
             let value_size_bytes = self.value_size.to_be_bytes();
             let mut bytes = [0; SLOT_SIZE];
             let mut current_pos = 0;
@@ -83,16 +92,40 @@ mod slot {
             current_pos += std::mem::size_of::<u32>();
             bytes[current_pos..current_pos + std::mem::size_of::<u32>()]
                 .copy_from_slice(&value_size_bytes);
+            current_pos += std::mem::size_of::<u32>();
+            bytes[current_pos..current_pos + KEY_PREFIX_SIZE].copy_from_slice(&self.key_prefix);
             bytes
         }
 
-        pub fn new(is_ghost: bool, offset: u32, key_size: u32, value_size: u32) -> Self {
+        pub fn new(
+            is_ghost: bool,
+            offset: u32,
+            key_suffix_size: u32,
+            value_size: u32,
+            key_prefix: &[u8],
+        ) -> Self {
+            assert!(key_prefix.len() <= KEY_PREFIX_SIZE);
+            let mut key_prefix_data = [0; KEY_PREFIX_SIZE];
+            key_prefix_data.copy_from_slice(&key_prefix[..KEY_PREFIX_SIZE.min(key_prefix.len())]);
             Slot {
                 ghost: is_ghost as u8,
                 offset,
-                key_size,
+                key_suffix_size,
                 value_size,
+                key_prefix: key_prefix_data,
             }
+        }
+
+        pub fn key_prefix(&self) -> &[u8] {
+            &self.key_prefix
+        }
+
+        pub fn set_key_prefix(&mut self, key_prefix: &[u8]) {
+            assert!(key_prefix.len() <= KEY_PREFIX_SIZE);
+            // Nullify the key_prefix
+            self.key_prefix = [0; KEY_PREFIX_SIZE];
+            self.key_prefix
+                .copy_from_slice(&key_prefix[..KEY_PREFIX_SIZE.min(key_prefix.len())]);
         }
 
         pub fn is_ghost(&self) -> bool {
@@ -111,12 +144,13 @@ mod slot {
             self.offset = offset;
         }
 
-        pub fn key_size(&self) -> u32 {
-            self.key_size
+        // Returns the size of the suffix
+        pub fn key_suffix_size(&self) -> u32 {
+            self.key_suffix_size
         }
 
-        pub fn set_key_size(&mut self, key_size: u32) {
-            self.key_size = key_size;
+        pub fn set_key_suffix_size(&mut self, key_suffix_size: u32) {
+            self.key_suffix_size = key_suffix_size;
         }
 
         pub fn value_size(&self) -> u32 {
@@ -128,12 +162,34 @@ mod slot {
         }
 
         pub fn total_size(&self) -> u32 {
-            self.key_size + self.value_size + SLOT_SIZE as u32
+            self.key_suffix_size + self.value_size + SLOT_SIZE as u32
+        }
+    }
+
+    pub struct PrefixSeparatedKey<'a> {
+        pub prefix: &'a [u8],
+        pub suffix: &'a [u8],
+    }
+
+    impl<'a> PrefixSeparatedKey<'a> {
+        pub fn new(key: &'a [u8]) -> Self {
+            PrefixSeparatedKey {
+                prefix: &key[..KEY_PREFIX_SIZE.min(key.len())],
+                suffix: &key[KEY_PREFIX_SIZE.min(key.len())..],
+            }
+        }
+
+        pub fn prefix_size(&self) -> usize {
+            KEY_PREFIX_SIZE
+        }
+
+        pub fn suffix_size(&self) -> usize {
+            self.suffix.len()
         }
     }
 }
 
-use slot::{Slot, SLOT_SIZE};
+use slot::{PrefixSeparatedKey, Slot, KEY_PREFIX_SIZE, SLOT_SIZE};
 
 pub enum BTreeKey<'a> {
     MinusInfty,
@@ -451,7 +507,7 @@ impl FosterBtreePage for Page {
         let mut sum_used = 0;
         for i in range {
             let slot = self.slot(i).unwrap();
-            sum_used += slot.key_size() as usize + slot.value_size() as usize;
+            sum_used += slot.key_suffix_size() as usize + slot.value_size() as usize;
             sum_used += SLOT_SIZE;
         }
         sum_used as u32
@@ -616,7 +672,7 @@ impl FosterBtreePage for Page {
         } else {
             let slot = self.slot(self.low_fence_slot_id()).unwrap();
             let offset = slot.offset() as usize;
-            let key_size = slot.key_size() as usize;
+            let key_size = slot.key_suffix_size() as usize;
             BTreeKey::Normal(&self[offset..offset + key_size])
         }
     }
@@ -627,7 +683,7 @@ impl FosterBtreePage for Page {
         } else {
             let slot = self.slot(self.high_fence_slot_id()).unwrap();
             let offset = slot.offset() as usize;
-            let key_size = slot.key_size() as usize;
+            let key_size = slot.key_suffix_size() as usize;
             BTreeKey::Normal(&self[offset..offset + key_size])
         }
     }
@@ -676,7 +732,7 @@ impl FosterBtreePage for Page {
                 for i in 0..self.slot_count() {
                     if let Some(mut slot) = self.slot(i) {
                         let offset = slot.offset() as usize;
-                        let key_size = slot.key_size() as usize;
+                        let key_size = slot.key_suffix_size() as usize;
                         let value_size = slot.value_size() as usize;
                         let size = key_size + value_size;
                         current_size += size;
@@ -747,10 +803,10 @@ impl FosterBtreePage for Page {
     }
 
     fn get_raw_key(&self, slot_id: u32) -> &[u8] {
-        assert!(slot_id < self.slot_count());
+        debug_assert!(slot_id < self.slot_count());
         let slot = self.slot(slot_id).unwrap();
         let offset = slot.offset() as usize;
-        let key_size = slot.key_size() as usize;
+        let key_size = slot.key_suffix_size() as usize;
         &self[offset..offset + key_size]
     }
 
@@ -770,13 +826,13 @@ impl FosterBtreePage for Page {
     }
 
     fn get_foster_key(&self) -> &[u8] {
-        assert!(self.has_foster_child());
+        debug_assert!(self.has_foster_child());
         let foster_slot_id = self.foster_child_slot_id();
         self.get_raw_key(foster_slot_id)
     }
 
     fn get_foster_val(&self) -> &[u8] {
-        assert!(self.has_foster_child());
+        debug_assert!(self.has_foster_child());
         let foster_slot_id = self.foster_child_slot_id();
         self.get_val(foster_slot_id)
     }
@@ -784,7 +840,7 @@ impl FosterBtreePage for Page {
     fn get_val(&self, slot_id: u32) -> &[u8] {
         let slot = self.slot(slot_id).unwrap();
         let offset = slot.offset() as usize;
-        let key_size = slot.key_size() as usize;
+        let key_size = slot.key_suffix_size() as usize;
         let value_size = slot.value_size() as usize;
         &self[offset + key_size..offset + key_size + value_size]
     }
@@ -894,7 +950,8 @@ impl FosterBtreePage for Page {
     /// This function **DOES NOT** check the existence of the key before inserting.
     /// This function **DOES NOT** check the sorted order of the keys.
     fn insert_at(&mut self, slot_id: u32, key: &[u8], value: &[u8], is_ghost: bool) -> bool {
-        let rec_size = key.len() + value.len();
+        let ps_key = PrefixSeparatedKey::new(key);
+        let rec_size = ps_key.suffix_size() + value.len();
         if SLOT_SIZE + rec_size > self.contiguous_free_space() as usize {
             if SLOT_SIZE + rec_size > self.total_free_space() as usize {
                 return false;
@@ -914,14 +971,21 @@ impl FosterBtreePage for Page {
 
                 // Insert the key-value pair
                 let current_offset = self.rec_start_offset();
-                let rec_size = key.len() + value.len();
+                let rec_size = ps_key.suffix_size() + value.len();
                 let offset = current_offset - rec_size as u32;
-                self[offset as usize..offset as usize + key.len()].copy_from_slice(key);
-                self[offset as usize + key.len()..offset as usize + rec_size]
+                self[offset as usize..offset as usize + ps_key.suffix_size()]
+                    .copy_from_slice(ps_key.suffix);
+                self[offset as usize + ps_key.suffix_size()..offset as usize + rec_size]
                     .copy_from_slice(value);
 
                 // Insert the slot
-                let slot = Slot::new(is_ghost, offset, key.len() as u32, value.len() as u32);
+                let slot = Slot::new(
+                    is_ghost,
+                    offset,
+                    ps_key.suffix_size() as u32,
+                    value.len() as u32,
+                    ps_key.prefix,
+                );
                 self.append_slot(&slot);
                 self.set_total_bytes_used(self.total_bytes_used() + slot.total_size());
                 debug_assert!(self.slot_count() == slot_id + 1);
@@ -929,10 +993,11 @@ impl FosterBtreePage for Page {
             std::cmp::Ordering::Less => {
                 // Insert the key-value pair
                 let current_offset = self.rec_start_offset();
-                let rec_size = key.len() + value.len();
+                let rec_size = ps_key.suffix_size() + value.len();
                 let offset = current_offset - rec_size as u32;
-                self[offset as usize..offset as usize + key.len()].copy_from_slice(key);
-                self[offset as usize + key.len()..offset as usize + rec_size]
+                self[offset as usize..offset as usize + ps_key.suffix_size()]
+                    .copy_from_slice(ps_key.suffix);
+                self[offset as usize + ps_key.suffix_size()..offset as usize + rec_size]
                     .copy_from_slice(value);
 
                 // Shift the slots to the right by 1
@@ -940,7 +1005,13 @@ impl FosterBtreePage for Page {
                 self.copy_within(start..end, start + SLOT_SIZE);
 
                 // Update the slot
-                let slot = Slot::new(is_ghost, offset, key.len() as u32, value.len() as u32);
+                let slot = Slot::new(
+                    is_ghost,
+                    offset,
+                    ps_key.suffix_size() as u32,
+                    value.len() as u32,
+                    ps_key.prefix,
+                );
                 self.update_slot(slot_id, &slot);
 
                 // Update the header
@@ -964,18 +1035,23 @@ impl FosterBtreePage for Page {
     fn update_at(&mut self, slot_id: u32, key: Option<&[u8]>, value: &[u8]) -> bool {
         assert!(slot_id < self.slot_count());
         let mut slot = self.slot(slot_id).unwrap();
-        let old_rec_size = slot.key_size() as usize + slot.value_size() as usize;
-        let new_rec_size = key.map(|k| k.len()).unwrap_or(slot.key_size() as usize) + value.len();
+        let old_rec_size = slot.key_suffix_size() as usize + slot.value_size() as usize;
+        let new_rec_size = key
+            .map(|k| PrefixSeparatedKey::new(k).suffix_size())
+            .unwrap_or(slot.key_suffix_size() as usize)
+            + value.len();
         if new_rec_size <= old_rec_size {
             let offset = slot.offset() as usize;
             if let Some(key) = key {
                 // Key changes
-                self[offset..offset + key.len()].copy_from_slice(key);
-                self[offset + key.len()..offset + new_rec_size].copy_from_slice(value);
-                slot.set_key_size(key.len() as u32);
+                let ps_key = PrefixSeparatedKey::new(key);
+                self[offset..offset + ps_key.suffix_size()].copy_from_slice(ps_key.suffix);
+                self[offset + ps_key.suffix_size()..offset + new_rec_size].copy_from_slice(value);
+                slot.set_key_prefix(ps_key.prefix);
+                slot.set_key_suffix_size(ps_key.suffix_size() as u32);
             } else {
                 // Key is the same
-                self[offset + slot.key_size() as usize..offset + new_rec_size]
+                self[offset + slot.key_suffix_size() as usize..offset + new_rec_size]
                     .copy_from_slice(value);
             }
             slot.set_value_size(value.len() as u32);
@@ -1001,22 +1077,35 @@ impl FosterBtreePage for Page {
         let is_ghost = slot.is_ghost();
         let offset = current_offset - new_rec_size as u32;
         let new_slot = if let Some(key) = key {
-            // Key changes
-            self[offset as usize..offset as usize + key.len()].copy_from_slice(key);
-            self[offset as usize + key.len()..offset as usize + new_rec_size]
+            let ps_key = PrefixSeparatedKey::new(key);
+            self[offset as usize..offset as usize + ps_key.suffix_size()]
+                .copy_from_slice(ps_key.suffix);
+            self[offset as usize + ps_key.suffix_size()..offset as usize + new_rec_size]
                 .copy_from_slice(value);
             // Update the slot
-            Slot::new(is_ghost, offset, key.len() as u32, value.len() as u32)
+            Slot::new(
+                is_ghost,
+                offset,
+                ps_key.suffix_size() as u32,
+                value.len() as u32,
+                ps_key.prefix,
+            )
         } else {
             // Key is the same
             self.copy_within(
-                slot.offset() as usize..slot.offset() as usize + slot.key_size() as usize,
+                slot.offset() as usize..slot.offset() as usize + slot.key_suffix_size() as usize,
                 offset as usize,
             );
-            self[offset as usize + slot.key_size() as usize..offset as usize + new_rec_size]
+            self[offset as usize + slot.key_suffix_size() as usize..offset as usize + new_rec_size]
                 .copy_from_slice(value);
             // Update the slot
-            Slot::new(is_ghost, offset, slot.key_size(), value.len() as u32)
+            Slot::new(
+                is_ghost,
+                offset,
+                slot.key_suffix_size(),
+                value.len() as u32,
+                slot.key_prefix(),
+            )
         };
         self.update_slot(slot_id, &new_slot);
         self.set_total_bytes_used(
@@ -1135,7 +1224,7 @@ impl FosterBtreePage for Page {
         // Calculate the inserting size and check if the page has enough space.
         let inserting_size = recs
             .iter()
-            .map(|(_, k, v)| k.as_ref().len() + v.as_ref().len())
+            .map(|(_, k, v)| PrefixSeparatedKey::new(k.as_ref()).suffix_size() + v.as_ref().len())
             .sum::<usize>()
             + recs.len() * SLOT_SIZE;
         if inserting_size > self.contiguous_free_space() as usize {
@@ -1156,9 +1245,16 @@ impl FosterBtreePage for Page {
             .iter()
             .map(|(is_ghost, k, v)| (is_ghost, k.as_ref(), v.as_ref()))
         {
-            let rec_size = key.len() + value.len();
+            let ps_key = PrefixSeparatedKey::new(key);
+            let rec_size = ps_key.suffix_size() + value.len();
             offset -= rec_size as u32;
-            let slot = Slot::new(*is_ghost, offset, key.len() as u32, value.len() as u32);
+            let slot = Slot::new(
+                *is_ghost,
+                offset,
+                ps_key.suffix_size() as u32,
+                value.len() as u32,
+                ps_key.prefix,
+            );
             // Copy the key-value pair to the record space
             self[offset as usize..offset as usize + key.len()].copy_from_slice(key);
             self[offset as usize + key.len()..offset as usize + rec_size].copy_from_slice(value);
@@ -1274,7 +1370,7 @@ impl FosterBtreePage for Page {
         let mut rec_mem_usage = 0;
         for i in 0..self.slot_count() {
             if let Some(slot) = self.slot(i) {
-                rec_mem_usage += slot.key_size() + slot.value_size();
+                rec_mem_usage += slot.key_suffix_size() + slot.value_size();
             }
         }
         let ideal_start_offset = self.len() as u32 - rec_mem_usage;
