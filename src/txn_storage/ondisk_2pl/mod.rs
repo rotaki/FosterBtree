@@ -762,7 +762,7 @@ impl NoWaitTxn {
                         let mut page = storage
                             .traverse_to_leaf_for_write_with_hint(key, Some(pa.to_pf_key(*c_id)));
                         let slot_id = page.upper_bound_slot_id(&BTreeKey::new(key)) - 1;
-                        if slot_id == 0 || page.get_raw_key(slot_id) != key {
+                        if slot_id == 0 || &page.get_raw_key(slot_id) != key {
                             panic!("Key: {:?} of container: {} should exist in storage at slot_id: {} if it is in rwset", key, c_id, slot_id);
                         } else {
                             // Update the record
@@ -780,7 +780,7 @@ impl NoWaitTxn {
                         let mut page = storage
                             .traverse_to_leaf_for_write_with_hint(key, Some(pa.to_pf_key(*c_id)));
                         let slot_id = page.upper_bound_slot_id(&BTreeKey::new(key)) - 1;
-                        if slot_id == 0 || page.get_raw_key(slot_id) != key {
+                        if slot_id == 0 || &page.get_raw_key(slot_id) != key {
                             panic!("Key: {:?} of container: {} should exist in storage at slot_id: {} if it is in rwset", key, c_id, slot_id);
                         } else {
                             page.unghostify_at(slot_id);
@@ -790,7 +790,7 @@ impl NoWaitTxn {
                         let mut page = storage
                             .traverse_to_leaf_for_write_with_hint(key, Some(pa.to_pf_key(*c_id)));
                         let slot_id = page.upper_bound_slot_id(&BTreeKey::new(key)) - 1;
-                        if slot_id == 0 || page.get_raw_key(slot_id) != key {
+                        if slot_id == 0 || &page.get_raw_key(slot_id) != key {
                             panic!("Key should exist in storage if it is in rwset")
                         } else {
                             // Physicall delete the record
@@ -820,7 +820,7 @@ impl NoWaitTxn {
                         Some(e.physical_address().to_pf_key(*c_id)),
                     );
                     let slot_id = page.upper_bound_slot_id(&BTreeKey::new(key)) - 1;
-                    if slot_id == 0 || page.get_raw_key(slot_id) != key {
+                    if slot_id == 0 || &page.get_raw_key(slot_id) != key {
                         panic!("Key should exist in storage if it is in rwset")
                     } else {
                         page.remove_at(slot_id);

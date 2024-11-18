@@ -17,7 +17,8 @@ use crate::{
     page::{Page, PageId, AVAILABLE_PAGE_SIZE},
 };
 
-use super::foster_btree_page::{BTreeKey, FosterBtreePage};
+use super::foster_btree_page_prefix_key::BTreeKey;
+use super::foster_btree_page_prefix_key::FosterBtreePage;
 
 #[derive(Clone, Copy, Debug)]
 enum OpType {
@@ -460,7 +461,8 @@ pub(crate) fn deserialize_page_id(bytes: &[u8]) -> Option<PageId> {
 /// Check if the parent page is the parent of the child page.
 /// This includes the foster child relationship.
 fn is_parent_and_child(parent: &Page, child: &Page) -> bool {
-    let low_key = BTreeKey::new(child.get_raw_key(child.low_fence_slot_id()));
+    let child_low_key = child.get_raw_key(child.low_fence_slot_id());
+    let low_key = BTreeKey::new(&child_low_key);
     // Find the slot id of the child page in the parent page.
     let slot_id = parent.upper_bound_slot_id(&low_key) - 1;
     // Check if the value of the slot id is the same as the child page id.
@@ -583,7 +585,7 @@ fn should_adopt(this: &Page, child: &Page) -> bool {
     }
     if this.total_free_space()
         < this.bytes_needed(
-            child.get_foster_key(),
+            &child.get_foster_key(),
             InnerVal::default().to_bytes().as_ref(),
         )
     {
@@ -603,7 +605,8 @@ fn should_antiadopt(this: &Page, child: &Page) -> bool {
         // If child is not small, there is no need to antiadopt because the child will not need to merge or load balance.
         return false;
     }
-    let low_key = BTreeKey::new(child.get_raw_key(child.low_fence_slot_id()));
+    let child_low_fence = child.get_raw_key(child.low_fence_slot_id());
+    let low_key = BTreeKey::new(&child_low_fence);
     let slot_id = this.upper_bound_slot_id(&low_key);
     if this.has_foster_child() {
         if slot_id >= this.foster_child_slot_id() {
@@ -687,7 +690,7 @@ fn split_even(this: &mut FrameWriteGuard, foster_child: &mut FrameWriteGuard) ->
         let is_ghost = this.is_ghost(i);
         let key = this.get_raw_key(i);
         let val = this.get_val(i);
-        let bytes_needed = this.bytes_needed(key, val);
+        let bytes_needed = this.bytes_needed(&key, val);
         if half_bytes >= bytes_needed {
             half_bytes -= bytes_needed;
             moving_slot_ids.push(i);
@@ -711,7 +714,7 @@ fn split_even(this: &mut FrameWriteGuard, foster_child: &mut FrameWriteGuard) ->
     foster_child.init();
     foster_child.set_level(this.level());
     foster_child.set_low_fence(&foster_key);
-    foster_child.set_high_fence(this.get_raw_key(this.high_fence_slot_id()));
+    foster_child.set_high_fence(&this.get_raw_key(this.high_fence_slot_id()));
     foster_child.set_right_most(this.is_right_most());
     let res = foster_child.append_sorted(&moving_kvs);
     assert!(res);
@@ -746,10 +749,10 @@ fn split_min_move(this: &mut FrameWriteGuard, foster_child: &mut FrameWriteGuard
 
     foster_child.init();
     foster_child.set_level(this.level());
-    foster_child.set_low_fence(moving_key);
-    foster_child.set_high_fence(this.get_raw_key(this.high_fence_slot_id()));
+    foster_child.set_low_fence(&moving_key);
+    foster_child.set_high_fence(&this.get_raw_key(this.high_fence_slot_id()));
     foster_child.set_right_most(this.is_right_most());
-    let res = foster_child.insert(moving_key, moving_val, is_ghost);
+    let res = foster_child.insert(&moving_key, moving_val, is_ghost);
     assert!(res);
     foster_child.set_has_foster_child(this.has_foster_child());
 
@@ -967,12 +970,12 @@ fn balance(this: &mut FrameWriteGuard, foster_child: &mut FrameWriteGuard) {
             // Move some slots from this to foster child.
             let mut diff = (this_total - foster_child_total) / 2;
             let mut moving_slot_ids = Vec::new();
-            let mut moving_kvs: Vec<(bool, &[u8], &[u8])> = Vec::new();
+            let mut moving_kvs: Vec<(bool, Vec<u8>, &[u8])> = Vec::new();
             for i in (1..this.foster_child_slot_id()).rev() {
                 let is_ghost = this.is_ghost(i);
                 let key = this.get_raw_key(i);
                 let val = this.get_val(i);
-                let bytes_needed = this.bytes_needed(key, val);
+                let bytes_needed = this.bytes_needed(&key, val);
                 if diff >= bytes_needed {
                     diff -= bytes_needed;
                     moving_slot_ids.push(i);
@@ -992,18 +995,18 @@ fn balance(this: &mut FrameWriteGuard, foster_child: &mut FrameWriteGuard) {
             // this [l, k0, k1, k2, ..., f(kN), h) --> foster_child [l(kN), kN, kN+1, ..., h)
             // After:
             // this [l, k0, k1, ..., f(kN-m), h) --> foster_child [l(kN-m), kN-m, kN-m+1, ..., h)
-            foster_child.set_low_fence(moving_kvs[0].1);
+            foster_child.set_low_fence(&moving_kvs[0].1);
             for (is_ghost, key, val) in moving_kvs {
                 // Pushes the key-value pair to the front. We cannot use append_sorted because
                 // we push the key-value pair to the front.
-                let res = foster_child.insert(key, val, is_ghost);
+                let res = foster_child.insert(&key, val, is_ghost);
                 assert!(res);
             }
             // Remove the moved slots from this
             let high_fence_slot_id = this.high_fence_slot_id();
             this.remove_range(moving_slot_ids[0], high_fence_slot_id);
             let res = this.insert(
-                foster_child.get_raw_key(0),
+                &foster_child.get_raw_key(0),
                 &InnerVal::new_with_frame_id(foster_child.get_id(), foster_child.frame_id())
                     .to_bytes(),
                 false,
@@ -1025,7 +1028,7 @@ fn balance(this: &mut FrameWriteGuard, foster_child: &mut FrameWriteGuard) {
                 let is_ghost = foster_child.is_ghost(i);
                 let key = foster_child.get_raw_key(i);
                 let val = foster_child.get_val(i);
-                let bytes_needed = foster_child.bytes_needed(key, val);
+                let bytes_needed = foster_child.bytes_needed(&key, val);
                 if diff >= bytes_needed {
                     diff -= bytes_needed;
                     moving_slot_ids.push(i);
@@ -1045,7 +1048,7 @@ fn balance(this: &mut FrameWriteGuard, foster_child: &mut FrameWriteGuard) {
             let foster_child_slot_id = this.foster_child_slot_id();
             this.remove_at(foster_child_slot_id);
             for (is_ghost, key, val) in moving_kvs {
-                let res = this.insert(key, val, is_ghost);
+                let res = this.insert(&key, val, is_ghost);
                 assert!(res);
             }
             // Remove the moved slots from foster child
@@ -1095,7 +1098,7 @@ fn adopt(parent: &mut FrameWriteGuard, child1: &mut FrameWriteGuard) {
 
     // Try insert the foster key and value into parent page.
     let res = parent.insert(
-        child1.get_foster_key(),
+        &child1.get_foster_key(),
         child1.get_val(child1.foster_child_slot_id()),
         false,
     );
@@ -1131,7 +1134,8 @@ fn anti_adopt(parent: &mut FrameWriteGuard, child1: &mut FrameWriteGuard) {
     debug_assert!(!child1.has_foster_child());
 
     // Identify child1 slot
-    let low_key = BTreeKey::new(child1.get_raw_key(child1.low_fence_slot_id()));
+    let child_low_key = child1.get_raw_key(child1.low_fence_slot_id());
+    let low_key = BTreeKey::new(&child_low_key);
     let slot_id = parent.upper_bound_slot_id(&low_key);
     if parent.has_foster_child() {
         debug_assert!(slot_id < parent.foster_child_slot_id());
@@ -1142,14 +1146,14 @@ fn anti_adopt(parent: &mut FrameWriteGuard, child1: &mut FrameWriteGuard) {
     let k1 = parent.get_raw_key(slot_id);
     let child2_ptr = parent.get_val(slot_id);
     let k2 = parent.get_raw_key(slot_id + 1);
-    child1.set_high_fence(k2);
+    child1.set_high_fence(&k2);
     child1.set_has_foster_child(true);
     if parent.is_right_most() && slot_id + 1 == parent.high_fence_slot_id() {
         // If k2 is the high fence of the parent, then child1 also becomes the right most child
         // because k2 is the high fence of child1 as well.
         child1.set_right_most(true);
     }
-    let res = child1.insert(k1, child2_ptr, false);
+    let res = child1.insert(&k1, child2_ptr, false);
     if !res {
         panic!("Cannot insert the slot into the child page");
     }
@@ -1227,7 +1231,7 @@ fn ascend_root(root: &mut FrameWriteGuard, child: &mut FrameWriteGuard) {
     // Set level, has_foster_child flag, and fence keys
     child.init();
     child.set_level(root.level());
-    child.set_low_fence(root.get_raw_key(root.low_fence_slot_id()));
+    child.set_low_fence(&root.get_raw_key(root.low_fence_slot_id()));
     child.set_left_most(root.is_left_most());
     child.set_right_most(false); // Right most will be false for the child page
     child.set_high_fence(&foster_key);
@@ -1748,7 +1752,7 @@ impl<T: MemPool> FosterBtree<T> {
         loop {
             let this_page = current_page;
             if this_page.is_leaf() {
-                if this_page.has_foster_child() && this_page.get_foster_key() <= key {
+                if this_page.has_foster_child() && this_page.get_foster_key().as_slice() <= key {
                     // Check whether the foster child should be traversed.
                     let val = InnerVal::from_bytes(this_page.get_foster_val());
                     let foster_page_key =
@@ -2368,7 +2372,7 @@ impl<T: MemPool> FosterBtreeCursor<T> {
         debug_assert!(self.current_leaf_page.is_some());
         let leaf_page = self.current_leaf_page.as_ref().unwrap();
         let key = leaf_page.get_raw_key(self.current_slot_id);
-        if BTreeKey::new(key) >= self.r_key() {
+        if BTreeKey::new(&key) >= self.r_key() {
             // No more keys in the range
             None
         } else if self.current_slot_id == leaf_page.high_fence_slot_id() {
@@ -2501,7 +2505,9 @@ impl<T: MemPool> FosterBtreeCursor<T> {
                     let this_page = current_page;
                     log_info!("Traversal for read, page: {}", this_page.get_id());
                     if this_page.is_leaf() {
-                        if this_page.has_foster_child() && this_page.get_foster_key() <= key {
+                        if this_page.has_foster_child()
+                            && this_page.get_foster_key().as_slice() <= key
+                        {
                             // Check whether the foster child should be traversed.
                             let val = InnerVal::from_bytes(this_page.get_foster_val());
                             let foster_page_key = PageFrameKey::new_with_frame_id(
@@ -3030,8 +3036,8 @@ mod tests {
         let high_fence = to_bytes(20);
         p.set_low_fence(&low_fence);
         p.set_high_fence(&high_fence);
-        assert_eq!(p.get_low_fence().as_ref(), low_fence);
-        assert_eq!(p.get_high_fence().as_ref(), high_fence);
+        assert_eq!(p.get_low_fence().to_vec(), low_fence);
+        assert_eq!(p.get_high_fence().to_vec(), high_fence);
     }
 
     fn test_page_merge_detail<T: MemPool>(
@@ -3113,8 +3119,8 @@ mod tests {
             let val = p0.get_val((i + 1 + left.len()) as u32);
             assert_eq!(val, to_bytes(right[i]));
         }
-        assert_eq!(p0.get_low_fence().as_ref(), k0);
-        assert_eq!(p0.get_high_fence().as_ref(), k2);
+        assert_eq!(p0.get_low_fence().to_vec(), k0);
+        assert_eq!(p0.get_high_fence().to_vec(), k2);
         assert!(!p0.has_foster_child());
 
         assert!(p1.empty());
@@ -3212,15 +3218,15 @@ mod tests {
             let key = p1.get_raw_key((i + 1) as u32);
             assert_eq!(key, to_bytes(*all[i + p0.active_slot_count() as usize - 1]));
         }
-        assert_eq!(p0.get_low_fence().as_ref(), k0);
-        assert_eq!(p0.get_high_fence().as_ref(), k2);
+        assert_eq!(p0.get_low_fence().to_vec(), k0);
+        assert_eq!(p0.get_high_fence().to_vec(), k2);
         assert!(p0.has_foster_child());
         assert_eq!(
             deserialize_page_id(p0.get_foster_val()).unwrap(),
             p1.get_id()
         );
         assert_eq!(p0.get_foster_key(), p1.get_raw_key(0));
-        assert_eq!(p1.get_high_fence().as_ref(), k2);
+        assert_eq!(p1.get_high_fence().to_vec(), k2);
 
         let new_diff = p0.total_bytes_used().abs_diff(p1.total_bytes_used());
         assert!(new_diff <= prev_diff);
@@ -3455,8 +3461,8 @@ mod tests {
         );
 
         assert_eq!(child0.active_slot_count() as usize, left.len() + 1);
-        assert_eq!(child0.get_low_fence().as_ref(), k0);
-        assert_eq!(child0.get_high_fence().as_ref(), k2);
+        assert_eq!(child0.get_low_fence().to_vec(), k0);
+        assert_eq!(child0.get_high_fence().to_vec(), k2);
         assert!(child0.has_foster_child());
         assert_eq!(child0.get_foster_key(), child1.get_raw_key(0));
         assert_eq!(
@@ -3471,8 +3477,8 @@ mod tests {
         }
 
         assert_eq!(child1.active_slot_count() as usize, right.len());
-        assert_eq!(child1.get_low_fence().as_ref(), k1);
-        assert_eq!(child1.get_high_fence().as_ref(), k2);
+        assert_eq!(child1.get_low_fence().to_vec(), k1);
+        assert_eq!(child1.get_high_fence().to_vec(), k2);
         for i in 0..right.len() {
             let key = child1.get_raw_key((i + 1) as u32);
             assert_eq!(key, to_bytes(right[i]));
@@ -3550,7 +3556,7 @@ mod tests {
         assert!(!root.has_foster_child());
         assert!(root.get_raw_key(1).is_empty());
         assert_eq!(deserialize_page_id(root.get_val(1)), Some(child.get_id()));
-        assert_eq!(root.get_raw_key(2), &foster_key);
+        assert_eq!(&root.get_raw_key(2), &foster_key);
         assert_eq!(
             deserialize_page_id(root.get_val(2)),
             Some(foster_child.get_id())
