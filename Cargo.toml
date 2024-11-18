@@ -5,7 +5,7 @@ edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [features]
-default = ["16k_page"]
+default = []
 log_trace = []
 log_debug = []
 log_info = []
@@ -14,6 +14,7 @@ log_error = []
 stat = []
 
 # Page sizes. If page sizes are larger than 256k, pages will be heap allocated to avoid stack overflow.
+# Default is 16KB (defined in page.rs)
 4k_page = []
 8k_page = []
 16k_page = []
@@ -30,6 +31,10 @@ ycsb_fbt = []
 ycsb_hash_fbt = []
 ycsb_hash_chain = []
 ycsb_hash_bloom_chain = []
+
+# Hints
+no_tree_hint = []
+no_bp_hint = []
 
 # Old iterator for foster btree
 old_iter = []

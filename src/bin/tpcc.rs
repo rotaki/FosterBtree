@@ -15,10 +15,28 @@ use fbtree::{
 static ALLOC: rpmalloc::RpMalloc = rpmalloc::RpMalloc;
 
 pub fn main() {
+    println!("Page size: {}", PAGE_SIZE);
+    #[cfg(feature = "no_tree_hint")]
+    {
+        println!("Tree hint disabled");
+    }
+    #[cfg(not(feature = "no_tree_hint"))]
+    {
+        println!("Tree hint enabled");
+    }
+    #[cfg(feature = "no_bp_hint")]
+    {
+        println!("BP hint disabled");
+    }
+    #[cfg(not(feature = "no_bp_hint"))]
+    {
+        println!("BP hint enabled");
+    }
     let config = TPCCConfig::parse();
+    println!("config: {:?}", config);
 
-    // Set frames for 4GB memory
-    let num_frames = 4 * 1024 * 1024 * 1024 / PAGE_SIZE;
+    // Set frames for 1GB memory per warehouses
+    let num_frames = config.num_warehouses as usize * 1024 * 1024 * 1024 / PAGE_SIZE;
     let bp = get_test_bp(num_frames);
     let txn_storage = NoWaitTxnStorage::new(&bp);
     let tbl_info = load_all_tables(&txn_storage, &config);

@@ -529,6 +529,8 @@ where
     T: TxnStorageTrait,
     P: TxnProfile,
 {
+    let mut retry_count: u32 = 0;
+    let base: u64 = 2;
     loop {
         let status = run::<T, P>(thread_id, config, txn_storage, tbl_info, stat, out);
         match status {
@@ -542,6 +544,10 @@ where
             }
             TPCCStatus::SystemAbort => {
                 log_info!("SystemAbort");
+                // Sleep for base^retry_count nanoseconds
+                let sleep_time = base.pow(retry_count) as u64;
+                std::thread::sleep(std::time::Duration::from_nanos(sleep_time));
+                retry_count += 1;
                 // Retry the transaction
             }
             TPCCStatus::Bug(reason) => {

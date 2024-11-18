@@ -625,7 +625,8 @@ impl MemPool for BufferPool {
     fn get_page_for_write(&self, key: PageFrameKey) -> Result<FrameWriteGuard, MemPoolStatus> {
         log_debug!("Page write: {}", key);
 
-        let location = {
+        #[cfg(not(feature = "no_bp_hint"))]
+        {
             // Fast path access to the frame using frame_id
             let frame_id = key.frame_id();
             let frames = unsafe { &*self.frames.get() };
@@ -646,13 +647,11 @@ impl MemPool for BufferPool {
                         } else {
                             // The page key does not match.
                             // Go to the slow path.
-                            Some(g)
                         }
                     } else {
                         // The frame is empty.
                         // Go to the slow path.
                         log_debug!("Page fast path write empty frame: {}", key);
-                        Some(g)
                     }
                 } else {
                     // The frame is latched.
@@ -660,16 +659,13 @@ impl MemPool for BufferPool {
                     log_debug!("Page fast path write latch failed: {}", key);
                     #[cfg(feature = "stat")]
                     inc_local_bp_latch_failures();
-                    None
                 }
             } else {
                 // The frame id is out of bounds.
                 // Go to the slow path.
                 log_debug!("Page fast path write frame id out of bounds: {}", key);
-                None
             }
-        };
-        drop(location);
+        }
 
         {
             self.shared();
@@ -719,11 +715,6 @@ impl MemPool for BufferPool {
                 guard.ok_or(MemPoolStatus::FrameWriteLatchGrantFailed)
             }
             None => {
-                // Policy1: Choose a victim frame based on the eviction policy [Default]
-                // Policy2: Prioritize placing the new page in the previously allocated frame
-                // let mut victim = if let Some(location) = location {
-                //    location
-                //} else if let Some(location) = self.choose_victim() {
                 let mut victim = if let Some(location) = self.choose_victim() {
                     location
                 } else {
@@ -750,7 +741,8 @@ impl MemPool for BufferPool {
     fn get_page_for_read(&self, key: PageFrameKey) -> Result<FrameReadGuard, MemPoolStatus> {
         log_debug!("Page read: {}", key);
 
-        let location = {
+        #[cfg(not(feature = "no_bp_hint"))]
+        {
             // Fast path access to the frame using frame_id
             let frame_id = key.frame_id();
             let frames = unsafe { &*self.frames.get() };
@@ -770,14 +762,11 @@ impl MemPool for BufferPool {
                             // The page key does not match.
                             // Go to the slow path.
                             log_debug!("Page fast path read key mismatch: {}", key);
-                            // Return option
-                            g.try_upgrade(false).ok()
                         }
                     } else {
                         // The frame is empty.
                         // Go to the slow path.
                         log_debug!("Page fast path read empty frame: {}", key);
-                        g.try_upgrade(false).ok()
                     }
                 } else {
                     // The frame is latched.
@@ -785,16 +774,13 @@ impl MemPool for BufferPool {
                     log_debug!("Page fast path read latch failed: {}", key);
                     #[cfg(feature = "stat")]
                     inc_local_bp_latch_failures();
-                    None
                 }
             } else {
                 // The frame id is out of bounds.
                 // Go to the slow path.
                 log_debug!("Page fast path read frame id out of bounds: {}", key);
-                None
             }
         };
-        drop(location);
 
         {
             self.shared();
@@ -843,9 +829,6 @@ impl MemPool for BufferPool {
                 guard.ok_or(MemPoolStatus::FrameReadLatchGrantFailed)
             }
             None => {
-                // let mut victim = if let Some(location) = location {
-                //     location
-                // } else if let Some(location) = self.choose_victim() {
                 let mut victim = if let Some(location) = self.choose_victim() {
                     location
                 } else {

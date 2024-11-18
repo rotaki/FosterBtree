@@ -647,25 +647,33 @@ fn should_root_descend(this: &Page, child: &Page) -> bool {
 }
 
 /// Opportunistically try to fix the child page frame id
+#[inline]
 fn fix_frame_id<'a>(
     this: FrameReadGuard<'a>,
     slot_id: u32,
     new_frame_key: &PageFrameKey,
 ) -> FrameReadGuard<'a> {
-    match this.try_upgrade(false) {
-        Ok(mut write_guard) => {
-            let val = InnerVal::new_with_frame_id(
-                new_frame_key.p_key().page_id,
-                new_frame_key.frame_id(),
-            );
-            let res = write_guard.update_at(slot_id, None, &val.to_bytes());
-            assert!(res);
-            log_debug!("Fixed frame id of the child page");
-            write_guard.downgrade()
-        }
-        Err(read_guard) => {
-            log_debug!("Failed to fix frame id of the child page");
-            read_guard
+    #[cfg(feature = "no_bp_hint")]
+    {
+        this
+    }
+    #[cfg(not(feature = "no_bp_hint"))]
+    {
+        match this.try_upgrade(false) {
+            Ok(mut write_guard) => {
+                let val = InnerVal::new_with_frame_id(
+                    new_frame_key.p_key().page_id,
+                    new_frame_key.frame_id(),
+                );
+                let res = write_guard.update_at(slot_id, None, &val.to_bytes());
+                assert!(res);
+                log_debug!("Fixed frame id of the child page");
+                write_guard.downgrade()
+            }
+            Err(read_guard) => {
+                log_debug!("Failed to fix frame id of the child page");
+                read_guard
+            }
         }
     }
 }
@@ -1708,22 +1716,29 @@ impl<T: MemPool> FosterBtree<T> {
         key: &[u8],
         hint: Option<PageFrameKey>,
     ) -> FrameReadGuard {
-        // Use the hint to speculatively find the page that contains the key.
-        if let Some(hint) = &hint {
-            let page = self.read_page(*hint);
-            // Check if
-            // 1. The page is valid
-            // 2. The page is a leaf
-            // 3. The key is inside the range of the page
-            // 4. The slot is not the foster child slot
-            if page.is_valid() && page.is_leaf() && page.inside_range(&BTreeKey::Normal(key)) {
-                let slot = page.upper_bound_slot_id(&BTreeKey::Normal(key)) - 1;
-                if !page.has_foster_child() && slot != page.foster_child_slot_id() {
-                    return page;
+        #[cfg(feature = "no_tree_hint")]
+        {
+            self.traverse_to_leaf_for_read(key)
+        }
+        #[cfg(not(feature = "no_tree_hint"))]
+        {
+            // Use the hint to speculatively find the page that contains the key.
+            if let Some(hint) = &hint {
+                let page = self.read_page(*hint);
+                // Check if
+                // 1. The page is valid
+                // 2. The page is a leaf
+                // 3. The key is inside the range of the page
+                // 4. The slot is not the foster child slot
+                if page.is_valid() && page.is_leaf() && page.inside_range(&BTreeKey::Normal(key)) {
+                    let slot = page.upper_bound_slot_id(&BTreeKey::Normal(key)) - 1;
+                    if !page.has_foster_child() && slot != page.foster_child_slot_id() {
+                        return page;
+                    }
                 }
             }
+            self.traverse_to_leaf_for_read_from(key, hint.unwrap_or(self.root_key))
         }
-        self.traverse_to_leaf_for_read_from(key, hint.unwrap_or(self.root_key))
     }
 
     fn traverse_to_leaf_for_read(&self, key: &[u8]) -> FrameReadGuard {
@@ -1842,38 +1857,50 @@ impl<T: MemPool> FosterBtree<T> {
         key: &[u8],
         hint: Option<PageFrameKey>,
     ) -> FrameWriteGuard {
-        // Use the hint to speculatively find the page that contains the key.
-        if let Some(hint) = &hint {
-            let base = 2;
-            let mut attempts = 0;
-            loop {
-                let page = self.read_page(*hint);
-                // Check if
-                // 1. The page is valid
-                // 2. The page is a leaf
-                // 3. The key is inside the range of the page
-                // 4. The slot is not the foster child slot
-                if page.is_valid() && page.is_leaf() && page.inside_range(&BTreeKey::Normal(key)) {
-                    let slot_id = page.upper_bound_slot_id(&BTreeKey::Normal(key)) - 1;
-                    if !page.has_foster_child() && slot_id != page.foster_child_slot_id() {
-                        match page.try_upgrade(true) {
-                            Ok(upgraded) => {
-                                return upgraded;
-                            }
-                            Err(page) => {
-                                drop(page);
-                                std::thread::sleep(Duration::from_nanos(u64::pow(base, attempts)));
-                                attempts += 1;
-                                continue;
+        #[cfg(feature = "no_tree_hint")]
+        {
+            self.traverse_to_leaf_for_write(key)
+        }
+        #[cfg(not(feature = "no_tree_hint"))]
+        {
+            // Use the hint to speculatively find the page that contains the key.
+            if let Some(hint) = &hint {
+                let base = 2;
+                let mut attempts = 0;
+                loop {
+                    let page = self.read_page(*hint);
+                    // Check if
+                    // 1. The page is valid
+                    // 2. The page is a leaf
+                    // 3. The key is inside the range of the page
+                    // 4. The slot is not the foster child slot
+                    if page.is_valid()
+                        && page.is_leaf()
+                        && page.inside_range(&BTreeKey::Normal(key))
+                    {
+                        let slot_id = page.upper_bound_slot_id(&BTreeKey::Normal(key)) - 1;
+                        if !page.has_foster_child() && slot_id != page.foster_child_slot_id() {
+                            match page.try_upgrade(true) {
+                                Ok(upgraded) => {
+                                    return upgraded;
+                                }
+                                Err(page) => {
+                                    drop(page);
+                                    std::thread::sleep(Duration::from_nanos(u64::pow(
+                                        base, attempts,
+                                    )));
+                                    attempts += 1;
+                                    continue;
+                                }
                             }
                         }
                     }
+                    // Traverse from the root or the hint
+                    break;
                 }
-                // Traverse from the root or the hint
-                break;
             }
+            self.traverse_to_leaf_for_write_from(key, hint.unwrap_or(self.root_key))
         }
-        self.traverse_to_leaf_for_write_from(key, hint.unwrap_or(self.root_key))
     }
 
     fn try_traverse_to_leaf_for_write_from(
@@ -2388,27 +2415,33 @@ impl<T: MemPool> FosterBtreeCursor<T> {
         (leaf_page.get_id(), leaf_page.frame_id())
     }
 
+    #[inline]
     pub fn opportunistic_update(&mut self, val: &[u8], make_dirty: bool) {
-        let frame_read_guard = self.current_leaf_page.take().unwrap();
+        #[cfg(feature = "no_tree_hint")]
+        {}
+        #[cfg(not(feature = "no_tree_hint"))]
+        {
+            let frame_read_guard = self.current_leaf_page.take().unwrap();
 
-        let read_guard = match frame_read_guard.try_upgrade(make_dirty) {
-            Ok(mut write_guard) => {
-                let current_val = write_guard.get_val(self.current_slot_id);
-                if val == current_val {
-                    // No need to update
-                } else if val.len() != write_guard.get_val(self.current_slot_id).len() {
-                    panic!("Value length mismatch");
-                } else {
-                    // Step 4: Perform the update
-                    write_guard.update_at(self.current_slot_id, None, val);
+            let read_guard = match frame_read_guard.try_upgrade(make_dirty) {
+                Ok(mut write_guard) => {
+                    let current_val = write_guard.get_val(self.current_slot_id);
+                    if val == current_val {
+                        // No need to update
+                    } else if val.len() != write_guard.get_val(self.current_slot_id).len() {
+                        panic!("Value length mismatch");
+                    } else {
+                        // Step 4: Perform the update
+                        write_guard.update_at(self.current_slot_id, None, val);
+                    }
+                    write_guard.downgrade()
                 }
-                write_guard.downgrade()
-            }
-            Err(read_guard) => read_guard,
-        };
+                Err(read_guard) => read_guard,
+            };
 
-        // Place the FrameReadGuard back into the Option
-        self.current_leaf_page = Some(read_guard);
+            // Place the FrameReadGuard back into the Option
+            self.current_leaf_page = Some(read_guard);
+        }
     }
 
     // Sets the cursor to the next key-value pair.
@@ -2570,6 +2603,9 @@ impl<T: MemPool> FosterBtreeAppendOnlyCursor<T> {
         FosterBtreeAppendOnlyCursor { cursor }
     }
 
+    // Returns ((key, number), value)
+    // The number represents the number of times the same key has been inserted
+    // to the tree.
     pub fn get_kv(&self) -> Option<((Vec<u8>, u32), Vec<u8>)> {
         let (key, val) = self.cursor.get_kv()?;
         let (key, suffix) = key.split_at(key.len() - 4);

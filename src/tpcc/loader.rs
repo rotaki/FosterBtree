@@ -263,8 +263,8 @@ pub fn create_and_insert_neworder_record(
 ///   - District: N * 10
 ///     - Customer: N * 10 * 3000
 ///       - History
-///     - Order:
-///       - OrderLine
+///     - Order: N * 10 * 3000
+///       - OrderLine: N * 10 * 3000 * 10 (average 10 orderlines per order)
 ///       - NewOrders
 
 pub fn load_item_table(txn_storage: &impl TxnStorageTrait, table_info: &TableInfo) {
