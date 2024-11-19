@@ -706,7 +706,7 @@ impl NoWaitTxn {
         &self,
         si: &mut SecondaryIterator<M>,
     ) -> Result<Option<(Vec<u8>, Vec<u8>)>, TxnStorageStatus> {
-        if let Some(((s_key, id), s_value)) = si.cursor.get_kv() {
+        if let Some(((s_key, _id), s_value)) = si.cursor.get_kv() {
             // We got the primary key from the secondary index. Now, we need to get the value from the primary index.
             let ps = &si.ss.ps;
             let (p_key, p_hint) = s_value.split_at(s_value.len() - 8);
@@ -714,9 +714,12 @@ impl NoWaitTxn {
             let (p_value, p_addr) = self.read(ps, p_key, Some(p_hint.clone()))?;
             // println!("Hint: {}, Actual: {}", p_hint, p_addr);
             // Rewrite the physical address in the secondary index. The last 8 bytes should be updated with the new physical address.
-            let new_p_addr = p_addr.to_bytes();
-            let new_s_val = [p_key, &new_p_addr].concat();
-            si.cursor.opportunistic_update(&new_s_val, false);
+            if p_hint != p_addr {
+                // Update the physical address in the secondary index
+                let new_p_addr = p_addr.to_bytes();
+                let new_s_val = [p_key, &new_p_addr].concat();
+                si.cursor.opportunistic_update(&new_s_val, false);
+            }
             si.cursor.go_to_next_kv();
 
             Ok(Some((s_key, p_value)))
@@ -930,6 +933,21 @@ impl<M: MemPool> TxnStorageTrait for NoWaitTxnStorage<M> {
         c_id: ContainerId,
     ) -> Result<(), TxnStorageStatus> {
         unimplemented!();
+    }
+
+    fn get_container_stats(
+        &self,
+        db_id: DatabaseId,
+        c_id: ContainerId,
+    ) -> Result<String, TxnStorageStatus> {
+        debug_assert_eq!(db_id, 0);
+        match self.pss.get(c_id) {
+            Some(ps) => Ok(ps.btree.page_stats(false)),
+            None => match self.sss.get(c_id) {
+                Some(ss) => Ok(ss.btree.fbt.page_stats(false)),
+                None => Err(TxnStorageStatus::ContainerNotFound),
+            },
+        }
     }
 
     fn list_containers(&self, db_id: DatabaseId) -> Result<HashSet<ContainerId>, TxnStorageStatus> {

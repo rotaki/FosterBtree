@@ -4,15 +4,15 @@ use clap::Parser;
 use fbtree::{
     bp::{get_test_bp, MemPool},
     prelude::{
-        load_all_tables, run_benchmark_for_thread, DeliveryTxn, NewOrderTxn, OrderStatusTxn,
-        PaymentTxn, StockLevelTxn, TPCCConfig, TPCCOutput, TPCCStat, TableInfo, TxnProfile,
-        TxnProfileID, TxnStorageTrait, PAGE_SIZE,
+        load_all_tables, run_benchmark_for_thread, show_table_stats, DeliveryTxn, NewOrderTxn,
+        OrderStatusTxn, PaymentTxn, StockLevelTxn, TPCCConfig, TPCCOutput, TPCCStat, TableInfo,
+        TxnProfile, TxnProfileID, TxnStorageTrait, PAGE_SIZE,
     },
     txn_storage::NoWaitTxnStorage,
 };
 
-#[global_allocator]
-static ALLOC: rpmalloc::RpMalloc = rpmalloc::RpMalloc;
+// #[global_allocator]
+// static ALLOC: rpmalloc::RpMalloc = rpmalloc::RpMalloc;
 
 pub fn main() {
     println!("Page size: {}", PAGE_SIZE);
@@ -40,6 +40,7 @@ pub fn main() {
     let bp = get_test_bp(num_frames);
     let txn_storage = NoWaitTxnStorage::new(&bp);
     let tbl_info = load_all_tables(&txn_storage, &config);
+    // show_table_stats(&txn_storage, &tbl_info);
 
     println!("BP stats after load: \n{}", bp.stats());
 

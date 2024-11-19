@@ -523,3 +523,14 @@ pub fn load_all_tables(txn_storage: &impl TxnStorageTrait, config: &TPCCConfig) 
 
     table_info
 }
+
+pub fn show_table_stats(txn_storage: &impl TxnStorageTrait, table_info: &TableInfo) {
+    // Show the stats by the order of c_id
+    let mut table_info_ordered = table_info.map.iter().collect::<Vec<_>>();
+    table_info_ordered.sort_by_key(|(_, c_id)| **c_id);
+    for (table, c_id) in table_info_ordered {
+        let stats = txn_storage.get_container_stats(DB_ID, *c_id).unwrap();
+        println!("========= {:?} (c_id: {}) =========", table, c_id);
+        println!("{}", stats);
+    }
+}

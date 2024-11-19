@@ -184,6 +184,14 @@ pub trait TxnStorageTrait: Send + Sync {
         c_id: ContainerId,
     ) -> Result<(), TxnStorageStatus>;
 
+    fn get_container_stats(
+        &self,
+        db_id: DatabaseId,
+        c_id: ContainerId,
+    ) -> Result<String, TxnStorageStatus> {
+        Ok("Stats disabled".to_string())
+    }
+
     // List all container names in the db
     fn list_containers(&self, db_id: DatabaseId) -> Result<HashSet<ContainerId>, TxnStorageStatus>;
 
