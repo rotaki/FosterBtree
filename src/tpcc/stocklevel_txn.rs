@@ -2,14 +2,14 @@ use std::collections::HashSet;
 use std::time::SystemTime;
 
 use crate::prelude::{ScanOptions, TxnOptions, TxnStorageTrait};
-use crate::tpcc::loader::Table;
-use crate::tpcc::tx_utils::*;
+use crate::tpcc::loader::TPCCTable;
+use crate::tpcc::txn_utils::*;
 
 #[allow(unused_imports)]
 use crate::log;
 use crate::{log_info, log_trace, write_fields};
 
-use super::loader::TableInfo;
+use super::loader::TPCCTableInfo;
 use super::record_definitions::*;
 
 pub struct StockLevelTxn {
@@ -18,10 +18,10 @@ pub struct StockLevelTxn {
 
 impl StockLevelTxn {
     pub const NAME: &'static str = "StockLevel";
-    pub const ID: TxnProfileID = TxnProfileID::StockLevelTxn;
+    pub const ID: TPCCTxnProfileID = TPCCTxnProfileID::StockLevelTxn;
 }
 
-impl TxnProfile for StockLevelTxn {
+impl TPCCTxnProfile for StockLevelTxn {
     fn new(config: &TPCCConfig, w_id: u16) -> Self {
         let input = StockLevelTxnInput::new(config, w_id);
         input.print();
@@ -32,7 +32,7 @@ impl TxnProfile for StockLevelTxn {
         &self,
         config: &TPCCConfig,
         txn_storage: &T,
-        tbl_info: &TableInfo,
+        tbl_info: &TPCCTableInfo,
         stat: &mut TPCCStat,
         out: &mut TPCCOutput,
     ) -> TPCCStatus {
@@ -49,7 +49,7 @@ impl TxnProfile for StockLevelTxn {
 
         // Fetch District record
         let d_key = DistrictKey::create_key(w_id, d_id);
-        let res = txn_storage.get_value(&txn, tbl_info[Table::District], d_key.into_bytes());
+        let res = txn_storage.get_value(&txn, tbl_info[TPCCTable::District], d_key.into_bytes());
         if not_successful(config, &res) {
             return helper.kill(&txn, &res, AbortID::GetDistrict as u8);
         }
@@ -68,7 +68,7 @@ impl TxnProfile for StockLevelTxn {
             upper: up_key.into_bytes().to_vec(),
         };
 
-        let res = txn_storage.scan_range(&txn, tbl_info[Table::OrderLine], scan_options);
+        let res = txn_storage.scan_range(&txn, tbl_info[TPCCTable::OrderLine], scan_options);
         if not_successful(config, &res) {
             return helper.kill(&txn, &res, AbortID::RangeGetOrderLine as u8);
         }
@@ -93,7 +93,7 @@ impl TxnProfile for StockLevelTxn {
         let mut count = 0;
         for &i_id in &s_i_ids {
             let s_key = StockKey::create_key(w_id, i_id);
-            let res = txn_storage.get_value(&txn, tbl_info[Table::Stock], s_key.into_bytes());
+            let res = txn_storage.get_value(&txn, tbl_info[TPCCTable::Stock], s_key.into_bytes());
             if not_successful(config, &res) {
                 return helper.kill(&txn, &res, AbortID::GetStock as u8);
             }

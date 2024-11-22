@@ -13,7 +13,7 @@ use crate::log_info;
 use crate::prelude::{TxnStorageStatus, TxnStorageTrait};
 use clap::Parser;
 
-use super::loader::TableInfo;
+use super::loader::TPCCTableInfo;
 use super::prelude::{DeliveryTxn, NewOrderTxn, OrderStatusTxn, PaymentTxn, StockLevelTxn};
 use super::record_definitions::urand_int;
 
@@ -48,11 +48,11 @@ pub struct TPCCConfig {
 
     /// Warmup duration in seconds.
     #[arg(short = 'd', long, default_value_t = 3)]
-    pub warmup: u64,
+    pub warmup_time: u64,
 
     /// Test duration in seconds.
     #[arg(short = 'D', long, default_value_t = 10)]
-    pub duration: u64,
+    pub exec_time: u64,
 }
 
 /// Enumeration representing the status of a transaction.
@@ -158,7 +158,7 @@ impl Index<usize> for Permutation {
 /// Enumeration representing transaction profile IDs.
 #[repr(u8)]
 #[derive(Debug, Clone, Copy)]
-pub enum TxnProfileID {
+pub enum TPCCTxnProfileID {
     NewOrderTxn = 0,
     PaymentTxn = 1,
     OrderStatusTxn = 2,
@@ -167,40 +167,40 @@ pub enum TxnProfileID {
     Max = 5,
 }
 
-impl From<u8> for TxnProfileID {
+impl From<u8> for TPCCTxnProfileID {
     fn from(val: u8) -> Self {
         match val {
-            0 => TxnProfileID::NewOrderTxn,
-            1 => TxnProfileID::PaymentTxn,
-            2 => TxnProfileID::OrderStatusTxn,
-            3 => TxnProfileID::DeliveryTxn,
-            4 => TxnProfileID::StockLevelTxn,
+            0 => TPCCTxnProfileID::NewOrderTxn,
+            1 => TPCCTxnProfileID::PaymentTxn,
+            2 => TPCCTxnProfileID::OrderStatusTxn,
+            3 => TPCCTxnProfileID::DeliveryTxn,
+            4 => TPCCTxnProfileID::StockLevelTxn,
             _ => panic!("Invalid TxnProfileID"),
         }
     }
 }
 
-impl std::fmt::Display for TxnProfileID {
+impl std::fmt::Display for TPCCTxnProfileID {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
-            TxnProfileID::NewOrderTxn => write!(f, "NewOrderTxn"),
-            TxnProfileID::PaymentTxn => write!(f, "PaymentTxn"),
-            TxnProfileID::OrderStatusTxn => write!(f, "OrderStatusTxn"),
-            TxnProfileID::DeliveryTxn => write!(f, "DeliveryTxn"),
-            TxnProfileID::StockLevelTxn => write!(f, "StockLevelTxn"),
-            TxnProfileID::Max => write!(f, "Max"),
+            TPCCTxnProfileID::NewOrderTxn => write!(f, "NewOrderTxn"),
+            TPCCTxnProfileID::PaymentTxn => write!(f, "PaymentTxn"),
+            TPCCTxnProfileID::OrderStatusTxn => write!(f, "OrderStatusTxn"),
+            TPCCTxnProfileID::DeliveryTxn => write!(f, "DeliveryTxn"),
+            TPCCTxnProfileID::StockLevelTxn => write!(f, "StockLevelTxn"),
+            TPCCTxnProfileID::Max => write!(f, "Max"),
         }
     }
 }
 
 // Mapping from TxProfileID to transaction profile structs.
-pub trait TxnProfile {
+pub trait TPCCTxnProfile {
     fn new(config: &TPCCConfig, w_id: u16) -> Self;
     fn run<T: TxnStorageTrait>(
         &self,
         config: &TPCCConfig,
         txn_storage: &T,
-        tbl_info: &TableInfo,
+        tbl_info: &TPCCTableInfo,
         stat: &mut TPCCStat,
         out: &mut TPCCOutput,
     ) -> TPCCStatus;
@@ -260,7 +260,7 @@ impl PerTxnType {
 
 #[derive(Debug)]
 pub struct TPCCStat {
-    pub per_type: [PerTxnType; TxnProfileID::Max as usize],
+    pub per_type: [PerTxnType; TPCCTxnProfileID::Max as usize],
 }
 
 impl Default for TPCCStat {
@@ -286,18 +286,18 @@ impl TPCCStat {
     }
 
     /// Gets a mutable reference to `PerTxType` based on `TxProfileID`.
-    pub fn get_mut(&mut self, tx_type: TxnProfileID) -> &mut PerTxnType {
+    pub fn get_mut(&mut self, tx_type: TPCCTxnProfileID) -> &mut PerTxnType {
         &mut self.per_type[tx_type as usize]
     }
 
     /// Gets an immutable reference to `PerTxType` based on `TxProfileID`.
-    pub fn get(&self, tx_type: TxnProfileID) -> &PerTxnType {
+    pub fn get(&self, tx_type: TPCCTxnProfileID) -> &PerTxnType {
         &self.per_type[tx_type as usize]
     }
 
     /// Adds statistics from another `Stat`.
     pub fn add(&mut self, rhs: &TPCCStat) {
-        for i in 0..(TxnProfileID::Max as usize) {
+        for i in 0..(TPCCTxnProfileID::Max as usize) {
             self.per_type[i].add(&rhs.per_type[i], true);
         }
     }
@@ -305,7 +305,7 @@ impl TPCCStat {
     /// Aggregates performance statistics across all transaction types.
     pub fn aggregate_perf(&self) -> PerTxnType {
         let mut out = PerTxnType::new();
-        for i in 0..(TxnProfileID::Max as usize) {
+        for i in 0..(TPCCTxnProfileID::Max as usize) {
             out.add(&self.per_type[i], false);
         }
         out
@@ -315,8 +315,8 @@ impl TPCCStat {
 impl std::fmt::Display for TPCCStat {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         let mut out = String::new();
-        for i in 0..(TxnProfileID::Max as usize) {
-            out.push_str(&format!("TxnType: {:?}\n", TxnProfileID::from(i as u8)));
+        for i in 0..(TPCCTxnProfileID::Max as usize) {
+            out.push_str(&format!("TxnType: {:?}\n", TPCCTxnProfileID::from(i as u8)));
             out.push_str(&format!(
                 "  num_commits: {}\n",
                 self.per_type[i].num_commits
@@ -351,16 +351,16 @@ impl std::fmt::Display for TPCCStat {
     }
 }
 
-impl Index<TxnProfileID> for TPCCStat {
+impl Index<TPCCTxnProfileID> for TPCCStat {
     type Output = PerTxnType;
 
-    fn index(&self, index: TxnProfileID) -> &Self::Output {
+    fn index(&self, index: TPCCTxnProfileID) -> &Self::Output {
         &self.per_type[index as usize]
     }
 }
 
-impl IndexMut<TxnProfileID> for TPCCStat {
-    fn index_mut(&mut self, index: TxnProfileID) -> &mut Self::Output {
+impl IndexMut<TPCCTxnProfileID> for TPCCStat {
+    fn index_mut(&mut self, index: TPCCTxnProfileID) -> &mut Self::Output {
         &mut self.per_type[index as usize]
     }
 }
@@ -494,17 +494,17 @@ impl<'a, T: TxnStorageTrait> TxHelper<'a, T> {
     }
 }
 
-pub fn run<T, P>(
+fn run<T, P>(
     thread_id: usize,
     config: &TPCCConfig,
     txn_storage: &T,
-    tbl_info: &TableInfo,
+    tbl_info: &TPCCTableInfo,
     stat: &mut TPCCStat,
     out: &mut TPCCOutput,
 ) -> TPCCStatus
 where
     T: TxnStorageTrait,
-    P: TxnProfile,
+    P: TPCCTxnProfile,
 {
     // Begin a transaction
     let w_id = if config.fixed_warehouse_per_thread {
@@ -517,17 +517,17 @@ where
     p.run(config, txn_storage, tbl_info, stat, out)
 }
 
-pub fn run_with_retry<T, P>(
+fn run_with_retry<T, P>(
     thread_id: usize,
     config: &TPCCConfig,
     txn_storage: &T,
-    tbl_info: &TableInfo,
+    tbl_info: &TPCCTableInfo,
     stat: &mut TPCCStat,
     out: &mut TPCCOutput,
 ) -> bool
 where
     T: TxnStorageTrait,
-    P: TxnProfile,
+    P: TPCCTxnProfile,
 {
     let mut retry_count: u32 = 0;
     let base: u64 = 2;
@@ -558,11 +558,11 @@ where
     }
 }
 
-pub fn run_benchmark_for_thread<T>(
+pub fn run_tpcc_for_thread<T>(
     thread_id: usize,
     config: &TPCCConfig,
     txn_storage: &T,
-    tbl_info: &TableInfo,
+    tbl_info: &TPCCTableInfo,
     flag: &AtomicBool, // while flag is true, keep running transactions
 ) -> (TPCCStat, TPCCOutput)
 where

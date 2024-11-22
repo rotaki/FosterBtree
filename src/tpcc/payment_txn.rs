@@ -7,12 +7,12 @@ use crate::prelude::ScanOptions;
 use crate::prelude::TxnOptions;
 use crate::prelude::TxnStorageStatus;
 use crate::prelude::TxnStorageTrait;
-use crate::tpcc::loader::Table;
+use crate::tpcc::loader::TPCCTable;
 use crate::write_fields;
 
-use super::loader::TableInfo;
+use super::loader::TPCCTableInfo;
 use super::record_definitions::*;
-use super::tx_utils::*;
+use super::txn_utils::*;
 
 pub struct PaymentTxn {
     input: PaymentTxnInput,
@@ -20,10 +20,10 @@ pub struct PaymentTxn {
 
 impl PaymentTxn {
     pub const NAME: &'static str = "Payment";
-    pub const ID: TxnProfileID = TxnProfileID::PaymentTxn;
+    pub const ID: TPCCTxnProfileID = TPCCTxnProfileID::PaymentTxn;
 }
 
-impl TxnProfile for PaymentTxn {
+impl TPCCTxnProfile for PaymentTxn {
     fn new(config: &TPCCConfig, w_id: u16) -> Self {
         let input: PaymentTxnInput = PaymentTxnInput::new(config, w_id);
         PaymentTxn { input }
@@ -33,7 +33,7 @@ impl TxnProfile for PaymentTxn {
         &self,
         config: &TPCCConfig,
         txn_storage: &T,
-        tbl_info: &TableInfo,
+        tbl_info: &TPCCTableInfo,
         stat: &mut TPCCStat,
         out: &mut TPCCOutput,
     ) -> TPCCStatus {
@@ -58,7 +58,7 @@ impl TxnProfile for PaymentTxn {
         let w_key = WarehouseKey::create_key(w_id);
         let res = txn_storage.update_value_with_func(
             &txn,
-            tbl_info[Table::Warehouse],
+            tbl_info[TPCCTable::Warehouse],
             w_key.into_bytes(),
             |bytes| {
                 let w = Warehouse::from_bytes_mut(bytes);
@@ -74,7 +74,7 @@ impl TxnProfile for PaymentTxn {
         let d_key = DistrictKey::create_key(w_id, d_id);
         let res = txn_storage.update_value_with_func(
             &txn,
-            tbl_info[Table::District],
+            tbl_info[TPCCTable::District],
             d_key.into_bytes(),
             |bytes| {
                 let d = District::from_bytes_mut(bytes);
@@ -95,7 +95,7 @@ impl TxnProfile for PaymentTxn {
             let sec_key_bytes = sec_key.into_bytes();
             let res = txn_storage.scan_range(
                 &txn,
-                tbl_info[Table::CustomerSecondary],
+                tbl_info[TPCCTable::CustomerSecondary],
                 ScanOptions {
                     lower: sec_key_bytes.to_vec(),
                     upper: vec![],
@@ -154,7 +154,7 @@ impl TxnProfile for PaymentTxn {
         };
         let res = txn_storage.update_value_with_func(
             &txn,
-            tbl_info[Table::Customer],
+            tbl_info[TPCCTable::Customer],
             c_key.into_bytes(),
             |bytes| {
                 let c = Customer::from_bytes_mut(bytes);

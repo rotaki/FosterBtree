@@ -5,7 +5,7 @@ mod orderstatus_txn;
 mod payment_txn;
 mod record_definitions;
 mod stocklevel_txn;
-mod tx_utils;
+mod txn_utils;
 
 pub mod prelude {
     pub use super::delivery_txn::*;
@@ -15,5 +15,5 @@ pub mod prelude {
     pub use super::payment_txn::*;
     pub use super::record_definitions::*;
     pub use super::stocklevel_txn::*;
-    pub use super::tx_utils::*;
+    pub use super::txn_utils::*;
 }

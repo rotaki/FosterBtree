@@ -5,6 +5,7 @@ pub mod random;
 pub mod tpcc;
 pub mod txn_storage;
 pub mod write_ahead_log;
+pub mod ycsb;
 
 mod file_manager;
 mod hybrid_latch;
@@ -20,4 +21,5 @@ pub mod prelude {
     pub use crate::page::*;
     pub use crate::tpcc::prelude::*;
     pub use crate::txn_storage::prelude::*;
+    pub use crate::ycsb::prelude::*;
 }

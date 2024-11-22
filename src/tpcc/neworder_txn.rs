@@ -1,4 +1,4 @@
-use super::prelude::TxnProfileID;
+use super::prelude::TPCCTxnProfileID;
 
 use std::time::SystemTime;
 
@@ -7,13 +7,13 @@ use crate::log;
 use crate::log_info;
 use crate::prelude::TxnOptions;
 use crate::prelude::TxnStorageTrait;
-use crate::tpcc::loader::Table;
+use crate::tpcc::loader::TPCCTable;
 use crate::write_fields;
 use memchr::memmem;
 
-use super::loader::TableInfo;
+use super::loader::TPCCTableInfo;
 use super::record_definitions::*;
-use super::tx_utils::*;
+use super::txn_utils::*;
 
 pub struct NewOrderTxn {
     input: NewOrderTxnInput,
@@ -21,10 +21,10 @@ pub struct NewOrderTxn {
 
 impl NewOrderTxn {
     pub const NAME: &'static str = "NewOrder";
-    pub const ID: TxnProfileID = TxnProfileID::NewOrderTxn;
+    pub const ID: TPCCTxnProfileID = TPCCTxnProfileID::NewOrderTxn;
 }
 
-impl TxnProfile for NewOrderTxn {
+impl TPCCTxnProfile for NewOrderTxn {
     fn new(config: &TPCCConfig, w_id: u16) -> Self {
         let input = NewOrderTxnInput::new(config, w_id);
         NewOrderTxn { input }
@@ -34,7 +34,7 @@ impl TxnProfile for NewOrderTxn {
         &self,
         config: &TPCCConfig,
         txn_storage: &T,
-        tbl_info: &TableInfo,
+        tbl_info: &TPCCTableInfo,
         stat: &mut TPCCStat,
         out: &mut TPCCOutput,
     ) -> TPCCStatus {
@@ -54,7 +54,7 @@ impl TxnProfile for NewOrderTxn {
 
         // Fetch warehouse record
         let w_key = WarehouseKey::create_key(w_id);
-        let res = txn_storage.get_value(&txn, tbl_info[Table::Warehouse], w_key.into_bytes());
+        let res = txn_storage.get_value(&txn, tbl_info[TPCCTable::Warehouse], w_key.into_bytes());
         if not_successful(config, &res) {
             return helper.kill(&txn, &res, AbortID::GetWarehouse as u8);
         }
@@ -68,7 +68,7 @@ impl TxnProfile for NewOrderTxn {
         let mut d_tax = 0.0;
         let res = txn_storage.update_value_with_func(
             &txn,
-            tbl_info[Table::District],
+            tbl_info[TPCCTable::District],
             d_key.into_bytes(),
             |bytes| {
                 let d = District::from_bytes_mut(bytes);
@@ -84,7 +84,7 @@ impl TxnProfile for NewOrderTxn {
 
         // Fetch customer record
         let c_key = CustomerKey::create_key(w_id, d_id, c_id);
-        let res = txn_storage.get_value(&txn, tbl_info[Table::Customer], c_key.into_bytes());
+        let res = txn_storage.get_value(&txn, tbl_info[TPCCTable::Customer], c_key.into_bytes());
         if not_successful(config, &res) {
             return helper.kill(&txn, &res, AbortID::GetCustomer as u8);
         }
@@ -107,7 +107,7 @@ impl TxnProfile for NewOrderTxn {
         self.create_neworder(&mut no, w_id, d_id, o_id);
         let res = txn_storage.insert_value(
             &txn,
-            tbl_info[Table::NewOrder],
+            tbl_info[TPCCTable::NewOrder],
             no_key.into_bytes().to_vec(),
             no.as_bytes().to_vec(),
         );
@@ -121,7 +121,7 @@ impl TxnProfile for NewOrderTxn {
         self.create_order(&mut o_rec, w_id, d_id, c_id, o_id, ol_cnt, is_remote);
         let res = txn_storage.insert_value(
             &txn,
-            tbl_info[Table::Order],
+            tbl_info[TPCCTable::Order],
             o_key.into_bytes().to_vec(),
             o_rec.as_bytes().to_vec(),
         );
@@ -143,7 +143,7 @@ impl TxnProfile for NewOrderTxn {
 
             // Fetch Item record
             let i_key = ItemKey::create_key(ol_i_id);
-            let res = txn_storage.get_value(&txn, tbl_info[Table::Item], i_key.into_bytes());
+            let res = txn_storage.get_value(&txn, tbl_info[TPCCTable::Item], i_key.into_bytes());
             if not_successful(config, &res) {
                 return helper.kill(&txn, &res, AbortID::GetItem as u8);
             }
@@ -158,7 +158,7 @@ impl TxnProfile for NewOrderTxn {
             total += ol_amount;
             let res = txn_storage.update_value_with_func(
                 &txn,
-                tbl_info[Table::Stock],
+                tbl_info[TPCCTable::Stock],
                 s_key.into_bytes(),
                 |bytes| {
                     let s = Stock::from_bytes_mut(bytes);
@@ -192,7 +192,7 @@ impl TxnProfile for NewOrderTxn {
             let ol_key = OrderLineKey::create_key(w_id, d_id, o_id, ol_num);
             let res = txn_storage.insert_value(
                 &txn,
-                tbl_info[Table::OrderLine],
+                tbl_info[TPCCTable::OrderLine],
                 ol_key.into_bytes().to_vec(),
                 ol.as_bytes().to_vec(),
             );

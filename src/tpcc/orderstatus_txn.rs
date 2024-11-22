@@ -1,12 +1,12 @@
 use std::time::SystemTime;
 
-use super::loader::TableInfo;
+use super::loader::TPCCTableInfo;
 use super::record_definitions::*;
-use super::tx_utils::*;
+use super::txn_utils::*;
 #[allow(unused_imports)]
 use crate::log;
 use crate::prelude::{ScanOptions, TxnOptions, TxnStorageStatus, TxnStorageTrait};
-use crate::tpcc::loader::Table;
+use crate::tpcc::loader::TPCCTable;
 use crate::{log_info, log_trace, write_fields};
 
 pub struct OrderStatusTxn {
@@ -15,10 +15,10 @@ pub struct OrderStatusTxn {
 
 impl OrderStatusTxn {
     pub const NAME: &'static str = "OrderStatus";
-    pub const ID: TxnProfileID = TxnProfileID::OrderStatusTxn;
+    pub const ID: TPCCTxnProfileID = TPCCTxnProfileID::OrderStatusTxn;
 }
 
-impl TxnProfile for OrderStatusTxn {
+impl TPCCTxnProfile for OrderStatusTxn {
     fn new(config: &TPCCConfig, w_id: u16) -> Self {
         let input = OrderStatusTxnInput::new(config, w_id);
         OrderStatusTxn { input }
@@ -28,7 +28,7 @@ impl TxnProfile for OrderStatusTxn {
         &self,
         config: &TPCCConfig,
         txn_storage: &T,
-        tbl_info: &TableInfo,
+        tbl_info: &TPCCTableInfo,
         stat: &mut TPCCStat,
         out: &mut TPCCOutput,
     ) -> TPCCStatus {
@@ -53,7 +53,7 @@ impl TxnProfile for OrderStatusTxn {
             let sec_key_bytes = sec_key.into_bytes();
             let res = txn_storage.scan_range(
                 &txn,
-                tbl_info[Table::CustomerSecondary],
+                tbl_info[TPCCTable::CustomerSecondary],
                 ScanOptions {
                     lower: sec_key_bytes.to_vec(),
                     upper: vec![],
@@ -109,7 +109,8 @@ impl TxnProfile for OrderStatusTxn {
         } else {
             debug_assert!(c_id != Customer::UNUSED_ID);
             let c_key = CustomerKey::create_key(c_w_id, c_d_id, c_id);
-            let res = txn_storage.get_value(&txn, tbl_info[Table::Customer], c_key.into_bytes());
+            let res =
+                txn_storage.get_value(&txn, tbl_info[TPCCTable::Customer], c_key.into_bytes());
             if not_successful(config, &res) {
                 return helper.kill(&txn, &res, AbortID::GetCustomer as u8);
             }
@@ -124,7 +125,7 @@ impl TxnProfile for OrderStatusTxn {
         let o_sec_high_key = OrderSecondaryKey::create_key(c_w_id, c_d_id, c_id + 1, 0);
         let res = txn_storage.scan_range(
             &txn,
-            tbl_info[Table::OrderSecondary],
+            tbl_info[TPCCTable::OrderSecondary],
             ScanOptions {
                 lower: o_sec_low_key.into_bytes().to_vec(),
                 upper: o_sec_high_key.into_bytes().to_vec(),
@@ -167,7 +168,7 @@ impl TxnProfile for OrderStatusTxn {
 
         let res = txn_storage.scan_range(
             &txn,
-            tbl_info[Table::OrderLine],
+            tbl_info[TPCCTable::OrderLine],
             ScanOptions {
                 lower: low_key.into_bytes().to_vec(),
                 upper: up_key.into_bytes().to_vec(),

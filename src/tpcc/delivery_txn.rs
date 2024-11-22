@@ -1,4 +1,4 @@
-use super::prelude::TxnProfileID;
+use super::prelude::TPCCTxnProfileID;
 
 use std::time::SystemTime;
 
@@ -9,12 +9,12 @@ use crate::log_info;
 use crate::prelude::ScanOptions;
 use crate::prelude::TxnOptions;
 use crate::prelude::TxnStorageTrait;
-use crate::tpcc::loader::Table;
+use crate::tpcc::loader::TPCCTable;
 use crate::write_fields;
 
-use super::loader::TableInfo;
+use super::loader::TPCCTableInfo;
 use super::record_definitions::*;
-use super::tx_utils::*;
+use super::txn_utils::*;
 
 pub struct DeliveryTxn {
     input: DeliveryTxnInput,
@@ -22,10 +22,10 @@ pub struct DeliveryTxn {
 
 impl DeliveryTxn {
     pub const NAME: &'static str = "Delivery";
-    pub const ID: TxnProfileID = TxnProfileID::DeliveryTxn;
+    pub const ID: TPCCTxnProfileID = TPCCTxnProfileID::DeliveryTxn;
 }
 
-impl TxnProfile for DeliveryTxn {
+impl TPCCTxnProfile for DeliveryTxn {
     fn new(config: &TPCCConfig, w_id: u16) -> Self {
         let input = DeliveryTxnInput::new(config, w_id);
         DeliveryTxn { input }
@@ -35,7 +35,7 @@ impl TxnProfile for DeliveryTxn {
         &self,
         config: &TPCCConfig,
         txn_storage: &T,
-        tbl_info: &TableInfo,
+        tbl_info: &TPCCTableInfo,
         stat: &mut TPCCStat,
         out: &mut TPCCOutput,
     ) -> TPCCStatus {
@@ -55,7 +55,7 @@ impl TxnProfile for DeliveryTxn {
 
             let res = txn_storage.scan_range(
                 &txn,
-                tbl_info[Table::NewOrder],
+                tbl_info[TPCCTable::NewOrder],
                 ScanOptions {
                     lower: no_low_key.into_bytes().to_vec(),
                     upper: vec![],
@@ -90,7 +90,7 @@ impl TxnProfile for DeliveryTxn {
             drop(iter);
 
             let res =
-                txn_storage.delete_value(&txn, tbl_info[Table::NewOrder], no_key.into_bytes());
+                txn_storage.delete_value(&txn, tbl_info[TPCCTable::NewOrder], no_key.into_bytes());
             if not_successful(config, &res) {
                 return helper.kill(&txn, &res, AbortID::DeleteNewOrder as u8);
             }
@@ -100,7 +100,7 @@ impl TxnProfile for DeliveryTxn {
             let mut c_id = u32::MAX;
             let res = txn_storage.update_value_with_func(
                 &txn,
-                tbl_info[Table::Order],
+                tbl_info[TPCCTable::Order],
                 o_key.into_bytes(),
                 |bytes| {
                     let o = Order::from_bytes_mut(bytes);
@@ -118,7 +118,7 @@ impl TxnProfile for DeliveryTxn {
             let up_key = OrderLineKey::create_key(w_id, d_id, no_key.o_id() + 1, 1);
             let res = txn_storage.scan_range(
                 &txn,
-                tbl_info[Table::OrderLine],
+                tbl_info[TPCCTable::OrderLine],
                 ScanOptions {
                     lower: low_key.into_bytes().to_vec(),
                     upper: up_key.into_bytes().to_vec(),
@@ -155,7 +155,7 @@ impl TxnProfile for DeliveryTxn {
                 total_ol_amount += ol.ol_amount;
                 let res = txn_storage.update_value(
                     &txn,
-                    tbl_info[Table::OrderLine],
+                    tbl_info[TPCCTable::OrderLine],
                     &key_bytes,
                     value_bytes,
                 );
@@ -168,7 +168,7 @@ impl TxnProfile for DeliveryTxn {
             let c_key = CustomerKey::create_key(w_id, d_id, c_id);
             let res = txn_storage.update_value_with_func(
                 &txn,
-                tbl_info[Table::Customer],
+                tbl_info[TPCCTable::Customer],
                 c_key.into_bytes(),
                 |bytes| {
                     let c = Customer::from_bytes_mut(bytes);

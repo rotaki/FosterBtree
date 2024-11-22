@@ -4,9 +4,9 @@ use clap::Parser;
 use fbtree::{
     bp::{get_test_bp, MemPool},
     prelude::{
-        load_all_tables, run_benchmark_for_thread, show_table_stats, DeliveryTxn, NewOrderTxn,
-        OrderStatusTxn, PaymentTxn, StockLevelTxn, TPCCConfig, TPCCOutput, TPCCStat, TableInfo,
-        TxnProfile, TxnProfileID, TxnStorageTrait, PAGE_SIZE,
+        run_tpcc_for_thread, tpcc_load_all_tables, tpcc_show_table_stats, DeliveryTxn, NewOrderTxn,
+        OrderStatusTxn, PaymentTxn, StockLevelTxn, TPCCConfig, TPCCOutput, TPCCStat, TPCCTableInfo,
+        TPCCTxnProfile, TPCCTxnProfileID, TxnStorageTrait, PAGE_SIZE,
     },
     txn_storage::NoWaitTxnStorage,
 };
@@ -39,7 +39,7 @@ pub fn main() {
     let num_frames = config.num_warehouses as usize * 1024 * 1024 * 1024 / PAGE_SIZE;
     let bp = get_test_bp(num_frames);
     let txn_storage = NoWaitTxnStorage::new(&bp);
-    let tbl_info = load_all_tables(&txn_storage, &config);
+    let tbl_info = tpcc_load_all_tables(&txn_storage, &config);
     // show_table_stats(&txn_storage, &tbl_info);
 
     println!("BP stats after load: \n{}", bp.stats());
@@ -56,7 +56,7 @@ pub fn main() {
             let tbl_info_ref = &tbl_info;
             let flag_ref = &flag;
             s.spawn(move || {
-                run_benchmark_for_thread(
+                run_tpcc_for_thread(
                     thread_id,
                     config_ref,
                     txn_storage_ref,
@@ -66,7 +66,7 @@ pub fn main() {
             });
         }
         // Start timer for config duration
-        std::thread::sleep(std::time::Duration::from_secs(config.warmup));
+        std::thread::sleep(std::time::Duration::from_secs(config.warmup_time));
         flag.store(false, Ordering::Release);
 
         // Automatically join all threads
@@ -85,7 +85,7 @@ pub fn main() {
             let tbl_info_ref = &tbl_info;
             let flag_ref = &flag;
             let handler = s.spawn(move || {
-                run_benchmark_for_thread(
+                run_tpcc_for_thread(
                     thread_id,
                     config_ref,
                     txn_storage_ref,
@@ -96,7 +96,7 @@ pub fn main() {
             handlers.push(handler);
         }
         // Start timer for config duration
-        std::thread::sleep(std::time::Duration::from_secs(config.duration));
+        std::thread::sleep(std::time::Duration::from_secs(config.exec_time));
         flag.store(false, Ordering::Release);
 
         for handler in handlers {
@@ -112,7 +112,7 @@ pub fn main() {
 
     let num_warehouses = config.num_warehouses;
     let num_threads = config.num_threads;
-    let seconds = config.duration;
+    let seconds = config.exec_time;
 
     println!(
         "{} warehouse(s), {} thread(s), {} second(s)",
@@ -128,8 +128,8 @@ pub fn main() {
 
     println!("\nDetails:");
 
-    for p in 0..TxnProfileID::Max as u8 {
-        let p = TxnProfileID::from(p);
+    for p in 0..TPCCTxnProfileID::Max as u8 {
+        let p = TPCCTxnProfileID::from(p);
         let profile = format!("{}", p);
         let tries =
             final_stat[p].num_commits + final_stat[p].num_usr_aborts + final_stat[p].num_sys_aborts;
@@ -155,11 +155,13 @@ pub fn main() {
 
     println!("\nSystem Abort Details:");
 
-    NewOrderTxn::print_abort_details(&final_stat[TxnProfileID::NewOrderTxn].abort_details);
-    PaymentTxn::print_abort_details(&final_stat[TxnProfileID::PaymentTxn].abort_details);
-    OrderStatusTxn::print_abort_details(&final_stat[TxnProfileID::OrderStatusTxn].abort_details);
-    DeliveryTxn::print_abort_details(&final_stat[TxnProfileID::DeliveryTxn].abort_details);
-    StockLevelTxn::print_abort_details(&final_stat[TxnProfileID::StockLevelTxn].abort_details);
+    NewOrderTxn::print_abort_details(&final_stat[TPCCTxnProfileID::NewOrderTxn].abort_details);
+    PaymentTxn::print_abort_details(&final_stat[TPCCTxnProfileID::PaymentTxn].abort_details);
+    OrderStatusTxn::print_abort_details(
+        &final_stat[TPCCTxnProfileID::OrderStatusTxn].abort_details,
+    );
+    DeliveryTxn::print_abort_details(&final_stat[TPCCTxnProfileID::DeliveryTxn].abort_details);
+    StockLevelTxn::print_abort_details(&final_stat[TPCCTxnProfileID::StockLevelTxn].abort_details);
 
     println!("BP stats: \n{}", bp.stats());
 }
@@ -167,7 +169,7 @@ pub fn main() {
 pub fn test_all_transactions<T: TxnStorageTrait>(
     config: &TPCCConfig,
     txn_storage: &T,
-    tbl_info: &TableInfo,
+    tbl_info: &TPCCTableInfo,
     stat: &mut TPCCStat,
     out: &mut TPCCOutput,
     w_id: u16,
