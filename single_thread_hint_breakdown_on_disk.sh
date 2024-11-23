@@ -1,0 +1,9 @@
+./target/release/secondary_index_bench -t 1 -n 100000 -k 100 -r 1000 -b 500    > t1_n100000_k10_r100_b500.txt
+./target/release/secondary_index_bench -t 1 -n 100000 -k 100 -r 1000 -b 1000   > t1_n100000_k10_r100_b1000.txt
+./target/release/secondary_index_bench -t 1 -n 100000 -k 100 -r 1000 -b 2000   > t1_n100000_k10_r100_b2000.txt
+./target/release/secondary_index_bench -t 1 -n 100000 -k 100 -r 1000 -b 3000   > t1_n100000_k10_r100_b3000.txt
+./target/release/secondary_index_bench -t 1 -n 100000 -k 100 -r 1000 -b 4000   > t1_n100000_k10_r100_b4000.txt
+./target/release/secondary_index_bench -t 1 -n 100000 -k 100 -r 1000 -b 5000   > t1_n100000_k10_r100_b5000.txt
+./target/release/secondary_index_bench -t 1 -n 100000 -k 100 -r 1000 -b 10000  > t1_n100000_k10_r100_b10000.txt
+./target/release/secondary_index_bench -t 1 -n 100000 -k 100 -r 1000 -b 15000  > t1_n100000_k10_r100_b15000.txt
+./target/release/secondary_index_bench -t 1 -n 100000 -k 100 -r 1000 -b 20000  > t1_n100000_k10_r100_b20000.txt
