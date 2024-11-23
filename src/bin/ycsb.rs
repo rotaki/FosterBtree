@@ -38,9 +38,8 @@ pub fn main() {
     // Set frames for 1GB memory per warehouses
     // Compute the expected size of the tree.
     // There are two indices, primary and secondary, and each entry is a key-value pair.
-    // To account for the internal nodes and extra space for each entry, we multiply by 4.
-    let size =
-        2 * 4 * config.num_keys as usize * (config.key_size as usize + config.value_size as usize);
+    // To account for the internal nodes and extra space for each entry, we multiply by 4 and add 20 bytes per entry.
+    let size = 2 * 4 * config.num_keys * (20 + config.key_size + config.value_size);
     let num_frames = size / PAGE_SIZE;
     println!("num_frames: {}", num_frames);
     println!(
@@ -53,6 +52,8 @@ pub fn main() {
     ycsb_show_table_stats(&txn_storage, &tbl_info);
 
     println!("BP stats after load: \n{}", bp.stats());
+
+    // ycsb_preliminary_secondary_scan(&txn_storage, &tbl_info);
 
     /*
     // Test all transactions

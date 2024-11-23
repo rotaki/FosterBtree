@@ -7,7 +7,7 @@ use super::txn_utils::*;
 use crate::log;
 use crate::prelude::{ScanOptions, TxnOptions, TxnStorageStatus, TxnStorageTrait};
 use crate::tpcc::loader::TPCCTable;
-use crate::{log_info, log_trace, write_fields};
+use crate::{log_info, write_fields};
 
 pub struct OrderStatusTxn {
     input: OrderStatusTxnInput,

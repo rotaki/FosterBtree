@@ -669,7 +669,7 @@ impl NoWaitTxn {
         let rwset_all = unsafe { &mut *self.rwset.get() };
         let rwset = rwset_all.entry(c_id).or_insert_with(ReadWriteSet::new);
         if let Some((key, value)) = pi.cursor.get_kv() {
-            let (page_id, frame_id) = pi.cursor.get_physical_address();
+            let (page_id, frame_id, _) = pi.cursor.get_physical_address();
             pi.cursor.go_to_next_kv();
             if let Some(e) = rwset.get_mut(&key) {
                 e.update_physical_address(PhysicalAddress::new(page_id, frame_id));
@@ -716,6 +716,7 @@ impl NoWaitTxn {
             // Rewrite the physical address in the secondary index. The last 8 bytes should be updated with the new physical address.
             if p_hint != p_addr {
                 // Update the physical address in the secondary index
+                // println!("Sec Update From: {}, To: {}", p_hint, p_addr);
                 let new_p_addr = p_addr.to_bytes();
                 let new_s_val = [p_key, &new_p_addr].concat();
                 si.cursor.opportunistic_update(&new_s_val, false);

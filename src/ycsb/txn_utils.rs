@@ -9,7 +9,6 @@ use rand::{prelude::Distribution, Rng};
 use crate::{
     prelude::{urand_int, TxnStorageStatus, TxnStorageTrait},
     random::gen_random_byte_vec,
-    txn_storage,
 };
 
 // do not warn about unused imports
@@ -406,7 +405,7 @@ where
             YCSBStatus::SystemAbort => {
                 log_info!("SystemAbort");
                 // Sleep for base^retry_count nanoseconds
-                let sleep_time = base.pow(retry_count) as u64;
+                let sleep_time = base.pow(retry_count);
                 std::thread::sleep(std::time::Duration::from_nanos(sleep_time));
                 retry_count += 1;
                 // Retry the transaction

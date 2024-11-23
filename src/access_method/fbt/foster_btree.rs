@@ -3,10 +3,7 @@ use crate::log;
 
 use std::{
     collections::BTreeMap,
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc,
-    },
+    sync::{atomic::Ordering, Arc},
     time::Duration,
 };
 
@@ -1724,11 +1721,13 @@ impl<T: MemPool> FosterBtree<T> {
                 // 4. The slot is not the foster child slot
                 if page.is_valid() && page.is_leaf() && page.inside_range(&BTreeKey::Normal(key)) {
                     let slot = page.upper_bound_slot_id(&BTreeKey::Normal(key)) - 1;
-                    if !page.has_foster_child() && slot != page.foster_child_slot_id() {
+                    if !page.has_foster_child() || slot != page.foster_child_slot_id() {
+                        // println!("Hint worked: {}", hint);
                         return page;
                     }
                 }
             }
+            // println!("Hint did not work: {:?}", hint);
             self.traverse_to_leaf_for_read_from(key, hint.unwrap_or(self.root_key))
         }
     }
@@ -1871,7 +1870,7 @@ impl<T: MemPool> FosterBtree<T> {
                         && page.inside_range(&BTreeKey::Normal(key))
                     {
                         let slot_id = page.upper_bound_slot_id(&BTreeKey::Normal(key)) - 1;
-                        if !page.has_foster_child() && slot_id != page.foster_child_slot_id() {
+                        if !page.has_foster_child() || slot_id != page.foster_child_slot_id() {
                             match page.try_upgrade(true) {
                                 Ok(upgraded) => {
                                     return upgraded;
@@ -2175,55 +2174,6 @@ impl<T: MemPool> Iterator for FosterBtreeRangeScanner<T> {
     }
 }
 
-pub struct FosterBtreeRangeScannerWithPageId<T: MemPool> {
-    cursor: FosterBtreeCursor<T>,
-    filter: Option<FilterFunc>,
-}
-
-impl<T: MemPool> FosterBtreeRangeScannerWithPageId<T> {
-    pub fn new(btree: &Arc<FosterBtree<T>>, l_key: &[u8], r_key: &[u8]) -> Self {
-        FosterBtreeRangeScannerWithPageId {
-            cursor: FosterBtreeCursor::new(btree, l_key, r_key),
-            filter: None,
-        }
-    }
-
-    pub fn new_with_filter(
-        btree: &Arc<FosterBtree<T>>,
-        l_key: &[u8],
-        r_key: &[u8],
-        filter: FilterFunc,
-    ) -> Self {
-        FosterBtreeRangeScannerWithPageId {
-            cursor: FosterBtreeCursor::new(btree, l_key, r_key),
-            filter: Some(filter),
-        }
-    }
-}
-
-impl<T: MemPool> Iterator for FosterBtreeRangeScannerWithPageId<T> {
-    type Item = (Vec<u8>, Vec<u8>, (PageId, u32));
-
-    fn next(&mut self) -> Option<Self::Item> {
-        loop {
-            let (key, value) = match self.cursor.get_kv() {
-                Some(kv) => kv,
-                None => return None,
-            };
-            let (page_id, frame_id) = self.cursor.get_physical_address();
-            self.cursor.go_to_next_kv();
-
-            if let Some(filter) = &self.filter {
-                if filter(&key, &value) {
-                    return Some((key, value, (page_id, frame_id)));
-                }
-            } else {
-                return Some((key, value, (page_id, frame_id)));
-            }
-        }
-    }
-}
-
 pub struct FosterBtreeCursor<T: MemPool> {
     btree: Arc<FosterBtree<T>>,
 
@@ -2395,9 +2345,13 @@ impl<T: MemPool> FosterBtreeCursor<T> {
         }
     }
 
-    pub fn get_physical_address(&self) -> (PageId, u32) {
+    pub fn get_physical_address(&self) -> (PageId, u32, u32) {
         let leaf_page = self.current_leaf_page.as_ref().unwrap();
-        (leaf_page.get_id(), leaf_page.frame_id())
+        (
+            leaf_page.get_id(),
+            leaf_page.frame_id(),
+            self.current_slot_id,
+        )
     }
 
     #[inline]
@@ -2606,7 +2560,7 @@ impl<T: MemPool> FosterBtreeAppendOnlyCursor<T> {
         self.cursor.go_to_next_kv();
     }
 
-    pub fn get_physical_address(&self) -> (PageId, u32) {
+    pub fn get_physical_address(&self) -> (PageId, u32, u32) {
         self.cursor.get_physical_address()
     }
 }
@@ -2756,30 +2710,6 @@ impl<T: MemPool> Iterator for FosterBtreeAppendOnlyRangeScanner<T> {
             key.truncate(key.len() - 4);
             (key, value)
         })
-    }
-}
-
-pub struct FosterBtreeAppendOnlyRangeScannerWithPageId<T: MemPool> {
-    scanner: FosterBtreeRangeScannerWithPageId<T>,
-}
-
-impl<T: MemPool> FosterBtreeAppendOnlyRangeScannerWithPageId<T> {
-    pub fn new(fbt: &Arc<FosterBtreeAppendOnly<T>>, l_key: &[u8], r_key: &[u8]) -> Self {
-        let scanner = FosterBtreeRangeScannerWithPageId::new(&fbt.fbt, l_key, r_key);
-        Self { scanner }
-    }
-}
-
-impl<T: MemPool> Iterator for FosterBtreeAppendOnlyRangeScannerWithPageId<T> {
-    type Item = (Vec<u8>, Vec<u8>, (PageId, u32));
-
-    fn next(&mut self) -> Option<(Vec<u8>, Vec<u8>, (PageId, u32))> {
-        self.scanner
-            .next()
-            .map(|(mut key, value, (page_id, frame_id))| {
-                key.truncate(key.len() - 4);
-                (key, value, (page_id, frame_id))
-            })
     }
 }
 

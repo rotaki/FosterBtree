@@ -2,8 +2,8 @@ use std::time::SystemTime;
 
 #[allow(unused_imports)]
 use crate::log;
+use crate::log_error;
 use crate::prelude::get_key_bytes;
-use crate::{log_error, log_info};
 
 use crate::{
     prelude::{ScanOptions, TxnOptions, TxnStorageTrait, DB_ID},

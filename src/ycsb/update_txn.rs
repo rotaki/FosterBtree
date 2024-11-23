@@ -2,8 +2,7 @@ use std::time::SystemTime;
 
 use crate::{
     log_error,
-    prelude::{ScanOptions, TxnOptions, TxnStorageTrait, DB_ID},
-    write_fields,
+    prelude::{TxnOptions, TxnStorageTrait, DB_ID},
 };
 
 use super::{

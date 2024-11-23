@@ -7,7 +7,7 @@ use crate::tpcc::txn_utils::*;
 
 #[allow(unused_imports)]
 use crate::log;
-use crate::{log_info, log_trace, write_fields};
+use crate::{log_info, write_fields};
 
 use super::loader::TPCCTableInfo;
 use super::record_definitions::*;

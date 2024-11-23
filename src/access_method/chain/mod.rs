@@ -222,7 +222,6 @@ mod tests {
 
     use crate::{
         bp::{get_in_mem_pool, get_test_bp, BufferPool},
-        log_info,
         prelude::UniqueKeyIndex,
         random::RandomKVs,
     };

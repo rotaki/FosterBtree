@@ -1,19 +1,13 @@
-use clap::Parser;
 use core::panic;
 use rand::prelude::Distribution;
 use rand::Rng;
-use std::{
-    collections::HashMap,
-    ops::Index,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    },
-};
+use std::{collections::HashMap, ops::Index};
 
 use crate::{
     bp::ContainerId,
-    prelude::{ContainerDS, ContainerOptions, DBOptions, TxnStorageTrait, DB_ID},
+    prelude::{
+        ContainerDS, ContainerOptions, DBOptions, ScanOptions, TxnOptions, TxnStorageTrait, DB_ID,
+    },
     random::gen_random_byte_vec,
 };
 
@@ -109,16 +103,9 @@ pub enum YCSBTable {
     Secondary,
 }
 
+#[derive(Default)]
 pub struct YCSBTableInfo {
     map: HashMap<YCSBTable, ContainerId>,
-}
-
-impl Default for YCSBTableInfo {
-    fn default() -> Self {
-        Self {
-            map: HashMap::new(),
-        }
-    }
 }
 
 impl YCSBTableInfo {
@@ -211,4 +198,28 @@ pub fn ycsb_show_table_stats(txn_storage: &impl TxnStorageTrait, table_info: &YC
         println!("========= {:?} (c_id: {}) =========", table, c_id);
         println!("{}", stats);
     }
+}
+
+pub fn ycsb_preliminary_secondary_scan(
+    txn_storage: &impl TxnStorageTrait,
+    table_info: &YCSBTableInfo,
+) {
+    let txn = txn_storage.begin_txn(DB_ID, TxnOptions::default()).unwrap();
+    let iter = txn_storage
+        .scan_range(
+            &txn,
+            table_info[YCSBTable::Secondary],
+            ScanOptions {
+                lower: vec![],
+                upper: vec![],
+            },
+        )
+        .unwrap();
+    let mut count = 0;
+    while let Ok(Some((key, value))) = txn_storage.iter_next(&txn, &iter) {
+        count += 1;
+    }
+    drop(iter);
+    txn_storage.commit_txn(&txn, false).unwrap();
+    println!("Secondary scan count: {}", count);
 }

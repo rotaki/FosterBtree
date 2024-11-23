@@ -10,8 +10,8 @@ pub mod sync_write {
     use crate::bp::ContainerId;
     #[allow(unused_imports)]
     use crate::log;
+    use crate::log_trace;
     use crate::page::{Page, PageId, PAGE_SIZE};
-    use crate::{log_info, log_trace};
     use std::fs::{File, OpenOptions};
     use std::io::{Read, Seek, SeekFrom, Write};
     use std::path::PathBuf;

@@ -1085,7 +1085,7 @@ mod tests {
     use crate::log_info;
 
     use super::*;
-    use std::thread::{self, sleep};
+    use std::thread::{self};
     use tempfile::TempDir;
 
     #[test]

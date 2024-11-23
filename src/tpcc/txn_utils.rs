@@ -1,8 +1,7 @@
 use core::panic;
 use rand::Rng;
 use std::cmp;
-use std::hash::DefaultHasher;
-use std::hash::{Hash, Hasher};
+use std::hash::Hasher;
 use std::ops::{Index, IndexMut};
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -545,7 +544,7 @@ where
             TPCCStatus::SystemAbort => {
                 log_info!("SystemAbort");
                 // Sleep for base^retry_count nanoseconds
-                let sleep_time = base.pow(retry_count) as u64;
+                let sleep_time = base.pow(retry_count);
                 std::thread::sleep(std::time::Duration::from_nanos(sleep_time));
                 retry_count += 1;
                 // Retry the transaction

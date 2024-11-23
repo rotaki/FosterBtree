@@ -5,7 +5,13 @@ edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [features]
-default = []
+default = [
+    "sec_bench_no_hint",
+    "sec_bench_page_hint",
+    "sec_bench_page_frame_hint",
+    "sec_bench_page_slot_hint",
+    "sec_bench_page_frame_slot_hint",
+]
 log_trace = []
 log_debug = []
 log_info = []
@@ -26,11 +32,12 @@ stat = []
 1m_page = ["heap_allocated_page"]
 heap_allocated_page = []
 
-# YCSB workloads
-ycsb_fbt = []
-ycsb_hash_fbt = []
-ycsb_hash_chain = []
-ycsb_hash_bloom_chain = []
+# Secondary index benchmarks
+sec_bench_no_hint = []
+sec_bench_page_hint = []
+sec_bench_page_frame_hint = []
+sec_bench_page_slot_hint = []
+sec_bench_page_frame_slot_hint = []
 
 # Hints
 no_tree_hint = []
@@ -55,13 +62,11 @@ concurrent-queue = "2.5"
 io-uring = {version = "0.7", optional = true}
 libc = {version = "0.2", optional = true}
 zipf = "7.0.1"
-fastbloom = "0.7"
 memchr = "2.7.4"
 dashmap = "6.1"
-rpmalloc = "0.2.0"
+criterion = { version = "0.5", features = ["html_reports"]}
 
 [dev-dependencies]
-criterion = { version = "0.5", features = ["html_reports"]}
 serde_cbor = "0.11"
 rstest = "0.23"
 
@@ -75,7 +80,7 @@ wasm-bindgen = "0.2"
 lto = true
 panic = "abort"
 codegen-units = 1
-debug = true # For perf
+# debug = true # For perf
 
 [[bench]]
 name = "foster_btree_insert"
