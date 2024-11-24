@@ -19,13 +19,14 @@ use criterion::black_box;
 use fbtree::{
     access_method::fbt::{BTreeKey, FosterBtreeCursor},
     bp::{ContainerId, ContainerKey, MemPool, PageFrameKey},
+    prelude::FosterBtreePage,
     prelude::{FosterBtree, PageId},
+    utils::Permutation,
 };
 
 use clap::Parser;
 use fbtree::{
-    access_method::prelude::*,
-    access_method::UniqueKeyIndex,
+    access_method::{AccessMethodError, UniqueKeyIndex},
     bp::{get_test_bp, BufferPool},
     random::gen_random_byte_vec,
 };
@@ -68,27 +69,27 @@ impl<T: MemPool> SecondaryIndex<T> for SecondaryNoHint<T> {
     fn get(&self, key: &[u8]) -> Result<Vec<u8>, AccessMethodError> {
         // let val = self.secondary.get(key)?;
         // self.primary.get(&val)
-        let leaf_page = self
+        let sec_leaf_page = self
             .secondary
             .traverse_to_leaf_for_read_with_hint(key, None);
-        let slot_id = leaf_page.upper_bound_slot_id(&BTreeKey::Normal(key)) - 1;
-        if slot_id == 0 {
+        let sec_slot_id = sec_leaf_page.upper_bound_slot_id(&BTreeKey::Normal(key)) - 1;
+        if sec_slot_id == 0 {
             // Lower fence. Non-existent key
             Err(AccessMethodError::KeyNotFound)
-        } else if leaf_page.get_raw_key(slot_id) == key {
+        } else if sec_leaf_page.get_raw_key(sec_slot_id) == key {
             // Logical ID is the key in the primary FBT
             // Physical address is the page_id of the page that contains the value in the primary FBT
-            let p_key = leaf_page.get_val(slot_id);
+            let p_key = sec_leaf_page.get_val(sec_slot_id);
 
-            let page = self
+            let pri_page = self
                 .primary
                 .traverse_to_leaf_for_read_with_hint(p_key, None);
-            let slot_id = page.upper_bound_slot_id(&BTreeKey::Normal(p_key)) - 1;
-            if slot_id == 0 {
+            let pri_slot_id = pri_page.upper_bound_slot_id(&BTreeKey::Normal(p_key)) - 1;
+            if pri_slot_id == 0 {
                 // Lower fence. Non-existent key
                 Err(AccessMethodError::KeyNotFound)
-            } else if page.get_raw_key(slot_id) == p_key {
-                Ok(page.get_val(slot_id).to_vec())
+            } else if pri_page.get_raw_key(pri_slot_id) == p_key {
+                Ok(pri_page.get_val(pri_slot_id).to_vec())
             } else {
                 // Non-existent key
                 Err(AccessMethodError::KeyNotFound)
@@ -137,50 +138,50 @@ impl<T: MemPool> SecondaryLeafPageHint<T> {
 
 impl<T: MemPool> SecondaryIndex<T> for SecondaryLeafPageHint<T> {
     fn get(&self, key: &[u8]) -> Result<Vec<u8>, AccessMethodError> {
-        let leaf_page = self
+        let sec_leaf_page = self
             .secondary
             .traverse_to_leaf_for_read_with_hint(key, None);
-        let slot_id = leaf_page.upper_bound_slot_id(&BTreeKey::Normal(key)) - 1;
-        if slot_id == 0 {
+        let sec_slot_id = sec_leaf_page.upper_bound_slot_id(&BTreeKey::Normal(key)) - 1;
+        if sec_slot_id == 0 {
             // Lower fence. Non-existent key
             Err(AccessMethodError::KeyNotFound)
-        } else if leaf_page.get_raw_key(slot_id) == key {
+        } else if sec_leaf_page.get_raw_key(sec_slot_id) == key {
             // Logical ID is the key in the primary FBT
             // Physical address is the page_id of the page that contains the value in the primary FBT
-            let val = leaf_page.get_val(slot_id);
+            let val = sec_leaf_page.get_val(sec_slot_id);
 
             // Split the value into logical_id and physical_address
-            let (p_key, phys_addr) = val.split_at(val.len() - 4);
-            let page_id = PageId::from_be_bytes(phys_addr.try_into().unwrap());
-            let page_frame_key = PageFrameKey::new(self.primary.c_key, page_id);
+            let (p_key, expected_phys_addr) = val.split_at(val.len() - 4);
+            let expected_page_id = PageId::from_be_bytes(expected_phys_addr.try_into().unwrap());
+            let expected_page_frame_key = PageFrameKey::new(self.primary.c_key, expected_page_id);
 
             // Traverse the primary FBT with the hint
-            let page = self
+            let pri_page = self
                 .primary
-                .traverse_to_leaf_for_read_with_hint(p_key, Some(page_frame_key));
-            let slot_id = page.upper_bound_slot_id(&BTreeKey::Normal(p_key)) - 1;
-            let result = if slot_id == 0 {
+                .traverse_to_leaf_for_read_with_hint(p_key, Some(expected_page_frame_key));
+            let pri_slot_id = pri_page.upper_bound_slot_id(&BTreeKey::Normal(p_key)) - 1;
+            let result = if pri_slot_id == 0 {
                 // Lower fence. Non-existent key
                 return Err(AccessMethodError::KeyNotFound);
-            } else if page.get_raw_key(slot_id) == p_key {
-                page.get_val(slot_id).to_vec()
+            } else if pri_page.get_raw_key(pri_slot_id) == p_key {
+                pri_page.get_val(pri_slot_id).to_vec()
             } else {
                 // Non-existent key
                 return Err(AccessMethodError::KeyNotFound);
             };
-            let new_page_id = page.get_id();
 
-            if new_page_id == page_id {
+            let actual_page_id = pri_page.get_id();
+            if actual_page_id == expected_page_id {
                 // No relocation
                 Ok(result)
             } else {
                 let mut val = val.to_vec();
-                match leaf_page.try_upgrade(false) {
-                    Ok(mut write_leaf_page) => {
+                match sec_leaf_page.try_upgrade(false) {
+                    Ok(mut sec_write_page) => {
                         // Modify the last 4 bytes of the value to the new page_id
                         let val_len = val.len();
-                        val[val_len - 4..].copy_from_slice(&new_page_id.to_be_bytes());
-                        let res = write_leaf_page.update_at(slot_id, None, &val);
+                        val[val_len - 4..].copy_from_slice(&actual_page_id.to_be_bytes());
+                        let res = sec_write_page.update_at(sec_slot_id, None, &val);
                         assert!(res);
                         Ok(result)
                     }
@@ -235,54 +236,58 @@ impl<T: MemPool> SecondaryLeafPageFrameHint<T> {
 
 impl<T: MemPool> SecondaryIndex<T> for SecondaryLeafPageFrameHint<T> {
     fn get(&self, key: &[u8]) -> Result<Vec<u8>, AccessMethodError> {
-        let leaf_page = self
+        let sec_leaf_page = self
             .secondary
             .traverse_to_leaf_for_read_with_hint(key, None);
-        let slot_id = leaf_page.upper_bound_slot_id(&BTreeKey::Normal(key)) - 1;
-        if slot_id == 0 {
+        let sec_slot_id = sec_leaf_page.upper_bound_slot_id(&BTreeKey::Normal(key)) - 1;
+        if sec_slot_id == 0 {
             // Lower fence. Non-existent key
             Err(AccessMethodError::KeyNotFound)
-        } else if leaf_page.get_raw_key(slot_id) == key {
+        } else if sec_leaf_page.get_raw_key(sec_slot_id) == key {
             // Logical ID is the key in the primary FBT
             // Physical address is the page_id of the page that contains the value in the primary FBT
-            let val = leaf_page.get_val(slot_id);
+            let val = sec_leaf_page.get_val(sec_slot_id);
 
             // Split the value into logical_id and physical_address
-            let (p_key, phys_addr) = val.split_at(val.len() - 8);
-            let (page_id, frame_id) = phys_addr.split_at(4);
-            let page_id = PageId::from_be_bytes(page_id.try_into().unwrap());
-            let frame_id = u32::from_be_bytes(frame_id.try_into().unwrap());
-            let page_frame_key =
-                PageFrameKey::new_with_frame_id(self.primary.c_key, page_id, frame_id);
+            let (p_key, expected_phys_addr) = val.split_at(val.len() - 8);
+            let (expected_page_id, expected_frame_id) = expected_phys_addr.split_at(4);
+            let expected_page_id = PageId::from_be_bytes(expected_page_id.try_into().unwrap());
+            let expected_frame_id = u32::from_be_bytes(expected_frame_id.try_into().unwrap());
+            let expected_page_frame_key = PageFrameKey::new_with_frame_id(
+                self.primary.c_key,
+                expected_page_id,
+                expected_frame_id,
+            );
 
             // Traverse the primary FBT with the hint
-            let page = self
+            let pri_page = self
                 .primary
-                .traverse_to_leaf_for_read_with_hint(p_key, Some(page_frame_key));
-            let slot_id = page.upper_bound_slot_id(&BTreeKey::Normal(p_key)) - 1;
-            let result = if slot_id == 0 {
+                .traverse_to_leaf_for_read_with_hint(p_key, Some(expected_page_frame_key));
+            let pri_slot_id = pri_page.upper_bound_slot_id(&BTreeKey::Normal(p_key)) - 1;
+            let result = if pri_slot_id == 0 {
                 // Lower fence. Non-existent key
                 return Err(AccessMethodError::KeyNotFound);
-            } else if page.get_raw_key(slot_id) == p_key {
-                page.get_val(slot_id).to_vec()
+            } else if pri_page.get_raw_key(pri_slot_id) == p_key {
+                pri_page.get_val(pri_slot_id).to_vec()
             } else {
                 // Non-existent key
                 return Err(AccessMethodError::KeyNotFound);
             };
-            let (new_page_id, new_frame_id) = (page.get_id(), page.frame_id());
 
-            if new_page_id == page_id && new_frame_id == frame_id {
+            let (actual_page_id, actual_frame_id) = (pri_page.get_id(), pri_page.frame_id());
+            if actual_page_id == expected_page_id && actual_frame_id == expected_frame_id {
                 // No relocation
                 Ok(result)
             } else {
                 let mut val = val.to_vec();
-                match leaf_page.try_upgrade(false) {
-                    Ok(mut write_leaf_page) => {
+                match sec_leaf_page.try_upgrade(false) {
+                    Ok(mut sec_write_page) => {
                         // Modify the last 4 bytes of the value to the new page_id
                         let val_len = val.len();
-                        val[val_len - 8..val_len - 4].copy_from_slice(&new_page_id.to_be_bytes());
-                        val[val_len - 4..].copy_from_slice(&new_frame_id.to_be_bytes());
-                        let res = write_leaf_page.update_at(slot_id, None, &val);
+                        val[val_len - 8..val_len - 4]
+                            .copy_from_slice(&actual_page_id.to_be_bytes());
+                        val[val_len - 4..].copy_from_slice(&actual_frame_id.to_be_bytes());
+                        let res = sec_write_page.update_at(sec_slot_id, None, &val);
                         assert!(res);
                         Ok(result)
                     }
@@ -337,66 +342,66 @@ impl<T: MemPool> SecondaryPageSlotHint<T> {
 
 impl<T: MemPool> SecondaryIndex<T> for SecondaryPageSlotHint<T> {
     fn get(&self, key: &[u8]) -> Result<Vec<u8>, AccessMethodError> {
-        let leaf_page = self
+        let sec_leaf_page = self
             .secondary
             .traverse_to_leaf_for_read_with_hint(key, None);
-        let slot_id = leaf_page.upper_bound_slot_id(&BTreeKey::Normal(key)) - 1;
-        if slot_id == 0 {
+        let sec_slot_id = sec_leaf_page.upper_bound_slot_id(&BTreeKey::Normal(key)) - 1;
+        if sec_slot_id == 0 {
             // Lower fence. Non-existent key
             Err(AccessMethodError::KeyNotFound)
-        } else if leaf_page.get_raw_key(slot_id) == key {
+        } else if sec_leaf_page.get_raw_key(sec_slot_id) == key {
             // Logical ID is the key in the primary FBT
             // Physical address is the page_id of the page that contains the value in the primary FBT
-            let val = leaf_page.get_val(slot_id);
+            let val = sec_leaf_page.get_val(sec_slot_id);
 
             // Split the value into logical_id and physical_address
-            let (p_key, phys_addr) = val.split_at(val.len() - 8);
-            let (page_id, slot_id) = phys_addr.split_at(4);
-            let page_id = PageId::from_be_bytes(page_id.try_into().unwrap());
-            let slot_id = u32::from_be_bytes(slot_id.try_into().unwrap());
-
-            let page_key = PageFrameKey::new(self.primary.c_key, page_id);
+            let (p_key, expected_phys_addr) = val.split_at(val.len() - 8);
+            let (expected_page_id, expected_slot_id) = expected_phys_addr.split_at(4);
+            let expected_page_id = PageId::from_be_bytes(expected_page_id.try_into().unwrap());
+            let expected_slot_id = u32::from_be_bytes(expected_slot_id.try_into().unwrap());
+            let expected_page_key = PageFrameKey::new(self.primary.c_key, expected_page_id);
 
             // Traverse the primary FBT with the hint
-            let page = self
+            let pri_page = self
                 .primary
-                .traverse_to_leaf_for_read_with_hint(p_key, Some(page_key));
+                .traverse_to_leaf_for_read_with_hint(p_key, Some(expected_page_key));
 
             // Check if expected slot_id is the same as the slot id
-            if page.low_fence_slot_id() < slot_id
-                && slot_id < page.high_fence_slot_id()
-                && page.get_raw_key(slot_id) == p_key
+            let (result, actual_slot_id) = if pri_page.low_fence_slot_id() < expected_slot_id
+                && expected_slot_id < pri_page.high_fence_slot_id()
+                && pri_page.get_raw_key(expected_slot_id) == p_key
             {
-                return Ok(page.get_val(slot_id).to_vec());
-            }
-
-            panic!("Slot hint failed");
-            // Expected slot id is not the same as the slot id
-            let slot_id = page.upper_bound_slot_id(&BTreeKey::Normal(p_key)) - 1;
-            let result = if slot_id == 0 {
-                // Lower fence. Non-existent key
-                return Err(AccessMethodError::KeyNotFound);
-            } else if page.get_raw_key(slot_id) == p_key {
-                page.get_val(slot_id).to_vec()
+                (
+                    pri_page.get_val(expected_slot_id).to_vec(),
+                    expected_slot_id,
+                )
             } else {
-                // Non-existent key
-                return Err(AccessMethodError::KeyNotFound);
+                let pri_slot_id = pri_page.upper_bound_slot_id(&BTreeKey::Normal(p_key)) - 1;
+                if pri_slot_id == 0 {
+                    // Lower fence. Non-existent key
+                    return Err(AccessMethodError::KeyNotFound);
+                } else if pri_page.get_raw_key(pri_slot_id) == p_key {
+                    (pri_page.get_val(pri_slot_id).to_vec(), pri_slot_id)
+                } else {
+                    // Non-existent key
+                    return Err(AccessMethodError::KeyNotFound);
+                }
             };
-            let (new_page_id, new_frame_id) = (page.get_id(), page.frame_id());
 
-            if new_page_id == page_id {
+            let actual_page_id = pri_page.get_id();
+            if actual_page_id == expected_page_id && actual_slot_id == expected_slot_id {
                 // No relocation
                 Ok(result)
             } else {
                 let mut val = val.to_vec();
-                match leaf_page.try_upgrade(false) {
+                match sec_leaf_page.try_upgrade(false) {
                     Ok(mut write_leaf_page) => {
-                        // Modify the last 12 bytes of the value to the new page_id, frame_id and slot_id
+                        // Modify the last 8 bytes of the value to the new page_id and slot_id
                         let val_len = val.len();
-                        val[val_len - 12..val_len - 8].copy_from_slice(&new_page_id.to_be_bytes());
-                        val[val_len - 8..val_len - 4].copy_from_slice(&new_frame_id.to_be_bytes());
-                        val[val_len - 4..].copy_from_slice(&slot_id.to_be_bytes());
-                        let res = write_leaf_page.update_at(slot_id, None, &val);
+                        val[val_len - 8..val_len - 4]
+                            .copy_from_slice(&actual_page_id.to_be_bytes());
+                        val[val_len - 4..].copy_from_slice(&actual_slot_id.to_be_bytes());
+                        let res = write_leaf_page.update_at(sec_slot_id, None, &val);
                         assert!(res);
                         Ok(result)
                     }
@@ -452,69 +457,78 @@ impl<T: MemPool> SecondaryPageFrameSlotHint<T> {
 
 impl<T: MemPool> SecondaryIndex<T> for SecondaryPageFrameSlotHint<T> {
     fn get(&self, key: &[u8]) -> Result<Vec<u8>, AccessMethodError> {
-        let leaf_page = self
+        let sec_leaf_page = self
             .secondary
             .traverse_to_leaf_for_read_with_hint(key, None);
-        let slot_id = leaf_page.upper_bound_slot_id(&BTreeKey::Normal(key)) - 1;
-        if slot_id == 0 {
+        let sec_slot_id = sec_leaf_page.upper_bound_slot_id(&BTreeKey::Normal(key)) - 1;
+        if sec_slot_id == 0 {
             // Lower fence. Non-existent key
             Err(AccessMethodError::KeyNotFound)
-        } else if leaf_page.get_raw_key(slot_id) == key {
+        } else if sec_leaf_page.get_raw_key(sec_slot_id) == key {
             // Logical ID is the key in the primary FBT
             // Physical address is the page_id of the page that contains the value in the primary FBT
-            let val = leaf_page.get_val(slot_id);
+            let val = sec_leaf_page.get_val(sec_slot_id);
 
             // Split the value into logical_id and physical_address
-            let (p_key, phys_addr) = val.split_at(val.len() - 12);
-            let (page_id, frame_id_and_slot_id) = phys_addr.split_at(4);
-            let page_id = PageId::from_be_bytes(page_id.try_into().unwrap());
-            let (frame_id, slot_id) = frame_id_and_slot_id.split_at(4);
-            let frame_id = u32::from_be_bytes(frame_id.try_into().unwrap());
-            let slot_id = u32::from_be_bytes(slot_id.try_into().unwrap());
+            let (p_key, expected_phys_addr) = val.split_at(val.len() - 12);
+            let (expected_page_id, expected_frame_slot_id) = expected_phys_addr.split_at(4);
+            let expected_page_id = PageId::from_be_bytes(expected_page_id.try_into().unwrap());
+            let (expected_frame_id, expected_slot_id) = expected_frame_slot_id.split_at(4);
+            let expected_frame_id = u32::from_be_bytes(expected_frame_id.try_into().unwrap());
+            let expected_slot_id = u32::from_be_bytes(expected_slot_id.try_into().unwrap());
 
-            let page_frame_key =
-                PageFrameKey::new_with_frame_id(self.primary.c_key, page_id, frame_id);
+            let expected_page_frame_key = PageFrameKey::new_with_frame_id(
+                self.primary.c_key,
+                expected_page_id,
+                expected_frame_id,
+            );
 
             // Traverse the primary FBT with the hint
-            let page = self
+            let pri_page = self
                 .primary
-                .traverse_to_leaf_for_read_with_hint(p_key, Some(page_frame_key));
+                .traverse_to_leaf_for_read_with_hint(p_key, Some(expected_page_frame_key));
 
             // Check if expected slot_id is the same as the slot id
-            if page.low_fence_slot_id() < slot_id
-                && slot_id < page.high_fence_slot_id()
-                && page.get_raw_key(slot_id) == p_key
+            let (result, actual_slot_id) = if pri_page.low_fence_slot_id() < expected_slot_id
+                && expected_slot_id < pri_page.high_fence_slot_id()
+                && pri_page.get_raw_key(expected_slot_id) == p_key
             {
-                return Ok(page.get_val(slot_id).to_vec());
-            }
-
-            panic!("Slot hint failed");
-            // Expected slot id is not the same as the slot id
-            let slot_id = page.upper_bound_slot_id(&BTreeKey::Normal(p_key)) - 1;
-            let result = if slot_id == 0 {
-                // Lower fence. Non-existent key
-                return Err(AccessMethodError::KeyNotFound);
-            } else if page.get_raw_key(slot_id) == p_key {
-                page.get_val(slot_id).to_vec()
+                (
+                    pri_page.get_val(expected_slot_id).to_vec(),
+                    expected_slot_id,
+                )
             } else {
-                // Non-existent key
-                return Err(AccessMethodError::KeyNotFound);
+                let pri_slot_id = pri_page.upper_bound_slot_id(&BTreeKey::Normal(p_key)) - 1;
+                if pri_slot_id == 0 {
+                    // Lower fence. Non-existent key
+                    return Err(AccessMethodError::KeyNotFound);
+                } else if pri_page.get_raw_key(pri_slot_id) == p_key {
+                    (pri_page.get_val(pri_slot_id).to_vec(), pri_slot_id)
+                } else {
+                    // Non-existent key
+                    return Err(AccessMethodError::KeyNotFound);
+                }
             };
-            let (new_page_id, new_frame_id) = (page.get_id(), page.frame_id());
 
-            if new_page_id == page_id && new_frame_id == frame_id {
+            let (actual_page_id, actual_frame_id) = (pri_page.get_id(), pri_page.frame_id());
+            if actual_page_id == expected_page_id
+                && actual_frame_id == expected_frame_id
+                && actual_slot_id == expected_slot_id
+            {
                 // No relocation
                 Ok(result)
             } else {
                 let mut val = val.to_vec();
-                match leaf_page.try_upgrade(false) {
+                match sec_leaf_page.try_upgrade(false) {
                     Ok(mut write_leaf_page) => {
                         // Modify the last 12 bytes of the value to the new page_id, frame_id and slot_id
                         let val_len = val.len();
-                        val[val_len - 12..val_len - 8].copy_from_slice(&new_page_id.to_be_bytes());
-                        val[val_len - 8..val_len - 4].copy_from_slice(&new_frame_id.to_be_bytes());
-                        val[val_len - 4..].copy_from_slice(&slot_id.to_be_bytes());
-                        let res = write_leaf_page.update_at(slot_id, None, &val);
+                        val[val_len - 12..val_len - 8]
+                            .copy_from_slice(&actual_page_id.to_be_bytes());
+                        val[val_len - 8..val_len - 4]
+                            .copy_from_slice(&actual_frame_id.to_be_bytes());
+                        val[val_len - 4..].copy_from_slice(&actual_slot_id.to_be_bytes());
+                        let res = write_leaf_page.update_at(sec_slot_id, None, &val);
                         assert!(res);
                         Ok(result)
                     }
@@ -682,13 +696,19 @@ fn bench_secondary<M: MemPool, T: SecondaryIndex<M>>(
 
     let mut avg = 0;
     for i in 0..warmup + exec {
+        let perm = Permutation::new(0, params.num_keys - 1);
         let start = std::time::Instant::now();
-        for _ in 0..params.num_keys {
-            let key = get_key(params.num_keys, params.skew_factor);
+        for key in perm {
             let key_bytes = get_key_bytes(key, params.key_size);
             let result = secondary.get(&key_bytes).unwrap();
             black_box(result);
         }
+        // for _ in 0..params.num_keys {
+        //     let key = get_key(params.num_keys, params.skew_factor);
+        //     let key_bytes = get_key_bytes(key, params.key_size);
+        //     let result = secondary.get(&key_bytes).unwrap();
+        //     black_box(result);
+        // }
         let elapsed = start.elapsed();
         let name = if i < warmup { "Warmup" } else { "Execution" };
         println!("Iteration({}) {}: time: {:?}", name, i, elapsed);

@@ -3,6 +3,7 @@ use std::{collections::HashMap, ops::Index};
 use crate::{
     bp::ContainerId,
     prelude::{ContainerDS, ContainerOptions, DBOptions, TxnStorageTrait},
+    utils::Permutation,
 };
 
 use super::{
@@ -11,7 +12,7 @@ use super::{
         DistrictKey, Item, ItemKey, NewOrder, NewOrderKey, Order, OrderKey, OrderLine,
         OrderLineKey, OrderSecondaryKey, Stock, StockKey, Timestamp, Warehouse, WarehouseKey,
     },
-    txn_utils::{Permutation, TPCCConfig},
+    txn_utils::TPCCConfig,
 };
 
 pub const DB_ID: u16 = 0;

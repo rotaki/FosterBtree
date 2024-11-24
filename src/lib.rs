@@ -4,6 +4,7 @@ pub mod bp;
 pub mod random;
 pub mod tpcc;
 pub mod txn_storage;
+pub mod utils;
 pub mod write_ahead_log;
 pub mod ycsb;
 
