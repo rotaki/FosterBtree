@@ -147,6 +147,27 @@ pub struct MemoryStats {
     pub write_page_to_disk: usize,  // Number of pages written
 }
 
+impl MemoryStats {
+    pub fn new() -> Self {
+        MemoryStats {
+            num_frames_in_mem: 0,
+            new_page_created: 0,
+            read_page_from_disk: 0,
+            write_page_to_disk: 0,
+        }
+    }
+
+    pub fn diff(&self, previous: &MemoryStats) -> MemoryStats {
+        assert_eq!(self.num_frames_in_mem, previous.num_frames_in_mem);
+        MemoryStats {
+            num_frames_in_mem: self.num_frames_in_mem,
+            new_page_created: self.new_page_created - previous.new_page_created,
+            read_page_from_disk: self.read_page_from_disk - previous.read_page_from_disk,
+            write_page_to_disk: self.write_page_to_disk - previous.write_page_to_disk,
+        }
+    }
+}
+
 impl std::fmt::Display for MemoryStats {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // Set to "N/A" if usize::MAX, otherwise format as a right-aligned string
@@ -163,10 +184,11 @@ impl std::fmt::Display for MemoryStats {
         let read_count = format_count(self.read_page_from_disk);
         let write_count = format_count(self.write_page_to_disk);
 
-        writeln!(f, "Frames in memory:  {}", num_frames_in_mem)?;
-        writeln!(f, "New pages created: {}", new_count)?;
-        writeln!(f, "Pages read:        {}", read_count)?;
-        writeln!(f, "Pages written:     {}", write_count)
+        write!(
+            f,
+            "Frames in mem: {}, New: {}, Read From Disk: {}, Write To Disk: {}",
+            num_frames_in_mem, new_count, read_count, write_count
+        )
     }
 }
 

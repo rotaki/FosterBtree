@@ -32,7 +32,7 @@ use fbtree::{
 };
 use rand::prelude::Distribution;
 use rand::Rng;
-use std::sync::Arc;
+use std::{fs::File, io::Write, process::Command, sync::Arc};
 
 pub trait SecondaryIndex<T: MemPool> {
     fn get(&self, key: &[u8]) -> Result<Vec<u8>, AccessMethodError>;
@@ -687,6 +687,7 @@ pub fn load_table(params: &SecBenchParams, table: &Arc<FosterBtree<BufferPool>>)
 fn bench_secondary<M: MemPool, T: SecondaryIndex<M>>(
     params: &SecBenchParams,
     secondary: &T,
+    bp: &Arc<M>,
 ) -> u128 {
     println!("{}", secondary.stats());
 
@@ -696,6 +697,7 @@ fn bench_secondary<M: MemPool, T: SecondaryIndex<M>>(
 
     let mut avg = 0;
     for i in 0..warmup + exec {
+        let bp_stats_pre = bp.stats();
         let perm = Permutation::new(0, params.num_keys - 1);
         let start = std::time::Instant::now();
         for key in perm {
@@ -710,8 +712,13 @@ fn bench_secondary<M: MemPool, T: SecondaryIndex<M>>(
         //     black_box(result);
         // }
         let elapsed = start.elapsed();
+        let bp_stats_post = bp.stats();
+        let diff = bp_stats_post.diff(&bp_stats_pre);
         let name = if i < warmup { "Warmup" } else { "Execution" };
-        println!("Iteration({}) {}: time: {:?}", name, i, elapsed);
+        println!(
+            "Iteration({}) {}: time: {:?}, bp_stats: {}",
+            name, i, elapsed, diff
+        );
         if i >= warmup {
             avg += elapsed.as_millis();
         }
@@ -721,6 +728,21 @@ fn bench_secondary<M: MemPool, T: SecondaryIndex<M>>(
     avg
 }
 
+fn flush_internal_cache_and_everything() {
+    // Sync the file system to flush pending writes
+    if let Err(e) = sync_filesystem() {
+        eprintln!("Error syncing filesystem: {}", e);
+    }
+}
+
+fn sync_filesystem() -> Result<(), std::io::Error> {
+    let status = Command::new("sync").status()?;
+    if !status.success() {
+        eprintln!("sync command failed");
+    }
+    Ok(())
+}
+
 fn main() {
     let params = SecBenchParams::parse();
     println!("Params: {:?}", params);
@@ -728,6 +750,7 @@ fn main() {
     // if sec_bench_normal is specified, or nothing is specified
     #[cfg(feature = "sec_bench_no_hint")]
     {
+        flush_internal_cache_and_everything();
         println!("=========================================================================================");
         let bp = get_test_bp(params.bp_size);
         let primary = Arc::new(FosterBtree::new(ContainerKey::new(0, 0), Arc::clone(&bp)));
@@ -740,7 +763,7 @@ fn main() {
         let normal = SecondaryNoHint::new(&primary, 10);
         bp.flush_all_and_reset().unwrap();
         println!("BP stats: \n{}", bp.stats());
-        let normal_time = bench_secondary(&params, &normal);
+        let normal_time = bench_secondary(&params, &normal, &bp);
         println!("BP stats: \n{}", bp.stats());
         println!("Summary");
         println!("Without hint: {} ms", normal_time);
@@ -749,6 +772,7 @@ fn main() {
 
     #[cfg(feature = "sec_bench_page_hint")]
     {
+        flush_internal_cache_and_everything();
         println!("=========================================================================================");
         let bp = get_test_bp(params.bp_size);
         let primary = Arc::new(FosterBtree::new(ContainerKey::new(0, 0), Arc::clone(&bp)));
@@ -761,7 +785,7 @@ fn main() {
         let with_page_hint = SecondaryLeafPageHint::new(&primary, 20);
         bp.flush_all_and_reset().unwrap();
         println!("BP stats: \n{}", bp.stats());
-        let with_page_hint_time = bench_secondary(&params, &with_page_hint);
+        let with_page_hint_time = bench_secondary(&params, &with_page_hint, &bp);
         println!("BP stats: \n{}", bp.stats());
         println!("Summary");
         println!("With leaf hint: {} ms", with_page_hint_time);
@@ -770,6 +794,7 @@ fn main() {
 
     #[cfg(feature = "sec_bench_page_frame_hint")]
     {
+        flush_internal_cache_and_everything();
         println!("=========================================================================================");
         let bp = get_test_bp(params.bp_size);
         let primary = Arc::new(FosterBtree::new(ContainerKey::new(0, 0), Arc::clone(&bp)));
@@ -782,7 +807,7 @@ fn main() {
         let with_frame_hint = SecondaryLeafPageFrameHint::new(&primary, 30);
         bp.flush_all_and_reset().unwrap();
         println!("BP stats: \n{}", bp.stats());
-        let with_frame_hint_time = bench_secondary(&params, &with_frame_hint);
+        let with_frame_hint_time = bench_secondary(&params, &with_frame_hint, &bp);
         println!("BP stats: \n{}", bp.stats());
         println!("Summary");
         println!("With leaf hint: {} ms", with_frame_hint_time);
@@ -803,7 +828,7 @@ fn main() {
         let with_slot_hint = SecondaryPageSlotHint::new(&primary, 40);
         bp.flush_all_and_reset().unwrap();
         println!("BP stats: \n{}", bp.stats());
-        let with_slot_hint_time = bench_secondary(&params, &with_slot_hint);
+        let with_slot_hint_time = bench_secondary(&params, &with_slot_hint, &bp);
         println!("BP stats: \n{}", bp.stats());
         println!("++++++++++++++++++++++++++++++++++++++++++++");
         println!("Summary");
@@ -813,6 +838,7 @@ fn main() {
 
     #[cfg(feature = "sec_bench_page_frame_slot_hint")]
     {
+        flush_internal_cache_and_everything();
         println!("=========================================================================================");
         let bp = get_test_bp(params.bp_size);
         let primary = Arc::new(FosterBtree::new(ContainerKey::new(0, 0), Arc::clone(&bp)));
@@ -825,7 +851,7 @@ fn main() {
         let with_slot_hint = SecondaryPageFrameSlotHint::new(&primary, 40);
         bp.flush_all_and_reset().unwrap();
         println!("BP stats: \n{}", bp.stats());
-        let with_slot_hint_time = bench_secondary(&params, &with_slot_hint);
+        let with_slot_hint_time = bench_secondary(&params, &with_slot_hint, &bp);
         println!("BP stats: \n{}", bp.stats());
         println!("++++++++++++++++++++++++++++++++++++++++++++");
         println!("Summary");
