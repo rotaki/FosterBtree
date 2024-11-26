@@ -2,6 +2,7 @@ use std::ops::Index;
 
 use rand::Rng;
 
+#[derive(Debug, Clone)]
 pub struct Permutation {
     perm: Vec<usize>,
 }

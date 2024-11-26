@@ -175,7 +175,7 @@ impl std::fmt::Display for MemoryStats {
             if count == usize::MAX {
                 "N/A".to_string()
             } else {
-                format!("{:>10}", count)
+                format!("{}", count)
             }
         };
 

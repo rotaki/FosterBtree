@@ -18,9 +18,8 @@
 use criterion::black_box;
 use fbtree::{
     access_method::fbt::{BTreeKey, FosterBtreeCursor},
-    bp::{ContainerId, ContainerKey, MemPool, PageFrameKey},
-    prelude::FosterBtreePage,
-    prelude::{FosterBtree, PageId},
+    bp::{self, ContainerId, ContainerKey, MemPool, PageFrameKey},
+    prelude::{FosterBtree, FosterBtreePage, PageId},
     utils::Permutation,
 };
 
@@ -32,9 +31,18 @@ use fbtree::{
 };
 use rand::prelude::Distribution;
 use rand::Rng;
-use std::{fs::File, io::Write, process::Command, sync::Arc};
+use std::{
+    fs::File,
+    io::Write,
+    process::Command,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+};
 
-pub trait SecondaryIndex<T: MemPool> {
+pub trait SecondaryIndex<T: MemPool>: Sync + Send {
+    fn new(primary: &Arc<FosterBtree<T>>, c_id: ContainerId) -> Self;
     fn get(&self, key: &[u8]) -> Result<Vec<u8>, AccessMethodError>;
     fn stats(&self) -> String;
 }
@@ -44,8 +52,8 @@ pub struct SecondaryNoHint<T: MemPool> {
     pub secondary: Arc<FosterBtree<T>>,
 }
 
-impl<T: MemPool> SecondaryNoHint<T> {
-    pub fn new(primary: &Arc<FosterBtree<T>>, c_id: ContainerId) -> SecondaryNoHint<T> {
+impl<T: MemPool> SecondaryIndex<T> for SecondaryNoHint<T> {
+    fn new(primary: &Arc<FosterBtree<T>>, c_id: ContainerId) -> SecondaryNoHint<T> {
         // Iterate through the table to create the secondary index.
         let mut iter = FosterBtreeCursor::new(primary, &[], &[]);
         let secondary = Arc::new(FosterBtree::new(
@@ -63,9 +71,7 @@ impl<T: MemPool> SecondaryNoHint<T> {
             secondary,
         }
     }
-}
 
-impl<T: MemPool> SecondaryIndex<T> for SecondaryNoHint<T> {
     fn get(&self, key: &[u8]) -> Result<Vec<u8>, AccessMethodError> {
         // let val = self.secondary.get(key)?;
         // self.primary.get(&val)
@@ -113,8 +119,8 @@ pub struct SecondaryLeafPageHint<T: MemPool> {
     pub secondary: Arc<FosterBtree<T>>,
 }
 
-impl<T: MemPool> SecondaryLeafPageHint<T> {
-    pub fn new(primary: &Arc<FosterBtree<T>>, c_id: ContainerId) -> SecondaryLeafPageHint<T> {
+impl<T: MemPool> SecondaryIndex<T> for SecondaryLeafPageHint<T> {
+    fn new(primary: &Arc<FosterBtree<T>>, c_id: ContainerId) -> SecondaryLeafPageHint<T> {
         // Iterate through the table to create the secondary index.
         let mut iter = FosterBtreeCursor::new(primary, &[], &[]);
         let secondary = Arc::new(FosterBtree::new(
@@ -134,9 +140,7 @@ impl<T: MemPool> SecondaryLeafPageHint<T> {
             secondary,
         }
     }
-}
 
-impl<T: MemPool> SecondaryIndex<T> for SecondaryLeafPageHint<T> {
     fn get(&self, key: &[u8]) -> Result<Vec<u8>, AccessMethodError> {
         let sec_leaf_page = self
             .secondary
@@ -210,8 +214,8 @@ pub struct SecondaryLeafPageFrameHint<T: MemPool> {
     pub secondary: Arc<FosterBtree<T>>,
 }
 
-impl<T: MemPool> SecondaryLeafPageFrameHint<T> {
-    pub fn new(primary: &Arc<FosterBtree<T>>, c_id: ContainerId) -> SecondaryLeafPageFrameHint<T> {
+impl<T: MemPool> SecondaryIndex<T> for SecondaryLeafPageFrameHint<T> {
+    fn new(primary: &Arc<FosterBtree<T>>, c_id: ContainerId) -> SecondaryLeafPageFrameHint<T> {
         // Iterate through the table to create the secondary index.
         let mut iter = FosterBtreeCursor::new(primary, &[], &[]);
         let secondary = Arc::new(FosterBtree::new(
@@ -232,9 +236,7 @@ impl<T: MemPool> SecondaryLeafPageFrameHint<T> {
             secondary,
         }
     }
-}
 
-impl<T: MemPool> SecondaryIndex<T> for SecondaryLeafPageFrameHint<T> {
     fn get(&self, key: &[u8]) -> Result<Vec<u8>, AccessMethodError> {
         let sec_leaf_page = self
             .secondary
@@ -316,8 +318,8 @@ pub struct SecondaryPageSlotHint<T: MemPool> {
     pub secondary: Arc<FosterBtree<T>>,
 }
 
-impl<T: MemPool> SecondaryPageSlotHint<T> {
-    pub fn new(primary: &Arc<FosterBtree<T>>, c_id: ContainerId) -> SecondaryPageSlotHint<T> {
+impl<T: MemPool> SecondaryIndex<T> for SecondaryPageSlotHint<T> {
+    fn new(primary: &Arc<FosterBtree<T>>, c_id: ContainerId) -> SecondaryPageSlotHint<T> {
         // Iterate through the table to create the secondary index.
         let mut iter = FosterBtreeCursor::new(primary, &[], &[]);
         let secondary = Arc::new(FosterBtree::new(
@@ -338,9 +340,7 @@ impl<T: MemPool> SecondaryPageSlotHint<T> {
             secondary,
         }
     }
-}
 
-impl<T: MemPool> SecondaryIndex<T> for SecondaryPageSlotHint<T> {
     fn get(&self, key: &[u8]) -> Result<Vec<u8>, AccessMethodError> {
         let sec_leaf_page = self
             .secondary
@@ -431,8 +431,8 @@ pub struct SecondaryPageFrameSlotHint<T: MemPool> {
     pub secondary: Arc<FosterBtree<T>>,
 }
 
-impl<T: MemPool> SecondaryPageFrameSlotHint<T> {
-    pub fn new(primary: &Arc<FosterBtree<T>>, c_id: ContainerId) -> SecondaryPageFrameSlotHint<T> {
+impl<T: MemPool> SecondaryIndex<T> for SecondaryPageFrameSlotHint<T> {
+    fn new(primary: &Arc<FosterBtree<T>>, c_id: ContainerId) -> SecondaryPageFrameSlotHint<T> {
         // Iterate through the table to create the secondary index.
         let mut iter = FosterBtreeCursor::new(primary, &[], &[]);
         let secondary = Arc::new(FosterBtree::new(
@@ -454,9 +454,7 @@ impl<T: MemPool> SecondaryPageFrameSlotHint<T> {
             secondary,
         }
     }
-}
 
-impl<T: MemPool> SecondaryIndex<T> for SecondaryPageFrameSlotHint<T> {
     fn get(&self, key: &[u8]) -> Result<Vec<u8>, AccessMethodError> {
         let sec_leaf_page = self
             .secondary
@@ -555,26 +553,29 @@ impl<T: MemPool> SecondaryIndex<T> for SecondaryPageFrameSlotHint<T> {
 }
 #[derive(Debug, Parser, Clone)]
 pub struct SecBenchParams {
+    /// Number of threads
+    #[clap(short = 't', long, default_value = "1")]
+    pub num_threads: usize,
     /// Buffer pool size. if 0 panic
-    #[clap(short, long, default_value = "100000")]
+    #[clap(short = 'b', long, default_value = "100000")]
     pub bp_size: usize,
     /// Number of records.
-    #[clap(short, long, default_value = "100000")]
+    #[clap(short = 'n', long, default_value = "100000")]
     pub num_keys: usize,
     /// Key size
-    #[clap(short, long, default_value = "50")]
+    #[clap(short = 'k', long, default_value = "50")]
     pub key_size: usize,
     /// Record size
-    #[clap(short, long, default_value = "100")]
+    #[clap(short = 'r', long, default_value = "100")]
     pub record_size: usize,
     /// Skew factor
-    #[clap(short, long, default_value = "0.0")]
+    #[clap(short = 's', long, default_value = "0.0")]
     pub skew_factor: f64,
     /// Warmup time in seconds
-    #[clap(short, long, default_value = "20")]
+    #[clap(short = 'd', long, default_value = "10")]
     pub warmup_time: usize,
     /// Execution time in seconds
-    #[clap(short, long, default_value = "20")]
+    #[clap(short = 'D', long, default_value = "10")]
     pub exec_time: usize,
 }
 
@@ -730,6 +731,96 @@ fn bench_secondary<M: MemPool, T: SecondaryIndex<M>>(
     avg
 }
 
+fn bench_multi_thread<M: MemPool, T: SecondaryIndex<M>>(
+    params: &SecBenchParams,
+    primary: &Arc<FosterBtree<M>>,
+    bp: &Arc<M>,
+) -> Vec<usize> {
+    // Create the #threads secondary indexes
+    let mut secondaries = Vec::with_capacity(params.num_threads);
+    for i in 0..params.num_threads {
+        let secondary = T::new(&primary, i as ContainerId);
+        secondaries.push(secondary);
+    }
+
+    // Print the bp stats
+    let stats_after_secondary = bp.stats();
+    println!(
+        "BP stats after secondary index creation: \n{}",
+        &stats_after_secondary
+    );
+    bp.flush_all_and_reset().unwrap();
+
+    let flag = AtomicBool::new(true);
+    // Run warmups first
+    let result = std::thread::scope(|s| {
+        let mut handles = Vec::with_capacity(params.num_threads);
+        for secondary in &secondaries {
+            let flag = &flag;
+            let params = params.clone();
+            let handle = s.spawn(move || per_thread_bench(flag, &params, secondary));
+            handles.push(handle);
+        }
+
+        std::thread::sleep(std::time::Duration::from_secs(params.warmup_time as u64));
+        flag.store(false, Ordering::Relaxed);
+
+        let mut results = Vec::with_capacity(params.num_threads);
+        for handle in handles {
+            results.push(handle.join().unwrap());
+        }
+        results
+    });
+
+    println!("Warmup results: {:?}", result);
+    let stats_after_warmup = bp.stats();
+    let diff = stats_after_warmup.diff(&stats_after_secondary);
+    println!("BP stats diff after warmup: \n{}", diff);
+
+    flag.store(true, Ordering::Relaxed);
+
+    let results = std::thread::scope(|s| {
+        let mut handles = Vec::with_capacity(params.num_threads);
+        for secondary in &secondaries {
+            let flag = &flag;
+            let params = params.clone();
+            let handle = s.spawn(move || per_thread_bench(flag, &params, secondary));
+            handles.push(handle);
+        }
+        std::thread::sleep(std::time::Duration::from_secs(params.exec_time as u64));
+        flag.store(false, Ordering::Relaxed);
+
+        let mut results = Vec::with_capacity(params.num_threads);
+        for handle in handles {
+            results.push(handle.join().unwrap());
+        }
+        results
+    });
+
+    println!("Execution results: {:?}", results);
+    let stats_after_exec = bp.stats();
+    let diff = stats_after_exec.diff(&stats_after_warmup);
+    println!("BP stats diff after execution: \n{}", diff);
+
+    results
+}
+
+fn per_thread_bench<T: SecondaryIndex<M>, M: MemPool>(
+    flag: &AtomicBool, // While true, run the benchmark
+    params: &SecBenchParams,
+    secondary: &T,
+) -> usize {
+    let mut count = 0;
+    while flag.load(Ordering::Relaxed) {
+        let key = get_key(params.num_keys, params.skew_factor);
+        let key_bytes = get_key_bytes(key, params.key_size);
+        let result = secondary.get(&key_bytes).unwrap();
+        black_box(result);
+        count += 1;
+    }
+    count
+}
+
 fn flush_internal_cache_and_everything() {
     // Sync the file system to flush pending writes
     if let Err(e) = sync_filesystem() {
@@ -762,13 +853,18 @@ fn main() {
         println!("Tree stats: \n{}", primary.page_stats(false));
         println!("++++++++++++++++++++++++++++++++++++++++++++");
         println!("No hint");
-        let normal = SecondaryNoHint::new(&primary, 10);
-        bp.flush_all_and_reset().unwrap();
-        println!("BP stats: \n{}", bp.stats());
-        let normal_time = bench_secondary(&params, &normal, &bp);
-        println!("BP stats: \n{}", bp.stats());
+        // Multi-threaded benchmark
+        let result =
+            bench_multi_thread::<BufferPool, SecondaryNoHint<BufferPool>>(&params, &primary, &bp);
         println!("Summary");
-        println!("Without hint: {} ms", normal_time);
+        // Sum the results from all the threads and divide it by the execution time
+        let sum: usize = result.iter().sum();
+        let avg = sum as f64 / params.exec_time as f64;
+        println!("System Throughput: {} ops/sec", avg);
+        println!(
+            "Per thread Throughput: {:?} ops/sec",
+            avg / params.num_threads as f64
+        );
         println!("=========================================================================================");
     }
 
@@ -784,13 +880,19 @@ fn main() {
         println!("Tree stats: \n{}", primary.page_stats(false));
         println!("++++++++++++++++++++++++++++++++++++++++++++");
         println!("[Page] hint");
-        let with_page_hint = SecondaryLeafPageHint::new(&primary, 20);
-        bp.flush_all_and_reset().unwrap();
-        println!("BP stats: \n{}", bp.stats());
-        let with_page_hint_time = bench_secondary(&params, &with_page_hint, &bp);
-        println!("BP stats: \n{}", bp.stats());
+        // Multi-threaded benchmark
+        let result = bench_multi_thread::<BufferPool, SecondaryLeafPageHint<BufferPool>>(
+            &params, &primary, &bp,
+        );
         println!("Summary");
-        println!("With leaf hint: {} ms", with_page_hint_time);
+        // Sum the results from all the threads and divide it by the execution time
+        let sum: usize = result.iter().sum();
+        let avg = sum as f64 / params.exec_time as f64;
+        println!("System Throughput: {} ops/sec", avg);
+        println!(
+            "Per thread Throughput: {:?} ops/sec",
+            avg / params.num_threads as f64
+        );
         println!("=========================================================================================");
     }
 
@@ -806,13 +908,19 @@ fn main() {
         println!("Tree stats: \n{}", primary.page_stats(false));
         println!("++++++++++++++++++++++++++++++++++++++++++++");
         println!("[Page, Frame] hint");
-        let with_frame_hint = SecondaryLeafPageFrameHint::new(&primary, 30);
-        bp.flush_all_and_reset().unwrap();
-        println!("BP stats: \n{}", bp.stats());
-        let with_frame_hint_time = bench_secondary(&params, &with_frame_hint, &bp);
-        println!("BP stats: \n{}", bp.stats());
+        // Multi-threaded benchmark
+        let result = bench_multi_thread::<BufferPool, SecondaryLeafPageFrameHint<BufferPool>>(
+            &params, &primary, &bp,
+        );
         println!("Summary");
-        println!("With leaf hint: {} ms", with_frame_hint_time);
+        // Sum the results from all the threads and divide it by the execution time
+        let sum: usize = result.iter().sum();
+        let avg = sum as f64 / params.exec_time as f64;
+        println!("System Throughput: {} ops/sec", avg);
+        println!(
+            "Per thread Throughput: {:?} ops/sec",
+            avg / params.num_threads as f64
+        );
         println!("=========================================================================================");
     }
 
@@ -827,14 +935,19 @@ fn main() {
         println!("Tree stats: \n{}", primary.page_stats(false));
         println!("++++++++++++++++++++++++++++++++++++++++++++");
         println!("[Page, Slot] hint");
-        let with_slot_hint = SecondaryPageSlotHint::new(&primary, 40);
-        bp.flush_all_and_reset().unwrap();
-        println!("BP stats: \n{}", bp.stats());
-        let with_slot_hint_time = bench_secondary(&params, &with_slot_hint, &bp);
-        println!("BP stats: \n{}", bp.stats());
-        println!("++++++++++++++++++++++++++++++++++++++++++++");
+        // Multi-threaded benchmark
+        let result = bench_multi_thread::<BufferPool, SecondaryPageSlotHint<BufferPool>>(
+            &params, &primary, &bp,
+        );
         println!("Summary");
-        println!("With slot hint: {} ms", with_slot_hint_time);
+        // Sum the results from all the threads and divide it by the execution time
+        let sum: usize = result.iter().sum();
+        let avg = sum as f64 / params.exec_time as f64;
+        println!("System Throughput: {} ops/sec", avg);
+        println!(
+            "Per thread Throughput: {:?} ops/sec",
+            avg / params.num_threads as f64
+        );
         println!("=========================================================================================");
     }
 
@@ -850,14 +963,19 @@ fn main() {
         println!("Tree stats: \n{}", primary.page_stats(false));
         println!("++++++++++++++++++++++++++++++++++++++++++++");
         println!("[Page, Frame, Slot] hint");
-        let with_slot_hint = SecondaryPageFrameSlotHint::new(&primary, 40);
-        bp.flush_all_and_reset().unwrap();
-        println!("BP stats: \n{}", bp.stats());
-        let with_slot_hint_time = bench_secondary(&params, &with_slot_hint, &bp);
-        println!("BP stats: \n{}", bp.stats());
-        println!("++++++++++++++++++++++++++++++++++++++++++++");
+        // Multi-threaded benchmark
+        let result = bench_multi_thread::<BufferPool, SecondaryPageFrameSlotHint<BufferPool>>(
+            &params, &primary, &bp,
+        );
         println!("Summary");
-        println!("With slot hint: {} ms", with_slot_hint_time);
+        // Sum the results from all the threads and divide it by the execution time
+        let sum: usize = result.iter().sum();
+        let avg = sum as f64 / params.exec_time as f64;
+        println!("System Throughput: {} ops/sec", avg);
+        println!(
+            "Per thread Throughput: {:?} ops/sec",
+            avg / params.num_threads as f64
+        );
         println!("=========================================================================================");
     }
 }
