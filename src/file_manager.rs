@@ -12,8 +12,10 @@ pub mod sync_write {
     use crate::log;
     use crate::log_trace;
     use crate::page::{Page, PageId, PAGE_SIZE};
+    use libc::O_DIRECT;
     use std::fs::{File, OpenOptions};
     use std::io::{Read, Seek, SeekFrom, Write};
+    use std::os::unix::fs::OpenOptionsExt;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Mutex;
@@ -37,6 +39,7 @@ pub mod sync_write {
                 .write(true)
                 .create(true)
                 .truncate(false)
+                .custom_flags(O_DIRECT)
                 .open(&path)?;
             let num_pages = file.metadata().unwrap().len() as usize / PAGE_SIZE;
             Ok(FileManager {
