@@ -749,7 +749,6 @@ fn bench_multi_thread<M: MemPool, T: SecondaryIndex<M>>(
         "BP stats after secondary index creation: \n{}",
         &stats_after_secondary
     );
-    bp.flush_all_and_reset().unwrap();
 
     let flag = AtomicBool::new(true);
     // Run warmups first
