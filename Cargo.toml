@@ -11,6 +11,7 @@ default = [
     "sec_bench_page_frame_hint",
     "sec_bench_page_slot_hint",
     "sec_bench_page_frame_slot_hint",
+    "o_direct"
 ]
 log_trace = []
 log_debug = []
@@ -46,12 +47,13 @@ no_bp_hint = []
 # Old iterator for foster btree
 old_iter = []
 # Async IO only for write
-async_write = ["io-uring"]
+async_write = ["io-uring", "libc"]
 # Async IO with prefetching
-new_async_write = ["io-uring"]
+new_async_write = ["io-uring", "libc"]
+# O_DIRECT
+o_direct = ["libc"]
 
 [dependencies]
-libc = "0.2"
 tempfile = "3.8"
 rand = "0.8"
 getrandom = { version = "0.2", features = ["js"] }
@@ -61,6 +63,7 @@ lazy_static = { version = "1.4" }
 clap = {version = "4.5", features = ["derive"]}
 concurrent-queue = "2.5"
 io-uring = {version = "0.7", optional = true}
+libc = {version = "0.2", optional = true}
 zipf = "7.0.1"
 memchr = "2.7.4"
 dashmap = "6.1"

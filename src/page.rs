@@ -40,8 +40,10 @@ const BASE_PAGE_HEADER_SIZE: usize = 4 + LSN_SIZE;
 pub const AVAILABLE_PAGE_SIZE: usize = PAGE_SIZE - BASE_PAGE_HEADER_SIZE;
 
 #[cfg(feature = "heap_allocated_page")]
+#[repr(C, align(4096))]
 pub struct Page(Vec<u8>); // A page with large size must be heap allocated. Otherwise, it will cause stack overflow during the test.
 #[cfg(not(feature = "heap_allocated_page"))]
+#[repr(C, align(4096))] // Align to 4K. If we don't align to 4K, it might break O_DIRECT writes.
 pub struct Page([u8; PAGE_SIZE]);
 
 impl Page {

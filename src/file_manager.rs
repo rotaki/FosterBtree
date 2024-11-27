@@ -1,21 +1,130 @@
-#[cfg(not(any(feature = "async_write", feature = "new_async_write")))]
+#[cfg(not(any(
+    feature = "async_write",
+    feature = "new_async_write",
+    feature = "o_direct"
+)))]
 pub type FileManager = sync_write::FileManager;
+#[cfg(feature = "o_direct")]
+pub type FileManager = o_direct::FileManager;
 #[cfg(feature = "async_write")]
 pub type FileManager = async_write::FileManager;
 #[cfg(feature = "new_async_write")]
 pub type FileManager = new_async_write::FileManager;
 
-#[cfg(not(any(feature = "async_write", feature = "new_async_write")))]
+#[cfg(not(any(
+    feature = "async_write",
+    feature = "new_async_write",
+    feature = "o_direct"
+)))]
 pub mod sync_write {
     use crate::bp::ContainerId;
     #[allow(unused_imports)]
     use crate::log;
     use crate::log_trace;
     use crate::page::{Page, PageId, PAGE_SIZE};
-    use libc::O_DIRECT;
     use std::fs::{File, OpenOptions};
     use std::io::{Read, Seek, SeekFrom, Write};
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::Mutex;
+
+    pub struct FileManager {
+        _path: PathBuf,
+        file: Mutex<File>,
+        num_pages: AtomicU32,
+        io_count: (AtomicU32, AtomicU32), // (Read, Write)
+    }
+
+    impl FileManager {
+        pub fn new<P: AsRef<std::path::Path>>(
+            db_dir: P,
+            c_id: ContainerId,
+        ) -> Result<Self, std::io::Error> {
+            std::fs::create_dir_all(&db_dir)?;
+            let path = db_dir.as_ref().join(format!("{}", c_id));
+            let file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(&path)?;
+            let num_pages = file.metadata().unwrap().len() as usize / PAGE_SIZE;
+            Ok(FileManager {
+                _path: path,
+                file: Mutex::new(file),
+                num_pages: AtomicU32::new(num_pages as PageId),
+                io_count: (AtomicU32::new(0), AtomicU32::new(0)),
+            })
+        }
+
+        pub fn fetch_add_page_id(&self) -> PageId {
+            self.num_pages.fetch_add(1, Ordering::AcqRel)
+        }
+
+        pub fn fetch_sub_page_id(&self) -> PageId {
+            self.num_pages.fetch_sub(1, Ordering::AcqRel)
+        }
+
+        pub fn get_stats(&self) -> String {
+            let _guard = self.file.lock().unwrap();
+            format!(
+                "Num pages: {}, Read count: {}, Write count: {}",
+                self.num_pages.load(Ordering::Acquire),
+                self.io_count.0.load(Ordering::Acquire),
+                self.io_count.1.load(Ordering::Acquire)
+            )
+        }
+
+        pub fn reset_stats(&self) {
+            let _guard = self.file.lock().unwrap();
+            self.io_count.0.store(0, Ordering::Release);
+            self.io_count.1.store(0, Ordering::Release);
+        }
+
+        pub fn prefetch_page(&self, _page_id: PageId) -> Result<(), std::io::Error> {
+            Ok(())
+        }
+
+        pub fn read_page(&self, page_id: PageId, page: &mut Page) -> Result<(), std::io::Error> {
+            let mut file = self.file.lock().unwrap();
+            self.io_count.0.fetch_add(1, Ordering::AcqRel);
+            log_trace!("Reading page: {} from file: {:?}", page_id, self.path);
+            file.seek(SeekFrom::Start(page_id as u64 * PAGE_SIZE as u64))?;
+            file.read_exact(page.get_raw_bytes_mut())?;
+            debug_assert!(page.get_id() == page_id, "Page id mismatch");
+            Ok(())
+        }
+
+        pub fn write_page(&self, page_id: PageId, page: &Page) -> Result<(), std::io::Error> {
+            let mut file = self.file.lock().unwrap();
+            log_trace!("Writing page: {} to file: {:?}", page_id, self.path);
+            self.io_count.1.fetch_add(1, Ordering::AcqRel);
+            debug_assert!(page.get_id() == page_id, "Page id mismatch");
+            file.seek(SeekFrom::Start(page_id as u64 * PAGE_SIZE as u64))?;
+            file.write_all(page.get_raw_bytes())?;
+            Ok(())
+        }
+
+        pub fn flush(&self) -> Result<(), std::io::Error> {
+            let mut file = self.file.lock().unwrap();
+            log_trace!("Flushing file: {:?}", self.path);
+            file.flush()
+        }
+    }
+}
+
+#[cfg(feature = "o_direct")]
+pub mod o_direct {
+    use crate::bp::ContainerId;
+    #[allow(unused_imports)]
+    use crate::log;
+    use crate::log_trace;
+    use crate::page::{Page, PageId, PAGE_SIZE};
+    use libc::{c_void, read, write, O_DIRECT};
+    use std::fs::{File, OpenOptions};
+    use std::io::{Seek, SeekFrom};
     use std::os::unix::fs::OpenOptionsExt;
+    use std::os::unix::io::AsRawFd;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Mutex;
@@ -80,28 +189,49 @@ pub mod sync_write {
 
         pub fn read_page(&self, page_id: PageId, page: &mut Page) -> Result<(), std::io::Error> {
             let mut file = self.file.lock().unwrap();
+            let fd = file.as_raw_fd();
             self.io_count.0.fetch_add(1, Ordering::AcqRel);
             log_trace!("Reading page: {} from file: {:?}", page_id, self.path);
             file.seek(SeekFrom::Start(page_id as u64 * PAGE_SIZE as u64))?;
-            file.read_exact(page.get_raw_bytes_mut())?;
+            unsafe {
+                let ret = read(
+                    fd,
+                    page.get_raw_bytes_mut().as_mut_ptr() as *mut c_void,
+                    PAGE_SIZE as usize,
+                );
+                if ret != PAGE_SIZE as isize {
+                    return Err(std::io::Error::last_os_error());
+                }
+            }
+            // file.seek(SeekFrom::Start(page_id as u64 * PAGE_SIZE as u64))?;
+            // file.read_exact(page.get_raw_bytes_mut())?;
             debug_assert!(page.get_id() == page_id, "Page id mismatch");
             Ok(())
         }
 
         pub fn write_page(&self, page_id: PageId, page: &Page) -> Result<(), std::io::Error> {
             let mut file = self.file.lock().unwrap();
-            log_trace!("Writing page: {} to file: {:?}", page_id, self.path);
+            let fd = file.as_raw_fd();
             self.io_count.1.fetch_add(1, Ordering::AcqRel);
+            log_trace!("Writing page: {} to file: {:?}", page_id, self.path);
             debug_assert!(page.get_id() == page_id, "Page id mismatch");
             file.seek(SeekFrom::Start(page_id as u64 * PAGE_SIZE as u64))?;
-            file.write_all(page.get_raw_bytes())?;
+            unsafe {
+                let ret = write(
+                    fd,
+                    page.get_raw_bytes().as_ptr() as *const c_void,
+                    PAGE_SIZE as usize,
+                );
+                if ret != PAGE_SIZE as isize {
+                    return Err(std::io::Error::last_os_error());
+                }
+            }
             Ok(())
         }
 
+        // With O_DIRECT, we don't need to flush.
         pub fn flush(&self) -> Result<(), std::io::Error> {
-            let mut file = self.file.lock().unwrap();
-            log_trace!("Flushing file: {:?}", self.path);
-            file.flush()
+            Ok(())
         }
     }
 }
