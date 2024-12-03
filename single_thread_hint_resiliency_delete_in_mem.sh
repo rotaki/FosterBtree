@@ -1,0 +1,2 @@
+cargo build --release --bin secondary_index_resiliency_delete;
+for d in 0.0 0.1 0.2 0.3 0.4 0.5 0.6 0.7 0.8 0.9 1.0 2.0 3.0 4.0 5.0 6.0 7.0 8.0 9.0; do ./target/release/secondary_index_resiliency_delete -n 100000 -k 100 -r 100 -d ${d} > inmem_resiliency_t1_n100000_k100_r100_d${d}.txt; done;

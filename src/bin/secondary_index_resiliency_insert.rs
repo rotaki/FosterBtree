@@ -445,6 +445,7 @@ fn sync_filesystem() -> Result<(), std::io::Error> {
 }
 
 fn main() {
+    println!("Secondary index resiliency insertion benchmark");
     let params = SecBenchParams::parse();
     println!("Params: {:?}", params);
 
