@@ -43,7 +43,7 @@ use std::{
 
 pub trait SecondaryIndex<T: MemPool>: Sync + Send {
     fn new(primary: &Arc<FosterBtree<T>>, c_id: ContainerId) -> Self;
-    fn get(&self, key: &[u8]) -> Result<Vec<u8>, AccessMethodError>;
+    fn get(&self, key: &[u8]) -> Result<*const u8, AccessMethodError>;
     fn stats(&self) -> String;
 }
 
@@ -72,7 +72,7 @@ impl<T: MemPool> SecondaryIndex<T> for SecondaryNoHint<T> {
         }
     }
 
-    fn get(&self, key: &[u8]) -> Result<Vec<u8>, AccessMethodError> {
+    fn get(&self, key: &[u8]) -> Result<*const u8, AccessMethodError> {
         // let val = self.secondary.get(key)?;
         // self.primary.get(&val)
         let sec_leaf_page = self
@@ -95,7 +95,7 @@ impl<T: MemPool> SecondaryIndex<T> for SecondaryNoHint<T> {
                 // Lower fence. Non-existent key
                 Err(AccessMethodError::KeyNotFound)
             } else if pri_page.get_raw_key(pri_slot_id) == p_key {
-                Ok(pri_page.get_val(pri_slot_id).to_vec())
+                Ok(pri_page.get_val(pri_slot_id).as_ptr())
             } else {
                 // Non-existent key
                 Err(AccessMethodError::KeyNotFound)
@@ -141,7 +141,7 @@ impl<T: MemPool> SecondaryIndex<T> for SecondaryLeafPageHint<T> {
         }
     }
 
-    fn get(&self, key: &[u8]) -> Result<Vec<u8>, AccessMethodError> {
+    fn get(&self, key: &[u8]) -> Result<*const u8, AccessMethodError> {
         let sec_leaf_page = self
             .secondary
             .traverse_to_leaf_for_read_with_hint(key, None);
@@ -168,7 +168,7 @@ impl<T: MemPool> SecondaryIndex<T> for SecondaryLeafPageHint<T> {
                 // Lower fence. Non-existent key
                 return Err(AccessMethodError::KeyNotFound);
             } else if pri_page.get_raw_key(pri_slot_id) == p_key {
-                pri_page.get_val(pri_slot_id).to_vec()
+                pri_page.get_val(pri_slot_id).as_ptr()
             } else {
                 // Non-existent key
                 return Err(AccessMethodError::KeyNotFound);
@@ -237,7 +237,7 @@ impl<T: MemPool> SecondaryIndex<T> for SecondaryLeafPageFrameHint<T> {
         }
     }
 
-    fn get(&self, key: &[u8]) -> Result<Vec<u8>, AccessMethodError> {
+    fn get(&self, key: &[u8]) -> Result<*const u8, AccessMethodError> {
         let sec_leaf_page = self
             .secondary
             .traverse_to_leaf_for_read_with_hint(key, None);
@@ -270,7 +270,7 @@ impl<T: MemPool> SecondaryIndex<T> for SecondaryLeafPageFrameHint<T> {
                 // Lower fence. Non-existent key
                 return Err(AccessMethodError::KeyNotFound);
             } else if pri_page.get_raw_key(pri_slot_id) == p_key {
-                pri_page.get_val(pri_slot_id).to_vec()
+                pri_page.get_val(pri_slot_id).as_ptr()
             } else {
                 // Non-existent key
                 return Err(AccessMethodError::KeyNotFound);
@@ -341,7 +341,7 @@ impl<T: MemPool> SecondaryIndex<T> for SecondaryPageSlotHint<T> {
         }
     }
 
-    fn get(&self, key: &[u8]) -> Result<Vec<u8>, AccessMethodError> {
+    fn get(&self, key: &[u8]) -> Result<*const u8, AccessMethodError> {
         let sec_leaf_page = self
             .secondary
             .traverse_to_leaf_for_read_with_hint(key, None);
@@ -373,7 +373,7 @@ impl<T: MemPool> SecondaryIndex<T> for SecondaryPageSlotHint<T> {
                 && pri_page.get_raw_key(expected_slot_id) == p_key
             {
                 (
-                    pri_page.get_val(expected_slot_id).to_vec(),
+                    pri_page.get_val(expected_slot_id).as_ptr(),
                     expected_slot_id,
                 )
             } else {
@@ -382,7 +382,7 @@ impl<T: MemPool> SecondaryIndex<T> for SecondaryPageSlotHint<T> {
                     // Lower fence. Non-existent key
                     return Err(AccessMethodError::KeyNotFound);
                 } else if pri_page.get_raw_key(pri_slot_id) == p_key {
-                    (pri_page.get_val(pri_slot_id).to_vec(), pri_slot_id)
+                    (pri_page.get_val(pri_slot_id).as_ptr(), pri_slot_id)
                 } else {
                     // Non-existent key
                     return Err(AccessMethodError::KeyNotFound);
@@ -455,7 +455,7 @@ impl<T: MemPool> SecondaryIndex<T> for SecondaryPageFrameSlotHint<T> {
         }
     }
 
-    fn get(&self, key: &[u8]) -> Result<Vec<u8>, AccessMethodError> {
+    fn get(&self, key: &[u8]) -> Result<*const u8, AccessMethodError> {
         let sec_leaf_page = self
             .secondary
             .traverse_to_leaf_for_read_with_hint(key, None);
@@ -494,7 +494,7 @@ impl<T: MemPool> SecondaryIndex<T> for SecondaryPageFrameSlotHint<T> {
                 && pri_page.get_raw_key(expected_slot_id) == p_key
             {
                 (
-                    pri_page.get_val(expected_slot_id).to_vec(),
+                    pri_page.get_val(expected_slot_id).as_ptr(),
                     expected_slot_id,
                 )
             } else {
@@ -503,7 +503,7 @@ impl<T: MemPool> SecondaryIndex<T> for SecondaryPageFrameSlotHint<T> {
                     // Lower fence. Non-existent key
                     return Err(AccessMethodError::KeyNotFound);
                 } else if pri_page.get_raw_key(pri_slot_id) == p_key {
-                    (pri_page.get_val(pri_slot_id).to_vec(), pri_slot_id)
+                    (pri_page.get_val(pri_slot_id).as_ptr(), pri_slot_id)
                 } else {
                     // Non-existent key
                     return Err(AccessMethodError::KeyNotFound);
