@@ -1494,7 +1494,7 @@ impl<T: MemPool> FosterBtree<T> {
                     std::thread::sleep(Duration::from_millis(1)); // Backoff because there is a lot of contention in the buffer pool
                 }
                 Err(e) => {
-                    panic!("Unexpected error: {:?}", e);
+                    panic!("Unexpected error with page key: {:?}, {:?}", page_key, e);
                 }
             }
         }
