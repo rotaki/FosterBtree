@@ -738,6 +738,8 @@ fn bench_multi_thread<M: MemPool, T: SecondaryIndex<M>>(
 ) -> Vec<usize> {
     // Create the #threads secondary indexes
     let secondary = T::new(&primary, 100 as ContainerId);
+    // Print the secondary index stats
+    println!("Secondary index stats: \n{}", secondary.stats());
 
     // Print the bp stats
     let stats_after_secondary = bp.stats();

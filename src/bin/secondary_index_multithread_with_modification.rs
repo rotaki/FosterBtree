@@ -43,7 +43,7 @@ use std::{
 
 pub trait SecondaryIndex<T: MemPool>: Sync + Send {
     fn new(primary: &Arc<FosterBtree<T>>, c_id: ContainerId) -> Self;
-    fn get(&self, key: &[u8]) -> Result<Vec<u8>, AccessMethodError>;
+    fn get(&self, key: &[u8]) -> Result<*const u8, AccessMethodError>;
     fn stats(&self) -> String;
 }
 
@@ -72,7 +72,7 @@ impl<T: MemPool> SecondaryIndex<T> for SecondaryNoHint<T> {
         }
     }
 
-    fn get(&self, key: &[u8]) -> Result<Vec<u8>, AccessMethodError> {
+    fn get(&self, key: &[u8]) -> Result<*const u8, AccessMethodError> {
         // let val = self.secondary.get(key)?;
         // self.primary.get(&val)
         let sec_leaf_page = self
@@ -95,7 +95,7 @@ impl<T: MemPool> SecondaryIndex<T> for SecondaryNoHint<T> {
                 // Lower fence. Non-existent key
                 Err(AccessMethodError::KeyNotFound)
             } else if pri_page.get_raw_key(pri_slot_id) == p_key {
-                Ok(pri_page.get_val(pri_slot_id).to_vec())
+                Ok(pri_page.get_val(pri_slot_id).as_ptr())
             } else {
                 // Non-existent key
                 Err(AccessMethodError::KeyNotFound)
@@ -141,7 +141,7 @@ impl<T: MemPool> SecondaryIndex<T> for SecondaryLeafPageHint<T> {
         }
     }
 
-    fn get(&self, key: &[u8]) -> Result<Vec<u8>, AccessMethodError> {
+    fn get(&self, key: &[u8]) -> Result<*const u8, AccessMethodError> {
         let sec_leaf_page = self
             .secondary
             .traverse_to_leaf_for_read_with_hint(key, None);
@@ -168,7 +168,7 @@ impl<T: MemPool> SecondaryIndex<T> for SecondaryLeafPageHint<T> {
                 // Lower fence. Non-existent key
                 return Err(AccessMethodError::KeyNotFound);
             } else if pri_page.get_raw_key(pri_slot_id) == p_key {
-                pri_page.get_val(pri_slot_id).to_vec()
+                pri_page.get_val(pri_slot_id).as_ptr()
             } else {
                 // Non-existent key
                 return Err(AccessMethodError::KeyNotFound);
@@ -237,7 +237,7 @@ impl<T: MemPool> SecondaryIndex<T> for SecondaryLeafPageFrameHint<T> {
         }
     }
 
-    fn get(&self, key: &[u8]) -> Result<Vec<u8>, AccessMethodError> {
+    fn get(&self, key: &[u8]) -> Result<*const u8, AccessMethodError> {
         let sec_leaf_page = self
             .secondary
             .traverse_to_leaf_for_read_with_hint(key, None);
@@ -270,7 +270,7 @@ impl<T: MemPool> SecondaryIndex<T> for SecondaryLeafPageFrameHint<T> {
                 // Lower fence. Non-existent key
                 return Err(AccessMethodError::KeyNotFound);
             } else if pri_page.get_raw_key(pri_slot_id) == p_key {
-                pri_page.get_val(pri_slot_id).to_vec()
+                pri_page.get_val(pri_slot_id).as_ptr()
             } else {
                 // Non-existent key
                 return Err(AccessMethodError::KeyNotFound);
@@ -341,7 +341,7 @@ impl<T: MemPool> SecondaryIndex<T> for SecondaryPageSlotHint<T> {
         }
     }
 
-    fn get(&self, key: &[u8]) -> Result<Vec<u8>, AccessMethodError> {
+    fn get(&self, key: &[u8]) -> Result<*const u8, AccessMethodError> {
         let sec_leaf_page = self
             .secondary
             .traverse_to_leaf_for_read_with_hint(key, None);
@@ -373,7 +373,7 @@ impl<T: MemPool> SecondaryIndex<T> for SecondaryPageSlotHint<T> {
                 && pri_page.get_raw_key(expected_slot_id) == p_key
             {
                 (
-                    pri_page.get_val(expected_slot_id).to_vec(),
+                    pri_page.get_val(expected_slot_id).as_ptr(),
                     expected_slot_id,
                 )
             } else {
@@ -382,7 +382,7 @@ impl<T: MemPool> SecondaryIndex<T> for SecondaryPageSlotHint<T> {
                     // Lower fence. Non-existent key
                     return Err(AccessMethodError::KeyNotFound);
                 } else if pri_page.get_raw_key(pri_slot_id) == p_key {
-                    (pri_page.get_val(pri_slot_id).to_vec(), pri_slot_id)
+                    (pri_page.get_val(pri_slot_id).as_ptr(), pri_slot_id)
                 } else {
                     // Non-existent key
                     return Err(AccessMethodError::KeyNotFound);
@@ -455,7 +455,7 @@ impl<T: MemPool> SecondaryIndex<T> for SecondaryPageFrameSlotHint<T> {
         }
     }
 
-    fn get(&self, key: &[u8]) -> Result<Vec<u8>, AccessMethodError> {
+    fn get(&self, key: &[u8]) -> Result<*const u8, AccessMethodError> {
         let sec_leaf_page = self
             .secondary
             .traverse_to_leaf_for_read_with_hint(key, None);
@@ -494,7 +494,7 @@ impl<T: MemPool> SecondaryIndex<T> for SecondaryPageFrameSlotHint<T> {
                 && pri_page.get_raw_key(expected_slot_id) == p_key
             {
                 (
-                    pri_page.get_val(expected_slot_id).to_vec(),
+                    pri_page.get_val(expected_slot_id).as_ptr(),
                     expected_slot_id,
                 )
             } else {
@@ -503,7 +503,7 @@ impl<T: MemPool> SecondaryIndex<T> for SecondaryPageFrameSlotHint<T> {
                     // Lower fence. Non-existent key
                     return Err(AccessMethodError::KeyNotFound);
                 } else if pri_page.get_raw_key(pri_slot_id) == p_key {
-                    (pri_page.get_val(pri_slot_id).to_vec(), pri_slot_id)
+                    (pri_page.get_val(pri_slot_id).as_ptr(), pri_slot_id)
                 } else {
                     // Non-existent key
                     return Err(AccessMethodError::KeyNotFound);
@@ -664,27 +664,15 @@ impl Iterator for KeyValueGenerator {
 }
 
 pub fn load_table(params: &SecBenchParams, table: &Arc<FosterBtree<BufferPool>>) {
-    let num_insertion_threads = 6;
-
-    let mut gen = KeyValueGenerator::new(
-        num_insertion_threads,
-        params.num_keys,
-        params.key_size,
-        params.record_size,
-    );
-
-    // Multi-thread insert. Use 6 threads to insert the keys.
-    std::thread::scope(|s| {
-        for _ in 0..6 {
-            let table = table.clone();
-            let key_gen = gen.pop().unwrap();
-            s.spawn(move || {
-                for (key, value) in key_gen {
-                    table.insert(&key, &value).unwrap();
-                }
-            });
+    let table = table.clone();
+    for key in 0..params.num_keys * 2 {
+        // Insert only the even keys
+        if key % 2 == 0 {
+            let key_bytes = get_key_bytes(key, params.key_size);
+            let value = get_new_value(params.record_size);
+            table.insert(&key_bytes, &value).unwrap();
         }
-    });
+    }
 }
 
 fn bench_secondary<M: MemPool, T: SecondaryIndex<M>>(
@@ -809,10 +797,41 @@ fn per_thread_bench<T: SecondaryIndex<M>, M: MemPool>(
 ) -> usize {
     let mut count = 0;
     while flag.load(Ordering::Relaxed) {
-        let key = get_key(params.num_keys, params.skew_factor);
+        let key = get_key(params.num_keys, params.skew_factor) * 2;
         let key_bytes = get_key_bytes(key, params.key_size);
         let result = secondary.get(&key_bytes).unwrap();
         black_box(result);
+        count += 1;
+    }
+    count
+}
+
+fn modification_thread<M: MemPool>(
+    flag: &AtomicBool, // While true, run the benchmark
+    params: &SecBenchParams,
+    primary: &Arc<FosterBtree<M>>,
+) -> usize {
+    let mut count = 0;
+    let mut state_tracker = vec![false; params.num_keys];
+    while flag.load(Ordering::Relaxed) {
+        let key = get_key(params.num_keys, params.skew_factor); // Modification is issued on the odd keys
+        let odd_key = key * 2 + 1;
+        if state_tracker[key] {
+            // Not present in the primary FBT. Insert it.
+            let key_bytes = get_key_bytes(odd_key, params.key_size);
+            let value = get_new_value(params.record_size);
+            while let Err(_) = primary.insert(&key_bytes, &value) {
+                // Retry until the key is inserted
+            }
+            state_tracker[key] = true;
+        } else {
+            // Present in the primary FBT. Delete it.
+            let key_bytes = get_key_bytes(odd_key, params.key_size);
+            while let Err(_) = primary.delete(&key_bytes) {
+                // Retry until the key is deleted
+            }
+            state_tracker[key] = false;
+        }
         count += 1;
     }
     count
