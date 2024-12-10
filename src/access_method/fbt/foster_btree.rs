@@ -1720,9 +1720,10 @@ impl<T: MemPool> FosterBtree<T> {
                 // 3. The key is inside the range of the page
                 // 4. The slot is not the foster child slot
                 if page.is_valid() && page.is_leaf() && page.inside_range(&BTreeKey::Normal(key)) {
-                    let slot = page.upper_bound_slot_id(&BTreeKey::Normal(key)) - 1;
-                    if !page.has_foster_child() || slot != page.foster_child_slot_id() {
-                        // println!("Hint worked: {}", hint);
+                    // If page has foster child, then the key should be less than the foster key
+                    if page.has_foster_child() && page.get_foster_key() <= key {
+                        // Hint failed
+                    } else {
                         return page;
                     }
                 }
@@ -1869,8 +1870,11 @@ impl<T: MemPool> FosterBtree<T> {
                         && page.is_leaf()
                         && page.inside_range(&BTreeKey::Normal(key))
                     {
-                        let slot_id = page.upper_bound_slot_id(&BTreeKey::Normal(key)) - 1;
-                        if !page.has_foster_child() || slot_id != page.foster_child_slot_id() {
+                        // If page has foster child, then the key should be less than the foster key
+                        if page.has_foster_child() && page.get_foster_key() <= key {
+                            // Hint failed
+                        } else {
+                            // Try to upgrade the page
                             match page.try_upgrade(true) {
                                 Ok(upgraded) => {
                                     return upgraded;

@@ -850,7 +850,7 @@ fn main() {
         println!("Tree stats: \n{}", primary.page_stats(false));
         println!("++++++++++++++++++++++++++++++++++++++++++++");
         println!("[Page, Frame, Slot] hint");
-        let with_slot_hint = SecondaryPageFrameSlotHint::new(&primary, 40);
+        let with_slot_hint = SecondaryPageFrameSlotHint::new(&primary, 50);
         bp.flush_all_and_reset().unwrap();
         println!("BP stats: \n{}", bp.stats());
         let with_slot_hint_time = bench_secondary(&params, &with_slot_hint, &bp);
