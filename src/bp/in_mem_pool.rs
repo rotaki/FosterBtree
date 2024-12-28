@@ -1,6 +1,6 @@
 use std::{
     cell::UnsafeCell,
-    collections::{hash_map::Entry, HashMap},
+    collections::{hash_map::Entry, BTreeMap, HashMap},
 };
 
 use crate::{page::Page, rwlatch::RwLatch};
@@ -141,11 +141,19 @@ impl MemPool for InMemPool {
 
     fn stats(&self) -> MemoryStats {
         let num_frames = unsafe { &*self.frames.get() }.len();
+        let mut containers = BTreeMap::new();
+        for frame in unsafe { &*self.frames.get() }.iter() {
+            let frame = frame.read();
+            if let Some(key) = frame.page_key() {
+                *containers.entry(key.c_key).or_insert(0) += 1;
+            }
+        }
         MemoryStats {
             num_frames_in_mem: num_frames,
             new_page_created: num_frames,
             read_page_from_disk: num_frames,
             write_page_to_disk: num_frames,
+            containers: BTreeMap::new(),
         }
     }
 

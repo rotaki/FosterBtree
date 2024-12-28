@@ -11,7 +11,7 @@ default = [
     "sec_bench_page_frame_hint",
     "sec_bench_page_slot_hint",
     "sec_bench_page_frame_slot_hint",
-    "o_direct"
+    # "o_direct"
 ]
 log_trace = []
 log_debug = []

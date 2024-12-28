@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use super::buffer_frame::{FrameReadGuard, FrameWriteGuard};
 
 use crate::page::PageId;
@@ -5,7 +7,7 @@ use crate::page::PageId;
 pub type DatabaseId = u16;
 pub type ContainerId = u16;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ContainerKey {
     pub db_id: DatabaseId,
     pub c_id: ContainerId,
@@ -145,6 +147,7 @@ pub struct MemoryStats {
     pub new_page_created: usize,    // Number of new pages created
     pub read_page_from_disk: usize, // Number of pages read
     pub write_page_to_disk: usize,  // Number of pages written
+    pub containers: BTreeMap<ContainerKey, i32>, // Number of pages of each container in memory
 }
 
 impl MemoryStats {
@@ -154,6 +157,7 @@ impl MemoryStats {
             new_page_created: 0,
             read_page_from_disk: 0,
             write_page_to_disk: 0,
+            containers: BTreeMap::new(),
         }
     }
 
@@ -164,6 +168,7 @@ impl MemoryStats {
             new_page_created: self.new_page_created - previous.new_page_created,
             read_page_from_disk: self.read_page_from_disk - previous.read_page_from_disk,
             write_page_to_disk: self.write_page_to_disk - previous.write_page_to_disk,
+            containers: self.containers.clone(),
         }
     }
 }
@@ -186,8 +191,8 @@ impl std::fmt::Display for MemoryStats {
 
         write!(
             f,
-            "Frames in mem: {}, New: {}, Read From Disk: {}, Write To Disk: {}",
-            num_frames_in_mem, new_count, read_count, write_count
+            "Frames in mem: {}, New: {}, Read From Disk: {}, Write To Disk: {}, Containers: {:?}",
+            num_frames_in_mem, new_count, read_count, write_count, self.containers
         )
     }
 }

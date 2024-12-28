@@ -13,7 +13,7 @@ use crate::file_manager::FileManager;
 
 use std::{
     cell::UnsafeCell,
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     fs::create_dir_all,
     ops::{Deref, DerefMut},
     path::PathBuf,
@@ -937,11 +937,19 @@ impl MemPool for BufferPool {
     // Just return the runtime stats
     fn stats(&self) -> MemoryStats {
         let (new_page, read_count, write_count) = self.runtime_stats.get();
+        let mut containers = BTreeMap::new();
+        for frame in unsafe { &*self.frames.get() }.iter() {
+            let frame = frame.read();
+            if let Some(key) = frame.page_key() {
+                *containers.entry(key.c_key).or_insert(0) += 1;
+            }
+        }
         MemoryStats {
             num_frames_in_mem: unsafe { &*self.frames.get() }.len(),
             new_page_created: new_page,
             read_page_from_disk: read_count,
             write_page_to_disk: write_count,
+            containers,
         }
     }
 
