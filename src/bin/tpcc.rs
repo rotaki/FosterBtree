@@ -4,9 +4,7 @@ use clap::Parser;
 use fbtree::{
     bp::{get_test_bp, MemPool},
     prelude::{
-        run_tpcc_for_thread, tpcc_load_all_tables, DeliveryTxn, NewOrderTxn, OrderStatusTxn,
-        PaymentTxn, StockLevelTxn, TPCCConfig, TPCCOutput, TPCCStat, TPCCTableInfo, TPCCTxnProfile,
-        TPCCTxnProfileID, TxnStorageTrait, PAGE_SIZE,
+        run_tpcc_for_thread, tpcc_load_all_tables, tpcc_show_table_stats, DeliveryTxn, NewOrderTxn, OrderStatusTxn, PaymentTxn, StockLevelTxn, TPCCConfig, TPCCOutput, TPCCStat, TPCCTableInfo, TPCCTxnProfile, TPCCTxnProfileID, TxnStorageTrait, PAGE_SIZE
     },
     txn_storage::NoWaitTxnStorage,
 };
@@ -40,7 +38,7 @@ pub fn main() {
     let bp = get_test_bp(num_frames);
     let txn_storage = NoWaitTxnStorage::new(&bp);
     let tbl_info = tpcc_load_all_tables(&txn_storage, &config);
-    // show_table_stats(&txn_storage, &tbl_info);
+    tpcc_show_table_stats(&txn_storage, &tbl_info);
 
     println!("BP stats after load: \n{}", bp.stats());
 
