@@ -2,7 +2,6 @@ mod inmem;
 mod locktable;
 mod ondisk;
 mod ondisk_2pl;
-mod ondisk_silo;
 mod txn_storage_trait;
 
 pub use inmem::{InMemDummyTxnHandle, InMemIterator, InMemStorage};
