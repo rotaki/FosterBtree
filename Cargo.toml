@@ -5,7 +5,14 @@ edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [features]
-default = ["256k_page"]
+default = [
+    "sec_bench_no_hint",
+    "sec_bench_page_hint",
+    "sec_bench_page_frame_hint",
+    "sec_bench_page_slot_hint",
+    "sec_bench_page_frame_slot_hint",
+    # "o_direct"
+]
 log_trace = []
 log_debug = []
 log_info = []
@@ -14,6 +21,7 @@ log_error = []
 stat = []
 
 # Page sizes. If page sizes are larger than 256k, pages will be heap allocated to avoid stack overflow.
+# Default is 16KB (defined in page.rs)
 4k_page = []
 8k_page = []
 16k_page = []
@@ -25,11 +33,16 @@ stat = []
 1m_page = ["heap_allocated_page"]
 heap_allocated_page = []
 
-# YCSB workloads
-ycsb_fbt = []
-ycsb_hash_fbt = []
-ycsb_hash_chain = []
-ycsb_hash_bloom_chain = []
+# Secondary index benchmarks
+sec_bench_no_hint = []
+sec_bench_page_hint = []
+sec_bench_page_frame_hint = []
+sec_bench_page_slot_hint = []
+sec_bench_page_frame_slot_hint = []
+
+# Hints
+no_tree_hint = []
+no_bp_hint = []
 
 # Old iterator for foster btree
 old_iter = []
@@ -37,6 +50,8 @@ old_iter = []
 async_write = ["io-uring", "libc"]
 # Async IO with prefetching
 new_async_write = ["io-uring", "libc"]
+# O_DIRECT
+o_direct = ["libc"]
 
 [dependencies]
 tempfile = "3.8"
@@ -47,15 +62,16 @@ chrono = "0.4"
 lazy_static = { version = "1.4" }
 clap = {version = "4.5", features = ["derive"]}
 concurrent-queue = "2.5"
-io-uring = {version = "0.6", optional = true}
+io-uring = {version = "0.7", optional = true}
 libc = {version = "0.2", optional = true}
 zipf = "7.0.1"
-fastbloom = "0.7"
+memchr = "2.7.4"
+dashmap = "6.1"
+criterion = { version = "0.5", features = ["html_reports"]}
 
 [dev-dependencies]
-criterion = { version = "0.5", features = ["html_reports"]}
 serde_cbor = "0.11"
-rstest = "0.22"
+rstest = "0.23"
 
 # For wasm (uncomment to use)
 # [lib]
@@ -67,7 +83,7 @@ wasm-bindgen = "0.2"
 lto = true
 panic = "abort"
 codegen-units = 1
-debug = true # For perf
+# debug = true # For perf
 
 [[bench]]
 name = "foster_btree_insert"

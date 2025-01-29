@@ -1,11 +1,13 @@
+use std::collections::BTreeMap;
+
 use super::buffer_frame::{FrameReadGuard, FrameWriteGuard};
 
-use crate::{file_manager::FMError, page::PageId};
+use crate::page::PageId;
 
 pub type DatabaseId = u16;
 pub type ContainerId = u16;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ContainerKey {
     pub db_id: DatabaseId,
     pub c_id: ContainerId,
@@ -108,16 +110,16 @@ impl std::fmt::Display for PageFrameKey {
 #[derive(Debug, PartialEq)]
 pub enum MemPoolStatus {
     FileManagerNotFound,
-    FileManagerError(FMError),
+    FileManagerError(String),
     PageNotFound,
     FrameReadLatchGrantFailed,
     FrameWriteLatchGrantFailed,
     CannotEvictPage,
 }
 
-impl From<FMError> for MemPoolStatus {
-    fn from(s: FMError) -> Self {
-        MemPoolStatus::FileManagerError(s)
+impl From<std::io::Error> for MemPoolStatus {
+    fn from(s: std::io::Error) -> Self {
+        MemPoolStatus::FileManagerError(s.to_string())
     }
 }
 
@@ -137,6 +139,61 @@ impl std::fmt::Display for MemPoolStatus {
                 write!(f, "[MP] All frames are latched and cannot evict page")
             }
         }
+    }
+}
+
+pub struct MemoryStats {
+    pub num_frames_in_mem: usize,
+    pub new_page_created: usize,    // Number of new pages created
+    pub read_page_from_disk: usize, // Number of pages read
+    pub write_page_to_disk: usize,  // Number of pages written
+    pub containers: BTreeMap<ContainerKey, i32>, // Number of pages of each container in memory
+}
+
+impl MemoryStats {
+    pub fn new() -> Self {
+        MemoryStats {
+            num_frames_in_mem: 0,
+            new_page_created: 0,
+            read_page_from_disk: 0,
+            write_page_to_disk: 0,
+            containers: BTreeMap::new(),
+        }
+    }
+
+    pub fn diff(&self, previous: &MemoryStats) -> MemoryStats {
+        assert_eq!(self.num_frames_in_mem, previous.num_frames_in_mem);
+        MemoryStats {
+            num_frames_in_mem: self.num_frames_in_mem,
+            new_page_created: self.new_page_created - previous.new_page_created,
+            read_page_from_disk: self.read_page_from_disk - previous.read_page_from_disk,
+            write_page_to_disk: self.write_page_to_disk - previous.write_page_to_disk,
+            containers: self.containers.clone(),
+        }
+    }
+}
+
+impl std::fmt::Display for MemoryStats {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Set to "N/A" if usize::MAX, otherwise format as a right-aligned string
+        let format_count = |count| {
+            if count == usize::MAX {
+                "N/A".to_string()
+            } else {
+                format!("{}", count)
+            }
+        };
+
+        let num_frames_in_mem = format_count(self.num_frames_in_mem);
+        let new_count = format_count(self.new_page_created);
+        let read_count = format_count(self.read_page_from_disk);
+        let write_count = format_count(self.write_page_to_disk);
+
+        write!(
+            f,
+            "Frames in mem: {}, New: {}, Read From Disk: {}, Write To Disk: {}, Containers: {:?}",
+            num_frames_in_mem, new_count, read_count, write_count, self.containers
+        )
     }
 }
 
@@ -188,7 +245,7 @@ pub trait MemPool: Sync + Send {
     fn fast_evict(&self, frame_id: u32) -> Result<(), MemPoolStatus>;
 
     /// Return the runtime statistics of the memory pool.
-    fn stats(&self) -> (usize, usize, usize);
+    fn stats(&self) -> MemoryStats;
 
     /// Reset the runtime statistics of the memory pool.
     fn reset_stats(&self);

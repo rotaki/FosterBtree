@@ -1,5 +1,4 @@
 use std::{
-    collections::BTreeMap,
     sync::{atomic::AtomicU32, Arc},
     time::Duration,
 };
@@ -9,8 +8,8 @@ use crate::log;
 use crate::{
     access_method::AccessMethodError,
     bp::prelude::*,
-    log_debug, log_info, log_trace, log_warn,
-    page::{Page, PageId, PAGE_SIZE},
+    log_debug, log_info, log_trace,
+    page::{Page, PageId},
 };
 
 use super::read_optimized_page::ReadOptimizedPage;

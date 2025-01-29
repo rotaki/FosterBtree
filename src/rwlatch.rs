@@ -12,6 +12,23 @@ impl Default for RwLatch {
     }
 }
 
+impl std::fmt::Display for RwLatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
+
+impl std::fmt::Debug for RwLatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let cnt = self.cnt.load(Ordering::Acquire);
+        match cnt {
+            0 => write!(f, "Unlocked"),
+            cnt if cnt > 0 => write!(f, "Shared({})", cnt),
+            _ => write!(f, "Exclusive"),
+        }
+    }
+}
+
 impl RwLatch {
     #[allow(dead_code)]
     pub fn is_locked(&self) -> bool {

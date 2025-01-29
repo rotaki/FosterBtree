@@ -25,11 +25,11 @@ fn main() {
 
     run_bench(insert_params, kvs, tree.clone());
 
-    println!("After Insertion\n{:?}", tree.mem_pool.stats());
+    println!("After Insertion\n{}", tree.mem_pool.stats());
     tree.mem_pool.flush_all().unwrap();
-    println!("After Flushing\n{:?}", tree.mem_pool.stats());
+    println!("After Flushing\n{}", tree.mem_pool.stats());
     tree.mem_pool.reset_stats();
-    println!("After Resetting Stats\n{:?}", tree.mem_pool.stats());
+    println!("After Resetting Stats\n{}", tree.mem_pool.stats());
 
     #[cfg(feature = "stat")]
     {
@@ -49,11 +49,11 @@ fn main() {
         total_len += k.len() + v.len();
     }
 
-    println!("After Scan\n{:?}", tree.mem_pool.stats());
+    println!("After Scan\n{}", tree.mem_pool.stats());
     tree.mem_pool.flush_all().unwrap();
-    println!("After Flushing\n{:?}", tree.mem_pool.stats());
+    println!("After Flushing\n{}", tree.mem_pool.stats());
     tree.mem_pool.reset_stats();
-    println!("After Resetting Stats\n{:?}", tree.mem_pool.stats());
+    println!("After Resetting Stats\n{}", tree.mem_pool.stats());
 
     println!("Total length of keys and values: {}", total_len);
 

@@ -1,429 +1,199 @@
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use clap::Parser;
-use core::panic;
 use fbtree::{
-    access_method::prelude::*,
-    access_method::{OrderedUniqueKeyIndex, UniqueKeyIndex},
-    bp::{get_test_bp, BufferPool},
-    prelude::PAGE_SIZE,
-    random::gen_random_byte_vec,
-};
-use rand::prelude::Distribution;
-use rand::Rng;
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
+    bp::{get_test_bp, MemPool},
+    prelude::{
+        run_ycsb_for_thread, ycsb_load_all_tables, ycsb_show_table_stats, ReadTxn, TxnStorageTrait,
+        UpdateTxn, YCSBConfig, YCSBOutput, YCSBStat, YCSBTableInfo, YCSBTxnProfile,
+        YCSBTxnProfileID, PAGE_SIZE,
+    },
+    txn_storage::NoWaitTxnStorage,
 };
 
-use fbtree::{
-    bp::{ContainerKey, MemPool},
-    prelude::FosterBtree,
-    random::gen_random_int,
-};
+// #[global_allocator]
+// static ALLOC: rpmalloc::RpMalloc = rpmalloc::RpMalloc;
 
-#[derive(Debug, Parser, Clone)]
-pub struct YCSBParams {
-    /// Workload type
-    #[clap(short, long, default_value = "A")]
-    pub workload_type: char,
-    // Number of threads
-    #[clap(short, long, default_value = "1")]
-    pub threads: usize,
-    /// Number of hash buckets if applicable
-    /// Default 1024
-    #[clap(short = 'p', long, default_value = "1024")]
-    pub buckets: usize,
-    /// Buffer pool size. if 0 panic
-    #[clap(short, long, default_value = "100000")]
-    pub bp_size: usize,
-    /// Number of records. Default 10 M
-    #[clap(short, long, default_value = "10000000")]
-    pub num_keys: usize,
-    /// Key size
-    #[clap(short, long, default_value = "8")]
-    pub key_size: usize,
-    /// Record size
-    #[clap(short, long, default_value = "1000")]
-    pub record_size: usize,
-    /// Skew factor
-    #[clap(short, long, default_value = "0.0")]
-    pub skew_factor: f64,
-    /// Warmup time in seconds
-    #[clap(short, long, default_value = "10")]
-    pub warmup_time: usize,
-    /// Execution time in seconds
-    #[clap(short, long, default_value = "10")]
-    pub exec_time: usize,
-}
-
-// Returns the proportion of each workload type
-// (read, update, scan, insert, read-modify-write)
-fn workload_proportion(workload_type: char) -> (usize, usize, usize, usize, usize) {
-    match workload_type {
-        'A' => (50, 50, 0, 0, 0), // Update heavy
-        'B' => (95, 5, 0, 0, 0),  // Read mostly
-        'C' => (100, 0, 0, 0, 0), // Read only
-        'D' => {
-            panic!("Workload type D not supported yet");
-            // (5, 0, 0, 95, 0),  // Read latest workload
-        }
-        'E' => {
-            panic!("Workload type E not supported yet");
-            // (0, 0, 95, 5, 0) // Scan workload
-        }
-        'F' => {
-            panic!("Workload type F not supported yet");
-            // (50, 0, 0, 0, 50) // Read-modify-write workload
-        }
-        'X' => {
-            // My workload. Scan only.
-            (0, 0, 100, 0, 0)
-        }
-        _ => panic!("Invalid workload type. Choose from A, B, C, D, E, F"),
+pub fn main() {
+    println!("Page size: {}", PAGE_SIZE);
+    #[cfg(feature = "no_tree_hint")]
+    {
+        println!("Tree hint disabled");
     }
-}
-
-fn get_key_bytes(key: usize, key_size: usize) -> Vec<u8> {
-    if key_size < std::mem::size_of::<usize>() {
-        panic!("Key size is less than the size of usize");
+    #[cfg(not(feature = "no_tree_hint"))]
+    {
+        println!("Tree hint enabled");
     }
-    let mut key_vec = vec![0u8; key_size];
-    let bytes = key.to_be_bytes().to_vec();
-    key_vec[key_size - bytes.len()..].copy_from_slice(&bytes);
-    key_vec
-}
-
-fn from_key_bytes(key: &[u8]) -> usize {
-    // The last 8 bytes of the key is the key
-
-    usize::from_be_bytes(
-        key[key.len() - std::mem::size_of::<usize>()..]
-            .try_into()
-            .unwrap(),
-    )
-}
-
-fn get_key(num_keys: usize, skew_factor: f64) -> usize {
-    let mut rng = rand::thread_rng();
-    if skew_factor <= 0f64 {
-        rng.gen_range(0..num_keys)
-    } else {
-        let zipf = zipf::ZipfDistribution::new(num_keys, skew_factor).unwrap();
-        let sample = zipf.sample(&mut rng);
-        sample - 1
+    #[cfg(feature = "no_bp_hint")]
+    {
+        println!("BP hint disabled");
     }
-}
-
-fn get_new_value(value_size: usize) -> Vec<u8> {
-    gen_random_byte_vec(value_size, value_size)
-}
-
-pub struct KeyValueGenerator {
-    key_size: usize,
-    value_size: usize,
-    start_key: usize, // Inclusive
-    end_key: usize,   // Exclusive
-}
-
-impl KeyValueGenerator {
-    pub fn new(partition: usize, num_keys: usize, key_size: usize, value_size: usize) -> Vec<Self> {
-        // Divide the keys equally among the partitions and
-        // assign the remaining keys to the last partition
-        let num_keys_per_partition = num_keys / partition;
-        let mut generators = Vec::new();
-        let mut count = 0;
-        for i in 0..partition {
-            let start_key = count;
-            let end_key = if i == partition - 1 {
-                num_keys
-            } else {
-                count + num_keys_per_partition
-            };
-            count = end_key;
-
-            generators.push(Self {
-                key_size,
-                value_size,
-                start_key,
-                end_key,
-            });
-        }
-        generators
+    #[cfg(not(feature = "no_bp_hint"))]
+    {
+        println!("BP hint enabled");
     }
-}
+    let config = YCSBConfig::parse();
+    println!("config: {:?}", config);
 
-impl Iterator for KeyValueGenerator {
-    type Item = (Vec<u8>, Vec<u8>);
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.start_key >= self.end_key {
-            return None;
-        }
-        let key = get_key_bytes(self.start_key, self.key_size);
-        let value = gen_random_byte_vec(self.value_size, self.value_size);
-        self.start_key += 1;
-
-        Some((key, value))
-    }
-}
-
-pub fn load_table(params: &YCSBParams, table: &Arc<impl UniqueKeyIndex + Send + Sync + 'static>) {
-    let num_insertion_threads = 6;
-
-    let mut gen = KeyValueGenerator::new(
-        num_insertion_threads,
-        params.num_keys,
-        params.key_size,
-        params.record_size,
+    // Set frames for 1GB memory per warehouses
+    // Compute the expected size of the tree.
+    // There are two indices, primary and secondary, and each entry is a key-value pair.
+    // To account for the internal nodes and extra space for each entry, we multiply by 4 and add 20 bytes per entry.
+    let size = 2 * 4 * config.num_keys * (20 + config.key_size + config.value_size);
+    let num_frames = size / PAGE_SIZE;
+    println!("num_frames: {}", num_frames);
+    println!(
+        "expected size in gigabytes: {}",
+        size as f64 / 1024.0 / 1024.0 / 1024.0
     );
+    let bp = get_test_bp(num_frames);
+    let txn_storage = NoWaitTxnStorage::new(&bp);
+    let tbl_info = ycsb_load_all_tables(&txn_storage, &config);
+    ycsb_show_table_stats(&txn_storage, &tbl_info);
 
-    // Multi-thread insert. Use 6 threads to insert the keys.
+    println!("BP stats after load: \n{}", bp.stats());
+
+    // ycsb_preliminary_secondary_scan(&txn_storage, &tbl_info);
+
+    /*
+    // Test all transactions
+    let mut stat = YCSBStat::new();
+    let mut out = YCSBOutput::new();
+    test_all_transactions(&config, &txn_storage, &tbl_info, &mut stat, &mut out);
+    println!("{}", stat);
+    */
+
+    let mut stats_and_outs = Vec::with_capacity(config.num_threads);
+    let flag = AtomicBool::new(true); // while flag is true, keep running the benchmark
+
+    // Warmup
     std::thread::scope(|s| {
-        for _ in 0..6 {
-            let table = table.clone();
-            let key_gen = gen.pop().unwrap();
+        for i in 0..config.num_threads {
+            let thread_id = i;
+            let config_ref = &config;
+            let txn_storage_ref = &txn_storage;
+            let tbl_info_ref = &tbl_info;
+            let flag_ref = &flag;
             s.spawn(move || {
-                for (key, value) in key_gen {
-                    table.insert(&key, &value).unwrap();
-                }
+                run_ycsb_for_thread(
+                    thread_id,
+                    config_ref,
+                    txn_storage_ref,
+                    tbl_info_ref,
+                    flag_ref,
+                );
             });
+        }
+        // Start timer for config duration
+        std::thread::sleep(std::time::Duration::from_secs(config.warmup_time));
+        flag.store(false, Ordering::Release);
+
+        // Automatically join all threads
+    });
+
+    println!("BP stats after warmup: \n{}", bp.stats());
+
+    flag.store(true, Ordering::Release);
+    // Run the benchmark
+    std::thread::scope(|s| {
+        let mut handlers = Vec::with_capacity(config.num_threads);
+        for i in 0..config.num_threads {
+            let thread_id = i;
+            let config_ref = &config;
+            let txn_storage_ref = &txn_storage;
+            let tbl_info_ref = &tbl_info;
+            let flag_ref = &flag;
+            let handler = s.spawn(move || {
+                run_ycsb_for_thread(
+                    thread_id,
+                    config_ref,
+                    txn_storage_ref,
+                    tbl_info_ref,
+                    flag_ref,
+                )
+            });
+            handlers.push(handler);
+        }
+        // Start timer for config duration
+        std::thread::sleep(std::time::Duration::from_secs(config.exec_time));
+        flag.store(false, Ordering::Release);
+
+        for handler in handlers {
+            stats_and_outs.push(handler.join().unwrap());
         }
     });
-}
 
-pub fn execute_workload(
-    params: &YCSBParams,
-    table: Arc<impl UniqueKeyIndex + Send + Sync + 'static>,
-) -> (usize, usize, usize, usize, usize) {
-    let warmup_flag = Arc::new(AtomicBool::new(true)); // Flag to stop the warmup
-    let exec_flag = Arc::new(AtomicBool::new(true)); // Flag to stop the workload
+    let mut final_stat = YCSBStat::new();
+    for (stat, _) in stats_and_outs {
+        final_stat.add(&stat);
+    }
+    let agg_stat = final_stat.aggregate_perf();
 
-    let (read, update, scan, insert, rmw) = workload_proportion(params.workload_type);
+    let num_keys = config.num_keys;
+    let key_size = config.key_size;
+    let value_size = config.value_size;
+    let num_threads = config.num_threads;
+    let seconds = config.exec_time;
 
-    // Execute the workload
-    let mut threads = Vec::new();
+    println!(
+        "{} keys(s), {} byte(s) key, {} byte(s) value, {} thread(s), {} second(s)",
+        num_keys, key_size, value_size, num_threads, seconds
+    );
+    println!("    commits: {}", agg_stat.num_commits);
+    println!("    sys_aborts: {}", agg_stat.num_sys_aborts);
+    println!(
+        "Throughput: {} txns/s",
+        agg_stat.num_commits as f64 / seconds as f64
+    );
 
-    for _ in 0..params.threads {
-        threads.push(std::thread::spawn({
-            let table = table.clone();
-            let warmup_flag = warmup_flag.clone();
-            let exec_flag = exec_flag.clone();
-            let params = params.clone();
-            move || {
-                let mut read_count = 0;
-                let mut update_count = 0;
-                let scan_count = 0;
-                let insert_count = 0;
-                let rmw_count = 0;
+    println!("\nDetails:");
 
-                while exec_flag.load(Ordering::Relaxed) {
-                    let x = gen_random_int(1, 100);
-                    if x <= read {
-                        let key = get_key(params.num_keys, params.skew_factor);
-                        // Read
-                        let _ = table.get(&get_key_bytes(key, params.key_size)).unwrap();
-                        if !warmup_flag.load(Ordering::Relaxed) {
-                            read_count += 1;
-                        }
-                    } else if x <= read + update {
-                        // Update
-                        let key = get_key(params.num_keys, params.skew_factor);
-                        table
-                            .update(
-                                &get_key_bytes(key, params.key_size),
-                                &get_new_value(params.record_size),
-                            )
-                            .unwrap();
-                        if !warmup_flag.load(Ordering::Relaxed) {
-                            update_count += 1;
-                        }
-                    } else if x <= read + update + scan {
-                        unreachable!()
-                        /*
-                        let start_key = get_key(params.num_keys, params.skew_factor);
-                        let end_key = start_key + 100;
-                        let start_bytes = get_key_bytes(start_key, params.key_size);
-                        let end_bytes = get_key_bytes(end_key, params.key_size);
-                        let iter = table.scan_range(&start_bytes, &end_bytes);
-                        // Check the scan results
-                        for (key, value) in iter {
-                            assert_eq!(key.len(), params.key_size);
-                            assert_eq!(value.len(), params.record_size);
-                        }
-
-                        // Scan
-                        if !warmup_flag.load(Ordering::Relaxed) {
-                            scan_count += 1;
-                        }
-                        */
-                    } else if x <= read + update + scan + insert {
-                        // Insert
-                        unreachable!();
-                        // if !warmup_flag.load(Ordering::Relaxed) {
-                        //     insert_count += 1;
-                        // }
-                    } else if x <= read + update + scan + insert + rmw {
-                        // Read-modify-write
-                        unreachable!();
-                        // if !warmup_flag.load(Ordering::Relaxed) {
-                        //     rmw_count += 1;
-                        // }
-                    } else {
-                        panic!("Invalid operation");
-                    }
-                }
-                (
-                    read_count,
-                    update_count,
-                    scan_count,
-                    insert_count,
-                    rmw_count,
-                )
-            }
-        }));
+    for p in 0..YCSBTxnProfileID::Max as u8 {
+        let p = YCSBTxnProfileID::from(p);
+        let profile = format!("{}", p);
+        let tries = final_stat[p].num_commits + final_stat[p].num_sys_aborts;
+        println!(
+        "    {:<15} c[{:6.2}%]:{:8}({:6.2}%)  sa:{:8}({:6.2}%)  avgl:{:8.0}  minl:{:8}  maxl:{:8}",
+        profile,
+        (final_stat[p].num_commits as f64) / (agg_stat.num_commits as f64) * 100.0,
+        final_stat[p].num_commits,
+        (final_stat[p].num_commits as f64) / (tries as f64) * 100.0,
+        final_stat[p].num_sys_aborts,
+        (final_stat[p].num_sys_aborts as f64) / (tries as f64) * 100.0,
+        (final_stat[p].total_latency as f64) / (final_stat[p].num_commits as f64),
+        if final_stat[p].min_latency == std::u64::MAX {
+            0
+        } else {
+            final_stat[p].min_latency
+        },
+        final_stat[p].max_latency
+    );
     }
 
-    // Wait for the warmup time
-    std::thread::sleep(std::time::Duration::from_secs(params.warmup_time as u64));
-    warmup_flag.store(false, Ordering::Relaxed);
+    println!("\nStat Details:");
+    println!("{}", final_stat);
 
-    // Wait for the execution time
-    std::thread::sleep(std::time::Duration::from_secs(params.exec_time as u64));
-    exec_flag.store(false, Ordering::Relaxed);
+    println!("BP stats: \n{}", bp.stats());
+}
 
-    // Collect the stats
-    let mut read_count = 0;
-    let mut update_count = 0;
-    let mut scan_count = 0;
-    let mut insert_count = 0;
-    let mut rmw_count = 0;
-    for t in threads {
-        let (r, u, s, i, m) = t.join().unwrap();
-        read_count += r;
-        update_count += u;
-        scan_count += s;
-        insert_count += i;
-        rmw_count += m;
+pub fn test_all_transactions<T: TxnStorageTrait>(
+    config: &YCSBConfig,
+    txn_storage: &T,
+    tbl_info: &YCSBTableInfo,
+    stat: &mut YCSBStat,
+    out: &mut YCSBOutput,
+) {
+    let count = 10000;
+
+    println!("Running {} read transactions", count);
+    for _ in 0..count {
+        let txn = ReadTxn::new(config);
+        txn.run(config, txn_storage, tbl_info, stat, out);
     }
 
-    (
-        read_count,
-        update_count,
-        scan_count,
-        insert_count,
-        rmw_count,
-    )
-}
-
-#[cfg(not(any(
-    feature = "ycsb_fbt",
-    feature = "ycsb_hash_fbt",
-    feature = "ycsb_hash_chain",
-    feature = "ycsb_hash_bloom_chain"
-)))]
-fn get_index(bp: Arc<BufferPool>, _params: &YCSBParams) -> Arc<FosterBtree<BufferPool>> {
-    Arc::new(FosterBtree::new(ContainerKey::new(0, 0), bp))
-}
-
-#[cfg(feature = "ycsb_fbt")]
-fn get_index(bp: Arc<BufferPool>, _params: &YCSBParams) -> Arc<FosterBtree<BufferPool>> {
-    println!("Using FosterBtree");
-    Arc::new(FosterBtree::new(ContainerKey::new(0, 0), bp))
-}
-
-#[cfg(feature = "ycsb_hash_fbt")]
-fn get_index(bp: Arc<BufferPool>, params: &YCSBParams) -> Arc<HashFosterBtree<BufferPool>> {
-    println!("Using HashFosterBtree");
-    Arc::new(HashFosterBtree::new(
-        ContainerKey::new(0, 0),
-        bp,
-        params.buckets,
-    ))
-}
-
-#[cfg(feature = "ycsb_hash_chain")]
-fn get_index(bp: Arc<BufferPool>, params: &YCSBParams) -> Arc<HashReadOptimize<BufferPool>> {
-    println!("Using HashChain");
-    Arc::new(HashReadOptimize::new(
-        ContainerKey::new(0, 0),
-        bp,
-        params.buckets,
-    ))
-}
-
-#[cfg(feature = "ycsb_hash_bloom_chain")]
-fn get_index(bp: Arc<BufferPool>, params: &YCSBParams) -> Arc<HashBloomChain<BufferPool>> {
-    println!("Using HashBloomChain");
-    Arc::new(HashBloomChain::new(
-        ContainerKey::new(0, 0),
-        bp,
-        params.buckets,
-    ))
-}
-
-fn print_stats(r: usize, u: usize, s: usize, i: usize, m: usize, total: usize, exec_time: usize) {
-    println!(
-        "{:16}: {:10}, ratio: {:.2}%",
-        "Read count",
-        r,
-        r as f64 / total as f64 * 100f64
-    );
-    println!(
-        "{:16}: {:10}, ratio: {:.2}%",
-        "Update count",
-        u,
-        u as f64 / total as f64 * 100f64
-    );
-    println!(
-        "{:16}: {:10}, ratio: {:.2}%",
-        "Scan count",
-        s,
-        s as f64 / total as f64 * 100f64
-    );
-    println!(
-        "{:16}: {:10}, ratio: {:.2}%",
-        "Insert count",
-        i,
-        i as f64 / total as f64 * 100f64
-    );
-    println!(
-        "{:16}: {:10}, ratio: {:.2}%",
-        "RMW count",
-        m,
-        m as f64 / total as f64 * 100f64
-    );
-    println!("{:16}: {:10}", "Total count", total);
-    println!(
-        "{:16}: {:10.2} ops/sec",
-        "Throughput",
-        total as f64 / exec_time as f64
-    );
-}
-
-fn main() {
-    let params = YCSBParams::parse();
-    println!("Page size: {}", PAGE_SIZE);
-    println!("{:?}", params);
-
-    let bp = get_test_bp(params.bp_size);
-    let table = get_index(bp.clone(), &params);
-
-    println!("Loading table...");
-    load_table(&params, &table);
-
-    println!("Buffer pool stats after load: {:?}", bp.stats());
-
-    println!("--- Page stats ---\n{}", table.page_stats(false));
-
-    println!("Flushing buffer pool...");
-    bp.flush_all().unwrap();
-
-    println!("Resetting stats...");
-    bp.reset_stats();
-
-    println!("Executing workload...");
-    let (r, u, s, i, m) = execute_workload(&params, table);
-
-    println!("Buffer pool stats after exec: {:?}", bp.stats());
-
-    print_stats(r, u, s, i, m, r + u + s + i + m, params.exec_time);
+    println!("Running {} update transactions", count);
+    for _ in 0..count {
+        let txn = UpdateTxn::new(config);
+        txn.run(config, txn_storage, tbl_info, stat, out);
+    }
 }

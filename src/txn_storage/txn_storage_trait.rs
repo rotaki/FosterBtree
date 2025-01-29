@@ -4,12 +4,12 @@ use crate::{
 };
 use std::collections::HashSet;
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone, Copy)]
 pub enum TxnStorageStatus {
     // Not found
     DBNotFound,
     ContainerNotFound,
-    TxNotFound,
+    TxnNotFound,
     KeyNotFound,
 
     // Already exists
@@ -20,14 +20,8 @@ pub enum TxnStorageStatus {
     // Transaction errors
     TxnConflict,
 
-    // System errors
-    SystemAbort,
-
-    // Other errors
-    Error,
-
-    // Access method errrors
-    AccessError(AccessMethodError),
+    Aborted,
+    AbortFailed,
 }
 
 // To String conversion
@@ -36,15 +30,14 @@ impl From<TxnStorageStatus> for String {
         match status {
             TxnStorageStatus::DBNotFound => "DB not found".to_string(),
             TxnStorageStatus::ContainerNotFound => "Container not found".to_string(),
-            TxnStorageStatus::TxNotFound => "Tx not found".to_string(),
+            TxnStorageStatus::TxnNotFound => "Tx not found".to_string(),
             TxnStorageStatus::KeyNotFound => "Key not found".to_string(),
             TxnStorageStatus::DBExists => "DB already exists".to_string(),
             TxnStorageStatus::ContainerExists => "Container already exists".to_string(),
             TxnStorageStatus::KeyExists => "Key already exists".to_string(),
             TxnStorageStatus::TxnConflict => "Txn conflict".to_string(),
-            TxnStorageStatus::SystemAbort => "System abort".to_string(),
-            TxnStorageStatus::Error => "Error".to_string(),
-            TxnStorageStatus::AccessError(status) => format!("Access error: {:?}", status),
+            TxnStorageStatus::Aborted => "Aborted".to_string(),
+            TxnStorageStatus::AbortFailed => "Abort failed".to_string(),
         }
     }
 }
@@ -54,7 +47,12 @@ impl From<AccessMethodError> for TxnStorageStatus {
         match status {
             AccessMethodError::KeyNotFound => TxnStorageStatus::KeyNotFound,
             AccessMethodError::KeyDuplicate => TxnStorageStatus::KeyExists,
-            _ => TxnStorageStatus::AccessError(status),
+            AccessMethodError::PageReadLatchFailed
+            | AccessMethodError::PageWriteLatchFailed
+            | AccessMethodError::NotEnoughMemory => TxnStorageStatus::TxnConflict,
+            other => {
+                panic!("Unexpected AccessMethodError: {:?}", other)
+            }
         }
     }
 }
@@ -75,42 +73,59 @@ impl DBOptions {
     }
 }
 
+/// Container data structure
 #[derive(Clone)]
-pub enum ContainerType {
+pub enum ContainerDS {
     Hash,
     BTree,
     AppendOnly,
 }
 
-impl ContainerType {
+impl ContainerDS {
     pub fn to_bytes(&self) -> Vec<u8> {
         match self {
-            ContainerType::Hash => vec![0],
-            ContainerType::BTree => vec![1],
-            ContainerType::AppendOnly => vec![2],
+            ContainerDS::Hash => vec![0],
+            ContainerDS::BTree => vec![1],
+            ContainerDS::AppendOnly => vec![2],
         }
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Self {
         match bytes[0] {
-            0 => ContainerType::Hash,
-            1 => ContainerType::BTree,
-            2 => ContainerType::AppendOnly,
+            0 => ContainerDS::Hash,
+            1 => ContainerDS::BTree,
+            2 => ContainerDS::AppendOnly,
             _ => panic!("Invalid container type"),
         }
     }
 }
 
+#[derive(Clone)]
+pub enum ContainerType {
+    Primary,
+    Secondary(ContainerId), // Secondary container with primary container id
+}
+
 pub struct ContainerOptions {
     name: String,
+    c_ds: ContainerDS,
     c_type: ContainerType,
 }
 
 impl ContainerOptions {
-    pub fn new(name: &str, c_type: ContainerType) -> Self {
+    pub fn primary(name: &str, c_ds: ContainerDS) -> Self {
         ContainerOptions {
             name: String::from(name),
-            c_type,
+            c_ds,
+            c_type: ContainerType::Primary,
+        }
+    }
+
+    pub fn secondary(name: &str, c_ds: ContainerDS, primary_c_id: ContainerId) -> Self {
+        ContainerOptions {
+            name: String::from(name),
+            c_ds,
+            c_type: ContainerType::Secondary(primary_c_id),
         }
     }
 
@@ -118,7 +133,11 @@ impl ContainerOptions {
         &self.name
     }
 
-    pub fn get_type(&self) -> ContainerType {
+    pub fn data_structure(&self) -> ContainerDS {
+        self.c_ds.clone()
+    }
+
+    pub fn container_type(&self) -> ContainerType {
         self.c_type.clone()
     }
 }
@@ -128,7 +147,8 @@ pub struct TxnOptions {}
 
 #[derive(Default)]
 pub struct ScanOptions {
-    // currently scans all keys
+    pub lower: Vec<u8>,
+    pub upper: Vec<u8>,
 }
 
 impl ScanOptions {
@@ -145,42 +165,58 @@ pub trait TxnStorageTrait: Send + Sync {
     fn open_db(&self, options: DBOptions) -> Result<DatabaseId, TxnStorageStatus>;
 
     // Close connection with the db
-    fn close_db(&self, db_id: &DatabaseId) -> Result<(), TxnStorageStatus>;
+    fn close_db(&self, db_id: DatabaseId) -> Result<(), TxnStorageStatus>;
 
     // Delete the db
-    fn delete_db(&self, db_id: &DatabaseId) -> Result<(), TxnStorageStatus>;
+    fn delete_db(&self, db_id: DatabaseId) -> Result<(), TxnStorageStatus>;
 
     // Create a container in the db
     fn create_container(
         &self,
-        txn: &Self::TxnHandle,
-        db_id: &DatabaseId,
+        db_id: DatabaseId,
         options: ContainerOptions,
     ) -> Result<ContainerId, TxnStorageStatus>;
 
     // Delete a container from the db
     fn delete_container(
         &self,
-        txn: &Self::TxnHandle,
-        db_id: &DatabaseId,
-        c_id: &ContainerId,
+        db_id: DatabaseId,
+        c_id: ContainerId,
     ) -> Result<(), TxnStorageStatus>;
 
-    // List all container names in the db
-    fn list_containers(
+    fn get_container_stats(
         &self,
-        txn: &Self::TxnHandle,
-        db_id: &DatabaseId,
-    ) -> Result<HashSet<ContainerId>, TxnStorageStatus>;
+        db_id: DatabaseId,
+        c_id: ContainerId,
+    ) -> Result<String, TxnStorageStatus> {
+        Ok("Stats disabled".to_string())
+    }
 
-    // Begin a transaction
+    // List all container names in the db
+    fn list_containers(&self, db_id: DatabaseId) -> Result<HashSet<ContainerId>, TxnStorageStatus>;
+
+    // Insert value without transaction support
+    fn raw_insert_value(
+        &self,
+        db_id: DatabaseId,
+        c_id: ContainerId,
+        key: Vec<u8>,
+        value: Vec<u8>,
+    ) -> Result<(), TxnStorageStatus>;
+
+    // Transactional operations
+
+    // Begin a transaction with the database.
     fn begin_txn(
         &self,
-        db_id: &DatabaseId,
+        db_id: DatabaseId,
         options: TxnOptions,
     ) -> Result<Self::TxnHandle, TxnStorageStatus>;
 
-    // Commit a transaction
+    // Commit a transaction.
+    // If transaction has been committed safely, it returns Ok(()).
+    // If transaction aborted, it returns Err(TxnStorageStatus::Aborted).
+    // If transaction is not committed safely, it returns Err(TxnStorageStatus::AbortFailed).
     fn commit_txn(&self, txn: &Self::TxnHandle, async_commit: bool)
         -> Result<(), TxnStorageStatus>;
 
@@ -196,14 +232,14 @@ pub trait TxnStorageTrait: Send + Sync {
     fn num_values(
         &self,
         txn: &Self::TxnHandle,
-        c_id: &ContainerId,
+        c_id: ContainerId,
     ) -> Result<usize, TxnStorageStatus>;
 
     // Check if value exists
     fn check_value<K: AsRef<[u8]>>(
         &self,
         txn: &Self::TxnHandle,
-        c_id: &ContainerId,
+        c_id: ContainerId,
         key: K,
     ) -> Result<bool, TxnStorageStatus>;
 
@@ -211,7 +247,7 @@ pub trait TxnStorageTrait: Send + Sync {
     fn get_value<K: AsRef<[u8]>>(
         &self,
         txn: &Self::TxnHandle,
-        c_id: &ContainerId,
+        c_id: ContainerId,
         key: K,
     ) -> Result<Vec<u8>, TxnStorageStatus>;
 
@@ -219,7 +255,7 @@ pub trait TxnStorageTrait: Send + Sync {
     fn insert_value(
         &self,
         txn: &Self::TxnHandle,
-        c_id: &ContainerId,
+        c_id: ContainerId,
         key: Vec<u8>,
         value: Vec<u8>,
     ) -> Result<(), TxnStorageStatus>;
@@ -228,7 +264,7 @@ pub trait TxnStorageTrait: Send + Sync {
     fn insert_values(
         &self,
         txn: &Self::TxnHandle,
-        c_id: &ContainerId,
+        c_id: ContainerId,
         kvs: Vec<(Vec<u8>, Vec<u8>)>,
     ) -> Result<(), TxnStorageStatus>;
 
@@ -236,16 +272,28 @@ pub trait TxnStorageTrait: Send + Sync {
     fn update_value<K: AsRef<[u8]>>(
         &self,
         txn: &Self::TxnHandle,
-        c_id: &ContainerId,
+        c_id: ContainerId,
         key: K,
         value: Vec<u8>,
+    ) -> Result<(), TxnStorageStatus>;
+
+    // Update value based on a function
+    // On in-memory systems, &mut [u8] can point to the actual value in memory or the entry in the read-write set.
+    // On on-disk systems with immediate modifications, the original value is copied and modified with this function and then written back.
+    // On on-disk systems with deferred modifications, the original value is copied into the read-write set and modified there.
+    fn update_value_with_func<K: AsRef<[u8]>, F: FnOnce(&mut [u8])>(
+        &self,
+        txn: &Self::TxnHandle,
+        c_id: ContainerId,
+        key: K,
+        func: F,
     ) -> Result<(), TxnStorageStatus>;
 
     // Delete value
     fn delete_value<K: AsRef<[u8]>>(
         &self,
         txn: &Self::TxnHandle,
-        c_id: &ContainerId,
+        c_id: ContainerId,
         key: K,
     ) -> Result<(), TxnStorageStatus>;
 
@@ -253,13 +301,14 @@ pub trait TxnStorageTrait: Send + Sync {
     fn scan_range(
         &self,
         txn: &Self::TxnHandle,
-        c_id: &ContainerId,
+        c_id: ContainerId,
         options: ScanOptions,
     ) -> Result<Self::IteratorHandle, TxnStorageStatus>;
 
     // Iterate next
     fn iter_next(
         &self,
+        txn: &Self::TxnHandle,
         iter: &Self::IteratorHandle,
     ) -> Result<Option<(Vec<u8>, Vec<u8>)>, TxnStorageStatus>;
 

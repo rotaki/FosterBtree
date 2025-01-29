@@ -221,9 +221,7 @@ mod tests {
     use std::{collections::HashSet, fs::File, sync::Arc};
 
     use crate::{
-        access_method::AccessMethodError,
         bp::{get_in_mem_pool, get_test_bp, BufferPool},
-        log_info,
         prelude::UniqueKeyIndex,
         random::RandomKVs,
     };
@@ -635,7 +633,7 @@ mod tests {
         );
         let verify_kvs = kvs.clone();
 
-        log_info!("Number of keys: {}", num_keys);
+        println!("Number of keys: {}", num_keys);
 
         // Use 3 threads to insert keys into the tree.
         // Increment the counter for each key inserted and if the counter is equal to the number of keys, then all keys have been inserted.
@@ -645,9 +643,9 @@ mod tests {
                 for kvs_i in kvs.iter() {
                     let chain = chain.clone();
                     s.spawn(move || {
-                        log_info!("Spawned");
+                        println!("Spawned");
                         for (key, val) in kvs_i.iter() {
-                            log_info!("Inserting key {:?}", key);
+                            println!("Inserting key {:?}", key);
                             chain.insert(key, val).unwrap();
                         }
                     });
@@ -711,9 +709,9 @@ mod tests {
             let c_key = ContainerKey::new(0, 0);
             let store = Arc::new(HashReadOptimize::load(c_key, bp.clone(), 0));
 
-            let mut scanner = store.scan();
+            let scanner = store.scan();
             // Remove the keys from the expected_vals set as they are scanned.
-            while let Some((key, val)) = scanner.next() {
+            for (key, val) in scanner {
                 let key = key.to_vec();
                 let val = val.to_vec();
                 assert!(expected_vals.remove(&(key, val)));

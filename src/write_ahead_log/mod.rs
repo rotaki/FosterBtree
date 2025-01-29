@@ -1,11 +1,5 @@
 mod log_buffer;
-mod log_record;
-
-use log_buffer::LogBuffer;
-pub type LogBufferRef = std::sync::Arc<LogBuffer>;
 
 pub mod prelude {
-    pub use super::log_buffer::{LogBuffer, Lsn, LSN_SIZE};
-    pub use super::log_record::LogRecord;
-    pub use super::LogBufferRef;
+    pub use super::log_buffer::{Lsn, LSN_SIZE};
 }

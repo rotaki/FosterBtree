@@ -27,21 +27,21 @@ fn main() {
         println!("File stats: ");
         println!("{}", phm.bp.file_stats());
     }
-    println!("After Insertion\n{:?}", phm.bp.stats());
+    println!("After Insertion\n{}", phm.bp.stats());
     phm.bp.flush_all().unwrap();
-    println!("After Flushing\n{:?}", phm.bp.stats());
+    println!("After Flushing\n{}", phm.bp.stats());
     phm.bp.reset_stats();
-    println!("After Resetting Stats\n{:?}", phm.bp.stats());
+    println!("After Resetting Stats\n{}", phm.bp.stats());
 
     let mut total_len = 0;
     for (k, v) in phm.iter() {
         total_len += k.len() + v.len();
     }
 
-    println!("After Scan\n{:?}", phm.bp.stats());
+    println!("After Scan\n{}", phm.bp.stats());
     phm.bp.flush_all().unwrap();
-    println!("After Flushing\n{:?}", phm.bp.stats());
+    println!("After Flushing\n{}", phm.bp.stats());
     phm.bp.reset_stats();
-    println!("After Resetting Stats\n{:?}", phm.bp.stats());
+    println!("After Resetting Stats\n{}", phm.bp.stats());
     println!("Total length of keys and values: {}", total_len);
 }

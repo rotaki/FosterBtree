@@ -137,7 +137,7 @@ impl<'a> FrameReadGuard<'a> {
     }
 }
 
-impl<'a> Drop for FrameReadGuard<'a> {
+impl Drop for FrameReadGuard<'_> {
     fn drop(&mut self) {
         if !self.upgraded.load(Ordering::Relaxed) {
             self.buffer_frame.latch.release_shared();
@@ -221,7 +221,7 @@ impl<'a> FrameWriteGuard<'a> {
     }
 }
 
-impl<'a> Drop for FrameWriteGuard<'a> {
+impl Drop for FrameWriteGuard<'_> {
     fn drop(&mut self) {
         if !self.downgraded.load(Ordering::Relaxed) {
             self.buffer_frame.latch.release_exclusive();
