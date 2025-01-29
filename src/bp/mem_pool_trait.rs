@@ -150,6 +150,12 @@ pub struct MemoryStats {
     pub containers: BTreeMap<ContainerKey, i32>, // Number of pages of each container in memory
 }
 
+impl Default for MemoryStats {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MemoryStats {
     pub fn new() -> Self {
         MemoryStats {

@@ -19,9 +19,7 @@ use fbtree::{
     access_method::fbt::{BTreeKey, FosterBtreeCursor},
     bp::{ContainerId, ContainerKey, MemPool, PageFrameKey},
     prelude::{FosterBtree, FosterBtreePage, PageId},
-    random::small_thread_rng,
     utils::Permutation,
-    zipfan::FastZipf,
 };
 
 use clap::Parser;
@@ -30,10 +28,7 @@ use fbtree::{
     bp::{get_test_bp, BufferPool},
     random::gen_random_byte_vec,
 };
-use rand::prelude::Distribution;
-use rand::Rng;
 use std::{
-    fs::File,
     io::Write,
     process::Command,
     sync::{
@@ -49,6 +44,12 @@ pub struct HintHitStats {
     pub frame_miss: AtomicU64,
     pub slot_hit: AtomicU64,
     pub slot_miss: AtomicU64,
+}
+
+impl Default for HintHitStats {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl HintHitStats {

@@ -6,8 +6,6 @@ use fbtree::{
     prelude::PAGE_SIZE,
     random::gen_random_byte_vec,
 };
-use rand::prelude::Distribution;
-use rand::Rng;
 use std::{sync::Arc, time::Duration};
 
 use fbtree::{

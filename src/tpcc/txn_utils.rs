@@ -1,5 +1,4 @@
 use core::panic;
-use rand::Rng;
 use std::cmp;
 use std::hash::Hasher;
 use std::ops::{Index, IndexMut};

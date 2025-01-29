@@ -1,4 +1,4 @@
-use std::cell::{RefCell, UnsafeCell};
+use std::cell::RefCell;
 use std::ops::Index;
 
 use rand::distr::uniform::SampleUniform;

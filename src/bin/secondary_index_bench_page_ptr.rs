@@ -30,9 +30,7 @@ use fbtree::{
     bp::{get_test_bp, BufferPool},
     random::gen_random_byte_vec,
 };
-use rand::prelude::Distribution;
-use rand::Rng;
-use std::{fs::File, io::Write, process::Command, sync::Arc};
+use std::{process::Command, sync::Arc};
 
 pub trait SecondaryIndex<T: MemPool> {
     fn get(&self, key: &[u8]) -> Result<*const u8, AccessMethodError>;

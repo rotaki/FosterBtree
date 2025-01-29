@@ -1,6 +1,6 @@
 use core::panic;
 use rand::prelude::Distribution;
-use rand::{Rng, RngCore};
+use rand::Rng;
 use std::{collections::HashMap, ops::Index};
 
 use crate::random::small_thread_rng;
