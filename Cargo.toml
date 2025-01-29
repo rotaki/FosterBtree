@@ -5,14 +5,7 @@ edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [features]
-default = [
-    "sec_bench_no_hint",
-    "sec_bench_page_hint",
-    "sec_bench_page_frame_hint",
-    "sec_bench_page_slot_hint",
-    "sec_bench_page_frame_slot_hint",
-    # "o_direct"
-]
+default = []
 log_trace = []
 log_debug = []
 log_info = []
@@ -54,30 +47,29 @@ new_async_write = ["io-uring", "libc"]
 o_direct = ["libc"]
 
 [dependencies]
-tempfile = "3.8"
-rand = "0.8"
-getrandom = { version = "0.2", features = ["js"] }
-serde = { version = "1.0", features = ["derive"] }
-chrono = "0.4"
+tempfile = "3.16.0"
+rand = {version = "0.9.0", features = ["small_rng"]}
+getrandom = { version = "0.3.1", features = ["wasm_js"] }
+serde = { version = "1.0.217", features = ["derive"] }
+chrono = "0.4.39"
 lazy_static = { version = "1.4" }
-clap = {version = "4.5", features = ["derive"]}
+clap = {version = "4.5.27", features = ["derive"]}
 concurrent-queue = "2.5"
-io-uring = {version = "0.7", optional = true}
-libc = {version = "0.2", optional = true}
-zipf = "7.0.1"
+io-uring = {version = "0.7.4", optional = true}
+libc = {version = "0.2.169", optional = true}
 memchr = "2.7.4"
 dashmap = "6.1"
 criterion = { version = "0.5", features = ["html_reports"]}
 
 [dev-dependencies]
 serde_cbor = "0.11"
-rstest = "0.23"
+rstest = "0.24.0"
 
 # For wasm (uncomment to use)
 # [lib]
 # crate-type = ["cdylib", "rlib"]
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-wasm-bindgen = "0.2"
+wasm-bindgen = "0.2.100"
 
 [profile.release]
 lto = true

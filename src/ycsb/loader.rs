@@ -1,8 +1,10 @@
 use core::panic;
 use rand::prelude::Distribution;
-use rand::Rng;
+use rand::{Rng, RngCore};
 use std::{collections::HashMap, ops::Index};
 
+use crate::random::small_thread_rng;
+use crate::zipfan::FastZipf;
 use crate::{
     bp::ContainerId,
     prelude::{
@@ -63,14 +65,9 @@ impl Iterator for KeyValueGenerator {
 }
 
 fn get_key(num_keys: usize, skew_factor: f64) -> usize {
-    let mut rng = rand::thread_rng();
-    if skew_factor <= 0f64 {
-        rng.gen_range(0..num_keys)
-    } else {
-        let zipf = zipf::ZipfDistribution::new(num_keys, skew_factor).unwrap();
-        let sample = zipf.sample(&mut rng);
-        sample - 1
-    }
+    let rng = small_thread_rng();
+    let mut zipf = FastZipf::new(rng, skew_factor, num_keys);
+    zipf.sample()
 }
 
 fn get_new_value(value_size: usize) -> Vec<u8> {

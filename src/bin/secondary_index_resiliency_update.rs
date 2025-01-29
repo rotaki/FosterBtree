@@ -18,8 +18,8 @@ use criterion::black_box;
 use fbtree::{
     access_method::fbt::{BTreeKey, FosterBtreeCursor},
     bp::{ContainerId, ContainerKey, MemPool, PageFrameKey},
-    prelude::FosterBtreePage,
-    prelude::{FosterBtree, PageId},
+    prelude::{FosterBtree, FosterBtreePage, PageId},
+    random::small_thread_rng,
     utils::Permutation,
 };
 
@@ -295,27 +295,6 @@ fn get_key_bytes(key: usize, key_size: usize) -> Vec<u8> {
     key_vec
 }
 
-fn from_key_bytes(key: &[u8]) -> usize {
-    // The last 8 bytes of the key is the key
-
-    usize::from_be_bytes(
-        key[key.len() - std::mem::size_of::<usize>()..]
-            .try_into()
-            .unwrap(),
-    )
-}
-
-fn get_key(num_keys: usize, skew_factor: f64) -> usize {
-    let mut rng = rand::thread_rng();
-    if skew_factor <= 0f64 {
-        rng.gen_range(0..num_keys)
-    } else {
-        let zipf = zipf::ZipfDistribution::new(num_keys, skew_factor).unwrap();
-        let sample = zipf.sample(&mut rng);
-        sample - 1
-    }
-}
-
 fn get_new_value(value_size: usize) -> Vec<u8> {
     gen_random_byte_vec(value_size, value_size)
 }
@@ -393,7 +372,7 @@ fn update_primary<M: MemPool>(
         // Random value size between params.record_size 0.0 and 2.0
         let value_size_min = (params.record_size as f64 * 0.0) as usize;
         let value_size_max = (params.record_size as f64 * 2.0) as usize;
-        let value_size = rand::thread_rng().gen_range(value_size_min..value_size_max);
+        let value_size = small_thread_rng().random_range(value_size_min..value_size_max);
         let value = get_new_value(value_size);
         primary.update(&key_bytes, &value).unwrap();
     }

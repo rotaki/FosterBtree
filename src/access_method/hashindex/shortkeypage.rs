@@ -919,6 +919,8 @@ impl ShortKeyPage for Page {
 
 #[cfg(test)]
 mod tests {
+    use crate::random::small_thread_rng;
+
     use super::*;
     use rand::Rng;
 
@@ -927,8 +929,8 @@ mod tests {
     }
 
     fn random_string(length: usize) -> Vec<u8> {
-        rand::thread_rng()
-            .sample_iter(&rand::distributions::Alphanumeric)
+        small_thread_rng()
+            .sample_iter(&rand::distr::Alphanumeric)
             .take(length)
             .collect()
     }
@@ -1071,7 +1073,7 @@ mod tests {
     #[test]
     fn stress_test_random_keys_and_values() {
         let mut page = <Page as ShortKeyPage>::new();
-        let mut rng = rand::thread_rng();
+        let mut rng = small_thread_rng();
         let mut keys_and_values = vec![];
 
         for _ in 0..40 {
@@ -1091,7 +1093,7 @@ mod tests {
     #[test]
     fn stress_test_random_keys_and_values_with_order() {
         let mut page = <Page as ShortKeyPage>::new();
-        let mut rng = rand::thread_rng();
+        let mut rng = small_thread_rng();
         let mut keys_and_values = vec![];
 
         for _ in 0..40 {
@@ -1268,7 +1270,7 @@ mod tests {
     #[test]
     fn stress_test_random_keys_and_values_with_merge() {
         let mut page = <Page as ShortKeyPage>::new();
-        let mut rng = rand::thread_rng();
+        let mut rng = small_thread_rng();
         let mut keys_and_values = vec![];
 
         for _ in 0..40 {
@@ -1291,7 +1293,7 @@ mod tests {
     #[test]
     fn stress_test_random_keys_and_values_with_merge_and_order() {
         let mut page = <Page as ShortKeyPage>::new();
-        let mut rng = rand::thread_rng();
+        let mut rng = small_thread_rng();
         let mut keys_and_values = vec![];
 
         for _ in 0..40 {
@@ -1491,7 +1493,7 @@ mod tests {
     #[test]
     fn stress_test_multiple_operations() {
         let mut page = <Page as ShortKeyPage>::new();
-        let mut rng = rand::thread_rng();
+        let mut rng = small_thread_rng();
         let mut keys_and_values = vec![];
         let mut inserted_keys = vec![];
 

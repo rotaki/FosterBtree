@@ -7,6 +7,7 @@ pub mod txn_storage;
 pub mod utils;
 pub mod write_ahead_log;
 pub mod ycsb;
+pub mod zipfan;
 
 mod file_manager;
 mod hybrid_latch;

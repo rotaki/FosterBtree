@@ -588,27 +588,6 @@ fn get_key_bytes(key: usize, key_size: usize) -> Vec<u8> {
     key_vec
 }
 
-fn from_key_bytes(key: &[u8]) -> usize {
-    // The last 8 bytes of the key is the key
-
-    usize::from_be_bytes(
-        key[key.len() - std::mem::size_of::<usize>()..]
-            .try_into()
-            .unwrap(),
-    )
-}
-
-fn get_key(num_keys: usize, skew_factor: f64) -> usize {
-    let mut rng = rand::thread_rng();
-    if skew_factor <= 0f64 {
-        rng.gen_range(0..num_keys)
-    } else {
-        let zipf = zipf::ZipfDistribution::new(num_keys, skew_factor).unwrap();
-        let sample = zipf.sample(&mut rng);
-        sample - 1
-    }
-}
-
 fn get_new_value(value_size: usize) -> Vec<u8> {
     gen_random_byte_vec(value_size, value_size)
 }
@@ -750,7 +729,6 @@ fn main() {
     println!("Params: {:?}", params);
 
     // if sec_bench_normal is specified, or nothing is specified
-    #[cfg(feature = "sec_bench_no_hint")]
     {
         // flush_internal_cache_and_everything();
         println!("=========================================================================================");
@@ -773,7 +751,6 @@ fn main() {
     }
 
     /*
-    #[cfg(feature = "sec_bench_page_hint")]
     {
         flush_internal_cache_and_everything();
         println!("=========================================================================================");
@@ -795,7 +772,6 @@ fn main() {
         println!("=========================================================================================");
     }
 
-    #[cfg(feature = "sec_bench_page_frame_hint")]
     {
         flush_internal_cache_and_everything();
         println!("=========================================================================================");
@@ -817,7 +793,6 @@ fn main() {
         println!("=========================================================================================");
     }
 
-    #[cfg(feature = "sec_bench_page_slot_hint")]
     {
         println!("=========================================================================================");
         let bp = get_test_bp(params.bp_size);
@@ -839,7 +814,6 @@ fn main() {
         println!("=========================================================================================");
     }
 
-    #[cfg(feature = "sec_bench_page_frame_slot_hint")]
     {
         flush_internal_cache_and_everything();
         println!("=========================================================================================");

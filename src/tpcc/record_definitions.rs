@@ -1415,28 +1415,30 @@ pub fn make_random_address(a: &mut Address) {
 // Placeholder functions for random number generation and string manipulation
 use rand::Rng;
 
+use crate::random::small_thread_rng;
+
 pub fn urand_int<T>(x: T, y: T) -> T
 where
-    T: rand::distributions::uniform::SampleUniform + PartialOrd + Copy,
+    T: rand::distr::uniform::SampleUniform + PartialOrd + Copy,
 {
-    rand::thread_rng().gen_range(x..=y)
+    small_thread_rng().gen_range(x..=y)
 }
 
 pub fn urand_double(min: u64, max: u64, divisor: u64) -> f64 {
-    (rand::thread_rng().gen_range(min..=max) as f64) / divisor as f64
+    (small_thread_rng().gen_range(min..=max) as f64) / divisor as f64
 }
 
 pub fn make_random_nstring(out: &mut [u8], min_len: usize, max_len: usize) {
-    let len = rand::thread_rng().gen_range(min_len..=max_len);
+    let len = small_thread_rng().gen_range(min_len..=max_len);
     for i in 0..len {
-        out[i] = rand::thread_rng().gen_range(b'0'..=b'9');
+        out[i] = small_thread_rng().gen_range(b'0'..=b'9');
     }
 }
 
 pub fn make_random_astring(out: &mut [u8], min_len: usize, max_len: usize) {
     const CHARSET: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
-    let len = rand::thread_rng().gen_range(min_len..=max_len);
+    let len = small_thread_rng().gen_range(min_len..=max_len);
     for i in 0..len {
-        out[i] = CHARSET[rand::thread_rng().gen_range(0..CHARSET.len())];
+        out[i] = CHARSET[small_thread_rng().gen_range(0..CHARSET.len())];
     }
 }

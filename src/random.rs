@@ -1,12 +1,42 @@
+use std::cell::{RefCell, UnsafeCell};
 use std::ops::Index;
 
-use rand::distributions::uniform::SampleUniform;
-use rand::distributions::Alphanumeric;
-use rand::distributions::WeightedIndex;
+use rand::distr::uniform::SampleUniform;
+use rand::distr::weighted::WeightedIndex;
+use rand::distr::Alphanumeric;
+use rand::rngs::SmallRng;
 use rand::{
-    distributions::{Distribution, Uniform},
-    thread_rng, Rng,
+    distr::{Distribution, Uniform},
+    rng, Rng,
 };
+use rand::{RngCore, SeedableRng};
+
+// Thread-local `SmallRng` state.
+thread_local! {
+    static THREAD_RNG_KEY: RefCell<SmallRng> = RefCell::new(SmallRng::from_os_rng());
+}
+
+/// A handle to the thread-local `SmallRng`—similar to `rand::ThreadRng`.
+#[derive(Debug, Clone)]
+pub struct SmallThreadRng;
+
+impl RngCore for SmallThreadRng {
+    fn next_u32(&mut self) -> u32 {
+        THREAD_RNG_KEY.with(|rng_cell| rng_cell.borrow_mut().next_u32())
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        THREAD_RNG_KEY.with(|rng_cell| rng_cell.borrow_mut().next_u64())
+    }
+
+    fn fill_bytes(&mut self, dest: &mut [u8]) {
+        THREAD_RNG_KEY.with(|rng_cell| rng_cell.borrow_mut().fill_bytes(dest))
+    }
+}
+
+pub fn small_thread_rng() -> SmallThreadRng {
+    SmallThreadRng
+}
 
 pub fn gen_random_pathname(prefix: Option<&str>) -> String {
     let ts_in_ns = std::time::SystemTime::now()
@@ -23,7 +53,7 @@ pub fn gen_random_pathname(prefix: Option<&str>) -> String {
 ///
 /// * `length` - The length of the string to generate.
 pub fn gen_random_string_with_length(length: usize) -> String {
-    thread_rng()
+    rng()
         .sample_iter(Alphanumeric)
         .take(length)
         .map(char::from)
@@ -31,8 +61,8 @@ pub fn gen_random_string_with_length(length: usize) -> String {
 }
 
 pub fn gen_random_byte_vec_with_length(length: usize) -> Vec<u8> {
-    let mut rng = thread_rng();
-    let range = Uniform::new_inclusive(0, 255);
+    let mut rng = rng();
+    let range = Uniform::new_inclusive(0, 255).unwrap();
     let mut vec = Vec::with_capacity(length);
     for _ in 0..length {
         vec.push(range.sample(&mut rng) as u8);
@@ -50,8 +80,8 @@ pub fn gen_random_int<T>(min: T, max: T) -> T
 where
     T: SampleUniform,
 {
-    let mut rng = thread_rng();
-    rng.sample(Uniform::new_inclusive(min, max))
+    let mut rng = rng();
+    rng.sample(Uniform::new_inclusive(min, max).unwrap())
 }
 
 pub fn gen_random_string(min: usize, max: usize) -> String {
@@ -175,7 +205,7 @@ impl<T> RandomOp<T> {
     where
         T: Clone,
     {
-        let mut rng = rand::thread_rng();
+        let mut rng = small_thread_rng();
         let index = self.distribution.sample(&mut rng);
         self.weighted_choices[index].0.clone()
     }
