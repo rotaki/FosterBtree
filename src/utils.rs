@@ -2,6 +2,8 @@ use std::ops::Index;
 
 use rand::Rng;
 
+use crate::random::small_thread_rng;
+
 #[derive(Debug, Clone)]
 pub struct Permutation {
     perm: Vec<usize>,
@@ -21,7 +23,7 @@ impl Permutation {
 
         // Now shuffle perm
         let s = perm.len();
-        let mut rng = rand::thread_rng();
+        let mut rng = small_thread_rng();
         for i in 0..(s - 1) {
             let j = rng.gen_range(0..=s - i - 1);
             assert!(i + j < s);

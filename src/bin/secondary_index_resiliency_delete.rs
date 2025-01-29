@@ -18,9 +18,10 @@ use criterion::black_box;
 use fbtree::{
     access_method::fbt::{BTreeKey, FosterBtreeCursor},
     bp::{ContainerId, ContainerKey, MemPool, PageFrameKey},
-    prelude::FosterBtreePage,
-    prelude::{FosterBtree, PageId},
+    prelude::{FosterBtree, FosterBtreePage, PageId},
+    random::small_thread_rng,
     utils::Permutation,
+    zipfan::FastZipf,
 };
 
 use clap::Parser;
@@ -295,27 +296,6 @@ fn get_key_bytes(key: usize, key_size: usize) -> Vec<u8> {
     key_vec
 }
 
-fn from_key_bytes(key: &[u8]) -> usize {
-    // The last 8 bytes of the key is the key
-
-    usize::from_be_bytes(
-        key[key.len() - std::mem::size_of::<usize>()..]
-            .try_into()
-            .unwrap(),
-    )
-}
-
-fn get_key(num_keys: usize, skew_factor: f64) -> usize {
-    let mut rng = rand::thread_rng();
-    if skew_factor <= 0f64 {
-        rng.gen_range(0..num_keys)
-    } else {
-        let zipf = zipf::ZipfDistribution::new(num_keys, skew_factor).unwrap();
-        let sample = zipf.sample(&mut rng);
-        sample - 1
-    }
-}
-
 fn get_new_value(value_size: usize) -> Vec<u8> {
     gen_random_byte_vec(value_size, value_size)
 }
@@ -454,7 +434,6 @@ fn main() {
     // All the entries in the secondary index have the valid hint to the primary index entry
     // We then perform insertions into the primary index see how many hints are invalidated
 
-    #[cfg(feature = "sec_bench_page_frame_slot_hint")]
     {
         flush_internal_cache_and_everything();
         println!("=========================================================================================");

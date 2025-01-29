@@ -247,6 +247,8 @@ impl SingleThreadLockTable {
 
 #[cfg(test)]
 mod tests {
+    use crate::random::small_thread_rng;
+
     use super::*;
     use rand::Rng;
     use std::collections::HashMap;
@@ -404,7 +406,7 @@ mod tests {
             let lock_table = Arc::clone(&lock_table);
             let keys = keys.clone();
             let handle = thread::spawn(move || {
-                let mut rng = rand::thread_rng();
+                let mut rng = small_thread_rng();
                 let mut held_shared_locks: HashMap<Vec<u8>, bool> = HashMap::new();
                 let mut held_exclusive_locks: HashMap<Vec<u8>, bool> = HashMap::new();
 

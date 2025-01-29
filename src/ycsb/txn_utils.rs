@@ -4,11 +4,12 @@ use std::{
 };
 
 use clap::Parser;
-use rand::{prelude::Distribution, Rng};
+use rand::{prelude::Distribution, rngs::SmallRng, Rng, SeedableRng};
 
 use crate::{
     prelude::{urand_int, TxnStorageStatus, TxnStorageTrait},
-    random::gen_random_byte_vec,
+    random::{gen_random_byte_vec, small_thread_rng},
+    zipfan::FastZipf,
 };
 
 // do not warn about unused imports
@@ -308,14 +309,8 @@ pub fn from_key_bytes(key: &[u8]) -> usize {
 }
 
 pub fn get_key(num_keys: usize, skew_factor: f64) -> usize {
-    let mut rng = rand::thread_rng();
-    if skew_factor <= 0f64 {
-        rng.gen_range(0..num_keys)
-    } else {
-        let zipf = zipf::ZipfDistribution::new(num_keys, skew_factor).unwrap();
-        let sample = zipf.sample(&mut rng);
-        sample - 1
-    }
+    let rng = small_thread_rng();
+    FastZipf::new(rng, skew_factor, num_keys).sample() as usize
 }
 
 pub fn get_new_value(value_size: usize) -> Vec<u8> {
