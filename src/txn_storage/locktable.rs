@@ -129,10 +129,12 @@ impl ConcurrentLockTable {
     }
 }
 
+#[allow(dead_code)]
 pub struct SingleThreadLockTable {
     hashmap: Mutex<HashMap<Vec<u8>, RwLatch>>,
 }
 
+#[allow(dead_code)]
 impl Display for SingleThreadLockTable {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut keys = vec![];
@@ -146,6 +148,7 @@ impl Display for SingleThreadLockTable {
     }
 }
 
+#[allow(dead_code)]
 impl SingleThreadLockTable {
     pub fn new() -> Self {
         SingleThreadLockTable {
@@ -411,8 +414,8 @@ mod tests {
                 let mut held_exclusive_locks: HashMap<Vec<u8>, bool> = HashMap::new();
 
                 for _ in 0..100 {
-                    let key = keys[rng.gen_range(0..keys.len())].clone();
-                    let op = rng.gen_range(0..5);
+                    let key = keys[rng.random_range(0..keys.len())].clone();
+                    let op = rng.random_range(0..5);
                     match op {
                         0 => {
                             if lock_table.try_shared(key.clone()) {
@@ -444,7 +447,7 @@ mod tests {
                         }
                         _ => {}
                     }
-                    thread::sleep(Duration::from_millis(rng.gen_range(0..5)));
+                    thread::sleep(Duration::from_millis(rng.random_range(0..5)));
                 }
 
                 for key in held_shared_locks.keys() {

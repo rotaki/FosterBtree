@@ -28,13 +28,9 @@ use fbtree::{
     bp::{get_test_bp, BufferPool},
     random::gen_random_byte_vec,
 };
-use std::{
-    io::Write,
-    process::Command,
-    sync::{
-        atomic::{AtomicU64, Ordering},
-        Arc,
-    },
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc,
 };
 
 pub struct HintHitStats {
@@ -409,21 +405,6 @@ fn run_secondary_lookups<M: MemPool, T: SecondaryIndex<M>>(
     );
 }
 
-fn flush_internal_cache_and_everything() {
-    // Sync the file system to flush pending writes
-    if let Err(e) = sync_filesystem() {
-        eprintln!("Error syncing filesystem: {}", e);
-    }
-}
-
-fn sync_filesystem() -> Result<(), std::io::Error> {
-    let status = Command::new("sync").status()?;
-    if !status.success() {
-        eprintln!("sync command failed");
-    }
-    Ok(())
-}
-
 fn main() {
     println!("Secondary index resiliency deletion benchmark");
     let params = SecBenchParams::parse();
@@ -436,7 +417,6 @@ fn main() {
     // We then perform insertions into the primary index see how many hints are invalidated
 
     {
-        flush_internal_cache_and_everything();
         println!("=========================================================================================");
         let bp = get_test_bp(params.bp_size);
         let primary = Arc::new(FosterBtree::new(ContainerKey::new(0, 0), Arc::clone(&bp)));

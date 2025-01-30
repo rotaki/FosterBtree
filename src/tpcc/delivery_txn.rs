@@ -191,12 +191,8 @@ impl TPCCTxnProfile for DeliveryTxn {
 impl DeliveryTxn {
     pub fn print_abort_details(stat: &[usize]) {
         println!("DeliveryTxn Abort Details:");
-        for i in 0..AbortID::Max as usize {
-            println!(
-                "        {:<45}: {}",
-                AbortID::from(i as u8).as_str(),
-                stat[i]
-            );
+        for (i, &count) in stat.iter().enumerate().take(AbortID::Max as usize) {
+            println!("        {:<45}: {}", AbortID::from(i as u8).as_str(), count);
         }
     }
 }

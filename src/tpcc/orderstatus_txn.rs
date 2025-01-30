@@ -207,12 +207,8 @@ impl TPCCTxnProfile for OrderStatusTxn {
 impl OrderStatusTxn {
     pub fn print_abort_details(stat: &[usize]) {
         println!("OrderStatusTxn Abort Details:");
-        for i in 0..AbortID::Max as usize {
-            println!(
-                "        {:<45}: {}",
-                AbortID::from(i as u8).as_str(),
-                stat[i]
-            );
+        for (i, &stat) in stat.iter().enumerate() {
+            println!("        {:<45}: {}", AbortID::from(i as u8).as_str(), stat,);
         }
     }
 }
@@ -227,7 +223,7 @@ pub struct OrderStatusTxnInput {
 }
 
 impl OrderStatusTxnInput {
-    pub fn new(config: &TPCCConfig, w_id: u16) -> Self {
+    pub fn new(_config: &TPCCConfig, w_id: u16) -> Self {
         let mut input = OrderStatusTxnInput {
             w_id: 0,
             d_id: 0,

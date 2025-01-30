@@ -13,7 +13,7 @@ fn bench_random_insertion(c: &mut Criterion) {
     // Generate hash maps
     let phm = gen_paged_hash_map_in_mem();
     let phm2 = gen_paged_hash_map_on_disk(bp_size);
-    let mut rhm = gen_rust_hash_map();
+    let rhm = gen_rust_hash_map();
 
     clear_cache();
     // Benchmark insertion functions
@@ -28,7 +28,7 @@ fn bench_random_insertion(c: &mut Criterion) {
 
     clear_cache();
     group.bench_function("Rust HashMap Insertion", |p| {
-        p.iter(|| insert_into_rust_hash_map(&mut rhm, &kvs))
+        p.iter(|| insert_into_rust_hash_map(&rhm, &kvs))
     });
 
     clear_cache();

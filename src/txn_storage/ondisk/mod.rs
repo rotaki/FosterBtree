@@ -20,7 +20,6 @@ use crate::{
 };
 
 pub enum Storage<M: MemPool> {
-    HashMap(),
     BTreeMap(Arc<FosterBtree<M>>),
     AppendOnly(Arc<AppendOnlyStore<M>>),
 }
@@ -68,9 +67,6 @@ impl<M: MemPool> Storage<M> {
 
     fn insert(&self, key: Vec<u8>, val: Vec<u8>) -> Result<(), TxnStorageStatus> {
         match self {
-            Storage::HashMap() => {
-                unimplemented!("Hash container not implemented")
-            }
             Storage::BTreeMap(b) => b.insert(&key, &val)?,
             Storage::AppendOnly(v) => v.append(&key, &val)?,
         };
@@ -79,11 +75,8 @@ impl<M: MemPool> Storage<M> {
 
     fn get(&self, key: &[u8]) -> Result<Vec<u8>, TxnStorageStatus> {
         let result = match self {
-            Storage::HashMap() => {
-                unimplemented!("Hash container not implemented")
-            }
             Storage::BTreeMap(b) => b.get(key)?,
-            Storage::AppendOnly(v) => {
+            Storage::AppendOnly(_v) => {
                 unimplemented!("get by key is not supported for append only container")
             }
         };
@@ -92,11 +85,8 @@ impl<M: MemPool> Storage<M> {
 
     fn update(&self, key: &[u8], val: Vec<u8>) -> Result<(), TxnStorageStatus> {
         match self {
-            Storage::HashMap() => {
-                unimplemented!("Hash container not implemented")
-            }
             Storage::BTreeMap(b) => b.update(key, &val)?,
-            Storage::AppendOnly(v) => {
+            Storage::AppendOnly(_v) => {
                 unimplemented!("update by key is not supported for append only container")
             }
         };
@@ -105,11 +95,8 @@ impl<M: MemPool> Storage<M> {
 
     fn remove(&self, key: &[u8]) -> Result<(), TxnStorageStatus> {
         match self {
-            Storage::HashMap() => {
-                unimplemented!("Hash container not implemented")
-            }
             Storage::BTreeMap(b) => b.delete(key)?,
-            Storage::AppendOnly(v) => {
+            Storage::AppendOnly(_v) => {
                 unimplemented!("remove by key is not supported for append only container")
             }
         };
@@ -118,9 +105,6 @@ impl<M: MemPool> Storage<M> {
 
     fn iter(self: &Arc<Self>) -> OnDiskIterator<M> {
         match self.as_ref() {
-            Storage::HashMap() => {
-                unimplemented!("Hash container not implemented")
-            }
             Storage::BTreeMap(b) => OnDiskIterator::btree(b.scan()),
             Storage::AppendOnly(v) => OnDiskIterator::vec(v.scan()),
         }
@@ -128,9 +112,6 @@ impl<M: MemPool> Storage<M> {
 
     fn num_values(&self) -> usize {
         match self {
-            Storage::HashMap() => {
-                unimplemented!("Hash container not implemented")
-            }
             Storage::BTreeMap(b) => b.num_kvs(),
             Storage::AppendOnly(v) => v.num_kvs(),
         }

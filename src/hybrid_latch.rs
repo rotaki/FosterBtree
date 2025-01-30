@@ -5,11 +5,13 @@ use std::{
 
 use crate::rwlatch::RwLatch;
 
+#[allow(dead_code)]
 pub struct HybridLatch {
     rwlatch: RwLatch,
     version: AtomicU64,
 }
 
+#[allow(dead_code)]
 impl HybridLatch {
     pub fn new() -> Self {
         Self {
@@ -36,11 +38,13 @@ impl HybridLatch {
     }
 }
 
+#[allow(dead_code)]
 pub struct HybridLatchGuardedStructure<T: Clone> {
     latch: HybridLatch,
     data: T,
 }
 
+#[allow(dead_code)]
 impl<T: Clone> HybridLatchGuardedStructure<T> {
     pub fn new(data: T) -> Self {
         Self {
@@ -83,11 +87,13 @@ impl<T: Clone> HybridLatchGuardedStructure<T> {
     }
 }
 
+#[allow(dead_code)]
 pub struct OptimisticReadGuard<T: Clone> {
     seen_version: u64,
     guarded_struct: *const HybridLatchGuardedStructure<T>,
 }
 
+#[allow(dead_code)]
 impl<T: Clone> OptimisticReadGuard<T> {
     pub fn validate(&self) -> bool {
         let guarded_struct = unsafe { &*self.guarded_struct };
@@ -126,11 +132,13 @@ impl<T: Clone> OptimisticReadGuard<T> {
     }
 }
 
+#[allow(dead_code)]
 pub struct WriteGuard<T: Clone> {
     downgraded: AtomicBool,
     guarded_struct: *mut HybridLatchGuardedStructure<T>,
 }
 
+#[allow(dead_code)]
 impl<T: Clone> Deref for WriteGuard<T> {
     type Target = T;
 

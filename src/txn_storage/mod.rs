@@ -198,8 +198,6 @@ mod tests {
         thread::scope(|scope| {
             for kv in kvs.iter() {
                 let storage = storage.clone();
-                let db_id = db_id;
-                let c_id = c_id;
                 scope.spawn(move || {
                     for (key, value) in kv.iter() {
                         let txn = storage.begin_txn(db_id, TxnOptions::default()).unwrap();

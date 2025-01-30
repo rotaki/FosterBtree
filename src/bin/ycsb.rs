@@ -161,7 +161,7 @@ pub fn main() {
         final_stat[p].num_sys_aborts,
         (final_stat[p].num_sys_aborts as f64) / (tries as f64) * 100.0,
         (final_stat[p].total_latency as f64) / (final_stat[p].num_commits as f64),
-        if final_stat[p].min_latency == std::u64::MAX {
+        if final_stat[p].min_latency == u64::MAX {
             0
         } else {
             final_stat[p].min_latency

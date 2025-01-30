@@ -586,10 +586,6 @@ fn get_key_bytes(key: usize, key_size: usize) -> Vec<u8> {
     key_vec
 }
 
-fn get_new_value(value_size: usize) -> Vec<u8> {
-    gen_random_byte_vec(value_size, value_size)
-}
-
 pub struct KeyValueGenerator {
     key_size: usize,
     value_size: usize,
@@ -728,7 +724,7 @@ fn main() {
 
     // if sec_bench_normal is specified, or nothing is specified
     {
-        // flush_internal_cache_and_everything();
+        flush_internal_cache_and_everything();
         println!("=========================================================================================");
         let bp = get_test_bp(params.bp_size);
         let primary = Arc::new(FosterBtree::new(ContainerKey::new(0, 0), Arc::clone(&bp)));

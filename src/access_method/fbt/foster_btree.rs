@@ -3298,18 +3298,18 @@ mod tests {
         );
         assert_eq!(child0.active_slot_count() as usize, left.len());
         assert!(!child0.has_foster_child());
-        for i in 0..left.len() {
+        for (i, &item) in left.iter().enumerate() {
             let key = child0.get_raw_key((i + 1) as u32);
-            assert_eq!(key, to_bytes(left[i]));
+            assert_eq!(key, to_bytes(item));
             let val = child0.get_val((i + 1) as u32);
-            assert_eq!(val, to_bytes(left[i]));
+            assert_eq!(val, to_bytes(item));
         }
         assert_eq!(child1.active_slot_count() as usize, right.len());
-        for i in 0..right.len() {
+        for (i, &item) in right.iter().enumerate() {
             let key = child1.get_raw_key((i + 1) as u32);
-            assert_eq!(key, to_bytes(right[i]));
+            assert_eq!(key, to_bytes(item));
             let val = child1.get_val((i + 1) as u32);
-            assert_eq!(val, to_bytes(right[i]));
+            assert_eq!(val, to_bytes(item));
         }
     }
 
@@ -3417,21 +3417,21 @@ mod tests {
             deserialize_page_id(child0.get_foster_val()).unwrap(),
             child1.get_id()
         );
-        for i in 0..left.len() {
+        for (i, &item) in left.iter().enumerate() {
             let key = child0.get_raw_key((i + 1) as u32);
-            assert_eq!(key, to_bytes(left[i]));
+            assert_eq!(key, to_bytes(item));
             let val = child0.get_val((i + 1) as u32);
-            assert_eq!(val, to_bytes(left[i]));
+            assert_eq!(val, to_bytes(item));
         }
 
         assert_eq!(child1.active_slot_count() as usize, right.len());
         assert_eq!(child1.get_low_fence().as_ref(), k1);
         assert_eq!(child1.get_high_fence().as_ref(), k2);
-        for i in 0..right.len() {
+        for (i, &item) in right.iter().enumerate() {
             let key = child1.get_raw_key((i + 1) as u32);
-            assert_eq!(key, to_bytes(right[i]));
+            assert_eq!(key, to_bytes(item));
             let val = child1.get_val((i + 1) as u32);
-            assert_eq!(val, to_bytes(right[i]));
+            assert_eq!(val, to_bytes(item));
         }
     }
 
@@ -4971,8 +4971,7 @@ mod tests {
         }
         // Scan the tree
         let iter = btree.scan();
-        let mut count = 0;
-        for (key, current_val) in iter {
+        for (count, (key, current_val)) in iter.enumerate() {
             println!(
                 "**************************** Scanning key {} **************************",
                 count
@@ -4980,7 +4979,6 @@ mod tests {
             // Check the prefix of the keys
             assert_eq!(key, inserting_key);
             assert_eq!(current_val, to_bytes(count));
-            count += 1;
         }
     }
 
@@ -5001,8 +4999,7 @@ mod tests {
         }
         // Scan the tree
         let iter = btree.scan();
-        let mut count = 0;
-        for (key, current_val) in iter {
+        for (count, (key, current_val)) in iter.enumerate() {
             println!(
                 "**************************** Scanning key {} **************************",
                 count
@@ -5010,7 +5007,6 @@ mod tests {
             // Check the prefix of the keys
             assert_eq!(key, inserting_key);
             assert_eq!(current_val, val);
-            count += 1;
         }
     }
 

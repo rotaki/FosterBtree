@@ -586,20 +586,6 @@ fn get_key_bytes(key: usize, key_size: usize) -> Vec<u8> {
     key_vec
 }
 
-fn from_key_bytes(key: &[u8]) -> usize {
-    // The last 8 bytes of the key is the key
-
-    usize::from_be_bytes(
-        key[key.len() - std::mem::size_of::<usize>()..]
-            .try_into()
-            .unwrap(),
-    )
-}
-
-fn get_new_value(value_size: usize) -> Vec<u8> {
-    gen_random_byte_vec(value_size, value_size)
-}
-
 pub struct KeyValueGenerator {
     key_size: usize,
     value_size: usize,
@@ -803,6 +789,7 @@ fn main() {
 
     */
     {
+        flush_internal_cache_and_everything();
         println!("=========================================================================================");
         let bp = get_test_bp(params.bp_size);
         let primary = Arc::new(FosterBtree::new(ContainerKey::new(0, 0), Arc::clone(&bp)));

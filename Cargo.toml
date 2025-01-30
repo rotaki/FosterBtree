@@ -26,13 +26,6 @@ stat = []
 1m_page = ["heap_allocated_page"]
 heap_allocated_page = []
 
-# Secondary index benchmarks
-sec_bench_no_hint = []
-sec_bench_page_hint = []
-sec_bench_page_frame_hint = []
-sec_bench_page_slot_hint = []
-sec_bench_page_frame_slot_hint = []
-
 # Hints
 no_tree_hint = []
 no_bp_hint = []

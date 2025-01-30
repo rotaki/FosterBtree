@@ -1,4 +1,3 @@
-
 use rand::RngCore;
 
 use crate::random::SmallThreadRng;

@@ -307,24 +307,24 @@ impl InMemIterator {
 
 /// Assumptions of InMemStorage:
 /// 1. Creation and deletion of the database is not thread-safe. This means, you can't create
-/// or delete a database while other threads are accessing the database.
+///    or delete a database while other threads are accessing the database.
 /// 2. Creation and deletion of a container is thread-safe with respect to other containers.
-/// However, deletion of a container is not thread-safe with respect to other threads accessing
-/// the same container that is being deleted. You have to make sure that no other threads are
-/// accessing the container while you are deleting. You also have to make sure that before you
-/// access the container, the container is already created (the create_container() has returned
-/// without error). If you try to access a container that is not created, it will panic as
-/// there is no container at that index in the containers vector.
+///    However, deletion of a container is not thread-safe with respect to other threads accessing
+///    the same container that is being deleted. You have to make sure that no other threads are
+///    accessing the container while you are deleting. You also have to make sure that before you
+///    access the container, the container is already created (the create_container() has returned
+///    without error). If you try to access a container that is not created, it will panic as
+///    there is no container at that index in the containers vector.
 /// 3. Accessing the container must be thread-safe. This means, you can concurrently access
-/// the container from multiple threads. insert, get, update, remove, scan_range, iter_next
-/// should be thread-safe. In the case of InMemStorage, while iterator is alive, insert,
-/// update, remove should be blocked. get and scan_range should be allowed because they are
-/// read-only operations.
+///    the container from multiple threads. insert, get, update, remove, scan_range, iter_next
+///    should be thread-safe. In the case of InMemStorage, while iterator is alive, insert,
+///    update, remove should be blocked. get and scan_range should be allowed because they are
+///    read-only operations.
 /// 4. For simplicity, a single database can be created. If you try to create multiple databases,
-/// it will return DBExists error.
+///    it will return DBExists error.
 /// 5. The iterator next() must not be called using multiple threads. next() is not thread-safe with
-/// respect to other next() calls of the same iterator. However, next() is thread-safe with respect
-/// to other operations on the same container including next() of other iterators.
+///    respect to other next() calls of the same iterator. However, next() is thread-safe with respect
+///    to other operations on the same container including next() of other iterators.
 pub struct InMemStorage {
     db_created: UnsafeCell<bool>,
     container_lock: RwLock<()>, // lock for container operations

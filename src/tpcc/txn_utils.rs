@@ -367,7 +367,7 @@ impl ThreadLocalData {
 /// Function to check if the transaction did not succeed.
 pub fn not_successful<K>(config: &TPCCConfig, res: &Result<K, TxnStorageStatus>) -> bool {
     match res {
-        Err(e) => {
+        Err(_e) => {
             log_info!("Error: {:?}", e);
             true // System abort
         }

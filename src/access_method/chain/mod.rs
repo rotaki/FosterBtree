@@ -155,15 +155,15 @@ impl<T: MemPool> UniqueKeyIndex for HashReadOptimize<T> {
 
     fn upsert_with_merge(
         &self,
-        key: &[u8],
-        value: &[u8],
-        merge_fn: impl Fn(&[u8], &[u8]) -> Vec<u8>,
+        _key: &[u8],
+        _value: &[u8],
+        _merge_fn: impl Fn(&[u8], &[u8]) -> Vec<u8>,
     ) -> Result<(), AccessMethodError> {
         unimplemented!()
         // self.get_bucket(key).upsert_with_merge(key, value, merge_fn)
     }
 
-    fn delete(&self, key: &[u8]) -> Result<(), AccessMethodError> {
+    fn delete(&self, _key: &[u8]) -> Result<(), AccessMethodError> {
         unimplemented!()
         // self.get_bucket(key).delete(key)
     }

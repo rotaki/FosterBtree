@@ -4,7 +4,6 @@ use std::{
 };
 
 use clap::Parser;
-use rand::{prelude::Distribution, Rng};
 
 use crate::{
     prelude::{urand_int, TxnStorageStatus, TxnStorageTrait},

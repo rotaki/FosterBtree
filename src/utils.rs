@@ -25,7 +25,7 @@ impl Permutation {
         let s = perm.len();
         let mut rng = small_thread_rng();
         for i in 0..(s - 1) {
-            let j = rng.gen_range(0..=s - i - 1);
+            let j = rng.random_range(0..=s - i - 1);
             assert!(i + j < s);
             if j != 0 {
                 perm.swap(i, i + j);

@@ -15,13 +15,11 @@
 // to find the value.
 // We compare the speed of the two access methods without any relocation.
 
-use criterion::black_box;
 use fbtree::{
     access_method::fbt::{BTreeKey, FosterBtreeCursor},
     bp::{ContainerId, ContainerKey, MemPool, PageFrameKey},
     prelude::FosterBtreePage,
     prelude::{FosterBtree, PageId},
-    utils::Permutation,
 };
 
 use clap::Parser;
@@ -30,7 +28,7 @@ use fbtree::{
     bp::{get_test_bp, BufferPool},
     random::gen_random_byte_vec,
 };
-use std::{process::Command, sync::Arc};
+use std::sync::Arc;
 
 pub trait SecondaryIndex<T: MemPool> {
     fn get(&self, key: &[u8]) -> Result<*const u8, AccessMethodError>;
@@ -657,65 +655,6 @@ pub fn load_table(params: &SecBenchParams, table: &Arc<FosterBtree<BufferPool>>)
             });
         }
     });
-}
-
-fn bench_secondary<M: MemPool, T: SecondaryIndex<M>>(
-    params: &SecBenchParams,
-    secondary: &T,
-    bp: &Arc<M>,
-) -> u128 {
-    println!("{}", secondary.stats());
-
-    // Keep calling get on the secondary index to measure the speed.
-    let warmup = params.warmup_time;
-    let exec = params.exec_time;
-
-    let mut avg = 0;
-    for i in 0..warmup + exec {
-        let bp_stats_pre = bp.stats();
-        let perm = Permutation::new(0, params.num_keys - 1);
-        let start = std::time::Instant::now();
-        for key in perm {
-            let key_bytes = get_key_bytes(key, params.key_size);
-            let result = secondary.get(&key_bytes).unwrap();
-            black_box(result);
-        }
-        // for _ in 0..params.num_keys {
-        //     let key = get_key(params.num_keys, params.skew_factor);
-        //     let key_bytes = get_key_bytes(key, params.key_size);
-        //     let result = secondary.get(&key_bytes).unwrap();
-        //     black_box(result);
-        // }
-        let elapsed = start.elapsed();
-        let bp_stats_post = bp.stats();
-        let diff = bp_stats_post.diff(&bp_stats_pre);
-        let name = if i < warmup { "Warmup" } else { "Execution" };
-        println!(
-            "Iteration({}) {}: time: {:?}, bp_stats: {}",
-            name, i, elapsed, diff
-        );
-        if i >= warmup {
-            avg += elapsed.as_millis();
-        }
-    }
-    avg /= exec as u128;
-    println!("Average time: {} ms", avg);
-    avg
-}
-
-fn flush_internal_cache_and_everything() {
-    // Sync the file system to flush pending writes
-    if let Err(e) = sync_filesystem() {
-        eprintln!("Error syncing filesystem: {}", e);
-    }
-}
-
-fn sync_filesystem() -> Result<(), std::io::Error> {
-    let status = Command::new("sync").status()?;
-    if !status.success() {
-        eprintln!("sync command failed");
-    }
-    Ok(())
 }
 
 fn main() {

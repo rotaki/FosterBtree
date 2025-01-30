@@ -1168,7 +1168,7 @@ mod tests {
         let func = simple_hash_func;
 
         for _ in 0..20000 {
-            let operation: u8 = rng.gen_range(0..3);
+            let operation: u8 = rng.random_range(0..3);
             let key = random_string(10);
             let value = random_string(20);
 
@@ -1208,7 +1208,7 @@ mod tests {
                 }
                 3 if !inserted_keys.is_empty() => {
                     // Remove
-                    let remove_index = rng.gen_range(0..inserted_keys.len());
+                    let remove_index = rng.random_range(0..inserted_keys.len());
                     let remove_key = inserted_keys.remove(remove_index);
                     assert!(
                         map.remove(&remove_key).is_some(),
@@ -1465,7 +1465,7 @@ mod tests {
         let func = simple_hash_func;
 
         for _ in 0..1000 {
-            let operation: u8 = rng.gen_range(0..4);
+            let operation: u8 = rng.random_range(0..4);
             let key = random_string(10);
             let value = random_string(20);
 
@@ -1505,7 +1505,7 @@ mod tests {
                 }
                 3 if !inserted_keys.is_empty() => {
                     // Remove
-                    let remove_index = rng.gen_range(0..inserted_keys.len());
+                    let remove_index = rng.random_range(0..inserted_keys.len());
                     let remove_key = inserted_keys.remove(remove_index);
                     assert!(
                         map.remove(&remove_key).is_some(),
@@ -1530,7 +1530,7 @@ mod tests {
         let mut inserted_keys = Vec::new(); // Track keys that are currently valid for removal
 
         for _ in 0..1000 {
-            let operation: u8 = rng.gen_range(0..4);
+            let operation: u8 = rng.random_range(0..4);
             let key = random_string(10);
             let value = random_string(20);
 
@@ -1570,7 +1570,7 @@ mod tests {
                 }
                 3 if !inserted_keys.is_empty() => {
                     // Remove
-                    let remove_index = rng.gen_range(0..inserted_keys.len());
+                    let remove_index = rng.random_range(0..inserted_keys.len());
                     let remove_key = inserted_keys.remove(remove_index);
                     assert!(
                         map.remove(&remove_key).is_some(),
@@ -1655,7 +1655,7 @@ mod tests {
     //             for _ in 0..num_operations_per_thread {
     //                 let key = random_string(10);
     //                 let value = random_string(20);
-    //                 let operation: u8 = rng.gen_range(0..4);
+    //                 let operation: u8 = rng.random_range(0..4);
 
     //                 match operation {
     //                     0 => { // Insert

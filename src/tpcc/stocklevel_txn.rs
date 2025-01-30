@@ -114,11 +114,11 @@ impl TPCCTxnProfile for StockLevelTxn {
 impl StockLevelTxn {
     pub fn print_abort_details(stat: &[usize]) {
         println!("StockLevelTxn Abort Details:");
-        for i in 0..AbortID::Max as usize {
+        for (i, &count) in stat.iter().enumerate().take(AbortID::Max as usize) {
             println!(
                 "        {:<45}: {}",
                 AbortID::from(i as u8).as_str(),
-                stat[i]
+                count,
             );
         }
     }

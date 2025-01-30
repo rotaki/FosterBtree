@@ -288,12 +288,8 @@ impl NewOrderTxn {
 
     pub fn print_abort_details(stat: &[usize]) {
         println!("NewOrderTxn Abort Details:");
-        for i in 0..AbortID::Max as usize {
-            println!(
-                "        {:<45}: {}",
-                AbortID::from(i as u8).as_str(),
-                stat[i]
-            );
+        for (i, &count) in stat.iter().enumerate().take(AbortID::Max as usize) {
+            println!("        {:<45}: {}", AbortID::from(i as u8).as_str(), count);
         }
     }
 }
@@ -369,13 +365,13 @@ impl NewOrderTxnInput {
             if self.is_remote { "t" } else { "f" },
             self.ol_cnt
         );
-        for (i, item) in self.items.iter().enumerate() {
+        for _item in self.items.iter() {
             log_info!(
                 " ({}): ol_i_id={} ol_supply_w_id={} c_quantity={}",
-                i + 1,
-                item.ol_i_id,
-                item.ol_supply_w_id,
-                item.ol_quantity
+                _i + 1,
+                _item.ol_i_id,
+                _item.ol_supply_w_id,
+                _item.ol_quantity
             );
         }
     }

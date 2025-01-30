@@ -1078,8 +1078,8 @@ mod tests {
 
         for _ in 0..40 {
             // Adjust the number for more intense testing
-            let key: Vec<u8> = (0..8).map(|_| rng.gen_range(0x00..0xFF)).collect();
-            let value: Vec<u8> = (0..50).map(|_| rng.gen_range(0x00..0xFF)).collect(); // Random length values
+            let key: Vec<u8> = (0..8).map(|_| rng.random_range(0x00..0xFF)).collect();
+            let value: Vec<u8> = (0..50).map(|_| rng.random_range(0x00..0xFF)).collect(); // Random length values
             keys_and_values.push((key.clone(), value.clone()));
             assert_eq!(page.upsert(&key, &value), (true, None));
         }
@@ -1098,8 +1098,8 @@ mod tests {
 
         for _ in 0..40 {
             // Adjust the number for more intense testing
-            let key: Vec<u8> = (0..8).map(|_| rng.gen_range(0x00..0xFF)).collect();
-            let value: Vec<u8> = (0..50).map(|_| rng.gen_range(0x00..0xFF)).collect(); // Random length values
+            let key: Vec<u8> = (0..8).map(|_| rng.random_range(0x00..0xFF)).collect();
+            let value: Vec<u8> = (0..50).map(|_| rng.random_range(0x00..0xFF)).collect(); // Random length values
             keys_and_values.push((key.clone(), value.clone()));
             assert_eq!(page.upsert(&key, &value), (true, None));
         }
@@ -1275,8 +1275,8 @@ mod tests {
 
         for _ in 0..40 {
             // Adjust the number for more intense testing
-            let key: Vec<u8> = (0..8).map(|_| rng.gen_range(0x00..0xFF)).collect();
-            let value: Vec<u8> = (0..50).map(|_| rng.gen_range(0x00..0xFF)).collect(); // Random length values
+            let key: Vec<u8> = (0..8).map(|_| rng.random_range(0x00..0xFF)).collect();
+            let value: Vec<u8> = (0..50).map(|_| rng.random_range(0x00..0xFF)).collect(); // Random length values
             keys_and_values.push((key.clone(), value.clone()));
             assert_eq!(
                 page.upsert_with_merge(&key, &value, update_fn),
@@ -1298,8 +1298,8 @@ mod tests {
 
         for _ in 0..40 {
             // Adjust the number for more intense testing
-            let key: Vec<u8> = (0..8).map(|_| rng.gen_range(0x00..0xFF)).collect();
-            let value: Vec<u8> = (0..50).map(|_| rng.gen_range(0x00..0xFF)).collect(); // Random length values
+            let key: Vec<u8> = (0..8).map(|_| rng.random_range(0x00..0xFF)).collect();
+            let value: Vec<u8> = (0..50).map(|_| rng.random_range(0x00..0xFF)).collect(); // Random length values
             keys_and_values.push((key.clone(), value.clone()));
             assert_eq!(
                 page.upsert_with_merge(&key, &value, update_fn),
@@ -1498,7 +1498,7 @@ mod tests {
         let mut inserted_keys = vec![];
 
         for _ in 0..20 {
-            let operation: u8 = rng.gen_range(0..4);
+            let operation: u8 = rng.random_range(0..4);
             let key = random_string(100);
             let value = random_string(20);
 
@@ -1513,7 +1513,8 @@ mod tests {
                 1 => {
                     // Update
                     if !inserted_keys.is_empty() {
-                        let key_to_update = &inserted_keys[rng.gen_range(0..inserted_keys.len())];
+                        let key_to_update =
+                            &inserted_keys[rng.random_range(0..inserted_keys.len())];
                         let new_value = random_string(20);
                         if page.update(key_to_update, &new_value).is_ok() {
                             keys_and_values.retain(|(k, _)| k != key_to_update);
@@ -1524,7 +1525,7 @@ mod tests {
                 2 => {
                     // Get
                     if !inserted_keys.is_empty() {
-                        let key_to_get = &inserted_keys[rng.gen_range(0..inserted_keys.len())];
+                        let key_to_get = &inserted_keys[rng.random_range(0..inserted_keys.len())];
                         let expected_value = keys_and_values
                             .iter()
                             .find(|(k, _)| k == key_to_get)
@@ -1536,7 +1537,7 @@ mod tests {
                     // Remove
                     if !inserted_keys.is_empty() {
                         let key_to_remove =
-                            inserted_keys.remove(rng.gen_range(0..inserted_keys.len()));
+                            inserted_keys.remove(rng.random_range(0..inserted_keys.len()));
                         let expected_value = keys_and_values
                             .iter()
                             .find(|(k, _)| *k == key_to_remove)

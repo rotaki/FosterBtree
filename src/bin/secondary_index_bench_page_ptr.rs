@@ -745,7 +745,7 @@ fn main() {
     // }
 
     {
-        // flush_internal_cache_and_everything();
+        flush_internal_cache_and_everything();
         println!("=========================================================================================");
         let bp = get_test_bp(params.bp_size);
         let primary = Arc::new(FosterBtree::new(ContainerKey::new(0, 0), Arc::clone(&bp)));

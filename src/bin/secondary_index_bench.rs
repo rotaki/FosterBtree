@@ -586,10 +586,6 @@ fn get_key_bytes(key: usize, key_size: usize) -> Vec<u8> {
     key_vec
 }
 
-fn get_new_value(value_size: usize) -> Vec<u8> {
-    gen_random_byte_vec(value_size, value_size)
-}
-
 pub struct KeyValueGenerator {
     key_size: usize,
     value_size: usize,

@@ -883,6 +883,7 @@ impl District {
     }
 
     // Method to print the District
+    #[allow(dead_code)]
     fn print(&self) -> String {
         format!(
             "[DIST] d_w_id:{} d_id:{} d_next_o_id:{} d_tax:{:.4} d_ytd:{:.2} d_name:{} d_address:({})",
@@ -1338,12 +1339,12 @@ const fn get_constant_for_nurand(a: u64, is_load: bool) -> u64 {
     const C_FOR_OL_I_ID: u64 = 5987;
 
     // Static assertions converted to runtime checks
-    assert!(C_FOR_C_LAST_IN_LOAD <= 255);
-    assert!(C_FOR_C_LAST_IN_RUN <= 255);
+    // assert!(C_FOR_C_LAST_IN_LOAD <= 255);
+    // assert!(C_FOR_C_LAST_IN_RUN <= 255);
     let delta = C_FOR_C_LAST_IN_LOAD - C_FOR_C_LAST_IN_RUN;
     assert!(65 <= delta && delta <= 119 && delta != 96 && delta != 112);
-    assert!(C_FOR_C_ID <= 1023);
-    assert!(C_FOR_OL_I_ID <= 8191);
+    // assert!(C_FOR_C_ID <= 1023);
+    // assert!(C_FOR_OL_I_ID <= 8191);
 
     match a {
         255 => {
@@ -1421,24 +1422,24 @@ pub fn urand_int<T>(x: T, y: T) -> T
 where
     T: rand::distr::uniform::SampleUniform + PartialOrd + Copy,
 {
-    small_thread_rng().gen_range(x..=y)
+    small_thread_rng().random_range(x..=y)
 }
 
 pub fn urand_double(min: u64, max: u64, divisor: u64) -> f64 {
-    (small_thread_rng().gen_range(min..=max) as f64) / divisor as f64
+    (small_thread_rng().random_range(min..=max) as f64) / divisor as f64
 }
 
 pub fn make_random_nstring(out: &mut [u8], min_len: usize, max_len: usize) {
-    let len = small_thread_rng().gen_range(min_len..=max_len);
-    for i in 0..len {
-        out[i] = small_thread_rng().gen_range(b'0'..=b'9');
+    let len = small_thread_rng().random_range(min_len..=max_len);
+    for v in out.iter_mut().take(len) {
+        *v = small_thread_rng().random_range(b'0'..=b'9');
     }
 }
 
 pub fn make_random_astring(out: &mut [u8], min_len: usize, max_len: usize) {
     const CHARSET: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
-    let len = small_thread_rng().gen_range(min_len..=max_len);
-    for i in 0..len {
-        out[i] = CHARSET[small_thread_rng().gen_range(0..CHARSET.len())];
+    let len = small_thread_rng().random_range(min_len..=max_len);
+    for v in out.iter_mut().take(len) {
+        *v = CHARSET[small_thread_rng().random_range(0..CHARSET.len())];
     }
 }

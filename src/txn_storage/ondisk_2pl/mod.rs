@@ -732,7 +732,7 @@ impl NoWaitTxn {
     pub fn commit<M: MemPool>(
         &self,
         pss: &PrimaryStorages<M>,
-        sss: &SecondaryStorages<M>,
+        _sss: &SecondaryStorages<M>,
     ) -> Result<(), TxnStorageStatus> {
         // Release read locks first
         log_info!("NO-WAIT-TXN: Committing transaction");
@@ -930,8 +930,8 @@ impl<M: MemPool> TxnStorageTrait for NoWaitTxnStorage<M> {
     // Deleting a container is not transactional
     fn delete_container(
         &self,
-        db_id: DatabaseId,
-        c_id: ContainerId,
+        _db_id: DatabaseId,
+        _c_id: ContainerId,
     ) -> Result<(), TxnStorageStatus> {
         unimplemented!();
     }
@@ -951,13 +951,16 @@ impl<M: MemPool> TxnStorageTrait for NoWaitTxnStorage<M> {
         }
     }
 
-    fn list_containers(&self, db_id: DatabaseId) -> Result<HashSet<ContainerId>, TxnStorageStatus> {
+    fn list_containers(
+        &self,
+        _db_id: DatabaseId,
+    ) -> Result<HashSet<ContainerId>, TxnStorageStatus> {
         unimplemented!();
     }
 
     fn raw_insert_value(
         &self,
-        db_id: DatabaseId,
+        _db_id: DatabaseId,
         c_id: ContainerId,
         key: Vec<u8>,
         value: Vec<u8>,
@@ -981,7 +984,7 @@ impl<M: MemPool> TxnStorageTrait for NoWaitTxnStorage<M> {
     fn begin_txn(
         &self,
         db_id: DatabaseId,
-        options: TxnOptions,
+        _options: TxnOptions,
     ) -> Result<Self::TxnHandle, TxnStorageStatus> {
         assert_eq!(db_id, 0);
         Ok(NoWaitTxn {
@@ -1013,27 +1016,27 @@ impl<M: MemPool> TxnStorageTrait for NoWaitTxnStorage<M> {
         }
     }
 
-    fn wait_for_txn(&self, txn: &Self::TxnHandle) -> Result<(), TxnStorageStatus> {
+    fn wait_for_txn(&self, _txn: &Self::TxnHandle) -> Result<(), TxnStorageStatus> {
         unimplemented!()
     }
 
-    fn drop_txn(&self, txn: Self::TxnHandle) -> Result<(), TxnStorageStatus> {
+    fn drop_txn(&self, _txn: Self::TxnHandle) -> Result<(), TxnStorageStatus> {
         unimplemented!()
     }
 
     fn num_values(
         &self,
-        txn: &Self::TxnHandle,
-        c_id: ContainerId,
+        _txn: &Self::TxnHandle,
+        _c_id: ContainerId,
     ) -> Result<usize, TxnStorageStatus> {
         unimplemented!()
     }
 
     fn check_value<K: AsRef<[u8]>>(
         &self,
-        txn: &Self::TxnHandle,
-        c_id: ContainerId,
-        key: K,
+        _txn: &Self::TxnHandle,
+        _c_id: ContainerId,
+        _key: K,
     ) -> Result<bool, TxnStorageStatus> {
         unimplemented!()
     }
@@ -1047,7 +1050,7 @@ impl<M: MemPool> TxnStorageTrait for NoWaitTxnStorage<M> {
         match self.pss.get(c_id) {
             Some(ps) => txn.read(ps, key, None).map(|(v, _)| v),
             None => match self.sss.get(c_id) {
-                Some(ss) => {
+                Some(_ss) => {
                     unimplemented!()
                 }
                 None => Err(TxnStorageStatus::ContainerNotFound),
@@ -1065,7 +1068,7 @@ impl<M: MemPool> TxnStorageTrait for NoWaitTxnStorage<M> {
         match self.pss.get(c_id) {
             Some(ps) => txn.insert(ps, key, value, None).map(|_| ()),
             None => match self.sss.get(c_id) {
-                Some(ss) => {
+                Some(_ss) => {
                     unimplemented!()
                 }
                 None => Err(TxnStorageStatus::ContainerNotFound),
@@ -1086,7 +1089,7 @@ impl<M: MemPool> TxnStorageTrait for NoWaitTxnStorage<M> {
                 }
             }
             None => match self.sss.get(c_id) {
-                Some(ss) => {
+                Some(_ss) => {
                     unimplemented!()
                 }
                 None => return Err(TxnStorageStatus::ContainerNotFound),
@@ -1105,7 +1108,7 @@ impl<M: MemPool> TxnStorageTrait for NoWaitTxnStorage<M> {
         match self.pss.get(c_id) {
             Some(ps) => txn.update(ps, key, value, None).map(|_| ()),
             None => match self.sss.get(c_id) {
-                Some(ss) => {
+                Some(_ss) => {
                     unimplemented!()
                 }
                 None => Err(TxnStorageStatus::ContainerNotFound),
@@ -1127,7 +1130,7 @@ impl<M: MemPool> TxnStorageTrait for NoWaitTxnStorage<M> {
                 txn.update(ps, key, value, Some(addr)).map(|_| ())
             }
             None => match self.sss.get(c_id) {
-                Some(ss) => {
+                Some(_ss) => {
                     unimplemented!()
                 }
                 None => Err(TxnStorageStatus::ContainerNotFound),
@@ -1144,7 +1147,7 @@ impl<M: MemPool> TxnStorageTrait for NoWaitTxnStorage<M> {
         match self.pss.get(c_id) {
             Some(ps) => txn.delete(ps, key, None).map(|_| ()),
             None => match self.sss.get(c_id) {
-                Some(ss) => {
+                Some(_ss) => {
                     unimplemented!()
                 }
                 None => Err(TxnStorageStatus::ContainerNotFound),
@@ -1154,7 +1157,7 @@ impl<M: MemPool> TxnStorageTrait for NoWaitTxnStorage<M> {
 
     fn scan_range(
         &self,
-        txn: &Self::TxnHandle,
+        _txn: &Self::TxnHandle,
         c_id: ContainerId,
         options: super::ScanOptions,
     ) -> Result<Self::IteratorHandle, TxnStorageStatus> {
