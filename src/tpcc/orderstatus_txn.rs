@@ -96,14 +96,14 @@ impl TPCCTxnProfile for OrderStatusTxn {
 
             // Sort the customer records by c_first
             customer_recs.sort_by(|a, b| {
-                let a = Customer::from_bytes(a);
-                let b = Customer::from_bytes(b);
+                let a = unsafe { Customer::from_bytes(a) };
+                let b = unsafe { Customer::from_bytes(b) };
                 a.c_first.cmp(&b.c_first)
             });
 
             // Select the middle record
             let c_bytes = customer_recs[(customer_recs.len() + 1) / 2 - 1].as_slice();
-            let c = Customer::from_bytes(c_bytes);
+            let c = unsafe { Customer::from_bytes(c_bytes) };
             c_id = c.c_id;
             write_fields!(out, &c.c_first, &c.c_middle, &c.c_last, &c.c_balance);
         } else {
@@ -115,7 +115,7 @@ impl TPCCTxnProfile for OrderStatusTxn {
                 return helper.kill(&txn, &res, AbortID::GetCustomer as u8);
             }
             let c_bytes = res.unwrap();
-            let c = Customer::from_bytes(&c_bytes);
+            let c = unsafe { Customer::from_bytes(&c_bytes) };
             c_id = c.c_id;
             write_fields!(out, &c.c_first, &c.c_middle, &c.c_last, &c.c_balance);
         }
@@ -159,7 +159,7 @@ impl TPCCTxnProfile for OrderStatusTxn {
                 AbortID::GetOrderByCustomerId as u8,
             );
         }
-        let o = Order::from_bytes(&last_order);
+        let o = unsafe { Order::from_bytes(&last_order) };
         write_fields!(out, &o.o_id, &o.o_entry_d, &o.o_carrier_id);
 
         // Fetch the order lines for the order
@@ -181,7 +181,7 @@ impl TPCCTxnProfile for OrderStatusTxn {
         loop {
             match txn_storage.iter_next(&txn, &iter) {
                 Ok(Some((_, val))) => {
-                    let ol = OrderLine::from_bytes(&val);
+                    let ol = unsafe { OrderLine::from_bytes(&val) };
                     write_fields!(
                         out,
                         &ol.ol_supply_w_id,
@@ -207,8 +207,8 @@ impl TPCCTxnProfile for OrderStatusTxn {
 impl OrderStatusTxn {
     pub fn print_abort_details(stat: &[usize]) {
         println!("OrderStatusTxn Abort Details:");
-        for (i, &stat) in stat.iter().enumerate() {
-            println!("        {:<45}: {}", AbortID::from(i as u8).as_str(), stat,);
+        for (i, &count) in stat.iter().enumerate().take(AbortID::Max as usize) {
+            println!("        {:<45}: {}", AbortID::from(i as u8).as_str(), count,);
         }
     }
 }

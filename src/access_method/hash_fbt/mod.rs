@@ -16,7 +16,7 @@ use super::{
         FosterBtree, FosterBtreeAppendOnly, FosterBtreeAppendOnlyRangeScanner,
         FosterBtreeRangeScanner,
     },
-    AccessMethodError, OrderedUniqueKeyIndex, UniqueKeyIndex,
+    AccessMethodError, FilterType, OrderedUniqueKeyIndex, UniqueKeyIndex,
 };
 
 pub mod prelude {
@@ -27,9 +27,9 @@ pub mod prelude {
 
 pub struct HashFosterBtree<T: MemPool> {
     pub mem_pool: Arc<T>,
-    c_key: ContainerKey,
+    _c_key: ContainerKey,
     num_buckets: usize,
-    meta_page_id: PageId, // Stores the number of buckets and all the page ids of the root of the foster btrees
+    _meta_page_id: PageId, // Stores the number of buckets and all the page ids of the root of the foster btrees
     buckets: Vec<Arc<FosterBtree<T>>>,
 }
 
@@ -68,9 +68,9 @@ impl<T: MemPool> HashFosterBtree<T> {
 
         Self {
             mem_pool: mem_pool.clone(),
-            c_key,
+            _c_key: c_key,
             num_buckets,
-            meta_page_id,
+            _meta_page_id: meta_page_id,
             buckets,
         }
     }
@@ -96,9 +96,9 @@ impl<T: MemPool> HashFosterBtree<T> {
 
         Self {
             mem_pool: mem_pool.clone(),
-            c_key,
+            _c_key: c_key,
             num_buckets,
-            meta_page_id,
+            _meta_page_id: meta_page_id,
             buckets,
         }
     }
@@ -172,10 +172,7 @@ impl<T: MemPool> UniqueKeyIndex for HashFosterBtree<T> {
         HashFosterBtreeIter::new(scanners)
     }
 
-    fn scan_with_filter(
-        self: &Arc<Self>,
-        filter: Arc<dyn Fn(&[u8], &[u8]) -> bool + Send + Sync>,
-    ) -> Self::Iter {
+    fn scan_with_filter(self: &Arc<Self>, filter: FilterType) -> Self::Iter {
         // Chain the iterators from all the buckets
         let mut scanners = Vec::with_capacity(self.num_buckets);
         for bucket in self.buckets.iter() {
@@ -188,7 +185,7 @@ impl<T: MemPool> UniqueKeyIndex for HashFosterBtree<T> {
 pub struct HashFosterBtreeIter<T: Iterator<Item = (Vec<u8>, Vec<u8>)>> {
     scanners: Vec<T>,
     current: usize,
-    filter: Option<Arc<dyn Fn(&[u8], &[u8]) -> bool + Send + Sync>>,
+    filter: Option<FilterType>,
 }
 
 impl<T: Iterator<Item = (Vec<u8>, Vec<u8>)>> HashFosterBtreeIter<T> {
@@ -200,10 +197,7 @@ impl<T: Iterator<Item = (Vec<u8>, Vec<u8>)>> HashFosterBtreeIter<T> {
         }
     }
 
-    pub fn new_with_filter(
-        scanners: Vec<T>,
-        filter: Arc<dyn Fn(&[u8], &[u8]) -> bool + Send + Sync>,
-    ) -> Self {
+    pub fn new_with_filter(scanners: Vec<T>, filter: FilterType) -> Self {
         Self {
             scanners,
             current: 0,
@@ -249,7 +243,7 @@ impl<T: MemPool> OrderedUniqueKeyIndex for HashFosterBtree<T> {
         self: &Arc<Self>,
         start_key: &[u8],
         end_key: &[u8],
-        filter: Arc<dyn Fn(&[u8], &[u8]) -> bool + Send + Sync>,
+        filter: FilterType,
     ) -> Self::RangeIter {
         // Chain the iterators from all the buckets
         let mut scanners = Vec::with_capacity(self.num_buckets);
@@ -263,7 +257,7 @@ impl<T: MemPool> OrderedUniqueKeyIndex for HashFosterBtree<T> {
 pub struct HashFosterBtreeUnorderedIter<T: Iterator<Item = (Vec<u8>, Vec<u8>)>> {
     scanners: Vec<T>,
     current: usize,
-    filter: Option<Arc<dyn Fn(&[u8], &[u8]) -> bool + Send + Sync>>,
+    filter: Option<FilterType>,
 }
 
 impl<T: Iterator<Item = (Vec<u8>, Vec<u8>)>> HashFosterBtreeUnorderedIter<T> {
@@ -275,10 +269,7 @@ impl<T: Iterator<Item = (Vec<u8>, Vec<u8>)>> HashFosterBtreeUnorderedIter<T> {
         }
     }
 
-    pub fn new_with_filter(
-        scanners: Vec<T>,
-        filter: Arc<dyn Fn(&[u8], &[u8]) -> bool + Send + Sync>,
-    ) -> Self {
+    pub fn new_with_filter(scanners: Vec<T>, filter: FilterType) -> Self {
         Self {
             scanners,
             current: 0,
@@ -308,11 +299,12 @@ impl<T: Iterator<Item = (Vec<u8>, Vec<u8>)>> Iterator for HashFosterBtreeUnorder
     }
 }
 
+type BinaryHeapEntryType = (Reverse<Vec<u8>>, (usize, Vec<u8>)); // (key, (tree_index, value))
+
 pub struct HashFosterBtreeOrderedIter<T: Iterator<Item = (Vec<u8>, Vec<u8>)>> {
     scanners: Vec<T>,
-    current: usize,
-    filter: Option<Arc<dyn Fn(&[u8], &[u8]) -> bool + Send + Sync>>,
-    heap: BinaryHeap<(Reverse<Vec<u8>>, (usize, Vec<u8>))>, // (key, (tree_index, value))
+    filter: Option<FilterType>,
+    heap: BinaryHeap<BinaryHeapEntryType>,
     initialized: bool,
     finished: bool,
 }
@@ -322,7 +314,6 @@ impl<T: Iterator<Item = (Vec<u8>, Vec<u8>)>> HashFosterBtreeOrderedIter<T> {
     pub fn new(scanners: Vec<T>) -> Self {
         Self {
             scanners,
-            current: 0,
             filter: None,
             heap: BinaryHeap::new(),
             initialized: false,
@@ -330,13 +321,9 @@ impl<T: Iterator<Item = (Vec<u8>, Vec<u8>)>> HashFosterBtreeOrderedIter<T> {
         }
     }
 
-    pub fn new_with_filter(
-        scanners: Vec<T>,
-        filter: Arc<dyn Fn(&[u8], &[u8]) -> bool + Send + Sync>,
-    ) -> Self {
+    pub fn new_with_filter(scanners: Vec<T>, filter: FilterType) -> Self {
         Self {
             scanners,
-            current: 0,
             filter: Some(filter),
             heap: BinaryHeap::new(),
             initialized: false,
@@ -387,9 +374,9 @@ impl<T: Iterator<Item = (Vec<u8>, Vec<u8>)>> Iterator for HashFosterBtreeOrdered
 
 pub struct HashFosterBtreeAppendOnly<T: MemPool> {
     pub mem_pool: Arc<T>,
-    c_key: ContainerKey,
+    _c_key: ContainerKey,
     num_buckets: usize,
-    meta_page_id: PageId, // Stores the number of buckets and all the page ids of the root of the foster btrees
+    _meta_page_id: PageId, // Stores the number of buckets and all the page ids of the root of the foster btrees
     buckets: Vec<Arc<FosterBtreeAppendOnly<T>>>,
 }
 
@@ -428,9 +415,9 @@ impl<T: MemPool> HashFosterBtreeAppendOnly<T> {
 
         Self {
             mem_pool: mem_pool.clone(),
-            c_key,
+            _c_key: c_key,
             num_buckets,
-            meta_page_id,
+            _meta_page_id: meta_page_id,
             buckets,
         }
     }
@@ -460,9 +447,9 @@ impl<T: MemPool> HashFosterBtreeAppendOnly<T> {
 
         Self {
             mem_pool: mem_pool.clone(),
-            c_key,
+            _c_key: c_key,
             num_buckets,
-            meta_page_id,
+            _meta_page_id: meta_page_id,
             buckets,
         }
     }

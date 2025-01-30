@@ -1,10 +1,6 @@
 use core::panic;
-use rand::prelude::Distribution;
-use rand::Rng;
 use std::{collections::HashMap, ops::Index};
 
-use crate::random::small_thread_rng;
-use crate::zipfan::FastZipf;
 use crate::{
     bp::ContainerId,
     prelude::{
@@ -64,16 +60,6 @@ impl Iterator for KeyValueGenerator {
     }
 }
 
-fn get_key(num_keys: usize, skew_factor: f64) -> usize {
-    let rng = small_thread_rng();
-    let mut zipf = FastZipf::new(rng, skew_factor, num_keys);
-    zipf.sample()
-}
-
-fn get_new_value(value_size: usize) -> Vec<u8> {
-    gen_random_byte_vec(value_size, value_size)
-}
-
 fn get_key_bytes(key: usize, key_size: usize) -> Vec<u8> {
     if key_size < std::mem::size_of::<usize>() {
         panic!("Key size is less than the size of usize");
@@ -82,16 +68,6 @@ fn get_key_bytes(key: usize, key_size: usize) -> Vec<u8> {
     let bytes = key.to_be_bytes().to_vec();
     key_vec[key_size - bytes.len()..].copy_from_slice(&bytes);
     key_vec
-}
-
-fn from_key_bytes(key: &[u8]) -> usize {
-    // The last 8 bytes of the key is the key
-
-    usize::from_be_bytes(
-        key[key.len() - std::mem::size_of::<usize>()..]
-            .try_into()
-            .unwrap(),
-    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -213,7 +189,7 @@ pub fn ycsb_preliminary_secondary_scan(
         )
         .unwrap();
     let mut count = 0;
-    while let Ok(Some((key, value))) = txn_storage.iter_next(&txn, &iter) {
+    while let Ok(Some((_key, _value))) = txn_storage.iter_next(&txn, &iter) {
         count += 1;
     }
     drop(iter);

@@ -14,7 +14,7 @@ use crate::{
 
 use super::{
     chain::read_optimized_chain::{ReadOptimizedChain, ReadOptimizedChainRangeScanner},
-    AccessMethodError, UniqueKeyIndex,
+    AccessMethodError, FilterType, UniqueKeyIndex,
 };
 
 pub mod prelude {
@@ -25,9 +25,9 @@ pub mod prelude {
 
 pub struct HashReadOptimize<T: MemPool> {
     pub mem_pool: Arc<T>,
-    c_key: ContainerKey,
+    _c_key: ContainerKey,
     num_buckets: usize,
-    meta_page_id: PageId, // Stores the number of buckets and all the page ids of the first of the chain
+    _meta_page_id: PageId, // Stores the number of buckets and all the page ids of the first of the chain
     buckets: Vec<Arc<ReadOptimizedChain<T>>>,
 }
 
@@ -66,9 +66,9 @@ impl<T: MemPool> HashReadOptimize<T> {
 
         Self {
             mem_pool: mem_pool.clone(),
-            c_key,
+            _c_key: c_key,
             num_buckets,
-            meta_page_id,
+            _meta_page_id: meta_page_id,
             buckets,
         }
     }
@@ -98,9 +98,9 @@ impl<T: MemPool> HashReadOptimize<T> {
 
         Self {
             mem_pool: mem_pool.clone(),
-            c_key,
+            _c_key: c_key,
             num_buckets,
-            meta_page_id,
+            _meta_page_id: meta_page_id,
             buckets,
         }
     }
@@ -177,10 +177,7 @@ impl<T: MemPool> UniqueKeyIndex for HashReadOptimize<T> {
         HashReadOptimizedChainIter::new(scanners)
     }
 
-    fn scan_with_filter(
-        self: &Arc<Self>,
-        filter: Arc<dyn Fn(&[u8], &[u8]) -> bool + Send + Sync>,
-    ) -> Self::Iter {
+    fn scan_with_filter(self: &Arc<Self>, _filter: FilterType) -> Self::Iter {
         unimplemented!()
     }
 }

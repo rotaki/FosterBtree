@@ -682,7 +682,11 @@ impl<T: MemPool> PagedHashMapIter<T> {
     fn initialize(&mut self) {
         assert!(!self.initialized);
         let page_key = PageFrameKey::new(self.map.c_key, 1);
-        let first_page = unsafe { std::mem::transmute(self.map.read_page(page_key)) };
+        let first_page = unsafe {
+            std::mem::transmute::<FrameReadGuard, FrameReadGuard<'static>>(
+                self.map.read_page(page_key),
+            )
+        };
         self.current_page = Some(first_page);
     }
 }

@@ -26,7 +26,7 @@ impl ReadTxn {
 }
 
 impl YCSBTxnProfile for ReadTxn {
-    fn new(config: &YCSBConfig) -> Self {
+    fn new(_config: &YCSBConfig) -> Self {
         Self {}
     }
 
@@ -59,19 +59,16 @@ impl YCSBTxnProfile for ReadTxn {
         log_error!("ReadTxn scan_range ok");
         let iter = res.unwrap();
 
-        loop {
-            match txn_storage.iter_next(&txn, &iter) {
-                Ok(Some((key, value))) => {
-                    let len = key.len() + value.len();
-                    write_fields!(out, &len);
-                    break;
-                }
-                Ok(None) => {
-                    panic!("Key should exist if we are able to scan it unless there is a deletion");
-                }
-                Err(e) => {
-                    return helper.kill::<()>(&txn, &Err(e));
-                }
+        match txn_storage.iter_next(&txn, &iter) {
+            Ok(Some((key, value))) => {
+                let len = key.len() + value.len();
+                write_fields!(out, &len);
+            }
+            Ok(None) => {
+                panic!("Key should exist if we are able to scan it unless there is a deletion");
+            }
+            Err(e) => {
+                return helper.kill::<()>(&txn, &Err(e));
             }
         }
         log_error!("ReadTxn iter_next ok");

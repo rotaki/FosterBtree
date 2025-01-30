@@ -8,7 +8,7 @@ use std::{
 };
 
 use crate::{
-    access_method::{AccessMethodError, OrderedUniqueKeyIndex, UniqueKeyIndex},
+    access_method::{AccessMethodError, FilterType, OrderedUniqueKeyIndex, UniqueKeyIndex},
     bp::prelude::*,
     log_debug, log_info,
     page::{Page, PageId, AVAILABLE_PAGE_SIZE},
@@ -2107,7 +2107,7 @@ impl<T: MemPool> UniqueKeyIndex for FosterBtree<T> {
         FosterBtreeRangeScanner::new(self, &[], &[])
     }
 
-    fn scan_with_filter(self: &Arc<Self>, filter: FilterFunc) -> Self::Iter {
+    fn scan_with_filter(self: &Arc<Self>, filter: FilterType) -> Self::Iter {
         FosterBtreeRangeScanner::new_with_filter(self, &[], &[], filter)
     }
 }
@@ -2123,17 +2123,15 @@ impl<T: MemPool> OrderedUniqueKeyIndex for FosterBtree<T> {
         self: &Arc<Self>,
         start_key: &[u8],
         end_key: &[u8],
-        filter: FilterFunc,
+        filter: FilterType,
     ) -> Self::RangeIter {
         FosterBtreeRangeScanner::new_with_filter(self, start_key, end_key, filter)
     }
 }
 
-type FilterFunc = Arc<dyn Fn(&[u8], &[u8]) -> bool + Send + Sync>;
-
 pub struct FosterBtreeRangeScanner<T: MemPool> {
     cursor: FosterBtreeCursor<T>,
-    filter: Option<FilterFunc>,
+    filter: Option<FilterType>,
 }
 
 impl<T: MemPool> FosterBtreeRangeScanner<T> {
@@ -2148,7 +2146,7 @@ impl<T: MemPool> FosterBtreeRangeScanner<T> {
         btree: &Arc<FosterBtree<T>>,
         l_key: &[u8],
         r_key: &[u8],
-        filter: FilterFunc,
+        filter: FilterType,
     ) -> Self {
         FosterBtreeRangeScanner {
             cursor: FosterBtreeCursor::new(btree, l_key, r_key),
@@ -2540,6 +2538,8 @@ pub struct FosterBtreeAppendOnlyCursor<T: MemPool> {
     cursor: FosterBtreeCursor<T>,
 }
 
+type NonUniqueKeyValueType = ((Vec<u8>, u32), Vec<u8>);
+
 impl<T: MemPool> FosterBtreeAppendOnlyCursor<T> {
     pub fn new(btree: &Arc<FosterBtreeAppendOnly<T>>, l_key: &[u8], r_key: &[u8]) -> Self {
         let cursor = FosterBtreeCursor::new(&btree.fbt, l_key, r_key);
@@ -2549,7 +2549,7 @@ impl<T: MemPool> FosterBtreeAppendOnlyCursor<T> {
     // Returns ((key, number), value)
     // The number represents the number of times the same key has been inserted
     // to the tree.
-    pub fn get_kv(&self) -> Option<((Vec<u8>, u32), Vec<u8>)> {
+    pub fn get_kv(&self) -> Option<NonUniqueKeyValueType> {
         let (key, val) = self.cursor.get_kv()?;
         let (key, suffix) = key.split_at(key.len() - 4);
         let suffix = u32::from_be_bytes(suffix.try_into().unwrap());
@@ -3055,17 +3055,17 @@ mod tests {
         p1.run_consistency_checks(false);
         // Check the contents of p0
         assert_eq!(p0.active_slot_count() as usize, left.len() + right.len());
-        for i in 0..left.len() {
+        for (i, &item) in left.iter().enumerate() {
             let key = p0.get_raw_key((i + 1) as u32);
-            assert_eq!(key, to_bytes(left[i]));
+            assert_eq!(key, to_bytes(item));
             let val = p0.get_val((i + 1) as u32);
-            assert_eq!(val, to_bytes(left[i]));
+            assert_eq!(val, to_bytes(item));
         }
-        for i in 0..right.len() {
+        for (i, &item) in right.iter().enumerate() {
             let key = p0.get_raw_key((i + 1 + left.len()) as u32);
-            assert_eq!(key, to_bytes(right[i]));
+            assert_eq!(key, to_bytes(item));
             let val = p0.get_val((i + 1 + left.len()) as u32);
-            assert_eq!(val, to_bytes(right[i]));
+            assert_eq!(val, to_bytes(item));
         }
         assert_eq!(p0.get_low_fence().as_ref(), k0);
         assert_eq!(p0.get_high_fence().as_ref(), k2);
@@ -3158,10 +3158,12 @@ mod tests {
         assert_eq!(total_keys + 1, total_keys_in_pages as usize); // +1 because of the foster key
 
         let all = left.iter().chain(right.iter()).collect::<Vec<_>>();
+        #[allow(clippy::needless_range_loop)]
         for i in 0..p0.active_slot_count() as usize - 1 {
             let key = p0.get_raw_key((i + 1) as u32);
             assert_eq!(key, to_bytes(*all[i]));
         }
+        #[allow(clippy::needless_range_loop)]
         for i in 0..p1.active_slot_count() as usize {
             let key = p1.get_raw_key((i + 1) as u32);
             assert_eq!(key, to_bytes(*all[i + p0.active_slot_count() as usize - 1]));
@@ -4372,7 +4374,7 @@ mod tests {
         // Scan empty
         let iter = btree.scan_range(&[], &[]);
         let mut count = 0;
-        for (key, current_val) in iter {
+        for (key, _current_val) in iter {
             let key = from_bytes(&key);
             println!(
                 "**************************** Scanning key {} **************************",

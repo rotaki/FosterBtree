@@ -208,6 +208,18 @@ struct RuntimeStats {
     write_count: AtomicUsize,
 }
 
+impl std::fmt::Display for RuntimeStats {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "New Page: {}\nRead Count: {}\nWrite Count: {}",
+            self.new_page.load(Ordering::Relaxed),
+            self.read_count.load(Ordering::Relaxed),
+            self.write_count.load(Ordering::Relaxed)
+        )
+    }
+}
+
 impl RuntimeStats {
     pub fn new() -> Self {
         RuntimeStats {
@@ -234,15 +246,6 @@ impl RuntimeStats {
             self.new_page.load(Ordering::Relaxed),
             self.read_count.load(Ordering::Relaxed),
             self.write_count.load(Ordering::Relaxed),
-        )
-    }
-
-    pub fn to_string(&self) -> String {
-        format!(
-            "New Page: {}\nRead Count: {}\nWrite Count: {}",
-            self.new_page.load(Ordering::Relaxed),
-            self.read_count.load(Ordering::Relaxed),
-            self.write_count.load(Ordering::Relaxed)
         )
     }
 
@@ -849,7 +852,7 @@ impl MemPool for BufferPool {
         result
     }
 
-    fn prefetch_page(&self, key: PageFrameKey) -> Result<(), MemPoolStatus> {
+    fn prefetch_page(&self, _key: PageFrameKey) -> Result<(), MemPoolStatus> {
         #[cfg(not(feature = "new_async_write"))]
         return Ok(());
 

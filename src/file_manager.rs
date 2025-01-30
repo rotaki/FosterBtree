@@ -65,6 +65,7 @@ pub mod sync_write {
             self.num_pages.fetch_sub(1, Ordering::AcqRel)
         }
 
+        #[allow(dead_code)]
         pub fn get_stats(&self) -> String {
             let _guard = self.file.lock().unwrap();
             format!(
@@ -75,12 +76,14 @@ pub mod sync_write {
             )
         }
 
+        #[allow(dead_code)]
         pub fn reset_stats(&self) {
             let _guard = self.file.lock().unwrap();
             self.io_count.0.store(0, Ordering::Release);
             self.io_count.1.store(0, Ordering::Release);
         }
 
+        #[allow(dead_code)]
         pub fn prefetch_page(&self, _page_id: PageId) -> Result<(), std::io::Error> {
             Ok(())
         }

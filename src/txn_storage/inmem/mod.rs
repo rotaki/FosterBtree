@@ -443,10 +443,10 @@ impl TxnStorageTrait for InMemStorage {
 
     fn raw_insert_value(
         &self,
-        db_id: DatabaseId,
-        c_id: ContainerId,
-        key: Vec<u8>,
-        value: Vec<u8>,
+        _db_id: DatabaseId,
+        _c_id: ContainerId,
+        _key: Vec<u8>,
+        _value: Vec<u8>,
     ) -> Result<(), TxnStorageStatus> {
         unimplemented!()
     }
@@ -584,10 +584,10 @@ impl TxnStorageTrait for InMemStorage {
 
     fn update_value_with_func<K: AsRef<[u8]>, F: FnOnce(&mut [u8])>(
         &self,
-        txn: &Self::TxnHandle,
-        c_id: ContainerId,
-        key: K,
-        func: F,
+        _txn: &Self::TxnHandle,
+        _c_id: ContainerId,
+        _key: K,
+        _func: F,
     ) -> Result<(), TxnStorageStatus> {
         unimplemented!()
     }

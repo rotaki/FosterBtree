@@ -34,6 +34,7 @@ impl ItemKey {
     }
 
     // Create key from Item
+    #[allow(dead_code)]
     fn create_key_from_item(item: &Item) -> Self {
         ItemKey { i_key: item.i_id }
     }
@@ -211,7 +212,6 @@ impl CustomerKey {
 // ----------------- CustomerSecondaryKey Struct -----------------
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(C)]
-
 pub struct CustomerSecondaryKey {
     pub num: u32,
     pub c_last: [u8; Customer::MAX_LAST],
@@ -225,6 +225,7 @@ impl CustomerSecondaryKey {
         }
     }
 
+    #[allow(dead_code)]
     fn from_num(num: u32) -> Self {
         CustomerSecondaryKey {
             num,
@@ -232,12 +233,14 @@ impl CustomerSecondaryKey {
         }
     }
 
+    #[allow(dead_code)]
     fn copy_from(other: &Self) -> Self {
         let num = other.num & 0x00FFFFFF; // Zero out the 'not_used' bits
         let c_last = other.c_last;
         CustomerSecondaryKey { num, c_last }
     }
 
+    #[allow(dead_code)]
     fn get_d_id(&self) -> u8 {
         (self.num & 0x000000FF) as u8
     }
@@ -246,6 +249,7 @@ impl CustomerSecondaryKey {
         self.num = (self.num & 0xFFFFFF00) | value as u32;
     }
 
+    #[allow(dead_code)]
     fn get_w_id(&self) -> u16 {
         ((self.num & 0x00FFFF00) >> 8) as u16
     }
@@ -261,11 +265,21 @@ impl CustomerSecondaryKey {
         bytes
     }
 
-    pub fn from_bytes(bytes: &[u8]) -> Self {
-        let num = u32::from_be_bytes(bytes[..4].try_into().unwrap());
-        let mut c_last = [0; Customer::MAX_LAST];
-        c_last.copy_from_slice(&bytes[4..]);
-        CustomerSecondaryKey { num, c_last }
+    /// # Safety
+    ///
+    /// The caller must ensure that the bytes are of the correct length
+    /// and that the lifetime of the returned reference is valid.
+    pub unsafe fn from_bytes(bytes: &[u8]) -> &CustomerSecondaryKey {
+        &*(bytes.as_ptr() as *const CustomerSecondaryKey)
+    }
+
+    /// # Safety
+    ///
+    /// The caller must ensure that the bytes are of the correct length
+    /// and that the lifetime of the returned reference is valid.
+    /// Also, the caller must ensure that the bytes are mutable.
+    pub unsafe fn from_bytes_mut(bytes: &mut [u8]) -> &mut CustomerSecondaryKey {
+        &mut *(bytes.as_mut_ptr() as *mut CustomerSecondaryKey)
     }
 
     pub fn create_key(w_id: u16, d_id: u8, c_last_in: &[u8]) -> Self {
@@ -322,14 +336,17 @@ pub struct OrderKey {
 }
 
 impl OrderKey {
+    #[allow(dead_code)]
     fn o_id(&self) -> u32 {
         (self.o_key & 0xFFFF_FFFF) as u32
     }
 
+    #[allow(dead_code)]
     fn d_id(&self) -> u8 {
         ((self.o_key >> 32) & 0xFF) as u8
     }
 
+    #[allow(dead_code)]
     fn w_id(&self) -> u16 {
         ((self.o_key >> 40) & 0xFFFF) as u16
     }
@@ -343,6 +360,7 @@ impl OrderKey {
         OrderKey { o_key }
     }
 
+    #[allow(dead_code)]
     fn create_key_from_order(o: &Order) -> Self {
         OrderKey::create_key(o.o_w_id, o.o_d_id, o.o_id)
     }
@@ -431,18 +449,22 @@ pub struct OrderLineKey {
 }
 
 impl OrderLineKey {
+    #[allow(dead_code)]
     fn ol_number(&self) -> u8 {
         (self.ol_key & 0xFF) as u8
     }
 
+    #[allow(dead_code)]
     fn o_id(&self) -> u32 {
         ((self.ol_key >> 8) & 0xFFFF_FFFF) as u32
     }
 
+    #[allow(dead_code)]
     fn d_id(&self) -> u8 {
         ((self.ol_key >> 40) & 0xFF) as u8
     }
 
+    #[allow(dead_code)]
     fn w_id(&self) -> u16 {
         ((self.ol_key >> 48) & 0xFFFF) as u16
     }
@@ -459,6 +481,7 @@ impl OrderLineKey {
         OrderLineKey { ol_key }
     }
 
+    #[allow(dead_code)]
     fn create_key_from_orderline(ol: &OrderLine) -> Self {
         OrderLineKey::create_key(ol.ol_w_id, ol.ol_d_id, ol.ol_o_id, ol.ol_number)
     }
@@ -500,9 +523,21 @@ impl NewOrderKey {
         self.no_key.to_be_bytes()
     }
 
-    pub fn from_bytes(bytes: &[u8]) -> Self {
-        let no_key = u64::from_be_bytes(bytes.try_into().unwrap());
-        NewOrderKey { no_key }
+    /// # Safety
+    ///
+    /// The caller must ensure that the bytes are of the correct length
+    /// and that the lifetime of the returned reference is valid.
+    pub unsafe fn from_bytes(bytes: &[u8]) -> &NewOrderKey {
+        &*(bytes.as_ptr() as *const NewOrderKey)
+    }
+
+    /// # Safety
+    ///
+    /// The caller must ensure that the bytes are of the correct length
+    /// and that the lifetime of the returned reference is valid.
+    /// Also, the caller must ensure that the bytes are mutable.
+    pub unsafe fn from_bytes_mut(bytes: &mut [u8]) -> &mut NewOrderKey {
+        &mut *(bytes.as_mut_ptr() as *mut NewOrderKey)
     }
 
     pub fn create_key(w_id: u16, d_id: u8, o_id: u32) -> Self {
@@ -510,6 +545,7 @@ impl NewOrderKey {
         NewOrderKey { no_key }
     }
 
+    #[allow(dead_code)]
     fn create_key_from_new_order(no: &NewOrder) -> Self {
         NewOrderKey::create_key(no.no_w_id, no.no_d_id, no.no_o_id)
     }
@@ -587,8 +623,21 @@ impl Item {
         }
     }
 
-    pub fn from_bytes(bytes: &[u8]) -> &mut Item {
-        unsafe { &mut *(bytes.as_ptr() as *mut Item) }
+    /// # Safety
+    ///
+    /// The caller must ensure that the bytes are of the correct length
+    /// and that the lifetime of the returned reference is valid.
+    pub unsafe fn from_bytes(bytes: &[u8]) -> &Item {
+        &*(bytes.as_ptr() as *const Item)
+    }
+
+    /// # Safety
+    ///
+    /// The caller must ensure that the bytes are of the correct length
+    /// and that the lifetime of the returned reference is valid.
+    /// Also, the caller must ensure that the bytes are mutable.
+    pub unsafe fn from_bytes_mut(bytes: &mut [u8]) -> &mut Item {
+        &mut *(bytes.as_mut_ptr() as *mut Item)
     }
 
     // Method to print the Item
@@ -706,6 +755,19 @@ impl Warehouse {
         }
     }
 
+    /// # Safety
+    ///
+    /// The caller must ensure that the bytes are of the correct length
+    /// and that the lifetime of the returned reference is valid.
+    pub unsafe fn from_bytes(bytes: &[u8]) -> &Warehouse {
+        &*(bytes.as_ptr() as *const Warehouse)
+    }
+
+    /// # Safety
+    ///
+    /// The caller must ensure that the bytes are of the correct length
+    /// and that the lifetime of the returned reference is valid.
+    /// Also, the caller must ensure that the bytes are mutable.
     pub fn from_bytes_mut(bytes: &mut [u8]) -> &mut Warehouse {
         unsafe { &mut *(bytes.as_mut_ptr() as *mut Warehouse) }
     }
@@ -790,12 +852,21 @@ impl Stock {
         }
     }
 
-    pub fn from_bytes(bytes: &[u8]) -> &Stock {
-        unsafe { &*(bytes.as_ptr() as *const Stock) }
+    /// # Safety
+    ///
+    /// The caller must ensure that the bytes are of the correct length
+    /// and that the lifetime of the returned reference is valid.
+    pub unsafe fn from_bytes(bytes: &[u8]) -> &Stock {
+        &*(bytes.as_ptr() as *const Stock)
     }
 
-    pub fn from_bytes_mut(bytes: &mut [u8]) -> &mut Stock {
-        unsafe { &mut *(bytes.as_mut_ptr() as *mut Stock) }
+    /// # Safety
+    ///
+    /// The caller must ensure that the bytes are of the correct length
+    /// and that the lifetime of the returned reference is valid.
+    /// Also, the caller must ensure that the bytes are mutable.
+    pub unsafe fn from_bytes_mut(bytes: &mut [u8]) -> &mut Stock {
+        &mut *(bytes.as_mut_ptr() as *mut Stock)
     }
 
     // Method to print the Stock
@@ -874,12 +945,21 @@ impl District {
         }
     }
 
-    pub fn from_bytes(bytes: &[u8]) -> &District {
-        unsafe { &*(bytes.as_ptr() as *const District) }
+    /// # Safety
+    ///
+    /// The caller must ensure that the bytes are of the correct length
+    /// and that the lifetime of the returned reference is valid.
+    pub unsafe fn from_bytes(bytes: &[u8]) -> &District {
+        &*(bytes.as_ptr() as *const District)
     }
 
-    pub fn from_bytes_mut(bytes: &mut [u8]) -> &mut District {
-        unsafe { &mut *(bytes.as_mut_ptr() as *mut District) }
+    /// # Safety
+    ///
+    /// The caller must ensure that the bytes are of the correct length
+    /// and that the lifetime of the returned reference is valid.
+    /// Also, the caller must ensure that the bytes are mutable.
+    pub unsafe fn from_bytes_mut(bytes: &mut [u8]) -> &mut District {
+        &mut *(bytes.as_mut_ptr() as *mut District)
     }
 
     // Method to print the District
@@ -1012,10 +1092,19 @@ impl Customer {
         }
     }
 
-    pub fn from_bytes(bytes: &[u8]) -> &Customer {
+    /// # Safety
+    ///
+    /// The caller must ensure that the input bytes are valid and
+    /// represent a valid Customer struct.
+    pub unsafe fn from_bytes(bytes: &[u8]) -> &Customer {
         unsafe { &*(bytes.as_ptr() as *const Customer) }
     }
 
+    /// # Safety
+    ///
+    /// The caller must ensure that the input bytes are valid and
+    /// represent a valid Customer struct. The caller must also ensure that
+    /// the input bytes are mutable.
     pub fn from_bytes_mut(bytes: &mut [u8]) -> &mut Customer {
         unsafe { &mut *(bytes.as_mut_ptr() as *mut Customer) }
     }
@@ -1089,8 +1178,21 @@ impl History {
         }
     }
 
-    pub fn from_bytes(bytes: &[u8]) -> &mut History {
-        unsafe { &mut *(bytes.as_ptr() as *mut History) }
+    /// # Safety
+    ///
+    /// The caller must ensure that the input bytes are valid and
+    /// represent a valid History struct.
+    pub unsafe fn from_bytes(bytes: &[u8]) -> &History {
+        &*(bytes.as_ptr() as *const History)
+    }
+
+    /// # Safety
+    ///
+    /// The caller must ensure that the input bytes are valid and
+    /// represent a valid History struct. The caller must also ensure that
+    /// the input bytes are mutable.
+    pub unsafe fn from_bytes_mut(bytes: &mut [u8]) -> &mut History {
+        &mut *(bytes.as_mut_ptr() as *mut History)
     }
 
     // Method to print the History
@@ -1163,12 +1265,21 @@ impl Order {
         }
     }
 
-    pub fn from_bytes(bytes: &[u8]) -> &mut Order {
-        unsafe { &mut *(bytes.as_ptr() as *mut Order) }
+    /// # Safety
+    ///
+    /// The caller must ensure that the input bytes are valid and
+    /// represent a valid Order struct.
+    pub unsafe fn from_bytes(bytes: &[u8]) -> &Order {
+        &*(bytes.as_ptr() as *const Order)
     }
 
-    pub fn from_bytes_mut(bytes: &mut [u8]) -> &mut Order {
-        unsafe { &mut *(bytes.as_mut_ptr() as *mut Order) }
+    /// # Safety
+    ///
+    /// The caller must ensure that the input bytes are valid and
+    /// represent a valid Order struct. The caller must also ensure that
+    /// the input bytes are mutable.
+    pub unsafe fn from_bytes_mut(bytes: &mut [u8]) -> &mut Order {
+        &mut *(bytes.as_ptr() as *mut Order)
     }
 
     // Method to print the Order
@@ -1220,8 +1331,21 @@ impl NewOrder {
         }
     }
 
-    pub fn from_bytes(bytes: &[u8]) -> &mut NewOrder {
-        unsafe { &mut *(bytes.as_ptr() as *mut NewOrder) }
+    /// # Safety
+    ///
+    /// The caller must ensure that the input bytes are valid and
+    /// represent a valid NewOrder struct.
+    pub unsafe fn from_bytes(bytes: &[u8]) -> &NewOrder {
+        &*(bytes.as_ptr() as *const NewOrder)
+    }
+
+    /// # Safety
+    ///
+    /// The caller must ensure that the input bytes are valid and
+    /// represent a valid NewOrder struct. The caller must also ensure that
+    /// the input bytes are mutable.
+    pub unsafe fn from_bytes_mut(bytes: &mut [u8]) -> &mut NewOrder {
+        &mut *(bytes.as_ptr() as *mut NewOrder)
     }
 
     // Method to print the NewOrder
@@ -1315,12 +1439,20 @@ impl OrderLine {
         }
     }
 
-    pub fn from_bytes(bytes: &[u8]) -> &OrderLine {
-        unsafe { &*(bytes.as_ptr() as *const OrderLine) }
+    /// # Safety
+    ///
+    /// The caller must ensure that the input bytes are valid and
+    /// represent a valid OrderLine struct.
+    pub unsafe fn from_bytes(bytes: &[u8]) -> &OrderLine {
+        &*(bytes.as_ptr() as *const OrderLine)
     }
 
-    pub fn from_bytes_mut(bytes: &mut [u8]) -> &mut OrderLine {
-        unsafe { &mut *(bytes.as_mut_ptr() as *mut OrderLine) }
+    /// # Safety
+    /// The caller must ensure that the input bytes are valid and
+    /// represent a valid OrderLine struct. The caller must also ensure that
+    /// the input bytes are mutable.
+    pub unsafe fn from_bytes_mut(bytes: &mut [u8]) -> &mut OrderLine {
+        &mut *(bytes.as_mut_ptr() as *mut OrderLine)
     }
 
     pub fn print(&self) -> String {

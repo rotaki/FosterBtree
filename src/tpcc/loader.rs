@@ -164,13 +164,13 @@ fn create_and_insert_customer_record(
 }
 
 fn create_and_insert_history_record(
-    txn_storage: &impl TxnStorageTrait,
-    table_info: &TPCCTableInfo,
-    h_c_w_id: u16,
-    h_c_d_id: u8,
-    h_c_id: u32,
-    h_w_id: u16,
-    h_d_id: u8,
+    _txn_storage: &impl TxnStorageTrait,
+    _table_info: &TPCCTableInfo,
+    _h_c_w_id: u16,
+    _h_c_d_id: u8,
+    _h_c_id: u32,
+    _h_w_id: u16,
+    _h_d_id: u8,
 ) {
     // ignore history record for now
 }
@@ -207,6 +207,7 @@ fn create_and_insert_order_record(
     (value.o_entry_d, value.o_ol_cnt)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn create_and_insert_orderline_record(
     txn_storage: &impl TxnStorageTrait,
     table_info: &TPCCTableInfo,
@@ -267,7 +268,6 @@ fn create_and_insert_neworder_record(
 ///     - Order: N * 10 * 3000
 ///       - OrderLine: N * 10 * 3000 * 10 (average 10 orderlines per order)
 ///       - NewOrders
-
 fn load_item_table(txn_storage: &impl TxnStorageTrait, table_info: &TPCCTableInfo) {
     println!("Loading item table");
     for i_id in 1..=Item::ITEMS {

@@ -44,6 +44,8 @@ pub mod prelude {
     pub use super::{NonUniqueKeyIndex, OrderedUniqueKeyIndex, UniqueKeyIndex};
 }
 
+pub type FilterType = Arc<dyn Fn(&[u8], &[u8]) -> bool + Send + Sync>;
+
 pub trait UniqueKeyIndex {
     type Iter: Iterator<Item = (Vec<u8>, Vec<u8>)>;
     fn insert(&self, key: &[u8], value: &[u8]) -> Result<(), AccessMethodError>;
@@ -58,10 +60,7 @@ pub trait UniqueKeyIndex {
         merge_fn: impl Fn(&[u8], &[u8]) -> Vec<u8>,
     ) -> Result<(), AccessMethodError>;
     fn scan(self: &Arc<Self>) -> Self::Iter;
-    fn scan_with_filter(
-        self: &Arc<Self>,
-        filter: Arc<dyn Fn(&[u8], &[u8]) -> bool + Send + Sync>,
-    ) -> Self::Iter;
+    fn scan_with_filter(self: &Arc<Self>, filter: FilterType) -> Self::Iter;
 }
 
 pub trait OrderedUniqueKeyIndex: UniqueKeyIndex {
@@ -71,7 +70,7 @@ pub trait OrderedUniqueKeyIndex: UniqueKeyIndex {
         self: &Arc<Self>,
         start_key: &[u8],
         end_key: &[u8],
-        filter: Arc<dyn Fn(&[u8], &[u8]) -> bool + Send + Sync>,
+        filter: FilterType,
     ) -> Self::RangeIter;
 }
 

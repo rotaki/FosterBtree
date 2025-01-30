@@ -16,7 +16,6 @@ use super::{
 /// A latch is used to synchronize access to the pool.
 /// An exclusive latch is required to create a new page and append it to the pool.
 /// Getting a page for read or write requires a shared latch.
-
 pub struct InMemPool {
     latch: RwLatch,
     frames: UnsafeCell<Vec<Box<BufferFrame>>>, // Box is required to ensure that the frame does not move when the vector is resized

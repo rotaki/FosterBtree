@@ -17,6 +17,7 @@ thread_local! {
 }
 
 #[inline]
+#[allow(dead_code)]
 pub fn log(level: &str, file: &str, line: u32, message: &str) {
     let now = Local::now();
     let formatted_time = now.format("%Y-%m-%d %H:%M:%S").to_string();

@@ -196,11 +196,6 @@ impl ReadWriteSet {
         rwset.insert(key, value);
     }
 
-    pub fn remove(&self, key: &[u8]) {
-        let rwset = unsafe { &mut *self.rwset.get() };
-        rwset.remove(key);
-    }
-
     pub fn iter(&self) -> std::collections::hash_map::Iter<Vec<u8>, RWEntry> {
         let rwset = unsafe { &*self.rwset.get() };
         rwset.iter()
@@ -659,6 +654,7 @@ impl NoWaitTxn {
         }
     }
 
+    #[allow(clippy::type_complexity)]
     pub fn iter_next<M: MemPool>(
         &self,
         pi: &mut PrimaryIterator<M>,
@@ -702,6 +698,7 @@ impl NoWaitTxn {
     }
 
     // Iterates over the secondary index and returns the value in the primary index
+    #[allow(clippy::type_complexity)]
     pub fn iter_next_sec<M: MemPool>(
         &self,
         si: &mut SecondaryIterator<M>,
@@ -1196,7 +1193,7 @@ impl<M: MemPool> TxnStorageTrait for NoWaitTxnStorage<M> {
         }
     }
 
-    fn drop_iterator_handle(&self, iter: Self::IteratorHandle) -> Result<(), TxnStorageStatus> {
+    fn drop_iterator_handle(&self, _iter: Self::IteratorHandle) -> Result<(), TxnStorageStatus> {
         unimplemented!()
     }
 }

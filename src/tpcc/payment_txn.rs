@@ -48,7 +48,7 @@ impl TPCCTxnProfile for PaymentTxn {
         let c_w_id = self.input.c_w_id;
         let c_d_id = self.input.c_d_id;
         let h_amount = self.input.h_amount;
-        let h_date = self.input.h_date;
+        let _h_date = self.input.h_date;
         let c_last = &self.input.c_last;
         let by_last_name = self.input.by_last_name;
 
@@ -77,7 +77,7 @@ impl TPCCTxnProfile for PaymentTxn {
             tbl_info[TPCCTable::District],
             d_key.into_bytes(),
             |bytes| {
-                let d = District::from_bytes_mut(bytes);
+                let d = unsafe { District::from_bytes_mut(bytes) };
                 write_fields!(out, &d.d_name);
                 d.d_ytd += h_amount;
             },
@@ -139,14 +139,15 @@ impl TPCCTxnProfile for PaymentTxn {
 
             // Sort the customer records by c_first
             customer_recs.sort_by(|a, b| {
-                let a = Customer::from_bytes(a);
-                let b = Customer::from_bytes(b);
+                let a = unsafe { Customer::from_bytes(a) };
+                let b = unsafe { Customer::from_bytes(b) };
                 a.c_first.cmp(&b.c_first)
             });
 
             // Select the middle record
-            let c =
-                Customer::from_bytes(customer_recs[(customer_recs.len() + 1) / 2 - 1].as_slice());
+            let c = unsafe {
+                Customer::from_bytes(customer_recs[(customer_recs.len() + 1) / 2 - 1].as_slice())
+            };
             CustomerKey::create_key_from_customer(c)
         } else {
             // Customer is selected based on customer number
@@ -262,6 +263,7 @@ pub struct PaymentTxnInput {
 }
 
 impl PaymentTxnInput {
+    #[allow(clippy::field_reassign_with_default)]
     pub fn new(config: &TPCCConfig, w_id: u16) -> Self {
         let num_warehouses = config.num_warehouses;
         let mut this = PaymentTxnInput::default();

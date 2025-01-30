@@ -186,8 +186,8 @@ pub trait TxnStorageTrait: Send + Sync {
 
     fn get_container_stats(
         &self,
-        db_id: DatabaseId,
-        c_id: ContainerId,
+        _db_id: DatabaseId,
+        _c_id: ContainerId,
     ) -> Result<String, TxnStorageStatus> {
         Ok("Stats disabled".to_string())
     }
@@ -306,6 +306,7 @@ pub trait TxnStorageTrait: Send + Sync {
     ) -> Result<Self::IteratorHandle, TxnStorageStatus>;
 
     // Iterate next
+    #[allow(clippy::type_complexity)]
     fn iter_next(
         &self,
         txn: &Self::TxnHandle,

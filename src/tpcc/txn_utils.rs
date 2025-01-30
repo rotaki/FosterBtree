@@ -1,6 +1,5 @@
 use core::panic;
 use std::cmp;
-use std::hash::Hasher;
 use std::ops::{Index, IndexMut};
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -166,7 +165,7 @@ pub trait TPCCTxnProfile {
 
 /// Statistics per transaction type.
 #[derive(Debug)]
-pub struct PerTxnType {
+pub struct TPCCPerTxnType {
     pub num_commits: usize,
     pub num_usr_aborts: usize,
     pub num_sys_aborts: usize,
@@ -176,16 +175,16 @@ pub struct PerTxnType {
     pub max_latency: u64,
 }
 
-impl Default for PerTxnType {
+impl Default for TPCCPerTxnType {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl PerTxnType {
+impl TPCCPerTxnType {
     /// Creates a new `PerTxType` instance.
     pub fn new() -> Self {
-        PerTxnType {
+        TPCCPerTxnType {
             num_commits: 0,
             num_usr_aborts: 0,
             num_sys_aborts: 0,
@@ -197,7 +196,7 @@ impl PerTxnType {
     }
 
     /// Adds statistics from another `PerTxType`.
-    pub fn add(&mut self, rhs: &PerTxnType, with_abort_details: bool) {
+    pub fn add(&mut self, rhs: &TPCCPerTxnType, with_abort_details: bool) {
         self.num_commits += rhs.num_commits;
         self.num_usr_aborts += rhs.num_usr_aborts;
         self.num_sys_aborts += rhs.num_sys_aborts;
@@ -218,7 +217,7 @@ impl PerTxnType {
 
 #[derive(Debug)]
 pub struct TPCCStat {
-    pub per_type: [PerTxnType; TPCCTxnProfileID::Max as usize],
+    pub per_type: [TPCCPerTxnType; TPCCTxnProfileID::Max as usize],
 }
 
 impl Default for TPCCStat {
@@ -234,22 +233,22 @@ impl TPCCStat {
     pub fn new() -> Self {
         TPCCStat {
             per_type: [
-                PerTxnType::new(),
-                PerTxnType::new(),
-                PerTxnType::new(),
-                PerTxnType::new(),
-                PerTxnType::new(),
+                TPCCPerTxnType::new(),
+                TPCCPerTxnType::new(),
+                TPCCPerTxnType::new(),
+                TPCCPerTxnType::new(),
+                TPCCPerTxnType::new(),
             ],
         }
     }
 
     /// Gets a mutable reference to `PerTxType` based on `TxProfileID`.
-    pub fn get_mut(&mut self, tx_type: TPCCTxnProfileID) -> &mut PerTxnType {
+    pub fn get_mut(&mut self, tx_type: TPCCTxnProfileID) -> &mut TPCCPerTxnType {
         &mut self.per_type[tx_type as usize]
     }
 
     /// Gets an immutable reference to `PerTxType` based on `TxProfileID`.
-    pub fn get(&self, tx_type: TPCCTxnProfileID) -> &PerTxnType {
+    pub fn get(&self, tx_type: TPCCTxnProfileID) -> &TPCCPerTxnType {
         &self.per_type[tx_type as usize]
     }
 
@@ -261,8 +260,8 @@ impl TPCCStat {
     }
 
     /// Aggregates performance statistics across all transaction types.
-    pub fn aggregate_perf(&self) -> PerTxnType {
-        let mut out = PerTxnType::new();
+    pub fn aggregate_perf(&self) -> TPCCPerTxnType {
+        let mut out = TPCCPerTxnType::new();
         for i in 0..(TPCCTxnProfileID::Max as usize) {
             out.add(&self.per_type[i], false);
         }
@@ -310,7 +309,7 @@ impl std::fmt::Display for TPCCStat {
 }
 
 impl Index<TPCCTxnProfileID> for TPCCStat {
-    type Output = PerTxnType;
+    type Output = TPCCPerTxnType;
 
     fn index(&self, index: TPCCTxnProfileID) -> &Self::Output {
         &self.per_type[index as usize]
@@ -389,12 +388,12 @@ pub fn not_successful<K>(config: &TPCCConfig, res: &Result<K, TxnStorageStatus>)
 /// returned by the transactional storage.
 pub struct TxHelper<'a, T: TxnStorageTrait> {
     txn_storage: &'a T,
-    per_type: &'a mut PerTxnType,
+    per_type: &'a mut TPCCPerTxnType,
 }
 
 impl<'a, T: TxnStorageTrait> TxHelper<'a, T> {
     /// Creates a new `TxHelper` instance.
-    pub fn new(txn_storage: &'a T, per_type: &'a mut PerTxnType) -> Self {
+    pub fn new(txn_storage: &'a T, per_type: &'a mut TPCCPerTxnType) -> Self {
         TxHelper {
             txn_storage,
             per_type,
@@ -409,7 +408,7 @@ impl<'a, T: TxnStorageTrait> TxHelper<'a, T> {
         abort_id: u8,
     ) -> TPCCStatus {
         match res {
-            Err(e) => {
+            Err(_e) => {
                 self.per_type.num_sys_aborts += 1;
                 self.per_type.abort_details[abort_id as usize] += 1;
                 self.txn_storage.abort_txn(handler).unwrap();
@@ -508,8 +507,8 @@ where
                 retry_count += 1;
                 // Retry the transaction
             }
-            TPCCStatus::Bug(reason) => {
-                log_info!("Other: {}", reason);
+            TPCCStatus::Bug(_reason) => {
+                log_info!("Other: {}", _reason);
                 return false;
             }
         }

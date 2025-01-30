@@ -73,24 +73,12 @@ mod slot {
             self.offset
         }
 
-        pub fn set_offset(&mut self, offset: u32) {
-            self.offset = offset;
-        }
-
         pub fn key_size(&self) -> u32 {
             self.key_size
         }
 
-        pub fn set_key_size(&mut self, key_size: u32) {
-            self.key_size = key_size;
-        }
-
         pub fn val_size(&self) -> u32 {
             self.val_size
-        }
-
-        pub fn set_val_size(&mut self, val_size: u32) {
-            self.val_size = val_size;
         }
     }
 }

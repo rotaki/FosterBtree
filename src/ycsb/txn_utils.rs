@@ -155,7 +155,7 @@ pub trait YCSBTxnProfile {
 
 /// Statistics per transaction type.
 #[derive(Debug)]
-pub struct PerTxnType {
+pub struct YCSBPerTxnType {
     pub num_commits: usize,
     pub num_sys_aborts: usize,
     pub total_latency: u64,
@@ -163,16 +163,16 @@ pub struct PerTxnType {
     pub max_latency: u64,
 }
 
-impl Default for PerTxnType {
+impl Default for YCSBPerTxnType {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl PerTxnType {
+impl YCSBPerTxnType {
     /// Creates a new `PerTxType` instance.
     pub fn new() -> Self {
-        PerTxnType {
+        YCSBPerTxnType {
             num_commits: 0,
             num_sys_aborts: 0,
             total_latency: 0,
@@ -182,7 +182,7 @@ impl PerTxnType {
     }
 
     /// Adds statistics from another `PerTxType`.
-    pub fn add(&mut self, rhs: &PerTxnType) {
+    pub fn add(&mut self, rhs: &YCSBPerTxnType) {
         self.num_commits += rhs.num_commits;
         self.num_sys_aborts += rhs.num_sys_aborts;
 
@@ -196,7 +196,7 @@ impl PerTxnType {
 
 #[derive(Debug)]
 pub struct YCSBStat {
-    pub per_type: [PerTxnType; YCSBTxnProfileID::Max as usize],
+    pub per_type: [YCSBPerTxnType; YCSBTxnProfileID::Max as usize],
 }
 
 impl Default for YCSBStat {
@@ -209,17 +209,17 @@ impl YCSBStat {
     /// Creates a new `Stat` instance.
     pub fn new() -> Self {
         YCSBStat {
-            per_type: [PerTxnType::new(), PerTxnType::new()],
+            per_type: [YCSBPerTxnType::new(), YCSBPerTxnType::new()],
         }
     }
 
     /// Gets a mutable reference to `PerTxType` based on `TxProfileID`.
-    pub fn get_mut(&mut self, tx_type: YCSBTxnProfileID) -> &mut PerTxnType {
+    pub fn get_mut(&mut self, tx_type: YCSBTxnProfileID) -> &mut YCSBPerTxnType {
         &mut self.per_type[tx_type as usize]
     }
 
     /// Gets an immutable reference to `PerTxType` based on `TxProfileID`.
-    pub fn get(&self, tx_type: YCSBTxnProfileID) -> &PerTxnType {
+    pub fn get(&self, tx_type: YCSBTxnProfileID) -> &YCSBPerTxnType {
         &self.per_type[tx_type as usize]
     }
 
@@ -231,8 +231,8 @@ impl YCSBStat {
     }
 
     /// Aggregates performance statistics across all transaction types.
-    pub fn aggregate_perf(&self) -> PerTxnType {
-        let mut out = PerTxnType::new();
+    pub fn aggregate_perf(&self) -> YCSBPerTxnType {
+        let mut out = YCSBPerTxnType::new();
         for i in 0..(YCSBTxnProfileID::Max as usize) {
             out.add(&self.per_type[i]);
         }
@@ -272,7 +272,7 @@ impl std::fmt::Display for YCSBStat {
 }
 
 impl Index<YCSBTxnProfileID> for YCSBStat {
-    type Output = PerTxnType;
+    type Output = YCSBPerTxnType;
 
     fn index(&self, index: YCSBTxnProfileID) -> &Self::Output {
         &self.per_type[index as usize]
@@ -322,12 +322,12 @@ pub fn get_new_value(value_size: usize) -> Vec<u8> {
 /// returned by the transactional storage.
 pub(super) struct TxHelper<'a, T: TxnStorageTrait> {
     txn_storage: &'a T,
-    per_type: &'a mut PerTxnType,
+    per_type: &'a mut YCSBPerTxnType,
 }
 
 impl<'a, T: TxnStorageTrait> TxHelper<'a, T> {
     /// Creates a new `TxHelper` instance.
-    pub fn new(txn_storage: &'a T, per_type: &'a mut PerTxnType) -> Self {
+    pub fn new(txn_storage: &'a T, per_type: &'a mut YCSBPerTxnType) -> Self {
         TxHelper {
             txn_storage,
             per_type,
@@ -341,7 +341,7 @@ impl<'a, T: TxnStorageTrait> TxHelper<'a, T> {
         res: &Result<K, TxnStorageStatus>,
     ) -> YCSBStatus {
         match res {
-            Err(e) => {
+            Err(_e) => {
                 self.per_type.num_sys_aborts += 1;
                 self.txn_storage.abort_txn(handler).unwrap();
                 YCSBStatus::SystemAbort
@@ -404,8 +404,8 @@ where
                 retry_count += 1;
                 // Retry the transaction
             }
-            YCSBStatus::Bug(reason) => {
-                log_info!("Other: {}", reason);
+            YCSBStatus::Bug(_reason) => {
+                log_info!("Other: {}", _reason);
                 return false;
             }
         }
@@ -413,7 +413,7 @@ where
 }
 
 fn run<T, P>(
-    thread_id: usize,
+    _thread_id: usize,
     config: &YCSBConfig,
     txn_storage: &T,
     tbl_info: &YCSBTableInfo,
@@ -467,7 +467,7 @@ where
 {
     let mut stat = YCSBStat::new();
     let mut out = YCSBOutput::new();
-    let (read, update, scan, insert, rmw) = workload_proportion(config.workload_type);
+    let (read, update, _scan, _insert, _rmw) = workload_proportion(config.workload_type);
 
     while flag.load(Ordering::Acquire) {
         let x = urand_int(1, 100);

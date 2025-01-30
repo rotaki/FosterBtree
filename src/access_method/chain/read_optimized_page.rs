@@ -1,3 +1,5 @@
+use std::cmp::Ordering;
+
 use crate::{
     access_method::AccessMethodError,
     prelude::{Page, PageId, AVAILABLE_PAGE_SIZE},
@@ -392,8 +394,7 @@ pub trait ReadOptimizedPage {
     /// This function is used for updating the val in place.
     /// Updates of the record should not change the size of the val.
     // fn get_mut_val_with_slot_id(&mut self, slot_id: u32) -> &mut [u8];
-
-    // Helpers (Jun)
+    /// Helpers (Jun)
     fn get_key_with_slot_id(&self, slot_id: u32) -> Vec<u8>;
     fn get_value_with_slot_id(&self, slot_id: u32) -> &[u8];
     fn get_value_with_slot(&self, slot: &Slot) -> &[u8];
@@ -676,21 +677,25 @@ impl ReadOptimizedPage for Page {
         let mut low = 0;
         let low_key = self.get_key_with_slot_id(low);
 
-        if key < low_key.as_slice() {
-            return (false, 0);
-        } else if key == low_key.as_slice() {
-            return (true, low);
+        match key.cmp(low_key.as_slice()) {
+            Ordering::Less => return (false, 0),
+            Ordering::Equal => return (true, low),
+            _ => {}
         }
 
         while low < high {
             let mid = low + (high - low) / 2;
             let mid_key = self.get_key_with_slot_id(mid);
-            if key < mid_key.as_slice() {
-                high = mid;
-            } else if key > mid_key.as_slice() {
-                low = mid + 1;
-            } else {
-                return (true, mid);
+            match mid_key.as_slice().cmp(key) {
+                Ordering::Less => {
+                    low = mid + 1;
+                }
+                Ordering::Greater => {
+                    high = mid;
+                }
+                Ordering::Equal => {
+                    return (true, mid);
+                }
             }
         }
 
@@ -1744,7 +1749,7 @@ mod tests {
         }
 
         // Step 4: Verify that all keys are still present and correct
-        for (key, original_value) in keys.iter().zip(values.iter()) {
+        for (key, _original_value) in keys.iter().zip(values.iter()) {
             assert_eq!(
                 page.get(key).unwrap(),
                 small_value.as_slice(),

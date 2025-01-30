@@ -67,25 +67,27 @@ impl TPCCTxnProfile for DeliveryTxn {
             }
             let iter = res.unwrap();
 
-            let (no_key, _) = loop {
-                match txn_storage.iter_next(&txn, &iter) {
-                    Ok(Some((key_bytes, value))) => {
-                        let no_key = NewOrderKey::from_bytes(&key_bytes);
-                        if no_key.w_id() == w_id && no_key.d_id() == d_id {
-                            break (no_key, value); // Return the NewOrder key and value
-                        } else {
-                            continue 'per_district_loop;
-                        }
+            let (no_key, _) = match txn_storage.iter_next(&txn, &iter) {
+                Ok(Some((key_bytes, value))) => {
+                    let no_key = *unsafe { NewOrderKey::from_bytes(&key_bytes) };
+                    if no_key.w_id() == w_id && no_key.d_id() == d_id {
+                        (no_key, value)
+                    } else {
+                        continue 'per_district_loop;
                     }
-                    Ok(None) => continue 'per_district_loop,
-                    Err(e) => {
-                        return helper.kill::<()>(
-                            &txn,
-                            &Err(e),
-                            AbortID::GetNewOrderWithSmallestKey as u8,
-                        );
-                    }
-                };
+                }
+                Ok(None) => {
+                    // Nothing more in iterator, so go to next district
+                    continue 'per_district_loop;
+                }
+                Err(e) => {
+                    // Handle error
+                    return helper.kill::<()>(
+                        &txn,
+                        &Err(e),
+                        AbortID::GetNewOrderWithSmallestKey as u8,
+                    );
+                }
             };
             drop(iter);
 
@@ -103,7 +105,7 @@ impl TPCCTxnProfile for DeliveryTxn {
                 tbl_info[TPCCTable::Order],
                 o_key.into_bytes(),
                 |bytes| {
-                    let o = Order::from_bytes_mut(bytes);
+                    let o = unsafe { Order::from_bytes_mut(bytes) };
                     o.o_carrier_id = o_carrier_id;
                     c_id = o.o_c_id;
                 },
@@ -150,7 +152,7 @@ impl TPCCTxnProfile for DeliveryTxn {
 
             let mut total_ol_amount = 0.0;
             for (key_bytes, mut value_bytes) in order_lines {
-                let ol = OrderLine::from_bytes_mut(&mut value_bytes);
+                let ol = unsafe { OrderLine::from_bytes_mut(&mut value_bytes) };
                 ol.ol_delivery_d = self.input.ol_delivery_d;
                 total_ol_amount += ol.ol_amount;
                 let res = txn_storage.update_value(
@@ -206,12 +208,12 @@ pub struct DeliveryTxnInput {
 }
 
 impl DeliveryTxnInput {
-    pub fn new(config: &TPCCConfig, w_id: u16) -> Self {
-        let mut input = DeliveryTxnInput::default();
-        input.w_id = w_id;
-        input.o_carrier_id = urand_int(1, 10) as u8;
-        input.ol_delivery_d = get_timestamp();
-        input
+    pub fn new(_config: &TPCCConfig, w_id: u16) -> Self {
+        DeliveryTxnInput {
+            w_id,
+            o_carrier_id: urand_int(1, 10) as u8,
+            ol_delivery_d: get_timestamp(),
+        }
     }
 
     pub fn print(&self) {

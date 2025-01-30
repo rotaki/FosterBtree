@@ -22,7 +22,7 @@ impl UpdateTxn {
 }
 
 impl YCSBTxnProfile for UpdateTxn {
-    fn new(config: &YCSBConfig) -> Self {
+    fn new(_config: &YCSBConfig) -> Self {
         Self {}
     }
 

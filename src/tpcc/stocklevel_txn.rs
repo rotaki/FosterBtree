@@ -54,7 +54,7 @@ impl TPCCTxnProfile for StockLevelTxn {
             return helper.kill(&txn, &res, AbortID::GetDistrict as u8);
         }
         let d_bytes = res.unwrap();
-        let d = District::from_bytes(&d_bytes);
+        let d = unsafe { District::from_bytes(&d_bytes) };
 
         // Prepare low and up keys for OrderLine
         let low_key = OrderLineKey::create_key(w_id, d_id, d.d_next_o_id - 20, 1);
@@ -78,7 +78,7 @@ impl TPCCTxnProfile for StockLevelTxn {
             let item = txn_storage.iter_next(&txn, &iter);
             match item {
                 Ok(Some((_key_bytes, value_bytes))) => {
-                    let ol = OrderLine::from_bytes(&value_bytes);
+                    let ol = unsafe { OrderLine::from_bytes(&value_bytes) };
                     debug_assert_ne!(ol.ol_i_id, { Item::UNUSED_ID });
                     s_i_ids.insert(ol.ol_i_id);
                 }
@@ -98,7 +98,7 @@ impl TPCCTxnProfile for StockLevelTxn {
                 return helper.kill(&txn, &res, AbortID::GetStock as u8);
             }
             let s_bytes = res.unwrap();
-            let s = Stock::from_bytes(&s_bytes);
+            let s = unsafe { Stock::from_bytes(&s_bytes) };
             if s.s_quantity < threshold as i16 {
                 count += 1;
             }
@@ -115,11 +115,7 @@ impl StockLevelTxn {
     pub fn print_abort_details(stat: &[usize]) {
         println!("StockLevelTxn Abort Details:");
         for (i, &count) in stat.iter().enumerate().take(AbortID::Max as usize) {
-            println!(
-                "        {:<45}: {}",
-                AbortID::from(i as u8).as_str(),
-                count,
-            );
+            println!("        {:<45}: {}", AbortID::from(i as u8).as_str(), count,);
         }
     }
 }
@@ -133,11 +129,11 @@ pub struct StockLevelTxnInput {
 
 impl StockLevelTxnInput {
     pub fn new(_config: &TPCCConfig, w_id0: u16) -> Self {
-        let mut input = StockLevelTxnInput::default();
-        input.w_id = w_id0;
-        input.d_id = urand_int(1, District::DISTS_PER_WARE as u64) as u8;
-        input.threshold = urand_int(10, 20) as u8;
-        input
+        StockLevelTxnInput {
+            w_id: w_id0,
+            d_id: urand_int(1, District::DISTS_PER_WARE as u64) as u8,
+            threshold: urand_int(10, 20) as u8,
+        }
     }
 
     pub fn print(&self) {

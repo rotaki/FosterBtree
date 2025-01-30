@@ -71,7 +71,7 @@ impl TPCCTxnProfile for NewOrderTxn {
             tbl_info[TPCCTable::District],
             d_key.into_bytes(),
             |bytes| {
-                let d = District::from_bytes_mut(bytes);
+                let d = unsafe { District::from_bytes_mut(bytes) };
                 o_id = d.d_next_o_id;
                 d.d_next_o_id += 1;
                 write_fields!(out, &d.d_tax, &d.d_next_o_id);
@@ -89,7 +89,7 @@ impl TPCCTxnProfile for NewOrderTxn {
             return helper.kill(&txn, &res, AbortID::GetCustomer as u8);
         }
         let c_bytes = res.unwrap();
-        let c = Customer::from_bytes(&c_bytes);
+        let c = unsafe { Customer::from_bytes(&c_bytes) };
 
         // Output data
         write_fields!(
@@ -148,7 +148,7 @@ impl TPCCTxnProfile for NewOrderTxn {
                 return helper.kill(&txn, &res, AbortID::GetItem as u8);
             }
             let i_bytes = res.unwrap();
-            let i = Item::from_bytes(&i_bytes);
+            let i = unsafe { Item::from_bytes(&i_bytes) };
 
             // Fetch and update Stock record. Create OrderLine record while updating Stock
             let s_key = StockKey::create_key(ol_supply_w_id, ol_i_id);
@@ -161,7 +161,7 @@ impl TPCCTxnProfile for NewOrderTxn {
                 tbl_info[TPCCTable::Stock],
                 s_key.into_bytes(),
                 |bytes| {
-                    let s = Stock::from_bytes_mut(bytes);
+                    let s = unsafe { Stock::from_bytes_mut(bytes) };
                     // Modify stock
                     if memmem::find(&s.s_data, b"ORIGINAL").is_some()
                         && memmem::find(&i.i_data, b"ORIGINAL").is_some()
@@ -240,6 +240,7 @@ impl NewOrderTxn {
         no.no_o_id = o_id;
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn create_order(
         &self,
         o: &mut Order,
@@ -260,6 +261,7 @@ impl NewOrderTxn {
         o.o_entry_d = get_timestamp();
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn create_orderline(
         &self,
         ol: &mut OrderLine,
