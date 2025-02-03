@@ -572,7 +572,7 @@ impl BufferPool {
         id_to_index.insert(key, index as usize);
         *location.page_key_mut() = Some(key);
         {
-            let mut evict_info = location.evict_info().write().unwrap();
+            let evict_info = location.evict_info();
             evict_info.reset();
             evict_info.update();
         }
@@ -640,7 +640,7 @@ impl MemPool for BufferPool {
                     if let Some(page_key) = g.page_key() {
                         if page_key == &key.p_key() {
                             // Update the eviction info
-                            g.evict_info().write().unwrap().update();
+                            g.evict_info().update();
                             // Mark the page as dirty
                             g.dirty().store(true, Ordering::Release);
                             log_debug!("Page fast path write: {}", key);
@@ -678,7 +678,7 @@ impl MemPool for BufferPool {
             if let Some(&index) = id_to_index.get(&key.p_key()) {
                 let guard = frames[index].try_write(true);
                 if let Some(g) = &guard {
-                    g.evict_info().write().unwrap().update();
+                    g.evict_info().update();
                 }
                 self.release_shared();
                 match guard {
@@ -710,7 +710,7 @@ impl MemPool for BufferPool {
                 if let Some(g) = &guard {
                     #[cfg(feature = "stat")]
                     inc_local_bp_slow_path_hit();
-                    g.evict_info().write().unwrap().update();
+                    g.evict_info().update();
                 } else {
                     #[cfg(feature = "stat")]
                     inc_local_bp_latch_failures();
@@ -756,7 +756,7 @@ impl MemPool for BufferPool {
                     if let Some(page_key) = g.page_key() {
                         if page_key == &key.p_key() {
                             // Update the eviction info
-                            g.evict_info().write().unwrap().update();
+                            g.evict_info().update();
                             log_debug!("Page fast path read: {}", key);
                             #[cfg(feature = "stat")]
                             inc_local_bp_fast_path_hit();
@@ -793,7 +793,7 @@ impl MemPool for BufferPool {
             if let Some(&index) = id_to_index.get(&key.p_key()) {
                 let guard = frames[index].try_read();
                 if let Some(g) = &guard {
-                    g.evict_info().write().unwrap().update();
+                    g.evict_info().update();
                 }
                 self.release_shared();
                 match guard {
@@ -824,7 +824,7 @@ impl MemPool for BufferPool {
                 if let Some(g) = &guard {
                     #[cfg(feature = "stat")]
                     inc_local_bp_slow_path_hit();
-                    g.evict_info().write().unwrap().update();
+                    g.evict_info().update();
                 } else {
                     #[cfg(feature = "stat")]
                     inc_local_bp_latch_failures();
