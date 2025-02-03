@@ -2160,10 +2160,7 @@ impl<T: MemPool> Iterator for FosterBtreeRangeScanner<T> {
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {
-            let (key, value) = match self.cursor.get_kv() {
-                Some(kv) => kv,
-                None => return None,
-            };
+            let (key, value) = self.cursor.get_kv()?;
             self.cursor.go_to_next_kv();
             if let Some(filter) = &self.filter {
                 if filter(&key, &value) {
