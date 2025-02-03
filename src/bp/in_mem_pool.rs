@@ -172,7 +172,7 @@ impl MemPool for InMemPool {
         Ok(())
     }
 
-    fn fast_evict(&self, _frame_id: u32) -> Result<(), MemPoolStatus> {
+    fn fast_evict(&self, _key: PageFrameKey) -> Result<(), MemPoolStatus> {
         Ok(())
     }
 }

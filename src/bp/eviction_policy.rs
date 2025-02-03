@@ -1,6 +1,6 @@
-use rand::{Rng, RngCore};
+use rand::RngCore;
 
-use crate::random::{small_thread_rng, SmallThreadRng};
+use crate::random::small_thread_rng;
 
 use super::buffer_frame::BufferFrame;
 use std::sync::atomic::{AtomicU64, Ordering};

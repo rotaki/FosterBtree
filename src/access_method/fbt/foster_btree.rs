@@ -1382,7 +1382,6 @@ impl<T: MemPool> FosterBtree<T> {
                 // Insert it into new page. If it fails, panic.
                 assert!(new_page.insert(key.as_ref(), value.as_ref(), false));
 
-                mem_pool.fast_evict(current_page.frame_id()).unwrap();
                 drop(current_page);
 
                 current_page = new_page;
@@ -2160,10 +2159,7 @@ impl<T: MemPool> Iterator for FosterBtreeRangeScanner<T> {
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {
-            let (key, value) = match self.cursor.get_kv() {
-                Some(kv) => kv,
-                None => return None,
-            };
+            let (key, value) = self.cursor.get_kv()?;
             self.cursor.go_to_next_kv();
             if let Some(filter) = &self.filter {
                 if filter(&key, &value) {

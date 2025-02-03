@@ -1613,7 +1613,7 @@ mod tests {
 
         // Ensure the last inserted key is still retrievable, implying multi-page handling
         assert!(
-            map.get(&last_key).is_ok(),
+            map.get(last_key).is_ok(),
             "The last key should still be retrievable, indicating multi-page handling"
         );
     }
@@ -1654,7 +1654,7 @@ mod tests {
     //         let barrier_clone = Arc::clone(&barrier);
     //         handles.push(thread::spawn(move || {
     //             barrier_clone.wait(); // Ensure all threads start at the same time
-    //             let mut rng = rng();
+    //             let mut rng = small_thread_rng();
 
     //             for _ in 0..num_operations_per_thread {
     //                 let key = random_string(10);

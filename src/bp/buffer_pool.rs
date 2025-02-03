@@ -12,8 +12,8 @@ use super::{
 use crate::file_manager::FileManager;
 
 use std::{
-    cell::UnsafeCell,
-    collections::{BTreeMap, HashMap},
+    cell::{RefCell, UnsafeCell},
+    collections::{BTreeMap, HashMap, VecDeque},
     fs::create_dir_all,
     ops::{Deref, DerefMut},
     path::PathBuf,
@@ -22,183 +22,6 @@ use std::{
 
 const EVICTION_SCAN_TRIALS: usize = 5;
 const EVICTION_SCAN_DEPTH: usize = 10;
-
-#[cfg(feature = "stat")]
-mod stat {
-    use lazy_static::lazy_static;
-
-    use std::{cell::UnsafeCell, sync::Mutex};
-    /// Statistics #pages evicted from the buffer pool.
-    pub struct BPStats {
-        hit_rate: UnsafeCell<[usize; 5]>, // [fast_path_hit, slow_path_hit, slow_path_miss, new_page, latch_failures]
-        victim_status: UnsafeCell<[usize; 4]>,
-    }
-
-    impl BPStats {
-        pub fn new() -> Self {
-            BPStats {
-                hit_rate: UnsafeCell::new([0, 0, 0, 0, 0]),
-                victim_status: UnsafeCell::new([0, 0, 0, 0]),
-            }
-        }
-
-        pub fn to_string(&self) -> String {
-            let hit_rate = unsafe { &*self.hit_rate.get() };
-            let victim_status = unsafe { &*self.victim_status.get() };
-            let mut result = String::new();
-            result.push_str("Buffer Pool Statistics\n");
-            result.push_str("Hit Rate\n");
-            let total_access = hit_rate.iter().sum::<usize>();
-            let labels = [
-                "Fast Path Hit",
-                "Slow Path Hit",
-                "Slow Path Miss",
-                "New Page",
-                "Latch Failures (Retry)",
-            ];
-            for i in 0..5 {
-                result.push_str(&format!(
-                    "{:25}: {:8} ({:6.2}%)\n",
-                    labels[i],
-                    hit_rate[i],
-                    (hit_rate[i] as f64 / total_access as f64) * 100.0
-                ));
-            }
-            result.push_str(&format!(
-                "{:25}: {:8} ({:6.2}%)\n",
-                "Total Access", total_access, 100.0
-            ));
-            result.push_str("\n");
-            result.push_str("Eviction Statistics\n");
-            let op_types = ["Free", "Clean", "Dirty", "All Latched", "Total"];
-            let total = victim_status.iter().sum::<usize>();
-            for i in 0..4 {
-                result.push_str(&format!(
-                    "{:12}: {:8} ({:6.2}%)\n",
-                    op_types[i],
-                    victim_status[i],
-                    (victim_status[i] as f64 / total as f64) * 100.0
-                ));
-            }
-            result.push_str(&format!(
-                "{:12}: {:8} ({:.2}%)\n",
-                op_types[4], total, 100.0
-            ));
-            result
-        }
-
-        pub fn merge(&self, other: &BPStats) {
-            let hit_rate = unsafe { &mut *self.hit_rate.get() };
-            let other_hit_rate = unsafe { &*other.hit_rate.get() };
-            for i in 0..5 {
-                hit_rate[i] += other_hit_rate[i];
-            }
-            let victim_status = unsafe { &mut *self.victim_status.get() };
-            let other_victim_status = unsafe { &*other.victim_status.get() };
-            for i in 0..4 {
-                victim_status[i] += other_victim_status[i];
-            }
-        }
-
-        pub fn clear(&self) {
-            let hit_rate = unsafe { &mut *self.hit_rate.get() };
-            for i in 0..5 {
-                hit_rate[i] = 0;
-            }
-            let victim_status = unsafe { &mut *self.victim_status.get() };
-            for i in 0..4 {
-                victim_status[i] = 0;
-            }
-        }
-    }
-
-    pub struct LocalBPStat {
-        pub stat: BPStats,
-    }
-
-    impl Drop for LocalBPStat {
-        fn drop(&mut self) {
-            GLOBAL_BP_STAT.lock().unwrap().merge(&self.stat);
-        }
-    }
-
-    lazy_static! {
-        pub static ref GLOBAL_BP_STAT: Mutex<BPStats> = Mutex::new(BPStats::new());
-    }
-
-    thread_local! {
-        pub static LOCAL_BP_STAT: LocalBPStat = LocalBPStat {
-            stat: BPStats::new(),
-        };
-    }
-
-    pub fn inc_local_bp_fast_path_hit() {
-        LOCAL_BP_STAT.with(|stat| {
-            let hit_rate = unsafe { &mut *stat.stat.hit_rate.get() };
-            hit_rate[0] += 1;
-        });
-    }
-
-    pub fn inc_local_bp_slow_path_hit() {
-        LOCAL_BP_STAT.with(|stat| {
-            let hit_rate = unsafe { &mut *stat.stat.hit_rate.get() };
-            hit_rate[1] += 1;
-        });
-    }
-
-    pub fn inc_local_bp_slow_path_miss() {
-        LOCAL_BP_STAT.with(|stat| {
-            let hit_rate = unsafe { &mut *stat.stat.hit_rate.get() };
-            hit_rate[2] += 1;
-        });
-    }
-
-    pub fn inc_local_bp_new_page() {
-        LOCAL_BP_STAT.with(|stat| {
-            let hit_rate = unsafe { &mut *stat.stat.hit_rate.get() };
-            hit_rate[3] += 1;
-        });
-    }
-
-    pub fn inc_local_bp_latch_failures() {
-        LOCAL_BP_STAT.with(|stat| {
-            let hit_rate = unsafe { &mut *stat.stat.hit_rate.get() };
-            hit_rate[4] += 1;
-        });
-    }
-
-    pub fn inc_local_bp_free_victim() {
-        LOCAL_BP_STAT.with(|stat| {
-            let victim_status = unsafe { &mut *stat.stat.victim_status.get() };
-            victim_status[0] += 1;
-        });
-    }
-
-    pub fn inc_local_bp_clean_victim() {
-        LOCAL_BP_STAT.with(|stat| {
-            let victim_status = unsafe { &mut *stat.stat.victim_status.get() };
-            victim_status[1] += 1;
-        });
-    }
-
-    pub fn inc_local_bp_dirty_victim() {
-        LOCAL_BP_STAT.with(|stat| {
-            let victim_status = unsafe { &mut *stat.stat.victim_status.get() };
-            victim_status[2] += 1;
-        });
-    }
-
-    pub fn inc_local_bp_all_latched_victim() {
-        LOCAL_BP_STAT.with(|stat| {
-            let victim_status = unsafe { &mut *stat.stat.victim_status.get() };
-            victim_status[3] += 1;
-        });
-    }
-}
-
-use concurrent_queue::ConcurrentQueue;
-#[cfg(feature = "stat")]
-use stat::*;
 
 /// Statistics kept by the buffer pool.
 /// These statistics are used for decision making.
@@ -256,41 +79,144 @@ impl RuntimeStats {
     }
 }
 
+// Thread-local eviction candidates
+struct EvictionTracker {
+    eviction_queue: VecDeque<PageFrameKey>,
+}
+
+impl EvictionTracker {
+    pub fn new() -> Self {
+        EvictionTracker {
+            eviction_queue: VecDeque::new(),
+        }
+    }
+}
+
+thread_local! {
+    pub static LOCAL_EVICTION_TRACKER: RefCell<EvictionTracker> = RefCell::new(EvictionTracker::new());
+}
+
+pub struct PerThreadEvictionTracker;
+
+impl PerThreadEvictionTracker {
+    pub fn add_eviction_candidate(&self, pf_key: PageFrameKey) {
+        LOCAL_EVICTION_TRACKER.with(|local_stat| {
+            let mut stat = local_stat.borrow_mut();
+            stat.eviction_queue.push_back(pf_key);
+        });
+    }
+
+    pub fn choose_victim<'a>(&self, frames: &'a [BufferFrame]) -> Option<FrameWriteGuard<'a>> {
+        // First, try the fast path victims.
+        let mut result = None;
+
+        LOCAL_EVICTION_TRACKER.with(|local_stat| {
+            let mut stat = local_stat.borrow_mut();
+
+            // Check the local eviction queue first
+            while let Some(victim) = stat.eviction_queue.pop_front() {
+                let frame_id = victim.frame_id() as usize;
+                if frame_id < frames.len() {
+                    let frame = frames[frame_id].try_write(false);
+                    match frame {
+                        Some(guard)
+                            if guard.page_key().is_none()
+                                || guard.page_key() == &Some(victim.p_key()) =>
+                        {
+                            // We should evict this page
+                            log_debug!("Fast path victim found @ frame({})", guard.frame_id());
+                            result = Some(guard);
+                        }
+                        _ => {
+                            // The page should not be evicted.
+                            // Either the frame is latched or the page key does not match.
+                        }
+                    }
+                }
+            }
+
+            let mut current_min_score = u64::MAX;
+            // Next, randomly select a few frames and choose the one with the minimum eviction score
+            for _ in 0..EVICTION_SCAN_TRIALS * EVICTION_SCAN_DEPTH {
+                let rand_idx = gen_random_int(0, frames.len() - 1);
+                let frame = frames[rand_idx].try_write(false);
+                match frame {
+                    Some(guard) if guard.eviction_score() < current_min_score => {
+                        // We should evict this page
+                        current_min_score = guard.eviction_score();
+                        result = Some(guard);
+                    }
+                    _ => {
+                        // Could not acquire the lock. Do not consider this frame.
+                    }
+                }
+            }
+        });
+
+        result
+    }
+}
+
 pub struct Frames {
-    num_frames: usize,
-    fast_path_victims: ConcurrentQueue<usize>,
-    eviction_candidates: [usize; EVICTION_SCAN_DEPTH],
+    intial_free_frames: AtomicUsize,
     frames: Vec<BufferFrame>, // The Vec<frames> is fixed size. If not fixed size, then Pin must be used to ensure that the frame does not move when the vector is resized.
 }
 
 impl Frames {
     pub fn new(num_frames: usize) -> Self {
-        let fast_path_victims = ConcurrentQueue::unbounded();
-        for i in 0..num_frames {
-            fast_path_victims.push(i).unwrap();
-        }
-
         Frames {
-            num_frames,
-            fast_path_victims,
-            eviction_candidates: [0; EVICTION_SCAN_DEPTH],
+            intial_free_frames: AtomicUsize::new(num_frames),
             frames: (0..num_frames)
                 .map(|i| BufferFrame::new(i as u32))
                 .collect(),
         }
     }
 
-    pub fn reset_free_frames(&self) {
-        while self.fast_path_victims.pop().is_ok() {}
-        for i in 0..self.num_frames {
-            self.fast_path_victims.push(i).unwrap();
+    pub fn choose_victim(&self) -> Option<FrameWriteGuard> {
+        loop {
+            // Check initial free frames
+            let initial_free_frames = self.intial_free_frames.load(Ordering::Acquire);
+            if initial_free_frames < self.frames.len() {
+                // Try to compare and swap with the initial free frames + 1
+                if self.intial_free_frames.compare_exchange(
+                    initial_free_frames,
+                    initial_free_frames + 1,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                ) == Ok(initial_free_frames)
+                {
+                    // We have successfully acquired a free frame
+                    return Some(self.frames[initial_free_frames].try_write(false).unwrap());
+                    // Unwrap is safe because the frame should be free
+                }
+            } else {
+                // All the initial free frames are used up
+                break;
+            }
         }
+        PerThreadEvictionTracker.choose_victim(&self.frames)
     }
 
-    pub fn push_to_eviction_queue(&self, frame_id: usize) {
-        self.fast_path_victims.push(frame_id).unwrap();
+    pub fn reset_free_frames(&self) {
+        self.intial_free_frames.store(0, Ordering::Release);
     }
 
+    pub fn push_to_eviction_queue(&self, key: PageFrameKey) {
+        PerThreadEvictionTracker.add_eviction_candidate(key);
+    }
+
+    // pub fn reset_free_frames(&self) {
+    //     while self.fast_path_victims.pop().is_ok() {}
+    //     for i in 0..self.frames.len() {
+    //         self.fast_path_victims.push(i).unwrap();
+    //     }
+    // }
+
+    // pub fn push_to_eviction_queue(&self, frame_id: usize) {
+    //     self.fast_path_victims.push(frame_id).unwrap();
+    // }
+
+    /*
     /// Choose a victim frame to be evicted.
     /// Return the index of the frame and whether the frame is dirty (requires writing back to disk).
     /// If all the frames are locked, then return None.
@@ -314,16 +240,16 @@ impl Frames {
             for i in 0..EVICTION_SCAN_DEPTH {
                 self.eviction_candidates[i] = usize::MAX;
             }
-            if self.num_frames > EVICTION_SCAN_DEPTH {
+            if self.frames.len() > EVICTION_SCAN_DEPTH {
                 // Generate **distinct** random numbers.
                 for _ in 0..3 * EVICTION_SCAN_DEPTH {
-                    let rand_idx = gen_random_int(0, self.num_frames - 1);
+                    let rand_idx = gen_random_int(0, self.frames.len() - 1);
                     self.eviction_candidates[rand_idx % EVICTION_SCAN_DEPTH] = rand_idx;
                     // Use mod to avoid duplicates
                 }
             } else {
                 // Use all the frames as candidates
-                for i in 0..self.num_frames {
+                for i in 0..self.frames.len() {
                     self.eviction_candidates[i] = i;
                 }
             }
@@ -364,6 +290,7 @@ impl Frames {
         }
         None
     }
+    */
 }
 
 impl Deref for Frames {
@@ -929,11 +856,9 @@ impl MemPool for BufferPool {
         Ok(())
     }
 
-    fn fast_evict(&self, frame_id: u32) -> Result<(), MemPoolStatus> {
-        // push_to_eviction_queue can be done without buffer pool latch
-        // because it is a lock-free operation
+    fn fast_evict(&self, key: PageFrameKey) -> Result<(), MemPoolStatus> {
         let frames = unsafe { &*self.frames.get() };
-        frames.push_to_eviction_queue(frame_id as usize);
+        frames.push_to_eviction_queue(key);
         Ok(())
     }
 

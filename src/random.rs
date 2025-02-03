@@ -6,8 +6,7 @@ use rand::distr::weighted::WeightedIndex;
 use rand::distr::Alphanumeric;
 use rand::rngs::SmallRng;
 use rand::{
-    distr::{Distribution, Uniform},
-    rng, Rng,
+    distr::{Distribution, Uniform}, Rng,
 };
 use rand::{RngCore, SeedableRng};
 
@@ -53,7 +52,7 @@ pub fn gen_random_pathname(prefix: Option<&str>) -> String {
 ///
 /// * `length` - The length of the string to generate.
 pub fn gen_random_string_with_length(length: usize) -> String {
-    rng()
+    small_thread_rng()
         .sample_iter(Alphanumeric)
         .take(length)
         .map(char::from)
@@ -61,7 +60,7 @@ pub fn gen_random_string_with_length(length: usize) -> String {
 }
 
 pub fn gen_random_byte_vec_with_length(length: usize) -> Vec<u8> {
-    let mut rng = rng();
+    let mut rng = small_thread_rng();
     let range = Uniform::new_inclusive(0, 255).unwrap();
     let mut vec = Vec::with_capacity(length);
     for _ in 0..length {
@@ -80,7 +79,7 @@ pub fn gen_random_int<T>(min: T, max: T) -> T
 where
     T: SampleUniform,
 {
-    let mut rng = rng();
+    let mut rng = small_thread_rng();
     rng.sample(Uniform::new_inclusive(min, max).unwrap())
 }
 

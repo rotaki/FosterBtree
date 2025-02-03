@@ -986,11 +986,9 @@ mod tests {
     #[test]
     fn test_upsert_multiple_keys_ordering() {
         let mut page = <Page as ShortKeyPage>::new();
-        let keys = [
-            (b"alpha", b"value_alpha"),
+        let keys = [(b"alpha", b"value_alpha"),
             (b"gamma", b"value_gamma"),
-            (b"betaa", b"value_betaa"),
-        ];
+            (b"betaa", b"value_betaa")];
 
         // Insert keys in a specific order
         for (key, value) in keys.iter() {
@@ -1513,8 +1511,7 @@ mod tests {
                 1 => {
                     // Update
                     if !inserted_keys.is_empty() {
-                        let key_to_update =
-                            &inserted_keys[rng.random_range(0..inserted_keys.len())];
+                        let key_to_update = &inserted_keys[rng.random_range(0..inserted_keys.len())];
                         let new_value = random_string(20);
                         if page.update(key_to_update, &new_value).is_ok() {
                             keys_and_values.retain(|(k, _)| k != key_to_update);

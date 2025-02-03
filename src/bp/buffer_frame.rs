@@ -9,10 +9,7 @@ use std::{
     cell::UnsafeCell,
     fmt::Debug,
     ops::{Deref, DerefMut},
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        RwLock,
-    },
+    sync::atomic::{AtomicBool, Ordering},
 };
 
 type EvictionPolicyType = LRUEvictionPolicy;
