@@ -6,7 +6,8 @@ use rand::distr::weighted::WeightedIndex;
 use rand::distr::Alphanumeric;
 use rand::rngs::SmallRng;
 use rand::{
-    distr::{Distribution, Uniform}, Rng,
+    distr::{Distribution, Uniform},
+    Rng,
 };
 use rand::{RngCore, SeedableRng};
 
