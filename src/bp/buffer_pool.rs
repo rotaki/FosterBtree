@@ -12,7 +12,7 @@ use super::{
 use crate::file_manager::FileManager;
 
 use std::{
-    cell::UnsafeCell,
+    cell::{RefCell, UnsafeCell},
     collections::{BTreeMap, HashMap},
     fs::create_dir_all,
     ops::{Deref, DerefMut},
@@ -88,6 +88,92 @@ pub struct Frames {
     frames: Vec<BufferFrame>, // The Vec<frames> is fixed size. If not fixed size, then Pin must be used to ensure that the frame does not move when the vector is resized.
 }
 
+struct EvictionCandidate {
+    candidates: [usize; EVICTION_SCAN_DEPTH],
+}
+
+thread_local! {
+    static EVICTION_CANDIDATE: RefCell<EvictionCandidate> = RefCell::new(EvictionCandidate {
+        candidates: [0; EVICTION_SCAN_DEPTH],
+    });
+}
+
+pub struct ThreadLocalEvictionCandidate;
+
+impl ThreadLocalEvictionCandidate {
+    pub fn choose_eviction_candidates<'a>(
+        &self,
+        frames: &'a Vec<BufferFrame>,
+    ) -> Option<FrameWriteGuard<'a>> {
+        let num_frames = frames.len();
+        let mut result = None;
+        EVICTION_CANDIDATE.with(|c| {
+            let mut candidates = c.borrow_mut();
+            let eviction_candidates = &mut candidates.candidates;
+            for _ in 0..EVICTION_SCAN_TRIALS {
+                // Initialize the eviction candidates with max
+                for i in 0..EVICTION_SCAN_DEPTH {
+                    eviction_candidates[i] = usize::MAX;
+                }
+
+                // Generate the eviction candidates.
+                // If the number of frames is greater than the scan depth, then generate distinct random numbers.
+                // Otherwise, use all the frames as candidates.
+                if num_frames > EVICTION_SCAN_DEPTH {
+                    // Generate **distinct** random numbers.
+                    for _ in 0..3 * EVICTION_SCAN_DEPTH {
+                        let rand_idx = gen_random_int(0, num_frames - 1);
+                        eviction_candidates[rand_idx % EVICTION_SCAN_DEPTH] = rand_idx;
+                        // Use mod to avoid duplicates
+                    }
+                } else {
+                    // Use all the frames as candidates
+                    for i in 0..num_frames {
+                        eviction_candidates[i] = i;
+                    }
+                }
+                log_debug!("Eviction candidates: {:?}", self.eviction_candidates);
+
+                let mut frame_with_min_score: Option<FrameWriteGuard> = None;
+                for i in eviction_candidates.iter() {
+                    if i == &usize::MAX {
+                        // Skip the invalid index
+                        continue;
+                    }
+                    let frame = frames[*i].try_write(false);
+                    if let Some(guard) = frame {
+                        if let Some(current_min_score) = frame_with_min_score.as_ref() {
+                            if guard.eviction_score() < current_min_score.eviction_score() {
+                                frame_with_min_score = Some(guard);
+                            } else {
+                                // No need to update the min frame
+                            }
+                        } else {
+                            frame_with_min_score = Some(guard);
+                        }
+                    } else {
+                        // Could not acquire the lock. Do not consider this frame.
+                    }
+                }
+
+                log_debug!("Frame with min score: {:?}", frame_with_min_score);
+
+                #[allow(clippy::manual_map)]
+                if let Some(guard) = frame_with_min_score {
+                    log_debug!("Victim found @ frame({})", guard.frame_id());
+                    result = Some(guard);
+                    break;
+                } else {
+                    log_debug!("All latched");
+                    continue;
+                }
+            }
+        });
+
+        result
+    }
+}
+
 impl Frames {
     pub fn new(num_frames: usize) -> Self {
         let fast_path_victims = ConcurrentQueue::unbounded();
@@ -133,7 +219,10 @@ impl Frames {
             }
         }
 
+        ThreadLocalEvictionCandidate.choose_eviction_candidates(&self.frames)
+
         // Next, randomly select a few frames and choose the one with the minimum eviction score
+        /*
         for _ in 0..EVICTION_SCAN_TRIALS {
             // Initialize the eviction candidates with max
             for i in 0..EVICTION_SCAN_DEPTH {
@@ -188,6 +277,7 @@ impl Frames {
             }
         }
         None
+        */
     }
 }
 
