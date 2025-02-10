@@ -213,6 +213,18 @@ pub trait MemPool: Sync + Send {
         c_key: ContainerKey,
     ) -> Result<FrameWriteGuard, MemPoolStatus>;
 
+    /// Create new pages for write.
+    /// This function will allocate multiple new pages in memory and return a list of FrameWriteGuard.
+    /// In general, this function does not need to write the page to disk.
+    /// Disk write will be handled when the page is evicted from the buffer pool.
+    /// This function will return available pages in the memory pool. 
+    /// It does not guarantee that the returned vector will have the requested number of pages.
+    fn create_new_pages_for_write(
+        &self,
+        c_key: ContainerKey,
+        num_pages: usize,
+    ) -> Result<Vec<FrameWriteGuard>, MemPoolStatus>;
+
     /// Get a page for write.
     /// This function will return a FrameWriteGuard.
     /// This function assumes that a page is already created and either in memory or on disk.

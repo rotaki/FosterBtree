@@ -24,6 +24,7 @@ const EVICTION_SCAN_TRIALS: usize = 5;
 const EVICTION_SCAN_DEPTH: usize = 10;
 
 use concurrent_queue::ConcurrentQueue;
+use dashmap::DashMap;
 
 /// Statistics kept by the buffer pool.
 /// These statistics are used for decision making.
@@ -82,7 +83,6 @@ impl RuntimeStats {
 }
 
 pub struct Frames {
-    num_frames: usize,
     fast_path_victims: ConcurrentQueue<usize>,
     eviction_candidates: [usize; EVICTION_SCAN_DEPTH],
     frames: Vec<BufferFrame>, // The Vec<frames> is fixed size. If not fixed size, then Pin must be used to ensure that the frame does not move when the vector is resized.
@@ -101,7 +101,7 @@ thread_local! {
 pub struct ThreadLocalEvictionCandidate;
 
 impl ThreadLocalEvictionCandidate {
-    pub fn choose_eviction_candidates<'a>(
+    pub fn choose_eviction_candidate<'a>(
         &self,
         frames: &'a Vec<BufferFrame>,
     ) -> Option<FrameWriteGuard<'a>> {
@@ -134,6 +134,7 @@ impl ThreadLocalEvictionCandidate {
                 }
                 log_debug!("Eviction candidates: {:?}", self.eviction_candidates);
 
+                // Go through the eviction candidates and find the victim
                 let mut frame_with_min_score: Option<FrameWriteGuard> = None;
                 for i in eviction_candidates.iter() {
                     if i == &usize::MAX {
@@ -182,7 +183,6 @@ impl Frames {
         }
 
         Frames {
-            num_frames,
             fast_path_victims,
             eviction_candidates: [0; EVICTION_SCAN_DEPTH],
             frames: (0..num_frames)
@@ -193,7 +193,7 @@ impl Frames {
 
     pub fn reset_free_frames(&self) {
         while self.fast_path_victims.pop().is_ok() {}
-        for i in 0..self.num_frames {
+        for i in 0..self.frames.len() {
             self.fast_path_victims.push(i).unwrap();
         }
     }
@@ -203,8 +203,7 @@ impl Frames {
     }
 
     /// Choose a victim frame to be evicted.
-    /// Return the index of the frame and whether the frame is dirty (requires writing back to disk).
-    /// If all the frames are locked, then return None.
+    /// If all the frames are latched, then return None.
     pub fn choose_victim(&mut self) -> Option<FrameWriteGuard> {
         log_debug!("Choosing victim");
 
@@ -219,65 +218,39 @@ impl Frames {
             }
         }
 
-        ThreadLocalEvictionCandidate.choose_eviction_candidates(&self.frames)
+        ThreadLocalEvictionCandidate.choose_eviction_candidate(&self.frames)
+    }
 
-        // Next, randomly select a few frames and choose the one with the minimum eviction score
-        /*
-        for _ in 0..EVICTION_SCAN_TRIALS {
-            // Initialize the eviction candidates with max
-            for i in 0..EVICTION_SCAN_DEPTH {
-                self.eviction_candidates[i] = usize::MAX;
-            }
-            if self.num_frames > EVICTION_SCAN_DEPTH {
-                // Generate **distinct** random numbers.
-                for _ in 0..3 * EVICTION_SCAN_DEPTH {
-                    let rand_idx = gen_random_int(0, self.num_frames - 1);
-                    self.eviction_candidates[rand_idx % EVICTION_SCAN_DEPTH] = rand_idx;
-                    // Use mod to avoid duplicates
+    /// Choose multiple victims to be evicted
+    /// The returned vector may contain fewer frames thant he requested number of victims.
+    /// It can also return an empty vector.
+    pub fn choose_victims(&mut self, num_victims: usize) -> Vec<FrameWriteGuard> {
+        let mut victims = Vec::with_capacity(num_victims);
+
+        while let Ok(victim) = self.fast_path_victims.pop() {
+            let frame = self.frames[victim].try_write(false);
+            if let Some(guard) = frame {
+                log_debug!("Fast path victim found @ frame({})", guard.frame_id());
+                victims.push(guard);
+                if victims.len() == num_victims {
+                    return victims;
                 }
             } else {
-                // Use all the frames as candidates
-                for i in 0..self.num_frames {
-                    self.eviction_candidates[i] = i;
-                }
-            }
-            log_debug!("Eviction candidates: {:?}", self.eviction_candidates);
-
-            let mut frame_with_min_score: Option<FrameWriteGuard> = None;
-            for i in self.eviction_candidates.iter() {
-                if i == &usize::MAX {
-                    // Skip the invalid index
-                    continue;
-                }
-                let frame = self.frames[*i].try_write(false);
-                if let Some(guard) = frame {
-                    if let Some(current_min_score) = frame_with_min_score.as_ref() {
-                        if guard.eviction_score() < current_min_score.eviction_score() {
-                            frame_with_min_score = Some(guard);
-                        } else {
-                            // No need to update the min frame
-                        }
-                    } else {
-                        frame_with_min_score = Some(guard);
-                    }
-                } else {
-                    // Could not acquire the lock. Do not consider this frame.
-                }
-            }
-
-            log_debug!("Frame with min score: {:?}", frame_with_min_score);
-
-            #[allow(clippy::manual_map)]
-            if let Some(guard) = frame_with_min_score {
-                log_debug!("Victim found @ frame({})", guard.frame_id());
-                return Some(guard);
-            } else {
-                log_debug!("All latched");
-                continue;
+                // The frame is latched. Try the next frame.
             }
         }
-        None
-        */
+
+        while victims.len() < num_victims {
+            if let Some(victim) =
+                ThreadLocalEvictionCandidate.choose_eviction_candidate(&self.frames)
+            {
+                victims.push(victim);
+            } else {
+                break;
+            }
+        }
+
+        victims
     }
 }
 
@@ -301,8 +274,9 @@ pub struct BufferPool {
     path: PathBuf,
     latch: RwLatch,
     frames: UnsafeCell<Frames>,
-    id_to_index: UnsafeCell<HashMap<PageKey, usize>>, // (c_id, page_id) -> index
-    container_to_file: UnsafeCell<HashMap<ContainerKey, FileManager>>,
+    container_to_file: DashMap<ContainerKey, FileManager>, // c_key -> file_manager
+    page_to_frame: UnsafeCell<HashMap<PageKey, usize>>, // (c_key, page_id) -> frame_index
+    file_page_counter: UnsafeCell<HashMap<ContainerKey, AtomicUsize>>,
     runtime_stats: RuntimeStats,
 }
 
@@ -338,7 +312,7 @@ impl BufferPool {
         // Identify all the directories. A directory corresponds to a database.
         // A file in the directory corresponds to a container.
         // Create a FileManager for each file and store it in the container.
-        let mut container = HashMap::new();
+        let container = DashMap::new();
         create_dir_all(&bp_dir).unwrap();
         for entry in std::fs::read_dir(&bp_dir).unwrap() {
             let entry = entry.unwrap();
@@ -373,9 +347,10 @@ impl BufferPool {
             remove_dir_on_drop,
             path: bp_dir.as_ref().to_path_buf(),
             latch: RwLatch::default(),
-            id_to_index: UnsafeCell::new(HashMap::new()),
+            page_to_frame: UnsafeCell::new(HashMap::new()),
             frames: UnsafeCell::new(Frames::new(num_frames)),
-            container_to_file: UnsafeCell::new(container),
+            container_to_file: container,
+            file_page_counter: UnsafeCell::new(todo!("file_page_counter")),
             runtime_stats: RuntimeStats::new(),
         })
     }
@@ -404,63 +379,91 @@ impl BufferPool {
         self.latch.release_exclusive();
     }
 
-    // The exclusive latch must be held when calling this function
+    // The exclusive latch is NOT NEEDED when calling this function
     fn choose_victim(&self) -> Option<FrameWriteGuard> {
         let frames = unsafe { &mut *self.frames.get() };
         frames.choose_victim()
     }
 
-    // The exclusive latch must be held when calling this function
-    fn handle_page_fault(
-        &self,
-        key: PageKey,
-        new_page: bool,
-        location: &mut FrameWriteGuard,
-    ) -> Result<(), MemPoolStatus> {
-        let id_to_index = unsafe { &mut *self.id_to_index.get() };
-        let container_to_file = unsafe { &mut *self.container_to_file.get() };
+    // The exclusive latch is NOT NEEDED when calling this function.
+    // It is not needed because a victim selection does not modify the shared state
+    // such as the page_to_frame mapping.
+    fn choose_victims(&self, num_victims: usize) -> Vec<FrameWriteGuard> {
+        let frames = unsafe { &mut *self.frames.get() };
+        frames.choose_victims(num_victims)
+    }
 
-        let index = location.frame_id();
-        let is_dirty = location.dirty().load(Ordering::Acquire);
+    // The exclusive latch is NOT NEEDED when calling this function
+    // This function will write the victim page to disk if it is dirty.
+    fn write_victim_to_disk_if_dirty(&self, victim: &mut FrameWriteGuard) -> Result<(), MemPoolStatus> {
+        let is_dirty = victim.dirty().load(Ordering::Acquire);
 
-        // Evict old page if necessary
-        if let Some(old_key) = location.page_key() {
+        if let Some(key) = victim.page_key() {
             if is_dirty {
-                location.dirty().store(false, Ordering::Release);
-                let file = container_to_file
-                    .get(&old_key.c_key)
-                    .ok_or(MemPoolStatus::FileManagerNotFound)?;
-
-                self.runtime_stats.inc_write_count();
-                file.write_page(old_key.page_id, location)?;
+                victim.dirty().store(false, Ordering::Release);
+                // Until this file object is dropped, a lock is held on the shard of the map.
+                let file = self.container_to_file.entry(key.c_key).or_insert_with(|| {
+                    FileManager::new(self.path.join(key.c_key.db_id.to_string()), key.c_key.c_id)
+                        .unwrap()
+                });
+                file.write_page(key.page_id, victim)?;
             }
-            id_to_index.remove(old_key);
-            log_debug!("Page evicted: {}", old_key);
         }
 
-        // Create a new page or read from disk
-        if new_page {
-            location.set_id(key.page_id);
-        } else {
-            let file = container_to_file
-                .get(&key.c_key)
-                .ok_or(MemPoolStatus::FileManagerNotFound)?;
-
-            self.runtime_stats.inc_read_count();
-            file.read_page(key.page_id, location)?;
-        };
-
-        id_to_index.insert(key, index as usize);
-        *location.page_key_mut() = Some(key);
-        {
-            let evict_info = location.evict_info();
-            evict_info.reset();
-            evict_info.update();
-        }
-
-        log_debug!("Page loaded: key: {}", key);
         Ok(())
     }
+
+    // The exclusive latch must be held when calling this function
+    // fn handle_page_fault(
+    //     &self,
+    //     key: PageKey,
+    //     new_page: bool,
+    //     location: &mut FrameWriteGuard,
+    // ) -> Result<(), MemPoolStatus> {
+    //     let page_to_frame = unsafe { &mut *self.page_to_frame.get() };
+    //     let container_to_file = unsafe { &mut *self.container_to_file.get() };
+
+    //     let index = location.frame_id();
+    //     let is_dirty = location.dirty().load(Ordering::Acquire);
+
+    //     // Evict old page if necessary
+    //     if let Some(old_key) = location.page_key() {
+    //         if is_dirty {
+    //             location.dirty().store(false, Ordering::Release);
+    //             let file = container_to_file
+    //                 .get(&old_key.c_key)
+    //                 .ok_or(MemPoolStatus::FileManagerNotFound)?;
+
+    //             self.runtime_stats.inc_write_count();
+    //             file.write_page(old_key.page_id, location)?;
+    //         }
+    //         page_to_frame.remove(old_key);
+    //         log_debug!("Page evicted: {}", old_key);
+    //     }
+
+    //     // Create a new page or read from disk
+    //     if new_page {
+    //         location.set_id(key.page_id);
+    //     } else {
+    //         let file = container_to_file
+    //             .get(&key.c_key)
+    //             .ok_or(MemPoolStatus::FileManagerNotFound)?;
+
+    //         self.runtime_stats.inc_read_count();
+    //         file.read_page(key.page_id, location)?;
+    //     };
+
+    //     page_to_frame.insert(key, index as usize);
+    //     *location.page_key_mut() = Some(key);
+    //     {
+    //         let evict_info = location.evict_info();
+    //         evict_info.reset();
+    //         evict_info.update();
+    //     }
+
+    //     log_debug!("Page loaded: key: {}", key);
+    //     Ok(())
+    // }
 }
 
 impl MemPool for BufferPool {
@@ -473,30 +476,115 @@ impl MemPool for BufferPool {
         &self,
         c_key: ContainerKey,
     ) -> Result<FrameWriteGuard, MemPoolStatus> {
-        log_debug!("Page create: {}", c_key);
-        self.runtime_stats.inc_new_page();
+        // 1. Choose victim
+        if let Some(mut victim) = self.choose_victim() {
+            // 2. Handle eviction if the victim is dirty
+            let res = self.write_victim_to_disk_if_dirty(&mut victim);
 
-        self.exclusive();
+            match res {
+                Ok(()) => {
+                    // 3. Modify the page_to_frame mapping. Critical section.
+                    // Need to remove the old mapping and insert the new mapping.
+                    let page_key = {
+                        self.exclusive();
+                        let page_to_frame = unsafe { &mut *self.page_to_frame.get() };
+                        let file_page_counter = unsafe { &mut *self.file_page_counter.get() };
+                        // Remove the old mapping
+                        if let Some(old_key) = victim.page_key() {
+                            page_to_frame.remove(&old_key).unwrap(); // Unwrap is safe because victim's write latch is held. No other thread can remove the old key from page_to_frame before this thread.
+                        }
+                        // Insert the new mapping
+                        let page_id = file_page_counter
+                            .entry(c_key)
+                            .or_insert_with(|| AtomicUsize::new(0))
+                            .fetch_add(1, Ordering::AcqRel) as u32;
+                        let index = victim.frame_id();
+                        let key = PageKey::new(c_key, page_id);
+                        page_to_frame.insert(key, index as usize);
+                        self.release_exclusive();
+                        key
+                    };
 
-        let container_to_file = unsafe { &mut *self.container_to_file.get() };
+                    // 4. Initialize the page
+                    victim.set_id(page_key.page_id); // Initialize the page with the page id
+                    *victim.page_key_mut() = Some(page_key); // Set the frame key to the new page key
+                    victim.dirty().store(true, Ordering::Release);
 
-        let fm = container_to_file.entry(c_key).or_insert_with(|| {
-            FileManager::new(self.path.join(c_key.db_id.to_string()), c_key.c_id).unwrap()
-        });
+                    return Ok(victim);
+                }
+                Err(e) => {
+                    return Err(e);
+                }
+            }
+        } else {
+            // Victim Selection failed
+            Err(MemPoolStatus::CannotEvictPage)
+        }
+    }
 
-        let page_id = fm.fetch_add_page_id();
-        let key = PageKey::new(c_key, page_id);
-        if let Some(mut location) = self.choose_victim() {
-            let res = self.handle_page_fault(key, true, &mut location);
-            if let Ok(()) = res {
-                location.dirty().store(true, Ordering::Release);
-            } else {
-                fm.fetch_sub_page_id();
+    fn create_new_pages_for_write(
+        &self,
+        c_key: ContainerKey,
+        num_pages: usize,
+    ) -> Result<Vec<FrameWriteGuard>, MemPoolStatus> {
+        assert!(num_pages > 0);
+        // 1. Choose victims
+        let mut victims = self.choose_victims(num_pages);
+        if !victims.is_empty() {
+
+            // 2. Handle eviction if the page is dirty
+            for victim in victims.iter_mut() {
+                let res = self.write_victim_to_disk_if_dirty(victim);
+                if let Err(e) = res {
+                    self.release_exclusive();
+                    return Err(e);
+                }
+            }
+
+            let start_page_id = {
+                // 3. Modify the page_to_frame mapping. Critical section.
+                // Need to remove the old mapping and insert the new mapping.
+                self.exclusive();
+                let page_to_frame = unsafe { &mut *self.page_to_frame.get() };
+                let file_page_counter = unsafe { &mut *self.file_page_counter.get() };
+
+                // Remove the old mapping
+                for victim in victims.iter() {
+                    if let Some(old_key) = victim.page_key() {
+                        page_to_frame.remove(&old_key).unwrap(); // Unwrap is safe because victim's write latch is held. No other thread can remove the old key from page_to_frame before this thread.
+                    }
+                }
+
+                // Insert the new mapping
+                let start_page_id = file_page_counter
+                    .entry(c_key)
+                    .or_insert_with(|| AtomicUsize::new(0))
+                    .fetch_add(num_pages as usize, Ordering::AcqRel) as u32;
+                for i in 0..num_pages {
+                    let page_id = start_page_id + i as u32;
+                    let key = PageKey::new(c_key, page_id);
+                    page_to_frame.insert(key, victims[i].frame_id() as usize);
+                }
+
+                self.release_exclusive();
+                start_page_id
+            };
+
+            // Victim modification will be done outside the critical section
+            // as the frame is already write-latched.
+            for i in 0..num_pages {
+                let page_id = start_page_id + i as u32;
+                let key = PageKey::new(c_key, page_id);
+                let victim = &mut victims[i];
+                victim.set_id(page_id);
+                *victim.page_key_mut() = Some(key);
+                victim.dirty().store(true, Ordering::Release);
             }
 
             self.release_exclusive();
-            res.map(|_| location)
+            Ok(victims)
         } else {
+            // Victims not found
             self.release_exclusive();
             Err(MemPoolStatus::CannotEvictPage)
         }
@@ -534,10 +622,10 @@ impl MemPool for BufferPool {
 
         {
             self.shared();
-            let id_to_index = unsafe { &mut *self.id_to_index.get() };
+            let page_to_frame = unsafe { &mut *self.page_to_frame.get() };
             let frames = unsafe { &mut *self.frames.get() };
 
-            if let Some(&index) = id_to_index.get(&key.p_key()) {
+            if let Some(&index) = page_to_frame.get(&key.p_key()) {
                 let guard = frames[index].try_write(true);
                 match guard {
                     Some(g) => {
@@ -557,11 +645,11 @@ impl MemPool for BufferPool {
 
         self.exclusive();
 
-        let id_to_index = unsafe { &mut *self.id_to_index.get() };
+        let page_to_frame = unsafe { &mut *self.page_to_frame.get() };
         let frames = unsafe { &mut *self.frames.get() };
 
-        // We need to recheck the id_to_index because another thread might have inserted the page
-        let result = match id_to_index.get(&key.p_key()) {
+        // We need to recheck the page_to_frame because another thread might have inserted the page
+        let result = match page_to_frame.get(&key.p_key()) {
             Some(&index) => {
                 let guard = frames[index].try_write(true);
                 if let Some(g) = &guard {
@@ -618,10 +706,10 @@ impl MemPool for BufferPool {
 
         {
             self.shared();
-            let id_to_index = unsafe { &mut *self.id_to_index.get() };
+            let page_to_frame = unsafe { &mut *self.page_to_frame.get() };
             let frames = unsafe { &mut *self.frames.get() };
 
-            if let Some(&index) = id_to_index.get(&key.p_key()) {
+            if let Some(&index) = page_to_frame.get(&key.p_key()) {
                 let guard = frames[index].try_read();
                 if let Some(g) = &guard {
                     g.evict_info().update();
@@ -644,10 +732,10 @@ impl MemPool for BufferPool {
 
         self.exclusive();
 
-        let id_to_index = unsafe { &mut *self.id_to_index.get() };
+        let page_to_frame = unsafe { &mut *self.page_to_frame.get() };
         let frames = unsafe { &mut *self.frames.get() };
 
-        let result = match id_to_index.get(&key.p_key()) {
+        let result = match page_to_frame.get(&key.p_key()) {
             Some(&index) => {
                 let guard = frames[index].try_read();
                 if let Some(g) = &guard {
@@ -693,10 +781,10 @@ impl MemPool for BufferPool {
             }
 
             self.shared();
-            let id_to_index = unsafe { &mut *self.id_to_index.get() };
+            let page_to_frame = unsafe { &mut *self.page_to_frame.get() };
             let container_to_file = unsafe { &mut *self.container_to_file.get() };
 
-            if id_to_index.contains_key(&key.p_key()) {
+            if page_to_frame.contains_key(&key.p_key()) {
                 // Do nothing
             } else {
                 let file = container_to_file
@@ -786,7 +874,7 @@ impl MemPool for BufferPool {
         self.exclusive();
 
         let frames = unsafe { &*self.frames.get() };
-        let id_to_index = unsafe { &mut *self.id_to_index.get() };
+        let page_to_frame = unsafe { &mut *self.page_to_frame.get() };
         let container_to_file = unsafe { &mut *self.container_to_file.get() };
 
         for frame in frames.iter() {
@@ -815,7 +903,7 @@ impl MemPool for BufferPool {
             file.flush()?;
         }
 
-        id_to_index.clear();
+        page_to_frame.clear();
 
         frames.reset_free_frames();
 
@@ -858,7 +946,7 @@ impl MemPool for BufferPool {
 impl BufferPool {
     pub fn run_checks(&self) {
         self.check_all_frames_unlatched();
-        self.check_id_to_index();
+        self.check_page_to_frame();
         self.check_frame_id_and_page_id_match();
     }
 
@@ -869,11 +957,11 @@ impl BufferPool {
         }
     }
 
-    // Invariant: id_to_index contains all the pages in the buffer pool
-    pub fn check_id_to_index(&self) {
-        let id_to_index = unsafe { &*self.id_to_index.get() };
+    // Invariant: page_to_frame contains all the pages in the buffer pool
+    pub fn check_page_to_frame(&self) {
+        let page_to_frame = unsafe { &*self.page_to_frame.get() };
         let mut index_to_id = HashMap::new();
-        for (k, &v) in id_to_index.iter() {
+        for (k, &v) in page_to_frame.iter() {
             index_to_id.insert(v, k);
         }
         let frames = unsafe { &*self.frames.get() };
@@ -885,7 +973,7 @@ impl BufferPool {
                 assert_eq!(frame.page_key(), &None);
             }
         }
-        // println!("id_to_index: {:?}", id_to_index);
+        // println!("page_to_frame: {:?}", page_to_frame);
     }
 
     pub fn check_frame_id_and_page_id_match(&self) {
@@ -900,8 +988,8 @@ impl BufferPool {
     }
 
     pub fn is_in_buffer_pool(&self, key: PageFrameKey) -> bool {
-        let id_to_index = unsafe { &*self.id_to_index.get() };
-        id_to_index.contains_key(&key.p_key())
+        let page_to_frame = unsafe { &*self.page_to_frame.get() };
+        page_to_frame.contains_key(&key.p_key())
     }
 }
 
