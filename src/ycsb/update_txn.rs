@@ -1,3 +1,5 @@
+#[allow(unused_imports)]
+use crate::log;
 use std::time::SystemTime;
 
 use crate::{

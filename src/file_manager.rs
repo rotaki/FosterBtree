@@ -20,8 +20,8 @@ pub mod sync_write {
     use crate::bp::ContainerId;
     #[allow(unused_imports)]
     use crate::log;
-    use crate::log_trace;
     use crate::page::{Page, PageId, PAGE_SIZE};
+    use crate::log_trace;
     use std::fs::{File, OpenOptions};
     use std::io::{Read, Seek, SeekFrom, Write};
     use std::path::PathBuf;
@@ -87,15 +87,14 @@ pub mod sync_write {
             log_trace!("Reading page: {} from file: {:?}", page_id, self.path);
             file.seek(SeekFrom::Start(page_id as u64 * PAGE_SIZE as u64))?;
             file.read_exact(page.get_raw_bytes_mut())?;
-            debug_assert!(page.get_id() == page_id, "Page id mismatch");
+            assert_eq!(page.get_id(), page_id);
             Ok(())
         }
 
         pub fn write_page(&self, page_id: PageId, page: &Page) -> Result<(), std::io::Error> {
             let mut file = self.file.lock().unwrap();
-            log_trace!("Writing page: {} to file: {:?}", page_id, self.path);
             self.io_count.1.fetch_add(1, Ordering::AcqRel);
-            debug_assert!(page.get_id() == page_id, "Page id mismatch");
+            assert_eq!(page.get_id(), page_id);
             file.seek(SeekFrom::Start(page_id as u64 * PAGE_SIZE as u64))?;
             file.write_all(page.get_raw_bytes())?;
             Ok(())

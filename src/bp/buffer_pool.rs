@@ -256,6 +256,8 @@ impl DerefMut for Frames {
     }
 }
 
+const NUM_EVICTION_PER_PAGE_FAULT: usize = 2;
+
 /// Buffer pool that manages the buffer frames.
 pub struct BufferPool {
     remove_dir_on_drop: bool,
@@ -478,7 +480,7 @@ impl MemPool for BufferPool {
 
                     // 4. Initialize the page
                     victim.set_id(page_key.page_id); // Initialize the page with the page id
-                    *victim.page_key_mut() = Some(page_key); // Set the frame key to the new page key
+                    victim.page_key_mut().replace(page_key); // Set the frame key to the new page key
                     victim.dirty().store(true, Ordering::Release);
 
                     Ok(victim)
@@ -546,7 +548,7 @@ impl MemPool for BufferPool {
                 let page_id = start_page_id + i as u32;
                 let key = PageKey::new(c_key, page_id);
                 victim.set_id(page_id);
-                *victim.page_key_mut() = Some(key);
+                victim.page_key_mut().replace(key);
                 victim.dirty().store(true, Ordering::Release);
             }
 
@@ -627,7 +629,7 @@ impl MemPool for BufferPool {
                     .ok_or(MemPoolStatus::FrameWriteLatchGrantFailed)
             }
             None => {
-                let mut victims = self.choose_victims(10);
+                let mut victims = self.choose_victims(NUM_EVICTION_PER_PAGE_FAULT);
                 if victims.is_empty() {
                     self.release_exclusive();
                     return Err(MemPoolStatus::CannotEvictPage);
@@ -640,8 +642,9 @@ impl MemPool for BufferPool {
                 }
                 // Insert the new mapping
                 page_to_frame.insert(key.p_key(), victims[0].frame_id() as usize);
-                self.release_exclusive();
 
+                // Removed keys must be written to disk before exiting the critical section.
+                // Otherwise, other threads may read the page before it is written to disk.
                 let mut victim = victims.swap_remove(0);
                 self.write_victim_to_disk_if_dirty_w(&victim).unwrap();
                 victim.page_key_mut().take();
@@ -651,7 +654,10 @@ impl MemPool for BufferPool {
                     self.write_victim_to_disk_if_dirty_w(&victim).unwrap();
                     victim.page_key_mut().take();
                     victim.evict_info().reset();
+                    frames.push_to_eviction_queue(victim.frame_id() as usize);
                 });
+
+                self.release_exclusive();
 
                 let file = self.container_to_file.get(&key.p_key().c_key).unwrap();
                 file.read_page(key.p_key().page_id, &mut victim).map(|()| {
@@ -732,7 +738,7 @@ impl MemPool for BufferPool {
                     .ok_or(MemPoolStatus::FrameReadLatchGrantFailed)
             }
             None => {
-                let mut victims = self.choose_victims(10);
+                let mut victims = self.choose_victims(NUM_EVICTION_PER_PAGE_FAULT);
                 if victims.is_empty() {
                     self.release_exclusive();
                     return Err(MemPoolStatus::CannotEvictPage);
@@ -745,7 +751,6 @@ impl MemPool for BufferPool {
                 }
                 // Insert the new mapping
                 page_to_frame.insert(key.p_key(), victims[0].frame_id() as usize);
-                self.release_exclusive();
 
                 let mut victim = victims.swap_remove(0);
                 self.write_victim_to_disk_if_dirty_w(&victim).unwrap();
@@ -756,7 +761,12 @@ impl MemPool for BufferPool {
                     self.write_victim_to_disk_if_dirty_w(&victim).unwrap();
                     victim.page_key_mut().take();
                     victim.evict_info().reset();
+                    frames.push_to_eviction_queue(victim.frame_id() as usize);
                 });
+
+                // Removed keys must be written to disk before exiting the critical section.
+                // Otherwise, other threads may read the page before it is written to disk.
+                self.release_exclusive();
 
                 let file = self.container_to_file.get(&key.p_key().c_key).unwrap();
                 file.read_page(key.p_key().page_id, &mut victim).map(|()| {

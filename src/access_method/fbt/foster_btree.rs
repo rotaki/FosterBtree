@@ -1305,30 +1305,6 @@ fn print_page(p: &Page) {
     println!("----------------------------------------------");
 }
 
-// struct RuntimeStats {
-//     num_keys: AtomicUsize,
-// }
-//
-// impl RuntimeStats {
-//     fn new() -> Self {
-//         RuntimeStats {
-//             num_keys: AtomicUsize::new(0),
-//         }
-//     }
-//
-//     fn inc_num_keys(&self) {
-//         self.num_keys.fetch_add(1, Ordering::Relaxed);
-//     }
-//
-//     fn dec_num_keys(&self) {
-//         self.num_keys.fetch_sub(1, Ordering::Relaxed);
-//     }
-//
-//     fn get_num_keys(&self) -> usize {
-//         self.num_keys.load(Ordering::Relaxed)
-//     }
-// }
-
 pub struct FosterBtree<T: MemPool> {
     pub c_key: ContainerKey,
     pub root_key: PageFrameKey,
