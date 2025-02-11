@@ -3,7 +3,7 @@ use std::{
     collections::{hash_map::Entry, BTreeMap, HashMap},
 };
 
-use crate::{page::Page, rwlatch::RwLatch};
+use crate::rwlatch::RwLatch;
 
 use super::{
     buffer_frame::BufferFrame,
@@ -86,7 +86,7 @@ impl MemPool for InMemPool {
         let mut guard = (frames.get(frame_index).unwrap()).write(true);
         self.release_exclusive();
 
-        guard.new_init(page_id);
+        guard.set_id(page_id);
         *guard.page_key_mut() = Some(page_key);
         Ok(guard)
     }
@@ -131,7 +131,7 @@ impl MemPool for InMemPool {
             let page_key = PageKey::new(c_key, page_id);
             let frame_index = page_to_frame.get(&page_key).unwrap();
             let mut guard = (frames.get(*frame_index).unwrap()).write(true);
-            guard.new_init(page_id);
+            guard.set_id(page_id);
             *guard.page_key_mut() = Some(page_key);
             guards.push(guard);
         }

@@ -31,7 +31,6 @@ pub mod sync_write {
     pub struct FileManager {
         _path: PathBuf,
         file: Mutex<File>,
-        num_pages: AtomicU32,
         io_count: (AtomicU32, AtomicU32), // (Read, Write)
     }
 
@@ -48,29 +47,24 @@ pub mod sync_write {
                 .create(true)
                 .truncate(false)
                 .open(&path)?;
-            let num_pages = file.metadata().unwrap().len() as usize / PAGE_SIZE;
             Ok(FileManager {
                 _path: path,
                 file: Mutex::new(file),
-                num_pages: AtomicU32::new(num_pages as PageId),
                 io_count: (AtomicU32::new(0), AtomicU32::new(0)),
             })
         }
 
-        pub fn fetch_add_page_id(&self) -> PageId {
-            self.num_pages.fetch_add(1, Ordering::AcqRel)
-        }
-
-        pub fn fetch_sub_page_id(&self) -> PageId {
-            self.num_pages.fetch_sub(1, Ordering::AcqRel)
+        pub fn num_pages(&self) -> usize {
+            let file = self.file.lock().unwrap();
+            file.metadata().unwrap().len() as usize / PAGE_SIZE
         }
 
         #[allow(dead_code)]
         pub fn get_stats(&self) -> String {
-            let _guard = self.file.lock().unwrap();
+            let num_pages = self.num_pages();
             format!(
                 "Num pages: {}, Read count: {}, Write count: {}",
-                self.num_pages.load(Ordering::Acquire),
+                num_pages,
                 self.io_count.0.load(Ordering::Acquire),
                 self.io_count.1.load(Ordering::Acquire)
             )
@@ -78,7 +72,6 @@ pub mod sync_write {
 
         #[allow(dead_code)]
         pub fn reset_stats(&self) {
-            let _guard = self.file.lock().unwrap();
             self.io_count.0.store(0, Ordering::Release);
             self.io_count.1.store(0, Ordering::Release);
         }
@@ -135,7 +128,6 @@ pub mod o_direct {
     pub struct FileManager {
         _path: PathBuf,
         file: Mutex<File>,
-        num_pages: AtomicU32,
         io_count: (AtomicU32, AtomicU32), // (Read, Write)
     }
 
@@ -153,35 +145,29 @@ pub mod o_direct {
                 .truncate(false)
                 .custom_flags(O_DIRECT)
                 .open(&path)?;
-            let num_pages = file.metadata().unwrap().len() as usize / PAGE_SIZE;
             Ok(FileManager {
                 _path: path,
                 file: Mutex::new(file),
-                num_pages: AtomicU32::new(num_pages as PageId),
                 io_count: (AtomicU32::new(0), AtomicU32::new(0)),
             })
         }
 
-        pub fn fetch_add_page_id(&self) -> PageId {
-            self.num_pages.fetch_add(1, Ordering::AcqRel)
-        }
-
-        pub fn fetch_sub_page_id(&self) -> PageId {
-            self.num_pages.fetch_sub(1, Ordering::AcqRel)
+        pub fn num_pages(&self) -> usize {
+            let guard = self.file.lock().unwrap();
+            guard.metadata().unwrap().len() as usize / PAGE_SIZE
         }
 
         pub fn get_stats(&self) -> String {
-            let _guard = self.file.lock().unwrap();
+            let num_pages = self.num_pages.load(Ordering::Acquire);
             format!(
                 "Num pages: {}, Read count: {}, Write count: {}",
-                self.num_pages.load(Ordering::Acquire),
+                num_pages,
                 self.io_count.0.load(Ordering::Acquire),
                 self.io_count.1.load(Ordering::Acquire)
             )
         }
 
         pub fn reset_stats(&self) {
-            let _guard = self.file.lock().unwrap();
             self.io_count.0.store(0, Ordering::Release);
             self.io_count.1.store(0, Ordering::Release);
         }
@@ -262,7 +248,6 @@ pub mod async_write {
     pub struct FileManager {
         #[allow(dead_code)]
         path: PathBuf,
-        num_pages: AtomicU32,
         file_inner: Mutex<FileManagerInner>,
     }
 
@@ -279,21 +264,11 @@ pub mod async_write {
                 .create(true)
                 .truncate(false)
                 .open(&path)?;
-            let num_pages = file.metadata().unwrap().len() as usize / PAGE_SIZE;
             let file_inner = FileManagerInner::new(file)?;
             Ok(FileManager {
                 path,
-                num_pages: AtomicU32::new(num_pages as PageId),
                 file_inner: Mutex::new(file_inner),
             })
-        }
-
-        pub fn fetch_add_page_id(&self) -> PageId {
-            self.num_pages.fetch_add(1, Ordering::AcqRel)
-        }
-
-        pub fn fetch_sub_page_id(&self) -> PageId {
-            self.num_pages.fetch_sub(1, Ordering::AcqRel)
         }
 
         #[allow(dead_code)]
