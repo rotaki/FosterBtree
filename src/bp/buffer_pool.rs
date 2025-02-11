@@ -256,7 +256,7 @@ impl DerefMut for Frames {
     }
 }
 
-const NUM_EVICTION_PER_PAGE_FAULT: usize = 2;
+const NUM_EVICTION_PER_PAGE_FAULT: usize = 1;
 
 /// Buffer pool that manages the buffer frames.
 pub struct BufferPool {
