@@ -506,7 +506,6 @@ impl MemPool for BufferPool {
             for victim in victims.iter_mut() {
                 let res = self.write_victim_to_disk_if_dirty_w(victim);
                 if let Err(e) = res {
-                    self.release_exclusive();
                     return Err(e);
                 }
             }
@@ -552,11 +551,9 @@ impl MemPool for BufferPool {
                 victim.dirty().store(true, Ordering::Release);
             }
 
-            self.release_exclusive();
             Ok(victims)
         } else {
             // Victims not found
-            self.release_exclusive();
             Err(MemPoolStatus::CannotEvictPage)
         }
     }
