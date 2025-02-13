@@ -505,9 +505,7 @@ impl MemPool for BufferPool {
             // 2. Handle eviction if the page is dirty
             for victim in victims.iter_mut() {
                 let res = self.write_victim_to_disk_if_dirty_w(victim);
-                if let Err(e) = res {
-                    return Err(e);
-                }
+                res?
             }
 
             let start_page_id = {
@@ -610,58 +608,75 @@ impl MemPool for BufferPool {
         // 1. Check the page-to-frame mapping and get a frame index.
         // 2. If the page is found, then try to acquire a write-latch, after which, the critical section ends.
         // 3. If the page is not found, then choose a victim and remove this mapping and insert the new mapping, after which, the critical section ends.
-        self.exclusive();
+        // 3.1. An optimization is to find a victim and handle IO outside the critical section.
 
-        let page_to_frame = unsafe { &mut *self.page_to_frame.get() };
-        let frames = unsafe { &mut *self.frames.get() };
-        match page_to_frame.get(&key.p_key()) {
-            Some(&index) => {
-                let guard = frames[index].try_write(true);
-                self.release_exclusive();
-
-                guard
-                    .inspect(|g| {
-                        g.evict_info().update();
-                    })
-                    .ok_or(MemPoolStatus::FrameWriteLatchGrantFailed)
+        // Before entering the critical section, we will find a frame that we can write to.
+        let mut victim_candidates = self.choose_victims(NUM_EVICTION_PER_PAGE_FAULT);
+        if victim_candidates.is_empty() {
+            return Err(MemPoolStatus::CannotEvictPage);
+        }
+        // Find a clean victim that can be used without writing the page to disk.
+        // If no clean victim is found, then write the page to disk and use it.
+        let mut victim_offset = None;
+        for (i, v) in victim_candidates.iter().enumerate() {
+            if v.page_key().is_none() || !v.dirty().load(Ordering::Acquire) {
+                victim_offset = Some(i);
+                break;
             }
-            None => {
-                let mut victims = self.choose_victims(NUM_EVICTION_PER_PAGE_FAULT);
-                if victims.is_empty() {
+        }
+        let mut victim = if let Some(offset) = victim_offset {
+            // Found a clean victim
+            victim_candidates.swap_remove(offset)
+        } else {
+            // Need to write the victim to disk before using it.
+            let victim = victim_candidates.swap_remove(0);
+            self.write_victim_to_disk_if_dirty_w(&victim).unwrap();
+            victim
+        };
+        drop(victim_candidates); // Release the write latches on unused victims
+                                 // Now we have a clean victim that can be used for writing.
+        assert!(!victim.dirty().load(Ordering::Acquire));
+
+        // Start the critical section.
+        {
+            self.exclusive();
+
+            let page_to_frame = unsafe { &mut *self.page_to_frame.get() };
+            let frames = unsafe { &mut *self.frames.get() };
+            match page_to_frame.get(&key.p_key()) {
+                Some(&index) => {
+                    // Unlikely path as it is already checked in the critical section above with the shared latch.
+                    let guard = frames[index].try_write(true);
                     self.release_exclusive();
-                    return Err(MemPoolStatus::CannotEvictPage);
+
+                    guard
+                        .inspect(|g| {
+                            g.evict_info().update();
+                        })
+                        .ok_or(MemPoolStatus::FrameWriteLatchGrantFailed)
                 }
-                // Remove the victims from the page_to_frame mapping
-                for victim in victims.iter() {
+                None => {
+                    // Likely path as the page has not been found in the page_to_frame mapping.
+                    // Remove the victim from the page_to_frame mapping
                     if let Some(old_key) = victim.page_key() {
-                        page_to_frame.remove(old_key).unwrap(); // Unwrap is safe because victim's write latch is held. No other thread can remove the old key from page_to_frame before this thread.
+                        page_to_frame.remove(old_key).unwrap();
+                        // Unwrap is safe because victim's write latch is held. No other thread can remove the old key from page_to_frame before this thread.
                     }
+                    // Insert the new mapping
+                    page_to_frame.insert(key.p_key(), victim.frame_id() as usize);
+
+                    self.release_exclusive();
+
+                    // Read the wanted page from disk.
+                    let file = self.container_to_file.get(&key.p_key().c_key).unwrap();
+                    file.read_page(key.p_key().page_id, &mut victim).map(|()| {
+                        victim.page_key_mut().replace(key.p_key());
+                        victim.evict_info().reset();
+                        victim.evict_info().update();
+                    })?;
+                    victim.dirty().store(true, Ordering::Release); // Prepare the page for writing.
+                    Ok(victim)
                 }
-                // Insert the new mapping
-                page_to_frame.insert(key.p_key(), victims[0].frame_id() as usize);
-
-                // Removed keys must be written to disk before exiting the critical section.
-                // Otherwise, other threads may read the page before it is written to disk.
-                let mut victim = victims.swap_remove(0);
-                self.write_victim_to_disk_if_dirty_w(&victim).unwrap();
-                victim.page_key_mut().take();
-                victim.evict_info().reset();
-
-                victims.drain(..).for_each(|mut victim| {
-                    self.write_victim_to_disk_if_dirty_w(&victim).unwrap();
-                    victim.page_key_mut().take();
-                    victim.evict_info().reset();
-                    frames.push_to_eviction_queue(victim.frame_id() as usize);
-                });
-
-                self.release_exclusive();
-
-                let file = self.container_to_file.get(&key.p_key().c_key).unwrap();
-                file.read_page(key.p_key().page_id, &mut victim).map(|()| {
-                    victim.page_key_mut().replace(key.p_key());
-                    victim.evict_info().update();
-                })?;
-                Ok(victim)
             }
         }
     }
@@ -719,58 +734,71 @@ impl MemPool for BufferPool {
         // 1. Check the page-to-frame mapping and get a frame index.
         // 2. If the page is found, then try to acquire a read-latch, after which, the critical section ends.
         // 3. If the page is not found, then choose a victim and remove this mapping and insert the new mapping, after which, the critical section ends.
-        self.exclusive();
+        // 3.1. An optimization is to find a victim and handle IO outside the critical section.
 
-        let page_to_frame = unsafe { &mut *self.page_to_frame.get() };
-        let frames = unsafe { &mut *self.frames.get() };
-        match page_to_frame.get(&key.p_key()) {
-            Some(&index) => {
-                let guard = frames[index].try_read();
-                self.release_exclusive();
-
-                guard
-                    .inspect(|g| {
-                        g.evict_info().update();
-                    })
-                    .ok_or(MemPoolStatus::FrameReadLatchGrantFailed)
+        // Before entering the critical section, we will find a frame that we can read from.
+        let mut victim_candidates: Vec<FrameWriteGuard<'_>> =
+            self.choose_victims(NUM_EVICTION_PER_PAGE_FAULT);
+        if victim_candidates.is_empty() {
+            return Err(MemPoolStatus::CannotEvictPage);
+        }
+        let mut victim_offset = None;
+        for (i, v) in victim_candidates.iter().enumerate() {
+            if v.page_key().is_none() || !v.dirty().load(Ordering::Acquire) {
+                victim_offset = Some(i);
+                break;
             }
-            None => {
-                let mut victims = self.choose_victims(NUM_EVICTION_PER_PAGE_FAULT);
-                if victims.is_empty() {
+        }
+        let mut victim = if let Some(offset) = victim_offset {
+            // Found
+            victim_candidates.swap_remove(offset)
+        } else {
+            // Need to write the victim to disk before using it.
+            let victim = victim_candidates.swap_remove(0);
+            self.write_victim_to_disk_if_dirty_w(&victim).unwrap();
+            victim
+        };
+        drop(victim_candidates); // Release the write latches on unused victims
+                                 // Now we have a clean victim that can be used for reading.
+        assert!(!victim.dirty().load(Ordering::Acquire));
+
+        // Start the critical section.
+        {
+            self.exclusive();
+
+            let page_to_frame = unsafe { &mut *self.page_to_frame.get() };
+            let frames = unsafe { &mut *self.frames.get() };
+            match page_to_frame.get(&key.p_key()) {
+                Some(&index) => {
+                    // Unlikely path as it is already checked in the critical section above with the shared latch.
+                    let guard = frames[index].try_read();
                     self.release_exclusive();
-                    return Err(MemPoolStatus::CannotEvictPage);
+
+                    guard
+                        .inspect(|g| {
+                            g.evict_info().update();
+                        })
+                        .ok_or(MemPoolStatus::FrameReadLatchGrantFailed)
                 }
-                // Remove the victims from the page_to_frame mapping
-                for victim in victims.iter() {
+                None => {
+                    // Likely path as the page has not been found in the page_to_frame mapping.
+                    // Remove the victim from the page_to_frame mapping
                     if let Some(old_key) = victim.page_key() {
                         page_to_frame.remove(old_key).unwrap(); // Unwrap is safe because victim's write latch is held. No other thread can remove the old key from page_to_frame before this thread.
                     }
+                    // Insert the new mapping
+                    page_to_frame.insert(key.p_key(), victim.frame_id() as usize);
+
+                    self.release_exclusive();
+
+                    let file = self.container_to_file.get(&key.p_key().c_key).unwrap();
+                    file.read_page(key.p_key().page_id, &mut victim).map(|()| {
+                        victim.page_key_mut().replace(key.p_key());
+                        victim.evict_info().reset();
+                        victim.evict_info().update();
+                    })?;
+                    Ok(victim.downgrade())
                 }
-                // Insert the new mapping
-                page_to_frame.insert(key.p_key(), victims[0].frame_id() as usize);
-
-                let mut victim = victims.swap_remove(0);
-                self.write_victim_to_disk_if_dirty_w(&victim).unwrap();
-                victim.page_key_mut().take();
-                victim.evict_info().reset();
-
-                victims.drain(..).for_each(|mut victim| {
-                    self.write_victim_to_disk_if_dirty_w(&victim).unwrap();
-                    victim.page_key_mut().take();
-                    victim.evict_info().reset();
-                    frames.push_to_eviction_queue(victim.frame_id() as usize);
-                });
-
-                // Removed keys must be written to disk before exiting the critical section.
-                // Otherwise, other threads may read the page before it is written to disk.
-                self.release_exclusive();
-
-                let file = self.container_to_file.get(&key.p_key().c_key).unwrap();
-                file.read_page(key.p_key().page_id, &mut victim).map(|()| {
-                    victim.page_key_mut().replace(key.p_key());
-                    victim.evict_info().update();
-                })?;
-                Ok(victim.downgrade())
             }
         }
     }
