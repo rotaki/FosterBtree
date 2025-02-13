@@ -22,6 +22,7 @@ use std::{
 
 const EVICTION_SCAN_TRIALS: usize = 5;
 const EVICTION_SCAN_DEPTH: usize = 10;
+const NUM_EVICTION_PER_PAGE_FAULT: usize = 1;
 
 use concurrent_queue::ConcurrentQueue;
 use dashmap::DashMap;
@@ -280,8 +281,6 @@ impl DerefMut for Frames {
         &mut self.frames
     }
 }
-
-const NUM_EVICTION_PER_PAGE_FAULT: usize = 1;
 
 /// Buffer pool that manages the buffer frames.
 pub struct BufferPool {
