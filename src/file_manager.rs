@@ -1,3 +1,5 @@
+use std::sync::atomic::{AtomicU32, Ordering};
+
 #[cfg(not(any(
     feature = "async_write",
     feature = "new_async_write",
@@ -11,12 +13,100 @@ pub type FileManager = async_write::FileManager;
 #[cfg(feature = "new_async_write")]
 pub type FileManager = new_async_write::FileManager;
 
+pub struct FileStats {
+    pub buffered_read_count: AtomicU32,
+    pub buffered_write_count: AtomicU32,
+    pub direct_read_count: AtomicU32,
+    pub direct_write_count: AtomicU32,
+}
+
+impl Clone for FileStats {
+    fn clone(&self) -> Self {
+        FileStats {
+            buffered_read_count: AtomicU32::new(self.buffered_read_count.load(Ordering::Acquire)),
+            buffered_write_count: AtomicU32::new(self.buffered_write_count.load(Ordering::Acquire)),
+            direct_read_count: AtomicU32::new(self.direct_read_count.load(Ordering::Acquire)),
+            direct_write_count: AtomicU32::new(self.direct_write_count.load(Ordering::Acquire)),
+        }
+    }
+}
+
+impl std::fmt::Display for FileStats {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Buffered read count: {}, Buffered write count: {}, Direct read count: {}, Direct write count: {}",
+            self.buffered_read_count.load(Ordering::Acquire),
+            self.buffered_write_count.load(Ordering::Acquire),
+            self.direct_read_count.load(Ordering::Acquire),
+            self.direct_write_count.load(Ordering::Acquire),
+        )
+    }
+}
+
+impl FileStats {
+    pub fn new() -> Self {
+        FileStats {
+            buffered_read_count: AtomicU32::new(0),
+            buffered_write_count: AtomicU32::new(0),
+            direct_read_count: AtomicU32::new(0),
+            direct_write_count: AtomicU32::new(0),
+        }
+    }
+
+    pub fn read_count(&self) -> u32 {
+        self.buffered_read_count.load(Ordering::Acquire)
+            + self.direct_read_count.load(Ordering::Acquire)
+    }
+
+    pub fn inc_buffered_read(&self) {
+        #[cfg(feature = "stat")]
+        {
+            self.buffered_read_count.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    pub fn inc_direct_read(&self) {
+        #[cfg(feature = "stat")]
+        {
+            self.direct_read_count.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    pub fn write_count(&self) -> u32 {
+        self.buffered_write_count.load(Ordering::Acquire)
+            + self.direct_write_count.load(Ordering::Acquire)
+    }
+
+    pub fn inc_buffered_write(&self) {
+        #[cfg(feature = "stat")]
+        {
+            self.buffered_write_count.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    pub fn inc_direct_write(&self) {
+        #[cfg(feature = "stat")]
+        {
+            self.direct_write_count.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    pub fn reset(&self) {
+        self.buffered_read_count.store(0, Ordering::Release);
+        self.buffered_write_count.store(0, Ordering::Release);
+        self.direct_read_count.store(0, Ordering::Release);
+        self.direct_write_count.store(0, Ordering::Release);
+    }
+}
+
 #[cfg(not(any(
     feature = "async_write",
     feature = "new_async_write",
     feature = "o_direct"
 )))]
 pub mod sync_write {
+    use super::FileStats;
     use crate::bp::ContainerId;
     #[allow(unused_imports)]
     use crate::log;
@@ -31,7 +121,7 @@ pub mod sync_write {
     pub struct FileManager {
         _path: PathBuf,
         file: Mutex<File>,
-        io_count: (AtomicU32, AtomicU32), // (Read, Write)
+        stats: FileStats,
     }
 
     impl FileManager {
@@ -50,7 +140,7 @@ pub mod sync_write {
             Ok(FileManager {
                 _path: path,
                 file: Mutex::new(file),
-                io_count: (AtomicU32::new(0), AtomicU32::new(0)),
+                stats: FileStats::new(),
             })
         }
 
@@ -59,21 +149,8 @@ pub mod sync_write {
             file.metadata().unwrap().len() as usize / PAGE_SIZE
         }
 
-        #[allow(dead_code)]
-        pub fn get_stats(&self) -> String {
-            let num_pages = self.num_pages();
-            format!(
-                "Num pages: {}, Read count: {}, Write count: {}",
-                num_pages,
-                self.io_count.0.load(Ordering::Acquire),
-                self.io_count.1.load(Ordering::Acquire)
-            )
-        }
-
-        #[allow(dead_code)]
-        pub fn reset_stats(&self) {
-            self.io_count.0.store(0, Ordering::Release);
-            self.io_count.1.store(0, Ordering::Release);
+        pub fn get_stats(&self) -> FileStats {
+            self.stats.clone()
         }
 
         #[allow(dead_code)]
@@ -83,7 +160,7 @@ pub mod sync_write {
 
         pub fn read_page(&self, page_id: PageId, page: &mut Page) -> Result<(), std::io::Error> {
             let mut file = self.file.lock().unwrap();
-            self.io_count.0.fetch_add(1, Ordering::AcqRel);
+            self.stats.inc_buffered_read();
             log_trace!("Reading page: {} from file: {:?}", page_id, self.path);
             file.seek(SeekFrom::Start(page_id as u64 * PAGE_SIZE as u64))?;
             file.read_exact(page.get_raw_bytes_mut())?;
@@ -93,7 +170,7 @@ pub mod sync_write {
 
         pub fn write_page(&self, page_id: PageId, page: &Page) -> Result<(), std::io::Error> {
             let mut file = self.file.lock().unwrap();
-            self.io_count.1.fetch_add(1, Ordering::AcqRel);
+            self.stats.inc_buffered_write();
             assert_eq!(page.get_id(), page_id);
             file.seek(SeekFrom::Start(page_id as u64 * PAGE_SIZE as u64))?;
             file.write_all(page.get_raw_bytes())?;

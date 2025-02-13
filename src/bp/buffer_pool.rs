@@ -28,45 +28,70 @@ use dashmap::DashMap;
 
 /// Statistics kept by the buffer pool.
 /// These statistics are used for decision making.
-struct RuntimeStats {
-    new_page: AtomicUsize,
-    read_count: AtomicUsize,
-    write_count: AtomicUsize,
+struct BPStats {
+    new_page_request: AtomicUsize,
+    read_request: AtomicUsize,
+    write_request: AtomicUsize,
 }
 
-impl std::fmt::Display for RuntimeStats {
+impl std::fmt::Display for BPStats {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
             "New Page: {}\nRead Count: {}\nWrite Count: {}",
-            self.new_page.load(Ordering::Relaxed),
-            self.read_count.load(Ordering::Relaxed),
-            self.write_count.load(Ordering::Relaxed)
+            self.new_page_request.load(Ordering::Relaxed),
+            self.read_request.load(Ordering::Relaxed),
+            self.write_request.load(Ordering::Relaxed)
         )
     }
 }
 
-impl RuntimeStats {
+impl BPStats {
     pub fn new() -> Self {
-        RuntimeStats {
-            new_page: AtomicUsize::new(0),
-            read_count: AtomicUsize::new(0),
-            write_count: AtomicUsize::new(0),
+        BPStats {
+            new_page_request: AtomicUsize::new(0),
+            read_request: AtomicUsize::new(0),
+            write_request: AtomicUsize::new(0),
         }
     }
 
-    pub fn get(&self) -> (usize, usize, usize) {
-        (
-            self.new_page.load(Ordering::Relaxed),
-            self.read_count.load(Ordering::Relaxed),
-            self.write_count.load(Ordering::Relaxed),
-        )
+    pub fn clear(&self) {
+        self.new_page_request.store(0, Ordering::Relaxed);
+        self.read_request.store(0, Ordering::Relaxed);
+        self.write_request.store(0, Ordering::Relaxed);
     }
 
-    pub fn clear(&self) {
-        self.new_page.store(0, Ordering::Relaxed);
-        self.read_count.store(0, Ordering::Relaxed);
-        self.write_count.store(0, Ordering::Relaxed);
+    pub fn new_page(&self) -> usize {
+        self.new_page_request.load(Ordering::Relaxed)
+    }
+
+    pub fn inc_new_page(&self) {
+        #[cfg(feature = "stat")]
+        self.new_page_request.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn inc_new_pages(&self, num_pages: usize) {
+        #[cfg(feature = "stat")]
+        self.new_page_request
+            .fetch_add(num_pages, Ordering::Relaxed);
+    }
+
+    pub fn read_count(&self) -> usize {
+        self.read_request.load(Ordering::Relaxed)
+    }
+
+    pub fn inc_read_count(&self) {
+        #[cfg(feature = "stat")]
+        self.read_request.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn write_count(&self) -> usize {
+        self.write_request.load(Ordering::Relaxed)
+    }
+
+    pub fn inc_write_count(&self) {
+        #[cfg(feature = "stat")]
+        self.write_request.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -267,7 +292,7 @@ pub struct BufferPool {
     container_to_file: DashMap<ContainerKey, FileManager>, // c_key -> file_manager
     page_to_frame: UnsafeCell<HashMap<PageKey, usize>>,    // (c_key, page_id) -> frame_index
     file_page_counter: UnsafeCell<HashMap<ContainerKey, usize>>,
-    runtime_stats: RuntimeStats,
+    stats: BPStats,
 }
 
 impl Drop for BufferPool {
@@ -344,7 +369,7 @@ impl BufferPool {
             frames: UnsafeCell::new(Frames::new(num_frames)),
             container_to_file,
             file_page_counter: UnsafeCell::new(file_page_counter),
-            runtime_stats: RuntimeStats::new(),
+            stats: BPStats::new(),
         })
     }
 
@@ -446,6 +471,8 @@ impl MemPool for BufferPool {
         &self,
         c_key: ContainerKey,
     ) -> Result<FrameWriteGuard, MemPoolStatus> {
+        self.stats.inc_new_page();
+
         // 1. Choose victim
         if let Some(mut victim) = self.choose_victim() {
             // 2. Handle eviction if the victim is dirty
@@ -499,6 +526,8 @@ impl MemPool for BufferPool {
         num_pages: usize,
     ) -> Result<Vec<FrameWriteGuard>, MemPoolStatus> {
         assert!(num_pages > 0);
+        self.stats.inc_new_pages(num_pages);
+
         // 1. Choose victims
         let mut victims = self.choose_victims(num_pages);
         if !victims.is_empty() {
@@ -558,6 +587,7 @@ impl MemPool for BufferPool {
 
     fn get_page_for_write(&self, key: PageFrameKey) -> Result<FrameWriteGuard, MemPoolStatus> {
         log_debug!("Page write: {}", key);
+        self.stats.inc_write_count();
 
         #[cfg(not(feature = "no_bp_hint"))]
         {
@@ -683,6 +713,7 @@ impl MemPool for BufferPool {
 
     fn get_page_for_read(&self, key: PageFrameKey) -> Result<FrameReadGuard, MemPoolStatus> {
         log_debug!("Page read: {}", key);
+        self.stats.inc_read_count();
 
         #[cfg(not(feature = "no_bp_hint"))]
         {
@@ -884,26 +915,48 @@ impl MemPool for BufferPool {
 
     // Just return the runtime stats
     fn stats(&self) -> MemoryStats {
-        let (new_page, read_count, write_count) = self.runtime_stats.get();
-        let mut containers = BTreeMap::new();
+        let new_page = self.stats.new_page();
+        let read_count = self.stats.read_count();
+        let write_count = self.stats.write_count();
+        let mut num_frames_per_container = BTreeMap::new();
         for frame in unsafe { &*self.frames.get() }.iter() {
             let frame = frame.read();
             if let Some(key) = frame.page_key() {
-                *containers.entry(key.c_key).or_insert(0) += 1;
+                *num_frames_per_container.entry(key.c_key).or_insert(0) += 1;
             }
         }
+        let mut disk_io_per_container = BTreeMap::new();
+        for entry in &self.container_to_file {
+            let (c_key, file) = entry.pair();
+            let file_stats = file.get_stats();
+            disk_io_per_container.insert(
+                c_key.clone(),
+                (
+                    file_stats.read_count() as i64,
+                    file_stats.write_count() as i64,
+                ),
+            );
+        }
+        let (total_disk_read, total_disk_write) = disk_io_per_container
+            .iter()
+            .fold((0, 0), |acc, (_, (read, write))| {
+                (acc.0 + read, acc.1 + write)
+            });
         MemoryStats {
-            num_frames_in_mem: unsafe { &*self.frames.get() }.len(),
-            new_page_created: new_page,
-            read_page_from_disk: read_count,
-            write_page_to_disk: write_count,
-            containers,
+            bp_num_frames_in_mem: unsafe { &*self.frames.get() }.len(),
+            bp_new_page: new_page,
+            bp_read_frame: read_count,
+            bp_write_frame: write_count,
+            bp_num_frames_per_container: num_frames_per_container,
+            disk_read: total_disk_read as usize,
+            disk_write: total_disk_write as usize,
+            disk_io_per_container: disk_io_per_container,
         }
     }
 
     // Reset the runtime stats
     fn reset_stats(&self) {
-        self.runtime_stats.clear();
+        self.stats.clear();
     }
 
     /// Reset the buffer pool to its initial state.
@@ -965,7 +1018,7 @@ impl MemPool for BufferPool {
         }
 
         // container_to_file.clear();
-        self.runtime_stats.clear();
+        self.stats.clear();
 
         self.release_exclusive();
         Ok(())

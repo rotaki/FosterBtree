@@ -143,11 +143,17 @@ impl std::fmt::Display for MemPoolStatus {
 }
 
 pub struct MemoryStats {
-    pub num_frames_in_mem: usize,
-    pub new_page_created: usize,    // Number of new pages created
-    pub read_page_from_disk: usize, // Number of pages read
-    pub write_page_to_disk: usize,  // Number of pages written
-    pub containers: BTreeMap<ContainerKey, i32>, // Number of pages of each container in memory
+    // Buffer pool stats
+    pub bp_num_frames_in_mem: usize,
+    pub bp_new_page: usize,    // Total number of new pages created (BP)
+    pub bp_read_frame: usize,  // Total number of frames requested for read (BP)
+    pub bp_write_frame: usize, // Total number of frames requested for write (BP)
+    pub bp_num_frames_per_container: BTreeMap<ContainerKey, i64>, // Number of pages of each container in BP
+
+    // Disk stats
+    pub disk_read: usize,  // Total number of pages read (DISK)
+    pub disk_write: usize, // Total number of pages written (DISK)
+    pub disk_io_per_container: BTreeMap<ContainerKey, (i64, i64)>, // Number of pages read and written for each container
 }
 
 impl Default for MemoryStats {
@@ -159,47 +165,77 @@ impl Default for MemoryStats {
 impl MemoryStats {
     pub fn new() -> Self {
         MemoryStats {
-            num_frames_in_mem: 0,
-            new_page_created: 0,
-            read_page_from_disk: 0,
-            write_page_to_disk: 0,
-            containers: BTreeMap::new(),
+            bp_num_frames_in_mem: 0,
+            bp_new_page: 0,
+            bp_read_frame: 0,
+            bp_write_frame: 0,
+            bp_num_frames_per_container: BTreeMap::new(),
+            disk_read: 0,
+            disk_write: 0,
+            disk_io_per_container: BTreeMap::new(),
         }
     }
 
     pub fn diff(&self, previous: &MemoryStats) -> MemoryStats {
-        assert_eq!(self.num_frames_in_mem, previous.num_frames_in_mem);
+        assert_eq!(self.bp_num_frames_in_mem, previous.bp_num_frames_in_mem);
         MemoryStats {
-            num_frames_in_mem: self.num_frames_in_mem,
-            new_page_created: self.new_page_created - previous.new_page_created,
-            read_page_from_disk: self.read_page_from_disk - previous.read_page_from_disk,
-            write_page_to_disk: self.write_page_to_disk - previous.write_page_to_disk,
-            containers: self.containers.clone(),
+            bp_num_frames_in_mem: self.bp_num_frames_in_mem,
+            bp_new_page: self.bp_new_page - previous.bp_new_page,
+            bp_read_frame: self.bp_read_frame - previous.bp_read_frame,
+            bp_write_frame: self.bp_write_frame - previous.bp_write_frame,
+            bp_num_frames_per_container: self
+                .bp_num_frames_per_container
+                .iter()
+                .map(|(k, v)| {
+                    let prev = previous.bp_num_frames_per_container.get(k).unwrap_or(&0);
+                    (*k, v - prev)
+                })
+                .collect(),
+            disk_read: self.disk_read - previous.disk_read,
+            disk_write: self.disk_write - previous.disk_write,
+            disk_io_per_container: self
+                .disk_io_per_container
+                .iter()
+                .map(|(k, v)| {
+                    let prev = previous.disk_io_per_container.get(k).unwrap_or(&(0, 0));
+                    (*k, (v.0 - prev.0, v.1 - prev.1))
+                })
+                .collect(),
         }
     }
 }
 
 impl std::fmt::Display for MemoryStats {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Set to "N/A" if usize::MAX, otherwise format as a right-aligned string
-        let format_count = |count| {
-            if count == usize::MAX {
-                "N/A".to_string()
-            } else {
-                format!("{}", count)
-            }
-        };
-
-        let num_frames_in_mem = format_count(self.num_frames_in_mem);
-        let new_count = format_count(self.new_page_created);
-        let read_count = format_count(self.read_page_from_disk);
-        let write_count = format_count(self.write_page_to_disk);
-
-        write!(
+        writeln!(f, "Buffer pool stats:")?;
+        writeln!(
             f,
-            "Frames in mem: {}, New: {}, Read From Disk: {}, Write To Disk: {}, Containers: {:?}",
-            num_frames_in_mem, new_count, read_count, write_count, self.containers
-        )
+            "  Number of frames in memory: {}",
+            self.bp_num_frames_in_mem
+        )?;
+        writeln!(f, "  Number of new pages created: {}", self.bp_new_page)?;
+        writeln!(
+            f,
+            "  Number of frames requested for read: {}",
+            self.bp_read_frame
+        )?;
+        writeln!(
+            f,
+            "  Number of frames requested for write: {}",
+            self.bp_write_frame
+        )?;
+        writeln!(f, "  Number of frames for each container:")?;
+        for (c_key, num_pages) in &self.bp_num_frames_per_container {
+            writeln!(f, "    {}: {}", c_key, num_pages)?;
+        }
+        writeln!(f, "Disk stats:")?;
+        writeln!(f, "  Number of pages read: {}", self.disk_read)?;
+        writeln!(f, "  Number of pages written: {}", self.disk_write)?;
+        writeln!(f, "  Number of pages read and written for each container:")?;
+        for (c_key, (num_read, num_write)) in &self.disk_io_per_container {
+            writeln!(f, "    {}: read={}, write={}", c_key, num_read, num_write)?;
+        }
+        Ok(())
     }
 }
 

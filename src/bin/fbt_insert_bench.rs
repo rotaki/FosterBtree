@@ -14,6 +14,11 @@ fn measure_time(title: &str, f: impl FnOnce()) {
 }
 
 fn main() {
+    #[cfg(feature = "stat")]
+    println!("Stat is enabled");
+    #[cfg(not(feature = "stat"))]
+    println!("Stat is disabled");
+
     let kvs = RandomKVs::new(true, false, 3, 1000000, 100, 50, 100);
     let bp_size = 10000;
 

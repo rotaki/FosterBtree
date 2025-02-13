@@ -196,11 +196,14 @@ impl MemPool for InMemPool {
             }
         }
         MemoryStats {
-            num_frames_in_mem: num_frames,
-            new_page_created: num_frames,
-            read_page_from_disk: num_frames,
-            write_page_to_disk: num_frames,
-            containers: BTreeMap::new(),
+            bp_num_frames_in_mem: num_frames,
+            bp_new_page: num_frames,
+            bp_read_frame: num_frames,
+            bp_write_frame: num_frames,
+            bp_num_frames_per_container: containers,
+            disk_read: 0,
+            disk_write: 0,
+            disk_io_per_container: BTreeMap::new(),
         }
     }
 
