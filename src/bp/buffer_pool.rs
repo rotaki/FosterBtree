@@ -22,7 +22,6 @@ use std::{
 
 const EVICTION_SCAN_TRIALS: usize = 5;
 const EVICTION_SCAN_DEPTH: usize = 10;
-const NUM_EVICTION_PER_PAGE_FAULT: usize = 1;
 
 use concurrent_queue::ConcurrentQueue;
 use dashmap::DashMap;
@@ -94,11 +93,6 @@ impl BPStats {
         #[cfg(feature = "stat")]
         self.write_request.fetch_add(1, Ordering::Relaxed);
     }
-}
-
-pub struct Frames {
-    fast_path_victims: ConcurrentQueue<usize>,
-    frames: Vec<BufferFrame>, // The Vec<frames> is fixed size. If not fixed size, then Pin must be used to ensure that the frame does not move when the vector is resized.
 }
 
 struct EvictionCandidate {
@@ -190,106 +184,15 @@ impl ThreadLocalEvictionCandidate {
     }
 }
 
-impl Frames {
-    pub fn new(num_frames: usize) -> Self {
-        let fast_path_victims = ConcurrentQueue::unbounded();
-        for i in 0..num_frames {
-            fast_path_victims.push(i).unwrap();
-        }
-
-        Frames {
-            fast_path_victims,
-            frames: (0..num_frames)
-                .map(|i| BufferFrame::new(i as u32))
-                .collect(),
-        }
-    }
-
-    pub fn reset_free_frames(&self) {
-        while self.fast_path_victims.pop().is_ok() {}
-        for i in 0..self.frames.len() {
-            self.fast_path_victims.push(i).unwrap();
-        }
-    }
-
-    pub fn push_to_eviction_queue(&self, frame_id: usize) {
-        self.fast_path_victims.push(frame_id).unwrap();
-    }
-
-    /// Choose a victim frame to be evicted.
-    /// If all the frames are latched, then return None.
-    pub fn choose_victim(&mut self) -> Option<FrameWriteGuard> {
-        log_debug!("Choosing victim");
-
-        // First, try the fast path victims.
-        while let Ok(victim) = self.fast_path_victims.pop() {
-            let frame = self.frames[victim].try_write(false);
-            if let Some(guard) = frame {
-                log_debug!("Fast path victim found @ frame({})", guard.frame_id());
-                return Some(guard);
-            } else {
-                // The frame is latched. Try the next frame.
-            }
-        }
-
-        ThreadLocalEvictionCandidate.choose_eviction_candidate(&self.frames)
-    }
-
-    /// Choose multiple victims to be evicted
-    /// The returned vector may contain fewer frames thant he requested number of victims.
-    /// It can also return an empty vector.
-    pub fn choose_victims(&mut self, num_victims: usize) -> Vec<FrameWriteGuard> {
-        let mut victims = Vec::with_capacity(num_victims);
-
-        while let Ok(victim) = self.fast_path_victims.pop() {
-            let frame = self.frames[victim].try_write(false);
-            if let Some(guard) = frame {
-                log_debug!("Fast path victim found @ frame({})", guard.frame_id());
-                victims.push(guard);
-                if victims.len() == num_victims {
-                    return victims;
-                }
-            } else {
-                // The frame is latched. Try the next frame.
-            }
-        }
-
-        while victims.len() < num_victims {
-            if let Some(victim) =
-                ThreadLocalEvictionCandidate.choose_eviction_candidate(&self.frames)
-            {
-                victims.push(victim);
-            } else {
-                break;
-            }
-        }
-
-        victims
-    }
-}
-
-impl Deref for Frames {
-    type Target = Vec<BufferFrame>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.frames
-    }
-}
-
-impl DerefMut for Frames {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.frames
-    }
-}
-
 /// Buffer pool that manages the buffer frames.
 pub struct BufferPool {
     remove_dir_on_drop: bool,
     path: PathBuf,
     latch: RwLatch,
-    frames: UnsafeCell<Frames>,
+    clean_frames_hints: ConcurrentQueue<usize>, // A hint for quickly finding a clean frame. Whenever a clean frame is found, it is pushed to this queue so that it can be quickly found.
+    frames: UnsafeCell<Vec<BufferFrame>>, // The Vec<frames> is fixed size. If not fixed size, then Pin must be used to ensure that the frame does not move when the vector is resized.
     container_to_file: DashMap<ContainerKey, FileManager>, // c_key -> file_manager
-    page_to_frame: UnsafeCell<HashMap<PageKey, usize>>,    // (c_key, page_id) -> frame_index
+    page_to_frame: UnsafeCell<HashMap<PageKey, usize>>, // (c_key, page_id) -> frame_index
     file_page_counter: UnsafeCell<HashMap<ContainerKey, usize>>,
     stats: BPStats,
 }
@@ -360,12 +263,22 @@ impl BufferPool {
             }
         }
 
+        let clean_frames_hints = ConcurrentQueue::unbounded();
+        for i in 0..num_frames {
+            clean_frames_hints.push(i).unwrap();
+        }
+
+        let frames = (0..num_frames)
+            .map(|i| BufferFrame::new(i as u32))
+            .collect();
+
         Ok(BufferPool {
             remove_dir_on_drop,
             path: bp_dir.as_ref().to_path_buf(),
             latch: RwLatch::default(),
             page_to_frame: UnsafeCell::new(HashMap::new()),
-            frames: UnsafeCell::new(Frames::new(num_frames)),
+            clean_frames_hints,
+            frames: UnsafeCell::new(frames),
             container_to_file,
             file_page_counter: UnsafeCell::new(file_page_counter),
             stats: BPStats::new(),
@@ -396,18 +309,54 @@ impl BufferPool {
         self.latch.release_exclusive();
     }
 
-    // The exclusive latch is NOT NEEDED when calling this function
+    /// Choose a victim frame to be evicted.
+    /// If all the frames are latched, then return None.
     fn choose_victim(&self) -> Option<FrameWriteGuard> {
-        let frames = unsafe { &mut *self.frames.get() };
-        frames.choose_victim()
+        let frames = unsafe { &*self.frames.get() };
+
+        // First, try the clean frames hints
+        while let Ok(victim) = self.clean_frames_hints.pop() {
+            let frame = frames[victim].try_write(false);
+            if let Some(guard) = frame {
+                return Some(guard);
+            } else {
+                // The frame is latched. Try the next frame.
+            }
+        }
+
+        ThreadLocalEvictionCandidate.choose_eviction_candidate(&frames)
     }
 
-    // The exclusive latch is NOT NEEDED when calling this function.
-    // It is not needed because a victim selection does not modify the shared state
-    // such as the page_to_frame mapping.
+    /// Choose multiple victims to be evicted
+    /// The returned vector may contain fewer frames thant he requested number of victims.
+    /// It can also return an empty vector.
     fn choose_victims(&self, num_victims: usize) -> Vec<FrameWriteGuard> {
-        let frames = unsafe { &mut *self.frames.get() };
-        frames.choose_victims(num_victims.min(frames.len()))
+        let frames = unsafe { &*self.frames.get() };
+        let num_victims = frames.len().min(num_victims);
+        let mut victims = Vec::with_capacity(num_victims);
+
+        // First, try the clean frames hints
+        while let Ok(victim) = self.clean_frames_hints.pop() {
+            let frame = frames[victim].try_write(false);
+            if let Some(guard) = frame {
+                victims.push(guard);
+                if victims.len() == num_victims {
+                    return victims;
+                }
+            } else {
+                // The frame is latched. Try the next frame.
+            }
+        }
+
+        while victims.len() < num_victims {
+            if let Some(victim) = ThreadLocalEvictionCandidate.choose_eviction_candidate(&frames) {
+                victims.push(victim);
+            } else {
+                break;
+            }
+        }
+
+        victims
     }
 
     // The exclusive latch is NOT NEEDED when calling this function
@@ -640,30 +589,9 @@ impl MemPool for BufferPool {
         // 3.1. An optimization is to find a victim and handle IO outside the critical section.
 
         // Before entering the critical section, we will find a frame that we can write to.
-        let mut victim_candidates = self.choose_victims(NUM_EVICTION_PER_PAGE_FAULT);
-        if victim_candidates.is_empty() {
-            return Err(MemPoolStatus::CannotEvictPage);
-        }
-        // Find a clean victim that can be used without writing the page to disk.
-        // If no clean victim is found, then write the page to disk and use it.
-        let mut victim_offset = None;
-        for (i, v) in victim_candidates.iter().enumerate() {
-            if v.page_key().is_none() || !v.dirty().load(Ordering::Acquire) {
-                victim_offset = Some(i);
-                break;
-            }
-        }
-        let mut victim = if let Some(offset) = victim_offset {
-            // Found a clean victim
-            victim_candidates.swap_remove(offset)
-        } else {
-            // Need to write the victim to disk before using it.
-            let victim = victim_candidates.swap_remove(0);
-            self.write_victim_to_disk_if_dirty_w(&victim).unwrap();
-            victim
-        };
-        drop(victim_candidates); // Release the write latches on unused victims
-                                 // Now we have a clean victim that can be used for writing.
+        let mut victim = self.choose_victim().ok_or(MemPoolStatus::CannotEvictPage)?;
+        self.write_victim_to_disk_if_dirty_w(&victim).unwrap();
+        // Now we have a clean victim that can be used for writing.
         assert!(!victim.dirty().load(Ordering::Acquire));
 
         // Start the critical section.
@@ -677,6 +605,9 @@ impl MemPool for BufferPool {
                     // Unlikely path as it is already checked in the critical section above with the shared latch.
                     let guard = frames[index].try_write(true);
                     self.release_exclusive();
+
+                    self.clean_frames_hints.push(index).unwrap();
+                    drop(victim); // Release the write latch on the unused victim
 
                     guard
                         .inspect(|g| {
@@ -767,29 +698,9 @@ impl MemPool for BufferPool {
         // 3.1. An optimization is to find a victim and handle IO outside the critical section.
 
         // Before entering the critical section, we will find a frame that we can read from.
-        let mut victim_candidates: Vec<FrameWriteGuard<'_>> =
-            self.choose_victims(NUM_EVICTION_PER_PAGE_FAULT);
-        if victim_candidates.is_empty() {
-            return Err(MemPoolStatus::CannotEvictPage);
-        }
-        let mut victim_offset = None;
-        for (i, v) in victim_candidates.iter().enumerate() {
-            if v.page_key().is_none() || !v.dirty().load(Ordering::Acquire) {
-                victim_offset = Some(i);
-                break;
-            }
-        }
-        let mut victim = if let Some(offset) = victim_offset {
-            // Found
-            victim_candidates.swap_remove(offset)
-        } else {
-            // Need to write the victim to disk before using it.
-            let victim = victim_candidates.swap_remove(0);
-            self.write_victim_to_disk_if_dirty_w(&victim).unwrap();
-            victim
-        };
-        drop(victim_candidates); // Release the write latches on unused victims
-                                 // Now we have a clean victim that can be used for reading.
+        let mut victim = self.choose_victim().ok_or(MemPoolStatus::CannotEvictPage)?;
+        self.write_victim_to_disk_if_dirty_w(&victim).unwrap();
+        // Now we have a clean victim that can be used for reading.
         assert!(!victim.dirty().load(Ordering::Acquire));
 
         // Start the critical section.
@@ -803,6 +714,9 @@ impl MemPool for BufferPool {
                     // Unlikely path as it is already checked in the critical section above with the shared latch.
                     let guard = frames[index].try_read();
                     self.release_exclusive();
+
+                    self.clean_frames_hints.push(index).unwrap();
+                    drop(victim); // Release the write latch on the unused victim
 
                     guard
                         .inspect(|g| {
@@ -904,11 +818,8 @@ impl MemPool for BufferPool {
         Ok(())
     }
 
-    fn fast_evict(&self, frame_id: u32) -> Result<(), MemPoolStatus> {
-        // push_to_eviction_queue can be done without buffer pool latch
-        // because it is a lock-free operation
-        let frames = unsafe { &*self.frames.get() };
-        frames.push_to_eviction_queue(frame_id as usize);
+    fn fast_evict(&self, _frame_id: u32) -> Result<(), MemPoolStatus> {
+        // do nothing for now.
         Ok(())
     }
 
@@ -987,7 +898,10 @@ impl MemPool for BufferPool {
 
         page_to_frame.clear();
 
-        frames.reset_free_frames();
+        while self.clean_frames_hints.pop().is_ok() {}
+        for i in 0..frames.len() {
+            self.clean_frames_hints.push(i).unwrap();
+        }
 
         self.release_exclusive();
         Ok(())
