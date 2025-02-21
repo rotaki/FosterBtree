@@ -199,6 +199,7 @@ impl MemPool for InMemPool {
             bp_num_frames_in_mem: num_frames,
             bp_new_page: num_frames,
             bp_read_frame: num_frames,
+            bp_read_frame_wait: 0,
             bp_write_frame: num_frames,
             bp_num_frames_per_container: containers,
             disk_read: 0,

@@ -41,6 +41,10 @@ impl BufferFrame {
         self.frame_id
     }
 
+    pub fn is_dirty(&self) -> bool {
+        self.is_dirty.load(Ordering::Relaxed)
+    }
+
     pub fn read(&self) -> FrameReadGuard {
         self.latch.shared();
         FrameReadGuard {

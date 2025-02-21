@@ -17,7 +17,10 @@ use std::{
     fs::create_dir_all,
     ops::{Deref, DerefMut},
     path::PathBuf,
-    sync::atomic::{AtomicUsize, Ordering},
+    sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc,
+    },
 };
 
 const EVICTION_SCAN_TRIALS: usize = 5;
@@ -31,6 +34,7 @@ use dashmap::DashMap;
 struct BPStats {
     new_page_request: AtomicUsize,
     read_request: AtomicUsize,
+    read_request_waiting_for_write: AtomicUsize,
     write_request: AtomicUsize,
 }
 
@@ -51,6 +55,7 @@ impl BPStats {
         BPStats {
             new_page_request: AtomicUsize::new(0),
             read_request: AtomicUsize::new(0),
+            read_request_waiting_for_write: AtomicUsize::new(0),
             write_request: AtomicUsize::new(0),
         }
     }
@@ -58,6 +63,8 @@ impl BPStats {
     pub fn clear(&self) {
         self.new_page_request.store(0, Ordering::Relaxed);
         self.read_request.store(0, Ordering::Relaxed);
+        self.read_request_waiting_for_write
+            .store(0, Ordering::Relaxed);
         self.write_request.store(0, Ordering::Relaxed);
     }
 
@@ -83,6 +90,16 @@ impl BPStats {
     pub fn inc_read_count(&self) {
         #[cfg(feature = "stat")]
         self.read_request.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn read_request_waiting_for_write_count(&self) -> usize {
+        self.read_request_waiting_for_write.load(Ordering::Relaxed)
+    }
+
+    pub fn inc_read_request_waiting_for_write_count(&self) {
+        #[cfg(feature = "stat")]
+        self.read_request_waiting_for_write
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn write_count(&self) -> usize {
@@ -699,6 +716,9 @@ impl MemPool for BufferPool {
 
         // Before entering the critical section, we will find a frame that we can read from.
         let mut victim = self.choose_victim().ok_or(MemPoolStatus::CannotEvictPage)?;
+        if victim.dirty().load(Ordering::Acquire) {
+            self.stats.inc_read_request_waiting_for_write_count();
+        }
         self.write_victim_to_disk_if_dirty_w(&victim).unwrap();
         // Now we have a clean victim that can be used for reading.
         assert!(!victim.dirty().load(Ordering::Acquire));
@@ -827,6 +847,7 @@ impl MemPool for BufferPool {
     fn stats(&self) -> MemoryStats {
         let new_page = self.stats.new_page();
         let read_count = self.stats.read_count();
+        let read_count_waiting_for_write = self.stats.read_request_waiting_for_write_count();
         let write_count = self.stats.write_count();
         let mut num_frames_per_container = BTreeMap::new();
         for frame in unsafe { &*self.frames.get() }.iter() {
@@ -856,6 +877,7 @@ impl MemPool for BufferPool {
             bp_num_frames_in_mem: unsafe { &*self.frames.get() }.len(),
             bp_new_page: new_page,
             bp_read_frame: read_count,
+            bp_read_frame_wait: read_count_waiting_for_write,
             bp_write_frame: write_count,
             bp_num_frames_per_container: num_frames_per_container,
             disk_read: total_disk_read as usize,

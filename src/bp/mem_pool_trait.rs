@@ -145,9 +145,10 @@ impl std::fmt::Display for MemPoolStatus {
 pub struct MemoryStats {
     // Buffer pool stats
     pub bp_num_frames_in_mem: usize,
-    pub bp_new_page: usize,    // Total number of new pages created (BP)
-    pub bp_read_frame: usize,  // Total number of frames requested for read (BP)
-    pub bp_write_frame: usize, // Total number of frames requested for write (BP)
+    pub bp_new_page: usize,        // Total number of new pages created (BP)
+    pub bp_read_frame: usize,      // Total number of frames requested for read (BP)
+    pub bp_read_frame_wait: usize, // Total number of frames requested for read but had to wait (BP)
+    pub bp_write_frame: usize,     // Total number of frames requested for write (BP)
     pub bp_num_frames_per_container: BTreeMap<ContainerKey, i64>, // Number of pages of each container in BP
 
     // Disk stats
@@ -168,6 +169,7 @@ impl MemoryStats {
             bp_num_frames_in_mem: 0,
             bp_new_page: 0,
             bp_read_frame: 0,
+            bp_read_frame_wait: 0,
             bp_write_frame: 0,
             bp_num_frames_per_container: BTreeMap::new(),
             disk_read: 0,
@@ -182,6 +184,7 @@ impl MemoryStats {
             bp_num_frames_in_mem: self.bp_num_frames_in_mem,
             bp_new_page: self.bp_new_page - previous.bp_new_page,
             bp_read_frame: self.bp_read_frame - previous.bp_read_frame,
+            bp_read_frame_wait: self.bp_read_frame_wait - previous.bp_read_frame_wait,
             bp_write_frame: self.bp_write_frame - previous.bp_write_frame,
             bp_num_frames_per_container: self
                 .bp_num_frames_per_container
@@ -218,6 +221,11 @@ impl std::fmt::Display for MemoryStats {
             f,
             "  Number of frames requested for read: {}",
             self.bp_read_frame
+        )?;
+        writeln!(
+            f,
+            "  Number of frames requested for read but had to wait: {}",
+            self.bp_read_frame_wait
         )?;
         writeln!(
             f,

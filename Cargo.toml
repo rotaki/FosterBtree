@@ -32,12 +32,9 @@ no_bp_hint = []
 
 # Old iterator for foster btree
 old_iter = []
-# Async IO only for write
-async_write = ["io-uring", "libc"]
-# Async IO with prefetching
-new_async_write = ["io-uring", "libc"]
-# O_DIRECT
-o_direct = ["libc"]
+preadpwrite_sync = [] # synchronous I/O implementation using pread/pwrite. Default
+iouring_sync = [] # synchronous I/O implementation using io-uring
+iouring_async = [] # asynchronous I/O implementation using io-uring
 
 [dependencies]
 tempfile = "3.16.0"
@@ -48,8 +45,8 @@ chrono = "0.4.39"
 lazy_static = { version = "1.4" }
 clap = {version = "4.5.27", features = ["derive"]}
 concurrent-queue = "2.5"
-io-uring = {version = "0.7.4", optional = true}
-libc = {version = "0.2.169", optional = true}
+io-uring = {version = "0.7.4"}
+libc = {version = "0.2.169"}
 memchr = "2.7.4"
 dashmap = "6.1"
 criterion = { version = "0.5", features = ["html_reports"]}
