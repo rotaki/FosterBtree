@@ -1,5 +1,7 @@
 use std::sync::atomic::{AtomicU32, Ordering};
 
+use crate::page::{Page, PageId};
+
 pub type ContainerId = u16;
 
 #[cfg(not(any(
@@ -68,10 +70,10 @@ impl FileStats {
             + self.direct_read_count.load(Ordering::Acquire)
     }
 
-    pub fn inc_read_count(&self, direct: bool) {
+    pub fn inc_read_count(&self, _direct: bool) {
         #[cfg(feature = "stat")]
         {
-            if direct {
+            if _direct {
                 self.direct_read_count.fetch_add(1, Ordering::AcqRel);
             } else {
                 self.buffered_read_count.fetch_add(1, Ordering::AcqRel);
@@ -84,10 +86,10 @@ impl FileStats {
             + self.direct_write_count.load(Ordering::Acquire)
     }
 
-    pub fn inc_write_count(&self, direct: bool) {
+    pub fn inc_write_count(&self, _direct: bool) {
         #[cfg(feature = "stat")]
         {
-            if direct {
+            if _direct {
                 self.direct_write_count.fetch_add(1, Ordering::AcqRel);
             } else {
                 self.buffered_write_count.fetch_add(1, Ordering::AcqRel);
@@ -95,6 +97,7 @@ impl FileStats {
         }
     }
 
+    #[allow(dead_code)]
     pub fn reset(&self) {
         self.buffered_read_count.store(0, Ordering::Release);
         self.buffered_write_count.store(0, Ordering::Release);
@@ -103,8 +106,19 @@ impl FileStats {
     }
 }
 
+pub trait FileManagerTrait: Send + Sync {
+    fn num_pages(&self) -> usize;
+    fn get_stats(&self) -> FileStats;
+    #[allow(dead_code)]
+    fn prefetch_page(&self, page_id: PageId) -> Result<(), std::io::Error>;
+    fn read_page(&self, page_id: PageId, page: &mut Page) -> Result<(), std::io::Error>;
+    fn write_page(&self, page_id: PageId, page: &Page) -> Result<(), std::io::Error>;
+    fn flush(&self) -> Result<(), std::io::Error>;
+}
+
+#[allow(dead_code)]
 pub mod preadpwrite_sync {
-    use super::{ContainerId, FileStats};
+    use super::{ContainerId, FileManagerTrait, FileStats};
     #[allow(unused_imports)]
     use crate::log;
     use crate::log_trace;
@@ -170,8 +184,10 @@ pub mod preadpwrite_sync {
                 direct: false,
             })
         }
+    }
 
-        pub fn num_pages(&self) -> usize {
+    impl FileManagerTrait for FileManager {
+        fn num_pages(&self) -> usize {
             // Allocate uninitialized memory for libc::stat
             let mut stat = MaybeUninit::<libc::stat>::uninit();
 
@@ -191,15 +207,15 @@ pub mod preadpwrite_sync {
             (stat.st_size as usize) / PAGE_SIZE
         }
 
-        pub fn get_stats(&self) -> FileStats {
+        fn get_stats(&self) -> FileStats {
             self.stats.clone()
         }
 
-        pub fn prefetch_page(&self, _page_id: PageId) -> Result<(), std::io::Error> {
+        fn prefetch_page(&self, _page_id: PageId) -> Result<(), std::io::Error> {
             Ok(())
         }
 
-        pub fn read_page(&self, page_id: PageId, page: &mut Page) -> Result<(), std::io::Error> {
+        fn read_page(&self, page_id: PageId, page: &mut Page) -> Result<(), std::io::Error> {
             self.stats.inc_read_count(self.direct);
             log_trace!("Reading page: {} from file: {:?}", page_id, self.path);
             unsafe {
@@ -217,7 +233,7 @@ pub mod preadpwrite_sync {
             Ok(())
         }
 
-        pub fn write_page(&self, page_id: PageId, page: &Page) -> Result<(), std::io::Error> {
+        fn write_page(&self, page_id: PageId, page: &Page) -> Result<(), std::io::Error> {
             self.stats.inc_write_count(self.direct);
             log_trace!("Writing page: {} to file: {:?}", page_id, self.path);
             debug_assert!(page.get_id() == page_id, "Page id mismatch");
@@ -236,7 +252,7 @@ pub mod preadpwrite_sync {
         }
 
         // With psync_direct, we don't need to flush.
-        pub fn flush(&self) -> Result<(), std::io::Error> {
+        fn flush(&self) -> Result<(), std::io::Error> {
             if self.direct {
                 Ok(())
             } else {
@@ -252,6 +268,7 @@ pub mod preadpwrite_sync {
     }
 }
 
+#[allow(dead_code)]
 pub mod iouring_sync {
     use super::{ContainerId, FileStats};
     #[allow(unused_imports)]
@@ -261,6 +278,7 @@ pub mod iouring_sync {
     use libc::O_DIRECT;
     use std::cell::RefCell;
     use std::fs::{File, OpenOptions};
+    use std::mem::MaybeUninit;
     use std::os::unix::fs::OpenOptionsExt;
     use std::os::unix::io::AsRawFd;
     use std::path::PathBuf;
@@ -481,7 +499,27 @@ pub mod iouring_sync {
             self.stats.clone()
         }
 
-        pub fn prefetch_page(&self, page_id: PageId) -> Result<(), std::io::Error> {
+        pub fn num_pages(&self) -> usize {
+            // Allocate uninitialized memory for libc::stat
+            let mut stat = MaybeUninit::<libc::stat>::uninit();
+
+            // Call fstat with a pointer to our uninitialized stat buffer
+            let ret = unsafe { libc::fstat(self.fileno, stat.as_mut_ptr()) };
+
+            // Check for errors (fstat returns -1 on failure)
+            if ret == -1 {
+                return 0;
+            }
+
+            // Now that fstat has successfully written to the buffer,
+            // we can assume it is initialized.
+            let stat = unsafe { stat.assume_init() };
+
+            // Use the file size (st_size) from stat, then compute pages.
+            (stat.st_size as usize) / PAGE_SIZE
+        }
+
+        pub fn prefetch_page(&self, _page_id: PageId) -> Result<(), std::io::Error> {
             Ok(())
         }
 
@@ -505,6 +543,7 @@ pub mod iouring_sync {
     }
 }
 
+#[allow(dead_code)]
 pub mod inmemory_async_simulator {
     use super::ContainerId;
     use crate::page::{Page, PageId};
@@ -528,7 +567,7 @@ pub mod inmemory_async_simulator {
         }
 
         pub fn write_page(&self, page_id: PageId, page: &Page) -> Result<(), std::io::Error> {
-            let idx = page_id as usize % NUM_PAGE_BUFFER as usize;
+            let idx = page_id as usize % NUM_PAGE_BUFFER;
             let mut temp_buffer = self.temp_buffers[idx].lock().unwrap();
             temp_buffer.copy(page);
             Ok(())
@@ -536,162 +575,89 @@ pub mod inmemory_async_simulator {
     }
 }
 
-pub mod copy_async_simulator {
-    use std::{
-        fs::{File, OpenOptions},
-        os::{fd::AsRawFd, unix::fs::OpenOptionsExt},
-        sync::Mutex,
-    };
-
-    use io_uring::IoUring;
-    use libc::O_DIRECT;
-
-    use crate::page::{Page, PageId};
-
-    use super::ContainerId;
-
-    const NUM_PAGE_BUFFER: usize = 128;
-
-    pub struct FileManager {
-        _file: File,
-        fileno: i32,
-        temp_buffers: Vec<Mutex<(IoUring, Page)>>,
-    }
-
-    impl FileManager {
-        pub fn new<P: AsRef<std::path::Path>>(
-            db_dir: P,
-            c_id: ContainerId,
-        ) -> Result<Self, std::io::Error> {
-            std::fs::create_dir_all(&db_dir)?;
-            let path = db_dir.as_ref().join(format!("{}", c_id));
-            let file = OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create(true)
-                .truncate(false)
-                .custom_flags(O_DIRECT)
-                .open(&path)?;
-            let fileno = file.as_raw_fd();
-            Ok(FileManager {
-                _file: file,
-                fileno,
-                temp_buffers: (0..NUM_PAGE_BUFFER)
-                    .map(|_| Mutex::new((IoUring::new(128).unwrap(), Page::new_empty())))
-                    .collect(),
-            })
-        }
-
-        pub fn write_page(&self, page_id: PageId, page: &Page) -> Result<(), std::io::Error> {
-            let idx = page_id as usize % NUM_PAGE_BUFFER as usize;
-            let mut lock = self.temp_buffers[idx].lock().unwrap();
-            let (ring, temp_buffer) = &mut *lock;
-            temp_buffer.copy(page);
-            let buf = temp_buffer.get_raw_bytes();
-            let entry = io_uring::opcode::Write::new(
-                io_uring::types::Fd(self.fileno),
-                buf.as_ptr() as _,
-                buf.len() as _,
-            )
-            .offset(page_id as u64 * crate::page::PAGE_SIZE as u64)
-            .build()
-            .user_data(page_id as u64);
-
-            unsafe {
-                ring.submission().push(&entry).expect("queue is full");
-            }
-            let _res = ring.submit_and_wait(1)?; // Submit and wait for completion of 1 operation.
-            assert_eq!(_res, 1); // This is true if SQPOLL is disabled.
-
-            // Poll for completion.
-            loop {
-                if let Some(entry) = ring.completion().next() {
-                    let _completed = entry.user_data();
-                    assert_eq!(page_id, _completed as PageId);
-                    break;
-                } else {
-                    std::hint::spin_loop();
-                }
-            }
-
-            Ok(())
-        }
-    }
-}
-
+#[allow(dead_code)]
 pub mod iouring_async {
-    use super::{ContainerId, FileStats};
+    use super::{ContainerId, FileManagerTrait, FileStats};
     #[allow(unused_imports)]
     use crate::log;
+
     use crate::page::{Page, PageId, PAGE_SIZE};
     use io_uring::{opcode, types, IoUring};
     use libc::{iovec, O_DIRECT};
     use std::cell::UnsafeCell;
     use std::fs::{File, OpenOptions};
     use std::hash::{Hash, Hasher};
+    use std::mem::MaybeUninit;
     use std::os::unix::fs::OpenOptionsExt;
     use std::os::unix::io::AsRawFd;
     use std::path::PathBuf;
-    use std::sync::Mutex;
-    use std::sync::OnceLock;
 
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
     enum UserData {
-        Read(PageId),
-        Write(PageId),
-        Flush,
+        Read(ContainerId, PageId),
+        Write(ContainerId, PageId),
+        Flush(ContainerId),
     }
 
     impl UserData {
         fn as_u64(&self) -> u64 {
-            // Higher 32 bits are the operation type.
-            // Lower 32 bits are the page id.
+            // Higher 16 bits are operation type.
+            // Next 16 bits are container id.
+            // Lower 32 bits are page id.
             match self {
-                UserData::Read(page_id) => {
-                    let upper_32 = 0;
+                UserData::Read(c_id, page_id) => {
+                    let upper_16 = 0;
+                    let middle_16 = *c_id as u64;
                     let lower_32 = *page_id as u64;
-                    (upper_32 << 32) | lower_32
+                    (upper_16 << 48) | (middle_16 << 32) | lower_32
                 }
-                UserData::Write(page_id) => {
-                    let upper_32 = 1;
+                UserData::Write(fileno, page_id) => {
+                    let upper_16 = 1;
+                    let middle_16 = *fileno as u64;
                     let lower_32 = *page_id as u64;
-                    (upper_32 << 32) | lower_32
+                    (upper_16 << 48) | (middle_16 << 32) | lower_32
                 }
-                UserData::Flush => {
-                    let upper_32 = 2;
+                UserData::Flush(fileno) => {
+                    let upper_16 = 2;
+                    let middle_16 = *fileno as u64;
                     let lower_32 = 0;
-                    (upper_32 << 32) | lower_32
+                    (upper_16 << 48) | (middle_16 << 32) | lower_32
                 }
             }
         }
 
         fn new_from_u64(data: u64) -> Self {
-            let upper_32 = (data >> 32) as u32;
+            let upper_16 = (data >> 48) as u16;
+            let middle_16 = (data >> 32) as u16;
             let lower_32 = data as u32;
-            match upper_32 {
-                0 => UserData::Read(lower_32),
-                1 => UserData::Write(lower_32),
-                2 => UserData::Flush,
+            match upper_16 {
+                0 => UserData::Read(middle_16, lower_32),
+                1 => UserData::Write(middle_16, lower_32),
+                2 => UserData::Flush(middle_16),
                 _ => panic!("Invalid user data"),
             }
         }
 
-        fn new_read(page_id: PageId) -> Self {
-            UserData::Read(page_id)
+        fn new_read(c_id: ContainerId, page_id: PageId) -> Self {
+            UserData::Read(c_id, page_id)
         }
 
-        fn new_write(page_id: PageId) -> Self {
-            UserData::Write(page_id)
+        fn new_write(c_id: ContainerId, page_id: PageId) -> Self {
+            UserData::Write(c_id, page_id)
         }
 
-        fn new_flush() -> Self {
-            UserData::Flush
+        fn new_flush(c_id: ContainerId) -> Self {
+            UserData::Flush(c_id)
         }
     }
 
-    pub struct PerPageHashRing {
+    struct PerPageHashRing {
         lock: Mutex<()>,
         ring: UnsafeCell<IoUring>,
         has_pending_write: UnsafeCell<bool>,
+        temp_buffer_id: UnsafeCell<Option<(ContainerId, PageId)>>, // (container_id, page_id) of the page in the temp buffer. This is updated when a write is issued.
         temp_buffer: UnsafeCell<Page>,
         _io_vec: UnsafeCell<[iovec; 1]>,
     }
@@ -719,14 +685,17 @@ pub mod iouring_async {
                 lock: Mutex::new(()),
                 ring: UnsafeCell::new(ring),
                 has_pending_write: UnsafeCell::new(false),
+                temp_buffer_id: UnsafeCell::new(None),
                 temp_buffer,
                 _io_vec: io_vec,
             }
         }
 
+        // Read a page from the file and copy it to the destination page.
         pub fn read(
             &self,
             fileno: i32,
+            c_id: ContainerId,
             page_id: PageId,
             page: &mut Page,
         ) -> Result<(), std::io::Error> {
@@ -734,15 +703,16 @@ pub mod iouring_async {
             let entry = opcode::Read::new(types::Fd(fileno), buf.as_mut_ptr(), buf.len() as _)
                 .offset(page_id as u64 * PAGE_SIZE as u64)
                 .build()
-                .user_data(UserData::new_read(page_id).as_u64());
+                .user_data(UserData::new_read(c_id, page_id).as_u64());
 
             let lock = self.lock.lock().unwrap();
             let ring = unsafe { &mut *self.ring.get() };
             let has_pending_writes = unsafe { &mut *self.has_pending_write.get() };
+            let temp_buffer_id = unsafe { &mut *self.temp_buffer_id.get() };
             let temp_buffer = unsafe { &mut *self.temp_buffer.get() };
 
             // If the page_buffer contains the same page, we don't need to read it from disk.
-            if temp_buffer.get_id() == page_id {
+            if temp_buffer_id.is_some() && temp_buffer_id.unwrap() == (c_id, page_id) {
                 // Copy to the destination page.
                 page.copy(temp_buffer);
                 return Ok(()); // Return early.
@@ -761,16 +731,16 @@ pub mod iouring_async {
                     let completed = entry.user_data();
                     let user_data = UserData::new_from_u64(completed);
                     match user_data {
-                        UserData::Read(completion_id) => {
-                            assert_eq!(completion_id, page_id);
-                            assert_eq!(completion_id, page.get_id());
-                            // Copying is done after the read is completed.
+                        UserData::Read(comp_c_id, comp_page_id) => {
+                            assert_eq!(comp_c_id, c_id);
+                            assert_eq!(comp_page_id, page_id);
+                            assert_eq!(comp_page_id, page.get_id());
                             break;
                         }
-                        UserData::Write(_) => {
+                        UserData::Write(_fileno, _completion_page_id) => {
                             *has_pending_writes = false;
                         }
-                        UserData::Flush => {
+                        UserData::Flush(_) => {
                             // Do nothing.
                         }
                     }
@@ -787,6 +757,7 @@ pub mod iouring_async {
         pub fn write(
             &self,
             fileno: i32,
+            c_id: ContainerId,
             page_id: PageId,
             page: &Page,
         ) -> Result<(), std::io::Error> {
@@ -795,11 +766,12 @@ pub mod iouring_async {
             let entry = opcode::Write::new(types::Fd(fileno), buf.as_ptr(), buf.len() as _)
                 .offset(page_id as u64 * PAGE_SIZE as u64)
                 .build()
-                .user_data(UserData::new_write(page_id).as_u64());
+                .user_data(UserData::new_write(c_id, page_id).as_u64());
 
             let lock = self.lock.lock().unwrap();
             let ring = unsafe { &mut *self.ring.get() };
             let has_pending_write = unsafe { &mut *self.has_pending_write.get() };
+            let temp_buffer_id = unsafe { &mut *self.temp_buffer_id.get() };
             let temp_buffer = unsafe { &mut *self.temp_buffer.get() };
 
             // If there are pending writes, poll the ring first.
@@ -810,16 +782,17 @@ pub mod iouring_async {
                         let completed = entry.user_data();
                         let user_data = UserData::new_from_u64(completed);
                         match user_data {
-                            UserData::Read(_) => {
+                            UserData::Read(..) => {
                                 // Do nothing.
                                 panic!("Read should be synchronous");
                             }
-                            UserData::Write(completion_id) => {
-                                assert_eq!(completion_id, temp_buffer.get_id());
+                            UserData::Write(comp_c_id, comp_page_id) => {
+                                assert_eq!(comp_c_id, temp_buffer_id.unwrap().0);
+                                assert_eq!(comp_page_id, temp_buffer_id.unwrap().1);
                                 *has_pending_write = false;
                                 break;
                             }
-                            UserData::Flush => {
+                            UserData::Flush(_) => {
                                 // Do nothing.
                             }
                         }
@@ -832,7 +805,8 @@ pub mod iouring_async {
             // Now we can write the new page to the temp buffer.
             // 1. Copy the page to the temp buffer.
             temp_buffer.copy(page);
-            // 2. Push the write operation to the ring.
+            *temp_buffer_id = Some((c_id, page_id)); // Update the temp buffer id.
+                                                     // 2. Push the write operation to the ring.
             unsafe {
                 ring.submission().push(&entry).expect("queue is full");
             }
@@ -845,15 +819,12 @@ pub mod iouring_async {
             Ok(())
         }
 
-        pub fn flush(&self, fileno: i32) -> Result<(), std::io::Error> {
-            let entry = opcode::Fsync::new(types::Fd(fileno))
-                .build()
-                .user_data(UserData::new_flush().as_u64());
-
+        // Wait for the completion of the pending write and clear the temp buffer id.
+        pub fn wait_and_clear(&self) -> Result<(), std::io::Error> {
             let lock = self.lock.lock().unwrap();
             let ring = unsafe { &mut *self.ring.get() };
             let has_pending_write = unsafe { &mut *self.has_pending_write.get() };
-            let temp_buffer = unsafe { &mut *self.temp_buffer.get() };
+            let temp_buffer_id = unsafe { &mut *self.temp_buffer_id.get() };
 
             // If there are pending writes, poll the ring first.
             if *has_pending_write {
@@ -862,16 +833,17 @@ pub mod iouring_async {
                         let completed = entry.user_data();
                         let user_data = UserData::new_from_u64(completed);
                         match user_data {
-                            UserData::Read(_) => {
+                            UserData::Read(..) => {
                                 // Do nothing.
                                 panic!("Read should be synchronous");
                             }
-                            UserData::Write(completion_id) => {
-                                assert_eq!(completion_id, temp_buffer.get_id());
+                            UserData::Write(comp_c_id, comp_page_id) => {
+                                assert_eq!(comp_c_id, temp_buffer_id.unwrap().0);
+                                assert_eq!(comp_page_id, temp_buffer_id.unwrap().1);
                                 *has_pending_write = false;
                                 break;
                             }
-                            UserData::Flush => {
+                            UserData::Flush(..) => {
                                 // Do nothing.
                             }
                         }
@@ -881,72 +853,132 @@ pub mod iouring_async {
                 }
             }
 
+            temp_buffer_id.take(); // Clear the temp buffer id.
+
+            drop(lock);
+
+            Ok(())
+        }
+
+        // Flush is synchronous.
+        // This function must be called when the kernel page cache is enabled.
+        pub fn flush(&self, fileno: i32, c_id: ContainerId) -> Result<(), std::io::Error> {
+            let entry = opcode::Fsync::new(types::Fd(fileno))
+                .build()
+                .user_data(UserData::new_flush(c_id).as_u64());
+
+            let lock = self.lock.lock().unwrap();
+            let ring = unsafe { &mut *self.ring.get() };
+            let has_pending_write = unsafe { &mut *self.has_pending_write.get() };
+            let temp_buffer_id = unsafe { &mut *self.temp_buffer_id.get() };
+
+            // If there are pending writes, poll the ring first.
+            if *has_pending_write {
+                loop {
+                    if let Some(entry) = ring.completion().next() {
+                        let completed = entry.user_data();
+                        let user_data = UserData::new_from_u64(completed);
+                        match user_data {
+                            UserData::Read(..) => {
+                                // Do nothing.
+                                panic!("Read should be synchronous");
+                            }
+                            UserData::Write(comp_c_id, comp_page_id) => {
+                                assert_eq!(comp_c_id, temp_buffer_id.unwrap().0);
+                                assert_eq!(comp_page_id, temp_buffer_id.unwrap().1);
+                                *has_pending_write = false;
+                                break;
+                            }
+                            UserData::Flush(..) => {
+                                // Do nothing.
+                            }
+                        }
+                    } else {
+                        std::hint::spin_loop();
+                    }
+                }
+            }
+
+            temp_buffer_id.take(); // Clear the temp buffer id.
+
             // 1. Push the flush operation to the ring.
             unsafe {
                 ring.submission().push(&entry).expect("queue is full");
             }
             // 2. Submit.
-            let _res = ring.submit()?; // Submit
+            let _res = ring.submit_and_wait(1)?; // Submit and wait for completion of 1 operation.
             assert_eq!(_res, 1); // This is true if SQPOLL is disabled.
+
+            // 3. Poll the ring for the completion of the flush operation.
+            let entry = ring.completion().next().unwrap();
+            let completed = entry.user_data();
+            let user_data = UserData::new_from_u64(completed);
+            assert_eq!(user_data, UserData::Flush(c_id));
+
             drop(lock);
 
             Ok(())
         }
     }
 
-    // Static per hash ring
-    static RINGS: OnceLock<Vec<PerPageHashRing>> = OnceLock::new();
+    pub struct GlobalRings {
+        rings: Vec<PerPageHashRing>,
+    }
 
-    const NUM_RINGS: usize = 128;
-
-    pub struct GlobalRing {}
-
-    impl GlobalRing {
-        pub fn new() -> Self {
-            Self {}
+    impl GlobalRings {
+        pub fn new(num_rings: usize) -> Self {
+            Self {
+                rings: (0..num_rings).map(|_| PerPageHashRing::new()).collect(),
+            }
         }
 
-        pub fn get(&self, fileno: i32, page_id: PageId) -> &PerPageHashRing {
-            let rings = RINGS.get_or_init(|| {
-                (0..NUM_RINGS)
-                    .map(|_| PerPageHashRing::new())
-                    .collect::<Vec<_>>()
-            });
-            let index = self.hash(fileno, page_id);
-            &rings[index]
+        fn get(&self, c_id: ContainerId, page_id: PageId) -> &PerPageHashRing {
+            let index = self.hash(c_id, page_id);
+            &self.rings[index]
         }
 
-        fn hash(&self, fileno: i32, page_id: PageId) -> usize {
+        fn hash(&self, c_id: ContainerId, page_id: PageId) -> usize {
             let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            (fileno, page_id).hash(&mut hasher);
-            hasher.finish() as usize % NUM_RINGS
+            (c_id, page_id).hash(&mut hasher);
+            hasher.finish() as usize % self.rings.len()
         }
 
-        pub fn read_page(
+        fn read_page(
             &self,
             fileno: i32,
+            c_id: ContainerId,
             page_id: PageId,
             page: &mut Page,
         ) -> Result<(), std::io::Error> {
             // Compute a hash based on fileno and page id
-            let ring = self.get(fileno, page_id);
-            ring.read(fileno, page_id, page)
+            let ring = self.get(c_id, page_id);
+            ring.read(fileno, c_id, page_id, page)
         }
 
-        pub fn write_page(
+        fn write_page(
             &self,
             fileno: i32,
+            c_id: ContainerId,
             page_id: PageId,
             page: &Page,
         ) -> Result<(), std::io::Error> {
-            let ring = self.get(fileno, page_id);
-            ring.write(fileno, page_id, page)
+            let ring = self.get(c_id, page_id);
+            ring.write(fileno, c_id, page_id, page)
         }
 
-        pub fn flush(&self, fileno: i32) -> Result<(), std::io::Error> {
-            let ring_vec = RINGS.get().unwrap();
-            for ring in ring_vec {
-                ring.flush(fileno)?;
+        pub fn flush(
+            &self,
+            direct: bool,
+            fileno: i32,
+            c_id: ContainerId,
+        ) -> Result<(), std::io::Error> {
+            if direct {
+                for ring in &self.rings {
+                    ring.wait_and_clear()?;
+                }
+            } else {
+                let ring = self.get(c_id, 0);
+                ring.flush(fileno, c_id)?;
             }
 
             Ok(())
@@ -959,12 +991,15 @@ pub mod iouring_async {
         stats: FileStats,
         fileno: i32,
         direct: bool,
+        c_id: ContainerId,
+        rings: Arc<GlobalRings>,
     }
 
     impl FileManager {
         pub fn new<P: AsRef<std::path::Path>>(
             db_dir: P,
             c_id: ContainerId,
+            rings: Arc<GlobalRings>,
         ) -> Result<Self, std::io::Error> {
             std::fs::create_dir_all(&db_dir)?;
             let path = db_dir.as_ref().join(format!("{}", c_id));
@@ -982,6 +1017,8 @@ pub mod iouring_async {
                 stats: FileStats::new(),
                 fileno,
                 direct: true,
+                c_id,
+                rings,
             })
         }
 
@@ -989,6 +1026,7 @@ pub mod iouring_async {
         pub fn with_kpc<P: AsRef<std::path::Path>>(
             db_dir: P,
             c_id: ContainerId,
+            rings: Arc<GlobalRings>,
         ) -> Result<Self, std::io::Error> {
             std::fs::create_dir_all(&db_dir)?;
             let path = db_dir.as_ref().join(format!("{}", c_id));
@@ -1005,49 +1043,86 @@ pub mod iouring_async {
                 stats: FileStats::new(),
                 fileno,
                 direct: false,
+                c_id,
+                rings,
             })
         }
+    }
 
-        pub fn get_stats(&self) -> FileStats {
+    impl FileManagerTrait for FileManager {
+        fn num_pages(&self) -> usize {
+            // Allocate uninitialized memory for libc::stat
+            let mut stat = MaybeUninit::<libc::stat>::uninit();
+
+            // Call fstat with a pointer to our uninitialized stat buffer
+            let ret = unsafe { libc::fstat(self.fileno, stat.as_mut_ptr()) };
+
+            // Check for errors (fstat returns -1 on failure)
+            if ret == -1 {
+                return 0;
+            }
+
+            // Now that fstat has successfully written to the buffer,
+            // we can assume it is initialized.
+            let stat = unsafe { stat.assume_init() };
+
+            // Use the file size (st_size) from stat, then compute pages.
+            (stat.st_size as usize) / PAGE_SIZE
+        }
+
+        fn get_stats(&self) -> FileStats {
             self.stats.clone()
         }
 
-        pub fn prefetch_page(&self, page_id: PageId) -> Result<(), std::io::Error> {
+        fn prefetch_page(&self, _page_id: PageId) -> Result<(), std::io::Error> {
             Ok(())
         }
 
-        pub fn read_page(&self, page_id: PageId, page: &mut Page) -> Result<(), std::io::Error> {
+        fn read_page(&self, page_id: PageId, page: &mut Page) -> Result<(), std::io::Error> {
             self.stats.inc_read_count(self.direct);
-            GlobalRing::new().read_page(self.fileno, page_id, page)
+            self.rings.read_page(self.fileno, self.c_id, page_id, page)
         }
 
         // Writes are asynchronous. It is not guaranteed that the write is completed when this function returns.
         // We guarantee that the write is completed before a new I/O operation is started on the same page.
-        pub fn write_page(&self, page_id: PageId, page: &Page) -> Result<(), std::io::Error> {
+        fn write_page(&self, page_id: PageId, page: &Page) -> Result<(), std::io::Error> {
             self.stats.inc_write_count(self.direct);
-            GlobalRing::new().write_page(self.fileno, page_id, page)
+            self.rings.write_page(self.fileno, self.c_id, page_id, page)
         }
 
-        pub fn flush(&self) -> Result<(), std::io::Error> {
-            if !self.direct {
-                Ok(())
-            } else {
-                GlobalRing::new().flush(self.fileno)
-            }
+        fn flush(&self) -> Result<(), std::io::Error> {
+            self.rings.flush(self.direct, self.fileno, self.c_id)
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::FileManager;
+    use std::path::Path;
+    use std::sync::Arc;
+
+    use rstest::rstest;
+
     use crate::page::{Page, PageId};
     use crate::random::gen_random_permutation;
 
-    #[test]
-    fn test_page_write_read() {
+    use super::FileManagerTrait;
+
+    fn get_preadpwrite_sync_fm(db_dir: &Path) -> impl FileManagerTrait {
+        super::preadpwrite_sync::FileManager::new(db_dir, 0).unwrap()
+    }
+
+    fn get_iouring_async_fm(db_dir: &Path) -> impl FileManagerTrait {
+        let rings = Arc::new(super::iouring_async::GlobalRings::new(128));
+        super::iouring_async::FileManager::new(db_dir, 0, rings).unwrap()
+    }
+
+    #[rstest]
+    #[case::preadpwrite(get_preadpwrite_sync_fm)]
+    #[case::iouring_async(get_iouring_async_fm)]
+    fn test_page_write_read<T: FileManagerTrait>(#[case] file_manager_gen: fn(&Path) -> T) {
         let temp_path = tempfile::tempdir().unwrap();
-        let file_manager = FileManager::new(&temp_path, 0).unwrap();
+        let file_manager = file_manager_gen(temp_path.path());
         let mut page = Page::new_empty();
 
         let page_id = 0;
@@ -1064,10 +1139,12 @@ mod tests {
         assert_eq!(&read_page[0..data.len()], data);
     }
 
-    #[test]
-    fn test_prefetch() {
+    #[rstest]
+    #[case::preadpwrite(get_preadpwrite_sync_fm)]
+    #[case::iouring_async(get_iouring_async_fm)]
+    fn test_prefetch_page<T: FileManagerTrait>(#[case] file_manager_gen: fn(&Path) -> T) {
         let temp_path = tempfile::tempdir().unwrap();
-        let file_manager = FileManager::new(&temp_path, 0).unwrap();
+        let file_manager = file_manager_gen(temp_path.path());
 
         let num_pages = 1000;
         let page_id_vec = (0..num_pages).collect::<Vec<PageId>>();
@@ -1090,10 +1167,14 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_page_write_read_sequential() {
+    #[rstest]
+    #[case::preadpwrite(get_preadpwrite_sync_fm)]
+    #[case::iouring_async(get_iouring_async_fm)]
+    fn test_page_write_read_sequential<T: FileManagerTrait>(
+        #[case] file_manager_gen: fn(&Path) -> T,
+    ) {
         let temp_path = tempfile::tempdir().unwrap();
-        let file_manager = FileManager::new(&temp_path, 0).unwrap();
+        let file_manager = file_manager_gen(temp_path.path());
 
         let num_pages = 1000;
 
@@ -1116,10 +1197,12 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_page_write_read_random() {
+    #[rstest]
+    #[case::preadpwrite(get_preadpwrite_sync_fm)]
+    #[case::iouring_async(get_iouring_async_fm)]
+    fn test_page_write_read_random<T: FileManagerTrait>(#[case] file_manager_gen: fn(&Path) -> T) {
         let temp_path = tempfile::tempdir().unwrap();
-        let file_manager = FileManager::new(&temp_path, 0).unwrap();
+        let file_manager = file_manager_gen(temp_path.path());
 
         let num_pages = 1000;
         let page_id_vec = (0..num_pages).collect::<Vec<PageId>>();
@@ -1145,10 +1228,14 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_page_write_read_interleave() {
+    #[rstest]
+    #[case::preadpwrite(get_preadpwrite_sync_fm)]
+    #[case::iouring_async(get_iouring_async_fm)]
+    fn test_page_write_read_interleave<T: FileManagerTrait>(
+        #[case] file_manager_gen: fn(&Path) -> T,
+    ) {
         let temp_path = tempfile::tempdir().unwrap();
-        let file_manager = FileManager::new(&temp_path, 0).unwrap();
+        let file_manager = file_manager_gen(temp_path.path());
 
         let num_pages = 1000;
         let page_id_vec = (0..num_pages).collect::<Vec<PageId>>();
@@ -1170,15 +1257,17 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_file_flush() {
+    #[rstest]
+    #[case::preadpwrite(get_preadpwrite_sync_fm)]
+    #[case::iouring_async(get_iouring_async_fm)]
+    fn test_file_flush<T: FileManagerTrait>(#[case] file_manager_gen: fn(&Path) -> T) {
         // Create two file managers with the same path.
         // Issue multiple write operations to one of the file managers.
         // Check if the other file manager can read the pages.
 
         let temp_path = tempfile::tempdir().unwrap();
-        let file_manager1 = FileManager::new(&temp_path, 0).unwrap();
-        let file_manager2 = FileManager::new(&temp_path, 0).unwrap();
+        let file_manager1 = file_manager_gen(temp_path.path());
+        let file_manager2 = file_manager_gen(temp_path.path());
 
         let num_pages = 2;
         let page_id_vec = (0..num_pages).collect::<Vec<PageId>>();
@@ -1206,10 +1295,14 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_concurrent_read_write_file() {
+    #[rstest]
+    #[case::preadpwrite(get_preadpwrite_sync_fm)]
+    #[case::iouring_async(get_iouring_async_fm)]
+    fn test_concurrent_read_write_file<T: FileManagerTrait>(
+        #[case] file_manager_gen: fn(&Path) -> T,
+    ) {
         let temp_path = tempfile::tempdir().unwrap();
-        let file_manager = FileManager::new(&temp_path, 0).unwrap();
+        let file_manager = file_manager_gen(temp_path.path());
 
         let num_pages = 1000;
         let page_id_vec = (0..num_pages).collect::<Vec<PageId>>();

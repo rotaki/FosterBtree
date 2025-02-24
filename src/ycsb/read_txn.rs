@@ -2,7 +2,6 @@ use std::time::SystemTime;
 
 #[allow(unused_imports)]
 use crate::log;
-use crate::log_error;
 use crate::prelude::get_key_bytes;
 
 use crate::{
@@ -56,7 +55,6 @@ impl YCSBTxnProfile for ReadTxn {
         if res.is_err() {
             return helper.kill(&txn, &res);
         }
-        log_error!("ReadTxn scan_range ok");
         let iter = res.unwrap();
 
         match txn_storage.iter_next(&txn, &iter) {
@@ -71,11 +69,8 @@ impl YCSBTxnProfile for ReadTxn {
                 return helper.kill::<()>(&txn, &Err(e));
             }
         }
-        log_error!("ReadTxn iter_next ok");
 
         drop(iter);
-
-        log_error!("ReadTxn drop iter ok");
 
         let elapsed = start.elapsed().unwrap().as_micros() as u64;
         helper.commit(&txn, elapsed)

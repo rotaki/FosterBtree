@@ -2,10 +2,7 @@
 use crate::log;
 use std::time::SystemTime;
 
-use crate::{
-    log_error,
-    prelude::{TxnOptions, TxnStorageTrait, DB_ID},
-};
+use crate::prelude::{TxnOptions, TxnStorageTrait, DB_ID};
 
 use super::{
     loader::{YCSBTable, YCSBTableInfo},
@@ -49,8 +46,6 @@ impl YCSBTxnProfile for UpdateTxn {
         if res.is_err() {
             return helper.kill(&txn, &res);
         }
-
-        log_error!("UpdateTxn update_value ok");
 
         let elapsed = start.elapsed().unwrap().as_micros() as u64;
         helper.commit(&txn, elapsed)

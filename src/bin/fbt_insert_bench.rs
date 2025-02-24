@@ -1,3 +1,4 @@
+use clap::Parser;
 use fbtree::{
     bench_utils::*,
     bp::{get_test_bp, ContainerKey, MemPool},
@@ -13,13 +14,38 @@ fn measure_time(title: &str, f: impl FnOnce()) {
     println!("{}: {:?}", title, elapsed);
 }
 
+#[derive(Debug, Parser, Clone)]
+pub struct Params {
+    #[clap(short = 't', long, default_value = "3")]
+    pub num_threads: usize,
+    #[clap(short = 'n', long, default_value = "1000000")]
+    pub num_keys: usize,
+    #[clap(long, default_value = "100")]
+    pub key_size: usize,
+    #[clap(long, default_value = "50")]
+    pub val_min_size: usize,
+    #[clap(long, default_value = "100")]
+    pub val_max_size: usize,
+}
+
 fn main() {
     #[cfg(feature = "stat")]
     println!("Stat is enabled");
     #[cfg(not(feature = "stat"))]
     println!("Stat is disabled");
 
-    let kvs = RandomKVs::new(true, false, 3, 1000000, 100, 50, 100);
+    let params = Params::parse();
+    println!("Params: {:?}", params);
+
+    let kvs = RandomKVs::new(
+        true,
+        false,
+        params.num_threads,
+        params.num_keys,
+        params.key_size,
+        params.val_min_size,
+        params.val_max_size,
+    );
     let bp_size = 10000;
 
     measure_time("Non-BP Foster BTree Insertion", || {

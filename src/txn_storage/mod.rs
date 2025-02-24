@@ -22,6 +22,8 @@ pub mod prelude {
 
 #[cfg(test)]
 mod tests {
+    #[allow(unused_imports)]
+    use crate::log;
     use ondisk::OnDiskStorage;
     use rstest::rstest;
 
