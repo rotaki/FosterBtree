@@ -8,15 +8,15 @@ pub use inmem::{InMemDummyTxnHandle, InMemIterator, InMemStorage};
 pub use ondisk::{OnDiskDummyTxnHandle, OnDiskIterator, OnDiskStorage};
 pub use ondisk_2pl::NoWaitTxnStorage;
 pub use txn_storage_trait::{
-    ContainerDS, ContainerOptions, DBOptions, ScanOptions, TxnOptions, TxnStorageStatus,
-    TxnStorageTrait,
+    ContainerDS, ContainerOptions, ContainerType, DBOptions, ScanOptions, TxnOptions,
+    TxnStorageStatus, TxnStorageTrait,
 };
 
 pub mod prelude {
     pub use super::{
-        ContainerDS, ContainerOptions, DBOptions, InMemDummyTxnHandle, InMemIterator, InMemStorage,
-        OnDiskDummyTxnHandle, OnDiskIterator, OnDiskStorage, ScanOptions, TxnOptions,
-        TxnStorageStatus, TxnStorageTrait,
+        ContainerDS, ContainerOptions, ContainerType, DBOptions, InMemDummyTxnHandle,
+        InMemIterator, InMemStorage, OnDiskDummyTxnHandle, OnDiskIterator, OnDiskStorage,
+        ScanOptions, TxnOptions, TxnStorageStatus, TxnStorageTrait,
     };
 }
 
