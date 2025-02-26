@@ -33,10 +33,11 @@ pub struct ContainerFileManager {
     container_to_file: DashMap<ContainerKey, (Arc<AtomicUsize>, Arc<FileManager>)>,
     #[cfg(feature = "iouring_async")]
     ring: Arc<GlobalRings>,
+    direct: bool, // Direct IO
 }
 
 impl ContainerFileManager {
-    pub fn new(base_dir: PathBuf) -> Result<Self, std::io::Error> {
+    pub fn new(base_dir: PathBuf, direct: bool) -> Result<Self, std::io::Error> {
         // Identify all the directories. A directory corresponds to a database.
         // A file in the directory corresponds to a container.
         // Create a FileManager for each file and store it in the container.
@@ -70,9 +71,17 @@ impl ContainerFileManager {
                             .parse()
                             .unwrap();
                         #[cfg(feature = "iouring_async")]
-                        let fm = Arc::new(FileManager::new(&db_path, c_id, ring.clone()).unwrap());
+                        let fm = if direct {
+                            Arc::new(FileManager::new(&db_path, c_id, ring.clone()).unwrap())
+                        } else {
+                            Arc::new(FileManager::with_kpc(&db_path, c_id, ring.clone()).unwrap())
+                        };
                         #[cfg(not(feature = "iouring_async"))]
-                        let fm = Arc::new(FileManager::new(&db_path, c_id).unwrap());
+                        let fm = if direct {
+                            Arc::new(FileManager::new(&db_path, c_id).unwrap())
+                        } else {
+                            Arc::new(FileManager::with_kpc(&db_path, c_id).unwrap())
+                        };
                         let counter = Arc::new(AtomicUsize::new(fm.num_pages()));
                         container_to_file.insert(ContainerKey { db_id, c_id }, (counter, fm));
                     }
@@ -85,6 +94,7 @@ impl ContainerFileManager {
             container_to_file,
             #[cfg(feature = "iouring_async")]
             ring,
+            direct,
         })
     }
 
@@ -92,9 +102,17 @@ impl ContainerFileManager {
         let file = self.container_to_file.entry(c_key).or_insert_with(|| {
             let db_path = self.base_dir.join(c_key.db_id.to_string());
             #[cfg(feature = "iouring_async")]
-            let fm = Arc::new(FileManager::new(&db_path, c_key.c_id, self.ring.clone()).unwrap());
+            let fm = if self.direct {
+                Arc::new(FileManager::new(&db_path, c_key.c_id, self.ring.clone()).unwrap())
+            } else {
+                Arc::new(FileManager::with_kpc(&db_path, c_key.c_id, self.ring.clone()).unwrap())
+            };
             #[cfg(not(feature = "iouring_async"))]
-            let fm = Arc::new(FileManager::new(&db_path, c_key.c_id).unwrap());
+            let fm = if self.direct {
+                Arc::new(FileManager::new(&db_path, c_key.c_id).unwrap())
+            } else {
+                Arc::new(FileManager::with_kpc(&db_path, c_key.c_id).unwrap())
+            };
             let counter = Arc::new(AtomicUsize::new(fm.num_pages()));
             (counter, fm)
         });
@@ -334,7 +352,39 @@ impl BufferPool {
     ) -> Result<Self, MemPoolStatus> {
         log_debug!("Buffer pool created: num_frames: {}", num_frames);
 
-        let container_file_manager = ContainerFileManager::new(bp_dir.as_ref().to_path_buf())?;
+        let container_file_manager =
+            ContainerFileManager::new(bp_dir.as_ref().to_path_buf(), true)?;
+
+        let clean_frames_hints = ConcurrentQueue::unbounded();
+        for i in 0..num_frames {
+            clean_frames_hints.push(i).unwrap();
+        }
+
+        let frames = (0..num_frames)
+            .map(|i| BufferFrame::new(i as u32))
+            .collect();
+
+        Ok(BufferPool {
+            remove_dir_on_drop,
+            path: bp_dir.as_ref().to_path_buf(),
+            latch: RwLatch::default(),
+            page_to_frame: UnsafeCell::new(HashMap::new()),
+            clean_frames_hints,
+            frames: UnsafeCell::new(frames),
+            container_file_manager,
+            stats: BPStats::new(),
+        })
+    }
+
+    pub fn new_with_kpc<P: AsRef<std::path::Path>>(
+        bp_dir: P,
+        num_frames: usize,
+        remove_dir_on_drop: bool,
+    ) -> Result<Self, MemPoolStatus> {
+        log_debug!("Buffer pool created: num_frames: {}", num_frames);
+
+        let container_file_manager =
+            ContainerFileManager::new(bp_dir.as_ref().to_path_buf(), false)?;
 
         let clean_frames_hints = ConcurrentQueue::unbounded();
         for i in 0..num_frames {

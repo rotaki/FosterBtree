@@ -16,8 +16,13 @@ pub use mem_pool_trait::{
 use crate::random::gen_random_pathname;
 
 pub fn get_test_bp(num_frames: usize) -> Arc<BufferPool> {
-    let dir = gen_random_pathname(Some("test_bp"));
+    let dir = gen_random_pathname(Some("test_bp_direct"));
     Arc::new(BufferPool::new(dir, num_frames, true).unwrap())
+}
+
+pub fn get_test_bp_with_kpc(num_frames: usize) -> Arc<BufferPool> {
+    let dir = gen_random_pathname(Some("test_bp_with_kpc"));
+    Arc::new(BufferPool::new_with_kpc(dir, num_frames, true).unwrap())
 }
 pub fn get_in_mem_pool() -> Arc<InMemPool> {
     Arc::new(InMemPool::new())
