@@ -32,11 +32,6 @@ use fbtree::{
 };
 use std::{process::Command, sync::Arc};
 
-pub trait SecondaryIndex<T: MemPool> {
-    fn get(&self, key: &[u8]) -> Result<*const u8, AccessMethodError>;
-    fn stats(&self) -> String;
-}
-
 pub struct SecondaryIncorrectHintIndex<T: MemPool> {
     pub primary: Arc<FosterBtree<T>>,
     pub secondary: Arc<FosterBtree<T>>,
@@ -187,7 +182,7 @@ impl<T: MemPool> SecondaryIncorrectHintIndex<T> {
     }
 }
 
-impl<T: MemPool> SecondaryIndex<T> for SecondaryIncorrectHintIndex<T> {
+impl<T: MemPool> SecondaryIncorrectHintIndex<T> {
     fn get(&self, key: &[u8]) -> Result<*const u8, AccessMethodError> {
         let sec_leaf_page = self
             .secondary
@@ -296,6 +291,36 @@ impl<T: MemPool> SecondaryIndex<T> for SecondaryIncorrectHintIndex<T> {
         }
     }
 
+    fn get_without_hint(&self, key: &[u8]) -> Result<*const u8, AccessMethodError> {
+        let sec_leaf_page = self
+            .secondary
+            .traverse_to_leaf_for_read_with_hint(key, None);
+        let sec_slot_id = sec_leaf_page.upper_bound_slot_id(&BTreeKey::Normal(key)) - 1;
+        if sec_slot_id == 0 {
+            // Lower fence. Non-existent key
+            Err(AccessMethodError::KeyNotFound)
+        } else if sec_leaf_page.get_raw_key(sec_slot_id) == key {
+            let val = sec_leaf_page.get_val(sec_slot_id);
+            let (p_key, _expected_phys_addr) = val.split_at(val.len() - 12);
+            let pri_leaf_page = self
+                .primary
+                .traverse_to_leaf_for_read_with_hint(p_key, None);
+            let pri_slot_id = pri_leaf_page.upper_bound_slot_id(&BTreeKey::Normal(p_key)) - 1;
+            if pri_slot_id == 0 {
+                // Lower fence. Non-existent key
+                Err(AccessMethodError::KeyNotFound)
+            } else if pri_leaf_page.get_raw_key(pri_slot_id) == p_key {
+                Ok(pri_leaf_page.get_val(pri_slot_id).as_ptr())
+            } else {
+                // Non-existent key
+                Err(AccessMethodError::KeyNotFound)
+            }
+        } else {
+            // Non-existent key
+            Err(AccessMethodError::KeyNotFound)
+        }
+    }
+
     fn stats(&self) -> String {
         format!(
             "[Page, Frame, Slot] hint secondary index: \n{}",
@@ -333,6 +358,9 @@ pub struct SecBenchParams {
     pub frame_hint_correctness: usize,
     #[clap(long, default_value = "100")]
     pub slot_hint_correctness: usize,
+    /// With or without hint. 0: without hint, 1: with hint
+    #[clap(short = 'h', long, default_value = "1")]
+    pub with_hint: usize,
 }
 
 fn get_key_bytes(key: usize, key_size: usize) -> Vec<u8> {
@@ -418,9 +446,9 @@ pub fn load_table(params: &SecBenchParams, table: &Arc<FosterBtree<BufferPool>>)
     });
 }
 
-fn bench_secondary<M: MemPool, T: SecondaryIndex<M>>(
+fn bench_secondary<M: MemPool>(
     params: &SecBenchParams,
-    secondary: &T,
+    secondary: &SecondaryIncorrectHintIndex<M>,
     _bp: &Arc<M>,
 ) -> u128 {
     println!("{}", secondary.stats());
@@ -436,7 +464,11 @@ fn bench_secondary<M: MemPool, T: SecondaryIndex<M>>(
         let start = std::time::Instant::now();
         for key in perm {
             let key_bytes = get_key_bytes(key, params.key_size);
-            let result = secondary.get(&key_bytes).unwrap();
+            let result = if params.with_hint == 0 {
+                secondary.get_without_hint(&key_bytes).unwrap()
+            } else {
+                secondary.get(&key_bytes).unwrap()
+            };
             black_box(result);
         }
         // for _ in 0..params.num_keys {

@@ -50,6 +50,7 @@ libc = {version = "0.2.169"}
 memchr = "2.7.4"
 dashmap = "6.1"
 criterion = { version = "0.5", features = ["html_reports"]}
+hdrhistogram = "7.5.4"
 
 [dev-dependencies]
 serde_cbor = "0.11"

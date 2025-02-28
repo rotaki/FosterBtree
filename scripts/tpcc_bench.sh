@@ -1,11 +1,11 @@
 #!/bin/bash
-set -euo pipefail
+set -euxo pipefail
 
 # Define page sizes and feature sets
 PAGE_SIZES=(
-    "4k_page" 
+    # "4k_page" 
     "16k_page" 
-    "64k_page"
+    # "64k_page"
 )
 FEATURE_SETS=(
     ""                      # All optimizations
@@ -53,7 +53,7 @@ for i in "${!FEATURE_SETS[@]}"; do
                 OUTPUT_FILE="${RESULT_DIR}/${BINARY_NAME}_w${NUM_WAREHOUSES}_t${THREAD_COUNT}.dat${ITERATION}"
                 
                 # Run the benchmark and redirect output to the file
-                ./"$BINARY_NAME" -w "$NUM_WAREHOUSES" -t "$THREAD_COUNT" > "$OUTPUT_FILE"
+                ./"$BINARY_NAME" -w "$NUM_WAREHOUSES" -t "$THREAD_COUNT" -d 20 -D 60 > "$OUTPUT_FILE"
             done
         done
     done

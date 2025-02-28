@@ -2,10 +2,12 @@ set -euxo
 
 cargo build --release --bin secondary_index_bench_ptr_with_updates
 
+./target/release/secondary_index_bench_ptr_with_updates -b 600000 -n 1000000 -k 10 -r 100 -h 0 > ptr_t1_n1000000_k10_r100_b600000_no_hint.txt
+
 ./target/release/secondary_index_bench_ptr_with_updates -b 600000 -n 1000000 -k 10 -r 100 --page-hint-correctness 0    > ptr_t1_n1000000_k10_r100_b600000_p0.txt
 ./target/release/secondary_index_bench_ptr_with_updates -b 600000 -n 1000000 -k 10 -r 100 --page-hint-correctness 10   > ptr_t1_n1000000_k10_r100_b600000_p10.txt
 ./target/release/secondary_index_bench_ptr_with_updates -b 600000 -n 1000000 -k 10 -r 100 --page-hint-correctness 20   > ptr_t1_n1000000_k10_r100_b600000_p20.txt
-./target/release/secondary_index_bench_ptr_with_updates -b 600000 -n 1000000 -k 10 -r 100 --page-hint-correctness 20   > ptr_t1_n1000000_k10_r100_b600000_p30.txt
+./target/release/secondary_index_bench_ptr_with_updates -b 600000 -n 1000000 -k 10 -r 100 --page-hint-correctness 30   > ptr_t1_n1000000_k10_r100_b600000_p30.txt
 ./target/release/secondary_index_bench_ptr_with_updates -b 600000 -n 1000000 -k 10 -r 100 --page-hint-correctness 40   > ptr_t1_n1000000_k10_r100_b600000_p40.txt
 ./target/release/secondary_index_bench_ptr_with_updates -b 600000 -n 1000000 -k 10 -r 100 --page-hint-correctness 50   > ptr_t1_n1000000_k10_r100_b600000_p50.txt
 ./target/release/secondary_index_bench_ptr_with_updates -b 600000 -n 1000000 -k 10 -r 100 --page-hint-correctness 60   > ptr_t1_n1000000_k10_r100_b600000_p60.txt
@@ -17,7 +19,7 @@ cargo build --release --bin secondary_index_bench_ptr_with_updates
 ./target/release/secondary_index_bench_ptr_with_updates -b 600000 -n 1000000 -k 10 -r 100 --frame-hint-correctness 0   > ptr_t1_n1000000_k10_r100_b600000_f0.txt
 ./target/release/secondary_index_bench_ptr_with_updates -b 600000 -n 1000000 -k 10 -r 100 --frame-hint-correctness 10  > ptr_t1_n1000000_k10_r100_b600000_f10.txt
 ./target/release/secondary_index_bench_ptr_with_updates -b 600000 -n 1000000 -k 10 -r 100 --frame-hint-correctness 20  > ptr_t1_n1000000_k10_r100_b600000_f20.txt
-./target/release/secondary_index_bench_ptr_with_updates -b 600000 -n 1000000 -k 10 -r 100 --frame-hint-correctness 20  > ptr_t1_n1000000_k10_r100_b600000_f30.txt
+./target/release/secondary_index_bench_ptr_with_updates -b 600000 -n 1000000 -k 10 -r 100 --frame-hint-correctness 30  > ptr_t1_n1000000_k10_r100_b600000_f30.txt
 ./target/release/secondary_index_bench_ptr_with_updates -b 600000 -n 1000000 -k 10 -r 100 --frame-hint-correctness 40  > ptr_t1_n1000000_k10_r100_b600000_f40.txt
 ./target/release/secondary_index_bench_ptr_with_updates -b 600000 -n 1000000 -k 10 -r 100 --frame-hint-correctness 50  > ptr_t1_n1000000_k10_r100_b600000_f50.txt
 ./target/release/secondary_index_bench_ptr_with_updates -b 600000 -n 1000000 -k 10 -r 100 --frame-hint-correctness 60  > ptr_t1_n1000000_k10_r100_b600000_f60.txt
@@ -29,7 +31,7 @@ cargo build --release --bin secondary_index_bench_ptr_with_updates
 ./target/release/secondary_index_bench_ptr_with_updates -b 600000 -n 1000000 -k 10 -r 100 --slot-hint-correctness 0    > ptr_t1_n1000000_k10_r100_b600000_s0.txt
 ./target/release/secondary_index_bench_ptr_with_updates -b 600000 -n 1000000 -k 10 -r 100 --slot-hint-correctness 10   > ptr_t1_n1000000_k10_r100_b600000_s10.txt
 ./target/release/secondary_index_bench_ptr_with_updates -b 600000 -n 1000000 -k 10 -r 100 --slot-hint-correctness 20   > ptr_t1_n1000000_k10_r100_b600000_s20.txt
-./target/release/secondary_index_bench_ptr_with_updates -b 600000 -n 1000000 -k 10 -r 100 --slot-hint-correctness 20   > ptr_t1_n1000000_k10_r100_b600000_s30.txt
+./target/release/secondary_index_bench_ptr_with_updates -b 600000 -n 1000000 -k 10 -r 100 --slot-hint-correctness 30   > ptr_t1_n1000000_k10_r100_b600000_s30.txt
 ./target/release/secondary_index_bench_ptr_with_updates -b 600000 -n 1000000 -k 10 -r 100 --slot-hint-correctness 40   > ptr_t1_n1000000_k10_r100_b600000_s40.txt
 ./target/release/secondary_index_bench_ptr_with_updates -b 600000 -n 1000000 -k 10 -r 100 --slot-hint-correctness 50   > ptr_t1_n1000000_k10_r100_b600000_s50.txt
 ./target/release/secondary_index_bench_ptr_with_updates -b 600000 -n 1000000 -k 10 -r 100 --slot-hint-correctness 60   > ptr_t1_n1000000_k10_r100_b600000_s60.txt

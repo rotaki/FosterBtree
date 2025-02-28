@@ -6,7 +6,7 @@ use crate::random::small_thread_rng;
 
 #[derive(Debug, Clone)]
 pub struct Permutation {
-    perm: Vec<usize>,
+    pub perm: Vec<usize>,
 }
 
 impl Permutation {
