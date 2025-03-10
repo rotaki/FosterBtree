@@ -119,11 +119,12 @@ impl ContainerFileManager {
         file.value().clone()
     }
 
-    pub fn get_stats(&self) -> Vec<(ContainerKey, FileStats)> {
+    pub fn get_stats(&self) -> Vec<(ContainerKey, (usize, FileStats))> {
         let mut vec = Vec::new();
         for fm in self.container_to_file.iter() {
+            let count = fm.0.load(Ordering::Relaxed);
             let stats = fm.1.get_stats();
-            vec.push((*fm.key(), stats));
+            vec.push((*fm.key(), (count, stats)));
         }
         vec
     }
@@ -913,19 +914,20 @@ impl MemPool for BufferPool {
             }
         }
         let mut disk_io_per_container = BTreeMap::new();
-        for (c_key, file_stats) in &self.container_file_manager.get_stats() {
+        for (c_key, (count, file_stats)) in &self.container_file_manager.get_stats() {
             disk_io_per_container.insert(
                 *c_key,
                 (
+                    *count as i64,
                     file_stats.read_count() as i64,
                     file_stats.write_count() as i64,
                 ),
             );
         }
-        let (total_disk_read, total_disk_write) = disk_io_per_container
+        let (total_created, total_disk_read, total_disk_write) = disk_io_per_container
             .iter()
-            .fold((0, 0), |acc, (_, (read, write))| {
-                (acc.0 + read, acc.1 + write)
+            .fold((0, 0, 0), |acc, (_, (created, read, write))| {
+                (acc.0 + created, acc.1 + read, acc.2 + write)
             });
         MemoryStats {
             bp_num_frames_in_mem: unsafe { &*self.frames.get() }.len(),
@@ -934,6 +936,7 @@ impl MemPool for BufferPool {
             bp_read_frame_wait: read_count_waiting_for_write,
             bp_write_frame: write_count,
             bp_num_frames_per_container: num_frames_per_container,
+            disk_created: total_created as usize,
             disk_read: total_disk_read as usize,
             disk_write: total_disk_write as usize,
             disk_io_per_container,

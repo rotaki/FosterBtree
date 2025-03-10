@@ -46,27 +46,27 @@ fn main() {
         params.val_min_size,
         params.val_max_size,
     );
-    let bp_size = 10000;
+    let bp_size = 100000;
 
-    measure_time("Non-BP Foster BTree Insertion", || {
-        insert_into_foster_tree(gen_foster_btree_in_mem(), &kvs)
-    });
+    // measure_time("Non-BP Foster BTree Insertion", || {
+    //     insert_into_foster_tree(gen_foster_btree_in_mem(), &kvs)
+    // });
 
-    measure_time("Non-BP Foster BTree Insertion Parallel", || {
-        insert_into_foster_tree_parallel(gen_foster_btree_in_mem(), &kvs)
-    });
+    // measure_time("Non-BP Foster BTree Insertion Parallel", || {
+    //     insert_into_foster_tree_parallel(gen_foster_btree_in_mem(), &kvs)
+    // });
 
-    measure_time("BP Foster BTree Insertion", || {
-        insert_into_foster_tree(gen_foster_btree_on_disk(bp_size), &kvs)
-    });
+    // measure_time("BP Foster BTree Insertion", || {
+    //     insert_into_foster_tree(gen_foster_btree_on_disk(bp_size), &kvs)
+    // });
 
-    measure_time("BP Foster BTree Insertion Parallel", || {
-        insert_into_foster_tree_parallel(gen_foster_btree_on_disk(bp_size), &kvs)
-    });
+    // measure_time("BP Foster BTree Insertion Parallel", || {
+    //     insert_into_foster_tree_parallel(gen_foster_btree_on_disk(bp_size), &kvs)
+    // });
 
-    measure_time("BTreeMap Insertion", || {
-        insert_into_btree_map(BTreeMap::new(), &kvs)
-    });
+    // measure_time("BTreeMap Insertion", || {
+    //     insert_into_btree_map(BTreeMap::new(), &kvs)
+    // });
 
     let (db_id, c_id) = (0, 0);
     let c_key = ContainerKey::new(db_id, c_id);

@@ -152,9 +152,10 @@ pub struct MemoryStats {
     pub bp_num_frames_per_container: BTreeMap<ContainerKey, i64>, // Number of pages of each container in BP
 
     // Disk stats
-    pub disk_read: usize,  // Total number of pages read (DISK)
-    pub disk_write: usize, // Total number of pages written (DISK)
-    pub disk_io_per_container: BTreeMap<ContainerKey, (i64, i64)>, // Number of pages read and written for each container
+    pub disk_created: usize, // Total number of pages created (DISK)
+    pub disk_read: usize,    // Total number of pages read (DISK)
+    pub disk_write: usize,   // Total number of pages written (DISK)
+    pub disk_io_per_container: BTreeMap<ContainerKey, (i64, i64, i64)>, // Number of pages created, read, and written for each container
 }
 
 impl Default for MemoryStats {
@@ -172,6 +173,7 @@ impl MemoryStats {
             bp_read_frame_wait: 0,
             bp_write_frame: 0,
             bp_num_frames_per_container: BTreeMap::new(),
+            disk_created: 0,
             disk_read: 0,
             disk_write: 0,
             disk_io_per_container: BTreeMap::new(),
@@ -194,14 +196,15 @@ impl MemoryStats {
                     (*k, v - prev)
                 })
                 .collect(),
+            disk_created: self.disk_created - previous.disk_created,
             disk_read: self.disk_read - previous.disk_read,
             disk_write: self.disk_write - previous.disk_write,
             disk_io_per_container: self
                 .disk_io_per_container
                 .iter()
                 .map(|(k, v)| {
-                    let prev = previous.disk_io_per_container.get(k).unwrap_or(&(0, 0));
-                    (*k, (v.0 - prev.0, v.1 - prev.1))
+                    let prev = previous.disk_io_per_container.get(k).unwrap_or(&(0, 0, 0));
+                    (*k, (v.0 - prev.0, v.1 - prev.1, v.2 - prev.2))
                 })
                 .collect(),
         }
@@ -237,11 +240,16 @@ impl std::fmt::Display for MemoryStats {
             writeln!(f, "    {}: {}", c_key, num_pages)?;
         }
         writeln!(f, "Disk stats:")?;
+        writeln!(f, "  Number of pages created: {}", self.disk_created)?;
         writeln!(f, "  Number of pages read: {}", self.disk_read)?;
         writeln!(f, "  Number of pages written: {}", self.disk_write)?;
         writeln!(f, "  Number of pages read and written for each container:")?;
-        for (c_key, (num_read, num_write)) in &self.disk_io_per_container {
-            writeln!(f, "    {}: read={}, write={}", c_key, num_read, num_write)?;
+        for (c_key, (num_created, num_read, num_write)) in &self.disk_io_per_container {
+            writeln!(
+                f,
+                "    {}: created={}, read={}, written={}",
+                c_key, num_created, num_read, num_write
+            )?;
         }
         Ok(())
     }

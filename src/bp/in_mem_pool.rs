@@ -202,6 +202,7 @@ impl MemPool for InMemPool {
             bp_read_frame_wait: 0,
             bp_write_frame: num_frames,
             bp_num_frames_per_container: containers,
+            disk_created: 0,
             disk_read: 0,
             disk_write: 0,
             disk_io_per_container: BTreeMap::new(),

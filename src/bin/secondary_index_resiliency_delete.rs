@@ -112,11 +112,6 @@ impl std::fmt::Display for HintHitStats {
 
 static HINT_HINT_STATS: HintHitStats = HintHitStats::new();
 
-pub trait SecondaryIndex<T: MemPool> {
-    fn get(&self, key: &[u8]) -> Result<Vec<u8>, AccessMethodError>;
-    fn stats(&self) -> String;
-}
-
 pub struct SecondaryPageFrameSlotHint<T: MemPool> {
     pub primary: Arc<FosterBtree<T>>,
     pub secondary: Arc<FosterBtree<T>>,
@@ -147,7 +142,7 @@ impl<T: MemPool> SecondaryPageFrameSlotHint<T> {
     }
 }
 
-impl<T: MemPool> SecondaryIndex<T> for SecondaryPageFrameSlotHint<T> {
+impl<T: MemPool> SecondaryPageFrameSlotHint<T> {
     fn get(&self, key: &[u8]) -> Result<Vec<u8>, AccessMethodError> {
         let sec_leaf_page = self
             .secondary
@@ -359,21 +354,23 @@ pub fn load_table(
     }
 }
 
-fn delete_from_primary<M: MemPool>(
+fn delete_from_primary_and_secondary<M: MemPool>(
     params: &SecBenchParams,
     primary: &Arc<FosterBtree<M>>,
+    secondary: &Arc<FosterBtree<M>>,
     perm: Permutation,
 ) {
     let deletion_count = (params.deletion_factor * params.num_keys as f64) as usize;
-    for key in perm.into_iter().skip(params.num_keys).take(deletion_count) {
+    for key in perm.into_iter().skip(deletion_count).take(deletion_count) {
         let key_bytes = get_key_bytes(key, params.key_size);
         primary.delete(&key_bytes).unwrap();
+        secondary.delete(&key_bytes).unwrap();
     }
 }
 
-fn run_secondary_lookups<M: MemPool, T: SecondaryIndex<M>>(
+fn run_secondary_lookups<M: MemPool>(
     params: &SecBenchParams,
-    secondary: &T,
+    secondary: &SecondaryPageFrameSlotHint<M>,
     bp: &Arc<M>,
     perm: Permutation,
 ) {
@@ -430,7 +427,12 @@ fn main() {
         println!("++++++++++++++++++++++++++++++++++++++++++++");
         println!("[Page, Frame, Slot] hint");
         let with_slot_hint = SecondaryPageFrameSlotHint::new(&primary, 40);
-        delete_from_primary(&params, &primary, perm.clone());
+        delete_from_primary_and_secondary(
+            &params,
+            &primary,
+            &with_slot_hint.secondary,
+            perm.clone(),
+        );
         println!("BP stats: \n{}", bp.stats());
         run_secondary_lookups(&params, &with_slot_hint, &bp, perm.clone());
         println!("BP stats: \n{}", bp.stats());
