@@ -1,8 +1,10 @@
 set -euxo 
 cargo build --release --bin secondary_index_point_read_with_slot_hint_modification
 
+# Figure 8. Latency of Key Lookup Operations Mixed With Hint Modification Operations
+
 ################ CHECK THE second_index_point_read_with_slot_hint_modification.rs for the 
-################ correct parameters of hint modification (Page 50 %, Frame 10 %, Slot 0 %)
+################ correct parameters of hint modification (Page 50 %, Frame 10 %, Slot 40 %)
 ##################################### SKEW 0.0 #####################################
 
 ./target/release/secondary_index_point_read_with_slot_hint_modification -b 60000 -n 1000000 -k 10 -r 100 -w 20 -e 60 -s 0 -m 0  > slot_modification_read_t1_n1000000_k10_r100_b60000_s0_m0.txt

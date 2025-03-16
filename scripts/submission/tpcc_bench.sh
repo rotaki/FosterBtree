@@ -1,4 +1,6 @@
 #!/bin/bash
+
+# Figure 3. TPCC Benchmark
 set -euxo pipefail
 
 # Define page sizes and feature sets

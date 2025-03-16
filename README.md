@@ -1,51 +1,59 @@
-# TODO
+# Storage Engine in Rust
 
-## Buffer pool
+This is a research project to build a persistent storage engine in Rust. The goal is to build a storage engine that is fast and efficient for modern hardware.
 
-* [x] Add reader-writer latch
-* [x] Add container file mapping
-* [x] Write the evicted page to disk if dirty
-* [x] Add logger for debugging
-* [x] Add cache replacement implementations
-  * [x] Add more eviction algo (SIEVE)
-* [x] Add write-ahead log, page lsn
-* [x] Add pointer swizzling
+## Design
 
-## Foster B-Tree
+The storage engine is designed to be modular and extensible. The storage engine is composed of the following components from the bottom up:
 
-* [x] Add Foster B-tree Page
-  * [x] Add insert operator
-  * [x] Add get operator
-  * [x] Add delete operator
-  * [x] Add upsert operator
-  * [x] Add statistics for each structure modification
-    * [x] Revise the split decision
-  * [x] Add thread-unsafe page traversal operator
-    * [x] Add consistency checker
-  * [x] Fix the buffer pool free frame allocation bug
-  * [x] Add memory usage profiler
-    * [x] Heaptrack for memory profiling
-  * [x] Test with bp (limited memory pool with disk offloading)
-  * [x] Add range scan operator
-  * [] Reuse the removed page in merge
-  * [] Improve page binary search
-  * [] Add prefix compression in pages
-  * [] Asynchronous page read/write
-  * [x] Add page split into three pages
-  * [] Add better latch for bp
-  * [] Add transactional support
-  * [] Optimistic lock coupling with hybrid latches with page versioning.
-  * [] Add ghost record support for transaction support
+* **File Manager**: Manages files on disk and provides direct I/O for reading and writing.
+* **Buffer Pool**: Manages pages in memory and provides a cache for disk pages.
+* **Access Method**: Provides different access methods for data storage.
+  * **Foster B-Tree**: A write-optimized B-Tree that supports efficient concurrent operations.
+  * **Hash Index**: A hash index that supports efficient point lookups.
+* **Transaction Manager**: Provides transaction support for the storage engine.
+  * **2PL**: Two-phase locking with no-wait (immediate abort).
+* **Benchmarking**: Provides TPC-C and YCSB benchmarking for the storage engine.
 
-### Open Questions
+The storage engine incorporates an optimization called **LIPAH (Logical ID with Physical Address Hinting)** to reduce the overhead of indirection layers in the storage engine.
 
-* [] How many threads are needed to get comparable performance with a single-threaded execution?
+## Features
 
-## Add Logging
+### File Manager
 
-* [x] Add log buffer with append and flush capabilities
+* [x] pread/pwrite with/without direct I/O
+* [x] iouring with/without direct I/O
 
-## Visualize foster b-tree
+### Buffer Pool
+
+* [x] Buffer pool with LRU eviction policy
+* [x] Concurrent page access with reader-writer latch
+* [x] LIPAH integration for buffer pool
+
+### Foster B-Tree
+
+* [x] Foster B-Tree with page split and merge
+* [x] Concurrent operations with latch coupling (crabbing)
+* [x] LIPAH integration for foster b-tree
+* [x] Visualization of foster b-tree with wasm
+
+### Hash Index
+
+* [x] Hash index with linear probing
+* [x] LIPAH integration for hash index
+
+### Transaction
+
+* [x] 2PL with no-wait (immediate abort)
+* [x] TPC-C and YCSB benchmarking
+* [x] LIPAH integration for transaction
+* [ ] Logging and recovery
+
+## Testing, Debugging, Profiling, and Benchmarking
+
+To run tests, run `cargo test`. To run a binary, build with `cargo build --release --bin <binary>` and run with `./target/release/<binary>`. To benchmark, see `scripts` directory. There are scripts for running TPC-C and YCSB benchmarks. The easiest way to run is to create a symlink to the shell script in the `scripts` directory in the root directory. Some scripts might not work as expected due to lack of maintenance.
+
+### Visualize Foster B-Tree
 
 ```sh
 wasm-pack build --target web
@@ -55,94 +63,21 @@ python3 -m http.server
 Then open `http://localhost:8000` in your browser.
 May need to comment out `criterion` in `Cargo.toml` to build for wasm.
 
-## Multi-thread logger
+### Multi-thread logger
 
 See `logger.rs` and
 
 ```sh
-cargo run --features "log_trace"
+cargo build --features "log_trace" # or log_debug, log_info, log_warn, log_error
 ```
 
-## Benchmarking notes
+### Stats
 
 ```sh
-cargo bench
+cargo build --features stat
 ```
 
-### Result (temp)
-
-#### Test scenario
-
-Measured the time taken to insert kvs.
-
-```text
-unique_keys: true,
-num_threads: 3 (when run in parallel),
-num_keys: 500000,
-key_size: 100,
-val_min_size: 50,
-val_max_size: 100,
-bp_size: 10000 (when run on-disk)
-```
-
-```text
-Random Insertion/In memory Foster BTree Initial Allocation
-                        time:   [206.71 ns 207.27 ns 208.37 ns]
-                        change: [+2.9012% +5.2609% +7.6219%] (p = 0.00 < 0.05)
-                        Performance has regressed.
-Found 2 outliers among 10 measurements (20.00%)
-  1 (10.00%) high mild
-  1 (10.00%) high severe
-Benchmarking Random Insertion/In memory Foster BTree Insertion: Warming up for 3.0000 s
-Warning: Unable to complete 10 samples in 5.0s. You may wish to increase target time to 5.3s.
-Random Insertion/In memory Foster BTree Insertion
-                        time:   [526.47 ms 529.48 ms 533.39 ms]
-                        change: [-0.0672% +0.5119% +1.3174%] (p = 0.22 > 0.05)
-                        No change in performance detected.
-Found 2 outliers among 10 measurements (20.00%)
-  1 (10.00%) high mild
-  1 (10.00%) high severe
-Random Insertion/In memory Foster BTree Insertion Parallel
-                        time:   [285.02 ms 287.67 ms 290.63 ms]
-                        change: [-2.6766% -1.5267% -0.4052%] (p = 0.02 < 0.05)
-                        Change within noise threshold.
-Random Insertion/On disk Foster BTree Initial Allocation
-                        time:   [14.635 ms 14.659 ms 14.687 ms]
-                        change: [-4.6366% -1.4302% +1.7827%] (p = 0.45 > 0.05)
-                        No change in performance detected.
-Found 1 outliers among 10 measurements (10.00%)
-  1 (10.00%) high severe
-Benchmarking Random Insertion/On disk Foster BTree Insertion: Warming up for 3.0000 s
-Warning: Unable to complete 10 samples in 5.0s. You may wish to increase target time to 9.8s.
-Random Insertion/On disk Foster BTree Insertion
-                        time:   [960.74 ms 975.66 ms 1.0008 s]
-                        change: [-4.6045% -2.4195% +0.9489%] (p = 0.10 > 0.05)
-                        No change in performance detected.
-Found 1 outliers among 10 measurements (10.00%)
-  1 (10.00%) high severe
-Benchmarking Random Insertion/On disk Foster BTree Insertion Parallel: Warming up for 3.0000 s
-Warning: Unable to complete 10 samples in 5.0s. You may wish to increase target time to 7.3s.
-Random Insertion/On disk Foster BTree Insertion Parallel
-                        time:   [717.28 ms 724.93 ms 732.74 ms]
-                        change: [-2.4263% -0.8722% +0.5856%] (p = 0.30 > 0.05)
-                        No change in performance detected.
-Random Insertion/BTreeMap Insertion
-                        time:   [434.31 ms 440.89 ms 450.57 ms]
-                        change: [-1.1270% +0.4669% +2.7757%] (p = 0.73 > 0.05)
-                        No change in performance detected.
-Found 2 outliers among 10 measurements (20.00%)
-  1 (10.00%) low mild
-  1 (10.00%) high severe
-```
-
-## Stats
-
-```sh
-cargo build --features stat --release --bin on_disk
-./target/release/on_disk
-```
-
-## Perf
+### Perf
 
 ```sh
 cargo build --target x86_64-unknown-linux-gnu --release --bin on_disk
@@ -154,7 +89,7 @@ if sudo is needed, set `echo -1 | sudo tee /proc/sys/kernel/perf_event_paranoid`
 To install `perf`, `apt-get install linux-tools-common linux-tools-generic linux-tools-`uname -r``
 To install `hotspot`, `apt-get install hotspot`
 
-## Heaptrack
+### Heaptrack
 
 Heaptrack is a heap memory profiler. To install, `apt-get install heaptrack heaptrack-gui`.
 To profile, `heaptrack <binary> <my params>`. This will open a gui to analyze the heap memory usage.
