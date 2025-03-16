@@ -62,6 +62,7 @@ python3 -m http.server
 
 Then open `http://localhost:8000` in your browser.
 May need to comment out `criterion` in `Cargo.toml` to build for wasm.
+This is NOT working right now due to the incompatibility of wasm and io-uring library.
 
 ### Multi-thread logger
 
