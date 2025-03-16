@@ -39,7 +39,7 @@ The storage engine incorporates an optimization called **LIPAH (Logical ID with 
 
 ### Hash Index
 
-* [x] Hash index with linear probing
+* [x] Hash index with chaining
 * [x] LIPAH integration for hash index
 
 ### Transaction
