@@ -13,16 +13,18 @@ pub use mem_pool_trait::{
     ContainerId, ContainerKey, DatabaseId, MemPool, MemPoolStatus, PageFrameKey,
 };
 
-use crate::random::gen_random_pathname;
+use crate::{container::ContainerManager, random::gen_random_pathname};
 
 pub fn get_test_bp(num_frames: usize) -> Arc<BufferPool> {
-    let dir = gen_random_pathname(Some("test_bp_direct"));
-    Arc::new(BufferPool::new(dir, num_frames, true).unwrap())
+    let base_dir = gen_random_pathname(Some("test_bp_direct"));
+    let cm = Arc::new(ContainerManager::new(base_dir, true, true).unwrap());
+    Arc::new(BufferPool::new(num_frames, cm).unwrap())
 }
 
 pub fn get_test_bp_with_kpc(num_frames: usize) -> Arc<BufferPool> {
-    let dir = gen_random_pathname(Some("test_bp_with_kpc"));
-    Arc::new(BufferPool::new_with_kpc(dir, num_frames, true).unwrap())
+    let base_dir = gen_random_pathname(Some("test_bp_with_kpc"));
+    let cm = Arc::new(ContainerManager::new(base_dir, false, true).unwrap());
+    Arc::new(BufferPool::new(num_frames, cm).unwrap())
 }
 pub fn get_in_mem_pool() -> Arc<InMemPool> {
     Arc::new(InMemPool::new())

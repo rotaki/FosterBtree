@@ -48,10 +48,6 @@ impl HintCorrectness {
         HintCorrectness { page, frame, slot }
     }
 
-    pub fn default() -> HintCorrectness {
-        HintCorrectness::new(100, 100, 100)
-    }
-
     fn validate(&self) {
         if self.page > 100 || self.frame > 100 || self.slot > 100 {
             panic!("Hint correctness should be between 0 and 100");
@@ -92,16 +88,14 @@ impl<T: MemPool> SecondaryIncorrectHintIndex<T> {
             let frame_id = if gen_random_int(1, 100) <= hint_correctness.frame as u32 {
                 frame_id
             } else {
-                let fake_frame_id = frame_id.saturating_sub(1);
-                fake_frame_id
+                frame_id.saturating_sub(1)
             };
 
             // Embed wrong slot id in the secondary index with a probability of hint_correctness
             let slot_id = if gen_random_int(1, 100) <= hint_correctness.slot as u32 {
                 slot_id
             } else {
-                let fake_slot_id = slot_id.saturating_sub(1);
-                fake_slot_id
+                slot_id.saturating_sub(1)
             };
             // Concatenate the primary key with the physical address
             let mut val = p_key.to_vec();

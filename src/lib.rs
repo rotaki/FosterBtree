@@ -1,6 +1,7 @@
 pub mod access_method;
 pub mod bench_utils;
 pub mod bp;
+pub mod container;
 pub mod random;
 pub mod tpcc;
 pub mod txn_storage;
@@ -9,7 +10,6 @@ pub mod write_ahead_log;
 pub mod ycsb;
 pub mod zipfan;
 
-mod file_manager;
 mod hybrid_latch;
 mod logger;
 mod page;

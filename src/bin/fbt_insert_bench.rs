@@ -1,12 +1,12 @@
 use clap::Parser;
 use fbtree::{
-    bench_utils::*,
     bp::{get_test_bp, ContainerKey, MemPool},
     prelude::{FosterBtree, UniqueKeyIndex},
     random::RandomKVs,
 };
-use std::{collections::BTreeMap, sync::Arc};
+use std::sync::Arc;
 
+#[allow(dead_code)]
 fn measure_time(title: &str, f: impl FnOnce()) {
     let start = std::time::Instant::now();
     f();

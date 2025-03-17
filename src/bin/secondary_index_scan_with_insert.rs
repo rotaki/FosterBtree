@@ -15,12 +15,10 @@
 // to find the value.
 // We compare the speed of the two access methods without any relocation.
 
-use criterion::{black_box, Throughput};
 use fbtree::{
     access_method::fbt::{BTreeKey, FosterBtreeCursor},
     bp::{ContainerId, ContainerKey, MemPool, PageFrameKey},
     prelude::{FosterBtree, FosterBtreePage, PageId},
-    random::gen_random_int,
     utils::Permutation,
 };
 
@@ -30,7 +28,7 @@ use fbtree::{
     bp::{get_test_bp, BufferPool},
     random::gen_random_byte_vec,
 };
-use std::{iter, process::Command, sync::Arc};
+use std::{process::Command, sync::Arc};
 
 #[derive(Debug, Clone)]
 pub struct RepairType {
@@ -239,30 +237,28 @@ impl<T: MemPool> SecondaryIndex<T> {
                 && actual_slot_id == expected_slot_id
             {
                 // No relocation
-            } else {
-                if self.repair_type.always_repair {
-                    repair_count += 1;
-                    // Repair always
-                    let actual_page_id = actual_page_id.to_be_bytes();
-                    let actual_frame_id = actual_frame_id.to_be_bytes();
-                    let actual_slot_id = actual_slot_id.to_be_bytes();
-                    let new_s_val =
-                        [p_key, &actual_page_id, &actual_frame_id, &actual_slot_id].concat();
-                    cursor.opportunistic_update(&new_s_val, false);
-                } else if self.repair_type.ignore_slot
-                    && (actual_page_id != expected_page_id || actual_frame_id != expected_frame_id)
-                {
-                    repair_count += 1;
-                    // Repair only if the page id or frame id is different
-                    let actual_page_id = actual_page_id.to_be_bytes();
-                    let actual_frame_id = actual_frame_id.to_be_bytes();
-                    let actual_slot_id = actual_slot_id.to_be_bytes();
-                    let new_s_val =
-                        [p_key, &actual_page_id, &actual_frame_id, &actual_slot_id].concat();
-                    cursor.opportunistic_update(&new_s_val, false);
-                } else if self.repair_type.ignore_all {
-                    // Do nothing.
-                }
+            } else if self.repair_type.always_repair {
+                repair_count += 1;
+                // Repair always
+                let actual_page_id = actual_page_id.to_be_bytes();
+                let actual_frame_id = actual_frame_id.to_be_bytes();
+                let actual_slot_id = actual_slot_id.to_be_bytes();
+                let new_s_val =
+                    [p_key, &actual_page_id, &actual_frame_id, &actual_slot_id].concat();
+                cursor.opportunistic_update(&new_s_val, false);
+            } else if self.repair_type.ignore_slot
+                && (actual_page_id != expected_page_id || actual_frame_id != expected_frame_id)
+            {
+                repair_count += 1;
+                // Repair only if the page id or frame id is different
+                let actual_page_id = actual_page_id.to_be_bytes();
+                let actual_frame_id = actual_frame_id.to_be_bytes();
+                let actual_slot_id = actual_slot_id.to_be_bytes();
+                let new_s_val =
+                    [p_key, &actual_page_id, &actual_frame_id, &actual_slot_id].concat();
+                cursor.opportunistic_update(&new_s_val, false);
+            } else if self.repair_type.ignore_all {
+                // Do nothing.
             }
             result_hash ^= result as usize;
             total_count += 1;
@@ -447,15 +443,16 @@ pub fn insert<T: MemPool>(
     // Insert into the primary index and then into the secondary index.
     primary.insert(key, value).unwrap();
     let iter = FosterBtreeCursor::new(primary, key, &[]);
-    while let Some((p_key, _)) = iter.get_kv() {
+    if let Some((p_key, _)) = iter.get_kv() {
         assert_eq!(p_key, key);
         let (page_id, frame_id, slot_id) = iter.get_physical_address();
         let mut s_val = p_key.to_vec();
         s_val.extend_from_slice(&page_id.to_be_bytes());
         s_val.extend_from_slice(&frame_id.to_be_bytes());
         s_val.extend_from_slice(&slot_id.to_be_bytes());
-        secondary.insert(&key, &s_val).unwrap();
-        break;
+        secondary.insert(key, &s_val).unwrap();
+    } else {
+        panic!("Key not found in the primary index");
     }
 }
 
@@ -465,7 +462,7 @@ pub fn insert_into_tables<M: MemPool>(
     secondary: &Arc<FosterBtree<M>>,
     iter: impl Iterator<Item = usize>,
 ) {
-    for (i, key) in iter.enumerate() {
+    for key in iter {
         let key = get_key_bytes(key, params.key_size);
         let value = get_new_value(params.record_size);
         insert(primary, secondary, &key, &value);

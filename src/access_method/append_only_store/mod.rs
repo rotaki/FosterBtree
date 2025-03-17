@@ -340,6 +340,7 @@ impl<T: MemPool> Iterator for AppendOnlyStoreScanner<T> {
 #[cfg(test)]
 mod tests {
     use crate::bp::{get_test_bp, BufferPool};
+    use crate::container::ContainerManager;
     use crate::random::{gen_random_byte_vec, RandomKVs};
 
     use super::*;
@@ -570,7 +571,8 @@ mod tests {
         // Create a store and insert some values.
         // Drop the store and buffer pool
         {
-            let bp = Arc::new(BufferPool::new(&temp_dir, 10, false).unwrap());
+            let cm = Arc::new(ContainerManager::new(temp_dir.path(), false, false).unwrap());
+            let bp = Arc::new(BufferPool::new(10, cm).unwrap());
 
             let store = Arc::new(AppendOnlyStore::bulk_insert_create(
                 get_c_key(),
@@ -583,7 +585,8 @@ mod tests {
         }
 
         {
-            let bp = Arc::new(BufferPool::new(&temp_dir, 10, false).unwrap());
+            let cm = Arc::new(ContainerManager::new(temp_dir.path(), false, false).unwrap());
+            let bp = Arc::new(BufferPool::new(10, cm).unwrap());
             let store = Arc::new(AppendOnlyStore::load(get_c_key(), bp.clone(), 0));
 
             let mut scanner = store.scan();

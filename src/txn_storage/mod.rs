@@ -35,6 +35,7 @@ mod tests {
             prelude::{ContainerId, DatabaseId},
             BufferPool, MemPool,
         },
+        container::ContainerManager,
         random::RandomKVs,
     };
     use std::{collections::HashSet, sync::Arc, thread};
@@ -229,7 +230,8 @@ mod tests {
         let tempdir = tempfile::tempdir().unwrap();
 
         let (db_id, c_ids) = {
-            let bp1 = Arc::new(BufferPool::new(&tempdir, 10, false).unwrap());
+            let cm = Arc::new(ContainerManager::new(tempdir.path(), true, false).unwrap());
+            let bp1 = Arc::new(BufferPool::new(10, cm).unwrap());
             let storage1 = OnDiskStorage::new(&bp1);
 
             let db_options = DBOptions::new("test_db");
@@ -268,7 +270,8 @@ mod tests {
             (db_id, (c_id1, c_id2, c_id3))
         };
 
-        let bp2 = Arc::new(BufferPool::new(tempdir, 10, false).unwrap());
+        let cm = Arc::new(ContainerManager::new(tempdir.path(), true, false).unwrap());
+        let bp2 = Arc::new(BufferPool::new(10, cm).unwrap());
         let storage2 = OnDiskStorage::load(&bp2);
 
         // Check if the values are still present after restarting the storage

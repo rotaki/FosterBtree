@@ -219,6 +219,7 @@ mod tests {
 
     use crate::{
         bp::{get_in_mem_pool, get_test_bp, BufferPool},
+        container::ContainerManager,
         prelude::UniqueKeyIndex,
         random::RandomKVs,
     };
@@ -687,7 +688,8 @@ mod tests {
         // Create a store and insert some values.
         // Drop the store and buffer pool
         {
-            let bp = Arc::new(BufferPool::new(&temp_dir, 20, false).unwrap());
+            let cm = Arc::new(ContainerManager::new(temp_dir.path(), false, false).unwrap());
+            let bp = Arc::new(BufferPool::new(10, cm).unwrap());
 
             let c_key = ContainerKey::new(0, 0);
             let store = Arc::new(HashReadOptimize::new(c_key, bp.clone(), 10));
@@ -701,7 +703,8 @@ mod tests {
         }
 
         {
-            let bp = Arc::new(BufferPool::new(&temp_dir, 10, false).unwrap());
+            let cm = Arc::new(ContainerManager::new(temp_dir.path(), false, false).unwrap());
+            let bp = Arc::new(BufferPool::new(10, cm).unwrap());
 
             let c_key = ContainerKey::new(0, 0);
             let store = Arc::new(HashReadOptimize::load(c_key, bp.clone(), 0));

@@ -13,8 +13,7 @@ use fbtree::{
     access_method::fbt::{BTreeKey, FosterBtreeCursor},
     bp::{ContainerId, ContainerKey, MemPool, PageFrameKey},
     prelude::{FosterBtree, FosterBtreePage, PageId},
-    random::{gen_random_int, small_thread_rng, FastZipf},
-    utils::Permutation,
+    random::{gen_random_int, FastZipf},
 };
 
 use clap::Parser;
@@ -25,10 +24,7 @@ use fbtree::{
 };
 use hdrhistogram::Histogram;
 use rand::{rngs::SmallRng, SeedableRng};
-use std::{
-    process::Command,
-    sync::{atomic::AtomicBool, Arc},
-};
+use std::sync::{atomic::AtomicBool, Arc};
 
 #[derive(Debug, Parser, Clone)]
 pub struct SecBenchParams {
@@ -101,6 +97,7 @@ pub struct RepairType {
 impl RepairType {
     pub fn new(always_repair: bool, ignore_slot: bool, ignore_all: bool) -> RepairType {
         // Only one of the three options can be true. At least one of the three options must be true.
+        #[allow(clippy::nonminimal_bool)]
         if (always_repair && ignore_slot)
             || (always_repair && ignore_all)
             || (ignore_slot && ignore_all)
@@ -368,8 +365,6 @@ impl<T: MemPool> SecondaryIndex<T> {
                             Ok(result)
                         }
                     }
-                } else if repair_type.ignore_all {
-                    Ok(result)
                 } else {
                     Ok(result)
                 }
@@ -614,7 +609,7 @@ pub fn do_work(
                 // Read
                 let start = std::time::Instant::now();
                 let res = if params.with_hint == 1 {
-                    secondary.get(&key, &repair_type).unwrap()
+                    secondary.get(&key, repair_type).unwrap()
                 } else {
                     secondary.get_without_hint(&key).unwrap()
                 };
@@ -625,8 +620,8 @@ pub fn do_work(
             }
             1 => {
                 // Modify hint
-                let res = secondary.modify_hint(&key, &hmr).unwrap();
-                black_box(res);
+                secondary.modify_hint(&key, &hmr).unwrap();
+                black_box(());
                 modify_hint_count += 1;
             }
             _ => panic!("Invalid value"),
@@ -784,8 +779,8 @@ pub fn plot_histogram(histogram: &Histogram<u64>, step: u64, threshold: Option<u
 
     // Print header.
     println!(
-        "{:>10} | {:<50} | {}({})",
-        "Value(ns)", "Histogram", "Count", "Percentage"
+        "{:>10} | {:<50} | Count(Percentage)",
+        "Value(ns)", "Histogram"
     );
     println!("{:-<10} | {:-<50} | {:-<20}", "", "", "");
 
@@ -829,49 +824,49 @@ pub fn plot_histogram(histogram: &Histogram<u64>, step: u64, threshold: Option<u
     }
 }
 
-fn print_histogram(histogram: &Histogram<u64>) {
-    // Print header for the formatted table.
-    println!(
-        "{:>10} {:>15} {:>10} {:>16}",
-        "Value", "Percentile", "TotalCount", "1/(1-Percentile)"
-    );
-
-    let mut cumulative = 0;
-    // Iterate over each recorded bucket.
-    for v in histogram.iter_recorded() {
-        cumulative += v.count_at_value();
-        // The iterator’s percentile is given as a percentage (0.0 to 100.0);
-        // we divide by 100 to get a fraction.
-        let pct = v.quantile_iterated_to();
-        if pct < 1.0 {
-            println!(
-                "{:10.3} {:15.12} {:10} {:16.2}",
-                v.value_iterated_to(),
-                pct,
-                cumulative,
-                1.0 / (1.0 - pct)
-            );
-        } else {
-            // For the final bucket (where percentile == 1), we omit the 1/(1-Percentile) column.
-            println!(
-                "{:10.3} {:15.12} {:10}",
-                v.value_iterated_to(),
-                pct,
-                cumulative
-            );
-        }
-    }
-
-    // Print a summary similar to your sample.
-    println!(
-        "#[Mean    = {:10.3}, StdDeviation   = {:10.3}]",
-        histogram.mean(),
-        histogram.stdev()
-    );
-    println!(
-        "#[Max     = {:10.3}, Total count    = {:10}]",
-        histogram.max(),
-        histogram.len()
-    );
-    println!("#[Buckets = {:10}]", histogram.buckets());
-}
+// fn print_histogram(histogram: &Histogram<u64>) {
+//     // Print header for the formatted table.
+//     println!(
+//         "{:>10} {:>15} {:>10} {:>16}",
+//         "Value", "Percentile", "TotalCount", "1/(1-Percentile)"
+//     );
+//
+//     let mut cumulative = 0;
+//     // Iterate over each recorded bucket.
+//     for v in histogram.iter_recorded() {
+//         cumulative += v.count_at_value();
+//         // The iterator’s percentile is given as a percentage (0.0 to 100.0);
+//         // we divide by 100 to get a fraction.
+//         let pct = v.quantile_iterated_to();
+//         if pct < 1.0 {
+//             println!(
+//                 "{:10.3} {:15.12} {:10} {:16.2}",
+//                 v.value_iterated_to(),
+//                 pct,
+//                 cumulative,
+//                 1.0 / (1.0 - pct)
+//             );
+//         } else {
+//             // For the final bucket (where percentile == 1), we omit the 1/(1-Percentile) column.
+//             println!(
+//                 "{:10.3} {:15.12} {:10}",
+//                 v.value_iterated_to(),
+//                 pct,
+//                 cumulative
+//             );
+//         }
+//     }
+//
+//     // Print a summary similar to your sample.
+//     println!(
+//         "#[Mean    = {:10.3}, StdDeviation   = {:10.3}]",
+//         histogram.mean(),
+//         histogram.stdev()
+//     );
+//     println!(
+//         "#[Max     = {:10.3}, Total count    = {:10}]",
+//         histogram.max(),
+//         histogram.len()
+//     );
+//     println!("#[Buckets = {:10}]", histogram.buckets());
+// }
