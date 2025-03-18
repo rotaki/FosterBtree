@@ -256,6 +256,26 @@ impl std::fmt::Display for MemoryStats {
 }
 
 pub trait MemPool: Sync + Send {
+    /// Create a container.
+    /// A container is basically a file in the file system if a disk-based storage is used.
+    /// If an in-memory storage is used, a container is a logical separation of pages.
+    /// This function will register a container in the memory pool.
+    /// If a page write is requested to a unregistered container, a container will be lazily created
+    /// and the page will be written to the container file.
+    /// Therefore, calling this function is not mandatory unless you want to ensure that
+    /// the container is created or you want to create a temporary container.
+    /// Creation of a already created container will be ignored.
+    fn create_container(&self, c_key: ContainerKey, is_temp: bool) -> Result<(), MemPoolStatus>;
+
+    /// Drop a container.
+    /// This only makes the container temporary, that is, it ensures that future write
+    /// requests to the container will be ignored. This does not guarantee that the pages
+    /// of the container are deleted from the disk or memory.
+    /// However, the page eviction policy could use this information to guide
+    /// the eviction of the pages in the memory pool as evicting pages of a temporary container
+    /// is virtually free.
+    fn drop_container(&self, c_key: ContainerKey) -> Result<(), MemPoolStatus>;
+
     /// Create a new page for write.
     /// This function will allocate a new page in memory and return a FrameWriteGuard.
     /// In general, this function does not need to write the page to disk.
@@ -282,6 +302,17 @@ pub trait MemPool: Sync + Send {
         c_key: ContainerKey,
         num_pages: usize,
     ) -> Result<Vec<FrameWriteGuard>, MemPoolStatus>;
+
+    /// Check if a page is cached in the memory pool.
+    /// This function will return true if the page is in memory, false otherwise.
+    /// There are no side effects of calling this function.
+    /// That is, the page will not be loaded into memory.
+    fn is_in_mem(&self, key: PageFrameKey) -> bool;
+
+    /// Get the list of page frame keys for a container.
+    /// This function will return a list of page frame keys for the container
+    /// that are currently in the memory pool.
+    fn get_page_keys_in_mem(&self, c_key: ContainerKey) -> Vec<PageFrameKey>;
 
     /// Get a page for write.
     /// This function will return a FrameWriteGuard.

@@ -10,7 +10,11 @@ use super::{
     mem_pool_trait::{ContainerKey, MemPool, MemPoolStatus, MemoryStats, PageFrameKey, PageKey},
 };
 use crate::{
-    container::ContainerManager, log_debug, page::PageId, random::gen_random_int, rwlatch::RwLatch,
+    container::ContainerManager,
+    log_debug,
+    page::{self, PageId},
+    random::gen_random_int,
+    rwlatch::RwLatch,
 };
 
 use std::{
@@ -199,13 +203,80 @@ impl ThreadLocalEvictionCandidate {
     }
 }
 
+pub struct PageToFrame {
+    map: HashMap<ContainerKey, HashMap<PageId, usize>>, // (c_key, page_id) -> frame_index
+}
+
+impl PageToFrame {
+    pub fn new() -> Self {
+        PageToFrame {
+            map: HashMap::new(),
+        }
+    }
+
+    pub fn contains_key(&self, p_key: &PageKey) -> bool {
+        self.map
+            .get(&p_key.c_key)
+            .map_or(false, |m| m.contains_key(&p_key.page_id))
+    }
+
+    pub fn get(&self, p_key: &PageKey) -> Option<&usize> {
+        // Get by c_key and then page_id
+        self.map
+            .get(&p_key.c_key)
+            .and_then(|m| m.get(&p_key.page_id))
+    }
+
+    pub fn get_page_keys(&self, c_key: ContainerKey) -> Vec<PageFrameKey> {
+        self.map.get(&c_key).map_or(Vec::new(), |m| {
+            m.iter()
+                .map(|(page_id, frame_index)| {
+                    PageFrameKey::new_with_frame_id(c_key, *page_id, *frame_index as u32)
+                })
+                .collect()
+        })
+    }
+
+    pub fn insert(&mut self, p_key: PageKey, frame_id: usize) {
+        self.map
+            .entry(p_key.c_key)
+            .or_insert_with(HashMap::new)
+            .insert(p_key.page_id, frame_id);
+    }
+
+    pub fn remove(&mut self, p_key: &PageKey) -> Option<usize> {
+        self.map
+            .get_mut(&p_key.c_key)
+            .and_then(|m| m.remove(&p_key.page_id))
+    }
+
+    pub fn clear(&mut self) {
+        self.map.clear();
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&ContainerKey, &PageId, &usize)> {
+        self.map.iter().flat_map(|(c_key, page_map)| {
+            page_map
+                .iter()
+                .map(move |(page_id, frame_index)| (c_key, page_id, frame_index))
+        })
+    }
+
+    pub fn iter_container(&self, c_key: ContainerKey) -> impl Iterator<Item = (&PageId, &usize)> {
+        self.map
+            .get(&c_key)
+            .into_iter()
+            .flat_map(|page_map| page_map.iter())
+    }
+}
+
 /// Buffer pool that manages the buffer frames.
 pub struct BufferPool {
     container_manager: Arc<ContainerManager>,
     latch: RwLatch,
-    clean_frames_hints: ConcurrentQueue<usize>, // A hint for quickly finding a clean frame. Whenever a clean frame is found, it is pushed to this queue so that it can be quickly found.
+    eviction_hints: ConcurrentQueue<usize>, // A hint for quickly finding a clean frame or a frame to evict. Whenever a clean frame is found, it is pushed to this queue so that it can be quickly found.
     frames: UnsafeCell<Vec<BufferFrame>>, // The Vec<frames> is fixed size. If not fixed size, then Pin must be used to ensure that the frame does not move when the vector is resized.
-    page_to_frame: UnsafeCell<HashMap<PageKey, usize>>, // (c_key, page_id) -> frame_index
+    page_to_frame: UnsafeCell<PageToFrame>, // (c_key, page_id) -> frame_index
     stats: BPStats,
 }
 
@@ -228,9 +299,9 @@ impl BufferPool {
     ) -> Result<Self, MemPoolStatus> {
         log_debug!("Buffer pool created: num_frames: {}", num_frames);
 
-        let clean_frames_hints = ConcurrentQueue::unbounded();
+        let eviction_hints = ConcurrentQueue::unbounded();
         for i in 0..num_frames {
-            clean_frames_hints.push(i).unwrap();
+            eviction_hints.push(i).unwrap();
         }
 
         let frames = (0..num_frames)
@@ -240,8 +311,8 @@ impl BufferPool {
         Ok(BufferPool {
             container_manager,
             latch: RwLatch::default(),
-            page_to_frame: UnsafeCell::new(HashMap::new()),
-            clean_frames_hints,
+            page_to_frame: UnsafeCell::new(PageToFrame::new()),
+            eviction_hints,
             frames: UnsafeCell::new(frames),
             stats: BPStats::new(),
         })
@@ -276,8 +347,8 @@ impl BufferPool {
     fn choose_victim(&self) -> Option<FrameWriteGuard> {
         let frames = unsafe { &*self.frames.get() };
 
-        // First, try the clean frames hints
-        while let Ok(victim) = self.clean_frames_hints.pop() {
+        // First, try the eviction hints
+        while let Ok(victim) = self.eviction_hints.pop() {
             let frame = frames[victim].try_write(false);
             if let Some(guard) = frame {
                 return Some(guard);
@@ -297,8 +368,8 @@ impl BufferPool {
         let num_victims = frames.len().min(num_victims);
         let mut victims = Vec::with_capacity(num_victims);
 
-        // First, try the clean frames hints
-        while let Ok(victim) = self.clean_frames_hints.pop() {
+        // First, try the eviction hints
+        while let Ok(victim) = self.eviction_hints.pop() {
             let frame = frames[victim].try_write(false);
             if let Some(guard) = frame {
                 victims.push(guard);
@@ -364,6 +435,22 @@ impl BufferPool {
 }
 
 impl MemPool for BufferPool {
+    fn create_container(&self, c_key: ContainerKey, is_temp: bool) -> Result<(), MemPoolStatus> {
+        self.container_manager.create_container(c_key, is_temp);
+        Ok(())
+    }
+
+    fn drop_container(&self, c_key: ContainerKey) -> Result<(), MemPoolStatus> {
+        self.container_manager.get_container(c_key).set_temp(true);
+        self.shared();
+        let page_to_frame = unsafe { &mut *self.page_to_frame.get() };
+        for (_, frame_index) in page_to_frame.iter_container(c_key) {
+            self.eviction_hints.push(*frame_index).unwrap();
+        }
+        self.release_shared();
+        Ok(())
+    }
+
     /// Create a new page for write in memory.
     /// NOTE: This function does not write the page to disk.
     /// See more at `handle_page_fault(key, new_page=true)`
@@ -475,6 +562,38 @@ impl MemPool for BufferPool {
         }
     }
 
+    fn is_in_mem(&self, key: PageFrameKey) -> bool {
+        {
+            // Fast path access to the frame using frame_id
+            let frame_id = key.frame_id();
+            let frames = unsafe { &*self.frames.get() };
+            if (frame_id as usize) < frames.len() {
+                if let Some(g) = frames[frame_id as usize].try_read() {
+                    if g.page_key().map(|k| k == key.p_key()).unwrap_or(false) {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        // Critical section.
+        {
+            self.shared();
+            let page_to_frame = unsafe { &*self.page_to_frame.get() };
+            let res = page_to_frame.contains_key(&key.p_key());
+            self.release_shared();
+            res
+        }
+    }
+
+    fn get_page_keys_in_mem(&self, c_key: ContainerKey) -> Vec<PageFrameKey> {
+        self.shared();
+        let page_to_frame = unsafe { &*self.page_to_frame.get() };
+        let keys = page_to_frame.get_page_keys(c_key);
+        self.release_shared();
+        keys
+    }
+
     fn get_page_for_write(&self, key: PageFrameKey) -> Result<FrameWriteGuard, MemPoolStatus> {
         log_debug!("Page write: {}", key);
         self.stats.inc_write_count();
@@ -548,7 +667,7 @@ impl MemPool for BufferPool {
                     let guard = frames[index].try_write(true);
                     self.release_exclusive();
 
-                    self.clean_frames_hints.push(index).unwrap();
+                    self.eviction_hints.push(index).unwrap();
                     drop(victim); // Release the write latch on the unused victim
 
                     guard
@@ -662,7 +781,7 @@ impl MemPool for BufferPool {
                     let guard = frames[index].try_read();
                     self.release_exclusive();
 
-                    self.clean_frames_hints.push(index).unwrap();
+                    self.eviction_hints.push(index).unwrap();
                     drop(victim); // Release the write latch on the unused victim
 
                     guard
@@ -810,9 +929,9 @@ impl MemPool for BufferPool {
 
         page_to_frame.clear();
 
-        while self.clean_frames_hints.pop().is_ok() {}
+        while self.eviction_hints.pop().is_ok() {}
         for i in 0..frames.len() {
-            self.clean_frames_hints.push(i).unwrap();
+            self.eviction_hints.push(i).unwrap();
         }
 
         self.release_exclusive();
@@ -865,15 +984,16 @@ impl BufferPool {
     // Invariant: page_to_frame contains all the pages in the buffer pool
     pub fn check_page_to_frame(&self) {
         let page_to_frame = unsafe { &*self.page_to_frame.get() };
-        let mut index_to_id = HashMap::new();
-        for (k, &v) in page_to_frame.iter() {
-            index_to_id.insert(v, k);
+        let mut frame_to_page = HashMap::new();
+        for (c, k, &v) in page_to_frame.iter() {
+            let p_key = PageKey::new(*c, *k);
+            frame_to_page.insert(v, p_key);
         }
         let frames = unsafe { &*self.frames.get() };
         for (i, frame) in frames.iter().enumerate() {
             let frame = frame.read();
-            if index_to_id.contains_key(&i) {
-                assert_eq!(frame.page_key().unwrap(), *index_to_id[&i]);
+            if frame_to_page.contains_key(&i) {
+                assert_eq!(frame.page_key().unwrap(), frame_to_page[&i]);
             } else {
                 assert_eq!(frame.page_key(), &None);
             }
@@ -890,11 +1010,6 @@ impl BufferPool {
                 assert_eq!(key.page_id, page_id);
             }
         }
-    }
-
-    pub fn is_in_buffer_pool(&self, key: PageFrameKey) -> bool {
-        let page_to_frame = unsafe { &*self.page_to_frame.get() };
-        page_to_frame.contains_key(&key.p_key())
     }
 }
 
@@ -942,6 +1057,7 @@ mod tests {
         });
         bp.run_checks();
         {
+            assert!(bp.is_in_mem(key));
             let guard = bp.get_page_for_read(key).unwrap();
             assert_eq!(guard[0], num_threads * num_iterations);
         }
@@ -968,11 +1084,13 @@ mod tests {
         bp.run_checks();
         // check contents of evicted page
         {
+            assert!(!bp.is_in_mem(key1));
             let guard = bp.get_page_for_read(key1).unwrap();
             assert_eq!(guard[0], 1);
         }
-        // check contents of the page in the buffer pool
+        // check contents of the second page
         {
+            assert!(!bp.is_in_mem(key2));
             let guard = bp.get_page_for_read(key2).unwrap();
             assert_eq!(guard[0], 2);
         }
