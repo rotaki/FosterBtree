@@ -4,6 +4,18 @@ set -euxo
 
 cargo build --release --bin secondary_index_bench_ptr_with_updates
 
+./target/release/secondary_index_bench_ptr_with_updates -b 600000 -n 1000000 -k 10 -r 100 --all-hint-correctness 0    > ptr_t1_n1000000_k10_r100_b600000_a0.txt
+./target/release/secondary_index_bench_ptr_with_updates -b 600000 -n 1000000 -k 10 -r 100 --all-hint-correctness 10    > ptr_t1_n1000000_k10_r100_b600000_a10.txt
+./target/release/secondary_index_bench_ptr_with_updates -b 600000 -n 1000000 -k 10 -r 100 --all-hint-correctness 20    > ptr_t1_n1000000_k10_r100_b600000_a20.txt
+./target/release/secondary_index_bench_ptr_with_updates -b 600000 -n 1000000 -k 10 -r 100 --all-hint-correctness 30    > ptr_t1_n1000000_k10_r100_b600000_a30.txt
+./target/release/secondary_index_bench_ptr_with_updates -b 600000 -n 1000000 -k 10 -r 100 --all-hint-correctness 40    > ptr_t1_n1000000_k10_r100_b600000_a40.txt
+./target/release/secondary_index_bench_ptr_with_updates -b 600000 -n 1000000 -k 10 -r 100 --all-hint-correctness 50    > ptr_t1_n1000000_k10_r100_b600000_a50.txt
+./target/release/secondary_index_bench_ptr_with_updates -b 600000 -n 1000000 -k 10 -r 100 --all-hint-correctness 60    > ptr_t1_n1000000_k10_r100_b600000_a60.txt
+./target/release/secondary_index_bench_ptr_with_updates -b 600000 -n 1000000 -k 10 -r 100 --all-hint-correctness 70    > ptr_t1_n1000000_k10_r100_b600000_a70.txt
+./target/release/secondary_index_bench_ptr_with_updates -b 600000 -n 1000000 -k 10 -r 100 --all-hint-correctness 80    > ptr_t1_n1000000_k10_r100_b600000_a80.txt
+./target/release/secondary_index_bench_ptr_with_updates -b 600000 -n 1000000 -k 10 -r 100 --all-hint-correctness 90    > ptr_t1_n1000000_k10_r100_b600000_a90.txt
+./target/release/secondary_index_bench_ptr_with_updates -b 600000 -n 1000000 -k 10 -r 100 --all-hint-correctness 100   > ptr_t1_n1000000_k10_r100_b600000_a100.txt
+
 ./target/release/secondary_index_bench_ptr_with_updates -b 600000 -n 1000000 -k 10 -r 100 -h 0 > ptr_t1_n1000000_k10_r100_b600000_no_hint.txt
 
 ./target/release/secondary_index_bench_ptr_with_updates -b 600000 -n 1000000 -k 10 -r 100 --page-hint-correctness 0    > ptr_t1_n1000000_k10_r100_b600000_p0.txt

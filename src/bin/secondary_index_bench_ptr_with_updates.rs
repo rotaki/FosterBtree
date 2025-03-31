@@ -30,14 +30,16 @@ use fbtree::{
     bp::{get_test_bp, BufferPool},
     random::gen_random_byte_vec,
 };
-use std::{process::Command, sync::Arc};
+use std::{hint, process::Command, sync::Arc};
 
 pub struct SecondaryIncorrectHintIndex<T: MemPool> {
     pub primary: Arc<FosterBtree<T>>,
     pub secondary: Arc<FosterBtree<T>>,
 }
 
+#[derive(Debug, Clone)]
 pub struct HintCorrectness {
+    pub all: Option<usize>,
     pub page: usize,
     pub frame: usize,
     pub slot: usize,
@@ -45,7 +47,21 @@ pub struct HintCorrectness {
 
 impl HintCorrectness {
     pub fn new(page: usize, frame: usize, slot: usize) -> HintCorrectness {
-        HintCorrectness { page, frame, slot }
+        HintCorrectness {
+            all: None,
+            page,
+            frame,
+            slot,
+        }
+    }
+
+    pub fn new_all(all: usize) -> HintCorrectness {
+        HintCorrectness {
+            all: Some(all),
+            page: 0,
+            frame: 0,
+            slot: 0,
+        }
     }
 
     fn validate(&self) {
@@ -70,32 +86,45 @@ impl<T: MemPool> SecondaryIncorrectHintIndex<T> {
         ));
         while let Some((p_key, _)) = iter.get_kv() {
             let (page_id, frame_id, slot_id) = iter.get_physical_address();
-            // Embed wrong page id in the secondary index with a probability of hint_correctness
-            // The frame id is "correct" because it contains the expected page id.
-            let (page_id, frame_id) = if gen_random_int(1, 100) <= hint_correctness.page as u32 {
-                (page_id, frame_id)
+            let (page_id, frame_id, slot_id) = if let Some(all) = hint_correctness.all {
+                if gen_random_int(1, 100) <= all {
+                    (page_id, frame_id, slot_id)
+                } else {
+                    let fake_page_id = page_id.saturating_sub(1);
+                    let fake_frame_id = frame_id.saturating_sub(2); // 2 to make sure it does not contain the fake page id
+                    let fake_slot_id = slot_id.saturating_sub(1);
+                    (fake_page_id, fake_frame_id, fake_slot_id)
+                }
             } else {
-                let fake_page_id = page_id.saturating_sub(1);
-                let frame_id = primary
-                    .mem_pool
-                    .get_page_for_read(PageFrameKey::new(primary.c_key, fake_page_id))
-                    .unwrap()
-                    .frame_id();
-                (fake_page_id, frame_id)
-            };
+                // Embed wrong page id in the secondary index with a probability of hint_correctness
+                // The frame id is "correct" because it contains the expected page id.
+                let (page_id, frame_id) = if gen_random_int(1, 100) <= hint_correctness.page as u32
+                {
+                    (page_id, frame_id)
+                } else {
+                    let fake_page_id = page_id.saturating_sub(1);
+                    let frame_id = primary
+                        .mem_pool
+                        .get_page_for_read(PageFrameKey::new(primary.c_key, fake_page_id))
+                        .unwrap()
+                        .frame_id();
+                    (fake_page_id, frame_id)
+                };
 
-            // Embed wrong frame id in the secondary index with a probability of hint_correctness
-            let frame_id = if gen_random_int(1, 100) <= hint_correctness.frame as u32 {
-                frame_id
-            } else {
-                frame_id.saturating_sub(1)
-            };
+                // Embed wrong frame id in the secondary index with a probability of hint_correctness
+                let frame_id = if gen_random_int(1, 100) <= hint_correctness.frame as u32 {
+                    frame_id
+                } else {
+                    frame_id.saturating_sub(1)
+                };
 
-            // Embed wrong slot id in the secondary index with a probability of hint_correctness
-            let slot_id = if gen_random_int(1, 100) <= hint_correctness.slot as u32 {
-                slot_id
-            } else {
-                slot_id.saturating_sub(1)
+                // Embed wrong slot id in the secondary index with a probability of hint_correctness
+                let slot_id = if gen_random_int(1, 100) <= hint_correctness.slot as u32 {
+                    slot_id
+                } else {
+                    slot_id.saturating_sub(1)
+                };
+                (page_id, frame_id, slot_id)
             };
             // Concatenate the primary key with the physical address
             let mut val = p_key.to_vec();
@@ -352,6 +381,8 @@ pub struct SecBenchParams {
     pub frame_hint_correctness: usize,
     #[clap(long, default_value = "100")]
     pub slot_hint_correctness: usize,
+    #[clap(long)]
+    pub all_hint_correctness: Option<usize>,
     /// With or without hint. 0: without hint, 1: with hint
     #[clap(short = 'h', long, default_value = "1")]
     pub with_hint: usize,
@@ -503,11 +534,16 @@ fn sync_filesystem() -> Result<(), std::io::Error> {
 fn main() {
     let params = SecBenchParams::parse();
     println!("Params: {:?}", params);
-    let hint_correctness = HintCorrectness::new(
-        params.page_hint_correctness,
-        params.frame_hint_correctness,
-        params.slot_hint_correctness,
-    );
+    let hint_correctness = if let Some(all) = params.all_hint_correctness {
+        HintCorrectness::new_all(all)
+    } else {
+        HintCorrectness::new(
+            params.page_hint_correctness,
+            params.frame_hint_correctness,
+            params.slot_hint_correctness,
+        )
+    };
+    println!("Hint correctness: {:?}", hint_correctness);
     {
         flush_internal_cache_and_everything();
         println!("=========================================================================================");
