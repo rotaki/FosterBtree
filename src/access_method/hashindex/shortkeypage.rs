@@ -877,11 +877,7 @@ impl ShortKeyPage for Page {
 
         for i in 0..header.slot_num {
             let mut slot = self.decode_shortkey_slot(i);
-            let remain_key_len = if slot.key_len > 8 {
-                slot.key_len - 8
-            } else {
-                0
-            };
+            let remain_key_len = slot.key_len.saturating_sub(8);
             let value_entry = self.decode_shortkey_value(slot.val_offset as usize, remain_key_len);
 
             // Calculate new offset

@@ -9,6 +9,7 @@ use std::{
     cell::UnsafeCell,
     fmt::Debug,
     ops::{Deref, DerefMut},
+    ptr::NonNull,
     sync::atomic::{AtomicBool, Ordering},
 };
 
@@ -36,8 +37,9 @@ impl FrameMeta {
 
 #[derive(Clone)]
 pub struct BufferFrame {
-    meta: *mut FrameMeta,
-    page: *mut Page,
+    meta: NonNull<FrameMeta>,
+    page: NonNull<Page>,
+    _marker: std::marker::PhantomData<*mut ()>,
 }
 
 unsafe impl Send for BufferFrame {}
@@ -45,48 +47,52 @@ unsafe impl Sync for BufferFrame {}
 
 impl BufferFrame {
     pub fn new(meta: *mut FrameMeta, page: *mut Page) -> Self {
-        BufferFrame { meta, page }
+        BufferFrame {
+            meta: NonNull::new(meta).expect("Meta pointer is null"),
+            page: NonNull::new(page).expect("Page pointer is null"),
+            _marker: std::marker::PhantomData,
+        }
     }
 
     pub fn frame_id(&self) -> u32 {
         // SAFETY: This is safe because frame meta must be a valid pointer and frame_id is not mutable.
-        unsafe { (*self.meta).frame_id }
+        unsafe { self.meta.as_ref().frame_id }
     }
 
     pub fn latch(&self) -> &RwLatch {
         // SAFETY: This is safe because frame meta must be a valid pointer.
-        unsafe { &(*self.meta).latch }
+        unsafe { &self.meta.as_ref().latch }
     }
 
     pub fn dirty(&self) -> &AtomicBool {
         // SAFETY: This is safe because frame meta must be a valid pointer.
-        unsafe { &(*self.meta).is_dirty }
+        unsafe { &self.meta.as_ref().is_dirty }
     }
 
     pub fn evict_info(&self) -> &EvictionPolicyType {
         // SAFETY: This is safe because frame meta must be a valid pointer.
-        unsafe { &(*self.meta).evict_info }
+        unsafe { &self.meta.as_ref().evict_info }
     }
 
     pub unsafe fn page_key(&self) -> &Option<PageKey> {
-        &*(*self.meta).key.get()
+        &*self.meta.as_ref().key.get()
     }
 
     pub unsafe fn page_key_mut(&self) -> &mut Option<PageKey> {
-        &mut *(*self.meta).key.get()
+        &mut *self.meta.as_ref().key.get()
     }
 
     pub unsafe fn page(&self) -> &Page {
-        &*self.page
+        self.page.as_ref()
     }
 
     pub unsafe fn page_mut(&self) -> &mut Page {
-        &mut *self.page
+        &mut *self.page.as_ptr()
     }
 
     pub fn read(&self) -> FrameReadGuard {
         // SAFETY: This is safe because frame meta must be a valid pointer.
-        unsafe { (*self.meta).latch.shared() };
+        unsafe { self.meta.as_ref().latch.shared() };
         FrameReadGuard {
             upgraded: AtomicBool::new(false),
             buffer_frame: self,
@@ -95,7 +101,7 @@ impl BufferFrame {
 
     pub fn try_read(&self) -> Option<FrameReadGuard> {
         // SAFETY: This is safe because frame meta must be a valid pointer.
-        if unsafe { (*self.meta).latch.try_shared() } {
+        if unsafe { self.meta.as_ref().latch.try_shared() } {
             Some(FrameReadGuard {
                 upgraded: AtomicBool::new(false),
                 buffer_frame: self,
@@ -108,11 +114,11 @@ impl BufferFrame {
     pub fn write(&self, make_dirty: bool) -> FrameWriteGuard {
         // SAFETY: This is safe because frame meta must be a valid pointer.
         unsafe {
-            (*self.meta).latch.exclusive();
+            self.meta.as_ref().latch.exclusive();
         }
         if make_dirty {
             unsafe {
-                (*self.meta).is_dirty.store(true, Ordering::Release);
+                self.meta.as_ref().is_dirty.store(true, Ordering::Release);
             }
         }
         FrameWriteGuard {
@@ -122,10 +128,10 @@ impl BufferFrame {
     }
 
     pub fn try_write(&self, make_dirty: bool) -> Option<FrameWriteGuard> {
-        if unsafe { (*self.meta).latch.try_exclusive() } {
+        if unsafe { self.meta.as_ref().latch.try_exclusive() } {
             if make_dirty {
                 unsafe {
-                    (*self.meta).is_dirty.store(true, Ordering::Release);
+                    self.meta.as_ref().is_dirty.store(true, Ordering::Release);
                 }
             }
             Some(FrameWriteGuard {
@@ -163,11 +169,11 @@ impl<'a> FrameReadGuard<'a> {
     /// The flag can be modified even with the FrameReadGuard
     /// when dirty pages are flushed to disk.
     pub fn dirty(&self) -> &AtomicBool {
-        &self.buffer_frame.dirty()
+        self.buffer_frame.dirty()
     }
 
     pub fn evict_info(&self) -> &EvictionPolicyType {
-        &self.buffer_frame.evict_info()
+        self.buffer_frame.evict_info()
     }
 
     pub fn try_upgrade(self, make_dirty: bool) -> Result<FrameWriteGuard<'a>, FrameReadGuard<'a>> {
@@ -199,7 +205,7 @@ impl Deref for FrameReadGuard<'_> {
 
     fn deref(&self) -> &Self::Target {
         // SAFETY: This is safe because the latch is held shared.
-        unsafe { &*self.buffer_frame.page() }
+        unsafe { self.buffer_frame.page() }
     }
 }
 
@@ -224,7 +230,7 @@ impl<'a> FrameWriteGuard<'a> {
 
     pub(crate) fn page_key(&self) -> &Option<PageKey> {
         // SAFETY: This is safe because the latch is held exclusively.
-        unsafe { &*self.buffer_frame.page_key() }
+        unsafe { self.buffer_frame.page_key() }
     }
 
     pub(crate) fn page_key_mut(&mut self) -> &mut Option<PageKey> {
@@ -239,11 +245,11 @@ impl<'a> FrameWriteGuard<'a> {
     }
 
     pub fn dirty(&self) -> &AtomicBool {
-        &self.buffer_frame.dirty()
+        self.buffer_frame.dirty()
     }
 
     pub fn evict_info(&self) -> &EvictionPolicyType {
-        &self.buffer_frame.evict_info()
+        self.buffer_frame.evict_info()
     }
 
     pub fn eviction_score(&self) -> u64 {
@@ -279,14 +285,14 @@ impl Deref for FrameWriteGuard<'_> {
 
     fn deref(&self) -> &Self::Target {
         // SAFETY: This is safe because the latch is held exclusively.
-        unsafe { &*self.buffer_frame.page() }
+        unsafe { self.buffer_frame.page() }
     }
 }
 
 impl DerefMut for FrameWriteGuard<'_> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         // SAFETY: This is safe because the latch is held exclusively.
-        unsafe { &mut *self.buffer_frame.page_mut() }
+        unsafe { self.buffer_frame.page_mut() }
     }
 }
 
@@ -318,7 +324,7 @@ pub fn box_as_ptr<T>(b: &Box<T>) -> *const T {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{sync::Arc, thread};
+    use std::thread;
 
     fn make_frame(frame_id: usize) -> (Box<FrameMeta>, Box<Page>, BufferFrame) {
         let mut page = Box::new(Page::new_empty());
@@ -331,7 +337,7 @@ mod tests {
     fn test_default_buffer_frame() {
         let (_meta, _page, buffer_frame) = make_frame(0);
         assert!(!buffer_frame.dirty().load(Ordering::Relaxed));
-        assert!(unsafe { &*buffer_frame.page_key() }.is_none());
+        assert!(unsafe { buffer_frame.page_key() }.is_none());
     }
 
     #[test]

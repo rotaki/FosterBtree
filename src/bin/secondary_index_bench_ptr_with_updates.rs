@@ -30,7 +30,7 @@ use fbtree::{
     bp::{get_test_bp, BufferPool},
     random::gen_random_byte_vec,
 };
-use std::{hint, process::Command, sync::Arc};
+use std::{process::Command, sync::Arc};
 
 pub struct SecondaryIncorrectHintIndex<T: MemPool> {
     pub primary: Arc<FosterBtree<T>>,

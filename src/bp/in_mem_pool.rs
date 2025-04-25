@@ -2,7 +2,6 @@ use std::{
     cell::UnsafeCell,
     collections::{hash_map::Entry, BTreeMap, HashMap},
     mem::ManuallyDrop,
-    ptr,
 };
 
 use crate::{
@@ -33,7 +32,7 @@ pub struct InMemPool {
 impl Drop for InMemPool {
     fn drop(&mut self) {
         unsafe {
-            ManuallyDrop::drop(&mut self.frames);
+            ManuallyDrop::drop(&mut self.frames); // Frames must be dropped first because it contains pointers to metas and pages
             ManuallyDrop::drop(&mut self.pages);
             ManuallyDrop::drop(&mut self.metas);
         }
@@ -86,8 +85,8 @@ impl InMemPool {
         let page = Box::new(Page::new_empty());
         pages.push(page);
         let buffer_frame = Box::new(BufferFrame::new(
-            ptr::from_mut(metas[frame_index].as_mut()),
-            ptr::from_mut(pages[frame_index].as_mut()),
+            box_as_mut_ptr(&mut metas[frame_index]),
+            box_as_mut_ptr(&mut pages[frame_index]),
         ));
         frames.push(buffer_frame);
 

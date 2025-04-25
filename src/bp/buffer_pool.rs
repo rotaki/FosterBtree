@@ -13,7 +13,7 @@ use crate::{
     bp::buffer_frame::box_as_mut_ptr,
     container::ContainerManager,
     log_debug,
-    page::{self, Page, PageId},
+    page::{Page, PageId},
     random::gen_random_int,
     rwlatch::RwLatch,
 };
@@ -22,7 +22,6 @@ use std::{
     cell::{RefCell, UnsafeCell},
     collections::{BTreeMap, HashMap},
     mem::ManuallyDrop,
-    ptr,
     sync::{
         atomic::{AtomicUsize, Ordering},
         Arc,
@@ -220,7 +219,7 @@ impl PageToFrame {
     pub fn contains_key(&self, p_key: &PageKey) -> bool {
         self.map
             .get(&p_key.c_key)
-            .map_or(false, |m| m.contains_key(&p_key.page_id))
+            .is_some_and(|m| m.contains_key(&p_key.page_id))
     }
 
     pub fn get(&self, p_key: &PageKey) -> Option<&usize> {
@@ -243,7 +242,7 @@ impl PageToFrame {
     pub fn insert(&mut self, p_key: PageKey, frame_id: usize) {
         self.map
             .entry(p_key.c_key)
-            .or_insert_with(HashMap::new)
+            .or_default()
             .insert(p_key.page_id, frame_id);
     }
 
@@ -294,7 +293,7 @@ impl Drop for BufferPool {
             self.flush_all_and_reset().unwrap();
         }
 
-        // Drop the frames first
+        // Drop the frames first because they are holding the pages.
         unsafe {
             ManuallyDrop::drop(&mut self.frames);
             ManuallyDrop::drop(&mut self.pages);
@@ -331,18 +330,8 @@ impl BufferPool {
         let frames = ManuallyDrop::new(UnsafeCell::new(
             (0..num_frames)
                 .map(|i| {
-                    BufferFrame::new(
-                        ptr::from_mut(metas[i].as_mut()),
-                        ptr::from_mut(pages[i].as_mut()),
-                    )
+                    BufferFrame::new(box_as_mut_ptr(&mut metas[i]), box_as_mut_ptr(&mut pages[i]))
                 })
-                // .map(|i| BufferFrame::new(box_as_mut_ptr(&mut metas[i]), box_as_mut_ptr(&mut pages[i])))
-                // .map(|i| {
-                //     BufferFrame::new(
-                //         Box::into_raw(Box::new(FrameMeta::new(i as u32))),
-                //         Box::into_raw(Box::new(Page::new_empty())),
-                //     )
-                // })
                 .collect(),
         ));
 

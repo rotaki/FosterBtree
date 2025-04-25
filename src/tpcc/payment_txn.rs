@@ -146,7 +146,7 @@ impl TPCCTxnProfile for PaymentTxn {
 
             // Select the middle record
             let c = unsafe {
-                Customer::from_bytes(customer_recs[(customer_recs.len() + 1) / 2 - 1].as_slice())
+                Customer::from_bytes(customer_recs[customer_recs.len().div_ceil(2) - 1].as_slice())
             };
             CustomerKey::create_key_from_customer(c)
         } else {

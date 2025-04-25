@@ -102,7 +102,7 @@ impl TPCCTxnProfile for OrderStatusTxn {
             });
 
             // Select the middle record
-            let c_bytes = customer_recs[(customer_recs.len() + 1) / 2 - 1].as_slice();
+            let c_bytes = customer_recs[customer_recs.len().div_ceil(2) - 1].as_slice();
             let c = unsafe { Customer::from_bytes(c_bytes) };
             c_id = c.c_id;
             write_fields!(out, &c.c_first, &c.c_middle, &c.c_last, &c.c_balance);
