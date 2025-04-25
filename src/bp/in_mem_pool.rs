@@ -1,12 +1,17 @@
 use std::{
     cell::UnsafeCell,
     collections::{hash_map::Entry, BTreeMap, HashMap},
+    mem::ManuallyDrop,
+    ptr,
 };
 
-use crate::rwlatch::RwLatch;
+use crate::{
+    page::{Page, PageId},
+    rwlatch::RwLatch,
+};
 
 use super::{
-    buffer_frame::BufferFrame,
+    buffer_frame::{box_as_mut_ptr, BufferFrame, FrameMeta},
     mem_pool_trait::{MemPool, MemoryStats, PageKey},
     prelude::{ContainerKey, FrameReadGuard, FrameWriteGuard, MemPoolStatus, PageFrameKey},
 };
@@ -18,9 +23,21 @@ use super::{
 /// Getting a page for read or write requires a shared latch.
 pub struct InMemPool {
     latch: RwLatch,
-    frames: UnsafeCell<Vec<Box<BufferFrame>>>, // Box is required to ensure that the frame does not move when the vector is resized
+    frames: ManuallyDrop<UnsafeCell<Vec<Box<BufferFrame>>>>, // Box is required to ensure that the frame does not move when the vector is resized
+    pages: ManuallyDrop<UnsafeCell<Vec<Box<Page>>>>,
+    metas: ManuallyDrop<UnsafeCell<Vec<Box<FrameMeta>>>>,
     page_to_frame: UnsafeCell<HashMap<PageKey, usize>>,
     container_page_count: UnsafeCell<HashMap<ContainerKey, u32>>,
+}
+
+impl Drop for InMemPool {
+    fn drop(&mut self) {
+        unsafe {
+            ManuallyDrop::drop(&mut self.frames);
+            ManuallyDrop::drop(&mut self.pages);
+            ManuallyDrop::drop(&mut self.metas);
+        }
+    }
 }
 
 impl Default for InMemPool {
@@ -33,7 +50,9 @@ impl InMemPool {
     pub fn new() -> Self {
         InMemPool {
             latch: RwLatch::default(),
-            frames: UnsafeCell::new(Vec::new()),
+            frames: ManuallyDrop::new(UnsafeCell::new(Vec::new())),
+            pages: ManuallyDrop::new(UnsafeCell::new(Vec::new())),
+            metas: ManuallyDrop::new(UnsafeCell::new(Vec::new())),
             page_to_frame: UnsafeCell::new(HashMap::new()),
             container_page_count: UnsafeCell::new(HashMap::new()),
         }
@@ -54,6 +73,29 @@ impl InMemPool {
     fn release_exclusive(&self) {
         self.latch.release_exclusive();
     }
+
+    unsafe fn alloc_frame(&self, c_key: ContainerKey, page_id: PageId) -> FrameWriteGuard {
+        let frames = &mut *self.frames.get();
+        let pages = &mut *self.pages.get();
+        let metas = &mut *self.metas.get();
+        let page_to_frame = &mut *self.page_to_frame.get();
+        let frame_index = frames.len();
+
+        let meta = Box::new(FrameMeta::new(frame_index as u32));
+        metas.push(meta);
+        let page = Box::new(Page::new_empty());
+        pages.push(page);
+        let buffer_frame = Box::new(BufferFrame::new(
+            ptr::from_mut(metas[frame_index].as_mut()),
+            ptr::from_mut(pages[frame_index].as_mut()),
+        ));
+        frames.push(buffer_frame);
+
+        let page_key = PageKey::new(c_key, page_id);
+        page_to_frame.insert(page_key, frame_index);
+        let guard = (frames.get(frame_index).unwrap()).write(true);
+        guard
+    }
 }
 
 impl MemPool for InMemPool {
@@ -70,8 +112,6 @@ impl MemPool for InMemPool {
         c_key: ContainerKey,
     ) -> Result<FrameWriteGuard, MemPoolStatus> {
         self.exclusive();
-        let frames = unsafe { &mut *self.frames.get() };
-        let page_to_frame = unsafe { &mut *self.page_to_frame.get() };
         let container_page_count = unsafe { &mut *self.container_page_count.get() };
 
         let page_id = match container_page_count.entry(c_key) {
@@ -86,16 +126,11 @@ impl MemPool for InMemPool {
             }
         };
 
-        let page_key = PageKey::new(c_key, page_id);
-        let frame_index = frames.len();
-        let frame = Box::new(BufferFrame::new(frame_index as u32));
-        frames.push(frame);
-        page_to_frame.insert(page_key, frame_index);
-        let mut guard = (frames.get(frame_index).unwrap()).write(true);
+        let mut guard = unsafe { self.alloc_frame(c_key, page_id) };
         self.release_exclusive();
 
         guard.set_id(page_id);
-        *guard.page_key_mut() = Some(page_key);
+        *guard.page_key_mut() = Some(PageKey::new(c_key, page_id));
         Ok(guard)
     }
 
@@ -105,8 +140,6 @@ impl MemPool for InMemPool {
         num_pages: usize,
     ) -> Result<Vec<FrameWriteGuard>, MemPoolStatus> {
         self.exclusive();
-        let frames = unsafe { &mut *self.frames.get() };
-        let page_to_frame = unsafe { &mut *self.page_to_frame.get() };
         let container_page_count = unsafe { &mut *self.container_page_count.get() };
 
         let start_page_id = match container_page_count.entry(c_key) {
@@ -121,26 +154,14 @@ impl MemPool for InMemPool {
             }
         };
 
-        // Insert all the new pages to the pool
-        for i in 0..num_pages {
-            let page_id = start_page_id + i as u32;
-            let page_key = PageKey::new(c_key, page_id);
-            let frame_index = frames.len();
-            let frame = Box::new(BufferFrame::new(frame_index as u32));
-            frames.push(frame);
-            page_to_frame.insert(page_key, frame_index);
-        }
-
+        // Insert all the new pages to the pool and push the guards to the vector
         let mut guards = Vec::with_capacity(num_pages);
 
-        // Initialize all the new pages
         for i in 0..num_pages {
             let page_id = start_page_id + i as u32;
-            let page_key = PageKey::new(c_key, page_id);
-            let frame_index = page_to_frame.get(&page_key).unwrap();
-            let mut guard = (frames.get(*frame_index).unwrap()).write(true);
+            let mut guard = unsafe { self.alloc_frame(c_key, page_id) };
             guard.set_id(page_id);
-            *guard.page_key_mut() = Some(page_key);
+            *guard.page_key_mut() = Some(PageKey::new(c_key, page_id));
             guards.push(guard);
         }
 

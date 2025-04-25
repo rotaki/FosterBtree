@@ -5,14 +5,15 @@ use crate::log;
 use crate::file_manager::iouring_async::GlobalRings;
 
 use super::{
-    buffer_frame::{BufferFrame, FrameReadGuard, FrameWriteGuard},
+    buffer_frame::{BufferFrame, FrameMeta, FrameReadGuard, FrameWriteGuard},
     eviction_policy::EvictionPolicy,
     mem_pool_trait::{ContainerKey, MemPool, MemPoolStatus, MemoryStats, PageFrameKey, PageKey},
 };
 use crate::{
+    bp::buffer_frame::box_as_mut_ptr,
     container::ContainerManager,
     log_debug,
-    page::{self, PageId},
+    page::{self, Page, PageId},
     random::gen_random_int,
     rwlatch::RwLatch,
 };
@@ -20,6 +21,8 @@ use crate::{
 use std::{
     cell::{RefCell, UnsafeCell},
     collections::{BTreeMap, HashMap},
+    mem::ManuallyDrop,
+    ptr,
     sync::{
         atomic::{AtomicUsize, Ordering},
         Arc,
@@ -275,7 +278,9 @@ pub struct BufferPool {
     container_manager: Arc<ContainerManager>,
     latch: RwLatch,
     eviction_hints: ConcurrentQueue<usize>, // A hint for quickly finding a clean frame or a frame to evict. Whenever a clean frame is found, it is pushed to this queue so that it can be quickly found.
-    frames: UnsafeCell<Vec<BufferFrame>>, // The Vec<frames> is fixed size. If not fixed size, then Pin must be used to ensure that the frame does not move when the vector is resized.
+    frames: ManuallyDrop<UnsafeCell<Vec<BufferFrame>>>, // The Vec<frames> is fixed size. If not fixed size, then Pin must be used to ensure that the frame does not move when the vector is resized.
+    pages: ManuallyDrop<Vec<Box<Page>>>,
+    metas: ManuallyDrop<Vec<Box<FrameMeta>>>,
     page_to_frame: UnsafeCell<PageToFrame>, // (c_key, page_id) -> frame_index
     stats: BPStats,
 }
@@ -287,6 +292,13 @@ impl Drop for BufferPool {
         } else {
             // Persist all the pages to disk
             self.flush_all_and_reset().unwrap();
+        }
+
+        // Drop the frames first
+        unsafe {
+            ManuallyDrop::drop(&mut self.frames);
+            ManuallyDrop::drop(&mut self.pages);
+            ManuallyDrop::drop(&mut self.metas);
         }
     }
 }
@@ -304,16 +316,44 @@ impl BufferPool {
             eviction_hints.push(i).unwrap();
         }
 
-        let frames = (0..num_frames)
-            .map(|i| BufferFrame::new(i as u32))
-            .collect();
+        let mut pages: ManuallyDrop<Vec<Box<Page>>> = ManuallyDrop::new(
+            (0..num_frames)
+                .map(|_| Box::new(Page::new_empty()))
+                .collect(),
+        );
+
+        let mut metas: ManuallyDrop<Vec<Box<FrameMeta>>> = ManuallyDrop::new(
+            (0..num_frames)
+                .map(|i| Box::new(FrameMeta::new(i as u32)))
+                .collect(),
+        );
+
+        let frames = ManuallyDrop::new(UnsafeCell::new(
+            (0..num_frames)
+                .map(|i| {
+                    BufferFrame::new(
+                        ptr::from_mut(metas[i].as_mut()),
+                        ptr::from_mut(pages[i].as_mut()),
+                    )
+                })
+                // .map(|i| BufferFrame::new(box_as_mut_ptr(&mut metas[i]), box_as_mut_ptr(&mut pages[i])))
+                // .map(|i| {
+                //     BufferFrame::new(
+                //         Box::into_raw(Box::new(FrameMeta::new(i as u32))),
+                //         Box::into_raw(Box::new(Page::new_empty())),
+                //     )
+                // })
+                .collect(),
+        ));
 
         Ok(BufferPool {
             container_manager,
             latch: RwLatch::default(),
             page_to_frame: UnsafeCell::new(PageToFrame::new()),
             eviction_hints,
-            frames: UnsafeCell::new(frames),
+            frames,
+            pages,
+            metas,
             stats: BPStats::new(),
         })
     }
