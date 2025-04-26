@@ -1,13 +1,13 @@
-mod frame_guards;
 mod buffer_pool;
 mod eviction_policy;
+mod frame_guards;
 mod in_mem_pool;
 mod mem_pool_trait;
 
 use std::sync::Arc;
 
-pub use frame_guards::{FrameReadGuard, FrameWriteGuard};
 pub use buffer_pool::BufferPool;
+pub use frame_guards::{FrameReadGuard, FrameWriteGuard};
 pub use in_mem_pool::InMemPool;
 pub use mem_pool_trait::{
     ContainerId, ContainerKey, DatabaseId, MemPool, MemPoolStatus, PageFrameKey,

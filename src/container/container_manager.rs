@@ -138,7 +138,7 @@ impl ContainerManager {
                             FileManager::with_kpc(&db_path, c_id).unwrap()
                         };
                         containers
-                            .insert(ContainerKey { db_id, c_id }, Arc::new(Container::new(fm)));
+                            .insert(ContainerKey::new(db_id, c_id), Arc::new(Container::new(fm)));
                     }
                 }
             }
@@ -161,7 +161,7 @@ impl ContainerManager {
     // Return the file manager for the given container key with a counter for the number of pages.
     pub fn get_container(&self, c_key: ContainerKey) -> Arc<Container> {
         let container = self.containers.entry(c_key).or_insert_with(|| {
-            let db_path = self.base_dir.join(c_key.db_id.to_string());
+            let db_path = self.base_dir.join(c_key.db_id().to_string());
             #[cfg(feature = "iouring_async")]
             let fm = if self.direct {
                 FileManager::new(&db_path, c_key.c_id, self.ring.clone()).unwrap()
@@ -170,9 +170,9 @@ impl ContainerManager {
             };
             #[cfg(not(feature = "iouring_async"))]
             let fm = if self.direct {
-                FileManager::new(&db_path, c_key.c_id).unwrap()
+                FileManager::new(&db_path, c_key.c_id()).unwrap()
             } else {
-                FileManager::with_kpc(&db_path, c_key.c_id).unwrap()
+                FileManager::with_kpc(&db_path, c_key.c_id()).unwrap()
             };
             Arc::new(Container::new(fm))
         });
@@ -181,7 +181,7 @@ impl ContainerManager {
 
     pub fn create_container(&self, c_key: ContainerKey, is_temp: bool) {
         self.containers.entry(c_key).or_insert_with(|| {
-            let db_path = self.base_dir.join(c_key.db_id.to_string());
+            let db_path = self.base_dir.join(c_key.db_id().to_string());
             #[cfg(feature = "iouring_async")]
             let fm = if self.direct {
                 FileManager::new(&db_path, c_key.c_id, self.ring.clone()).unwrap()
@@ -190,9 +190,9 @@ impl ContainerManager {
             };
             #[cfg(not(feature = "iouring_async"))]
             let fm = if self.direct {
-                FileManager::new(&db_path, c_key.c_id).unwrap()
+                FileManager::new(&db_path, c_key.c_id()).unwrap()
             } else {
-                FileManager::with_kpc(&db_path, c_key.c_id).unwrap()
+                FileManager::with_kpc(&db_path, c_key.c_id()).unwrap()
             };
             if is_temp {
                 Arc::new(Container::new_temp(fm))

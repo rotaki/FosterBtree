@@ -1,4 +1,8 @@
-use std::collections::BTreeMap;
+use std::{
+    collections::BTreeMap,
+    fmt,
+    hash::{Hash, Hasher},
+};
 
 use super::frame_guards::{FrameReadGuard, FrameWriteGuard};
 
@@ -7,24 +11,112 @@ use crate::page::PageId;
 pub type DatabaseId = u16;
 pub type ContainerId = u16;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+/*------------------ low-level representation (unchanged) ------------------*/
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+struct Parts {
+    db_id: DatabaseId,
+    c_id: ContainerId,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+union Repr {
+    parts: Parts,
+    packed: u32,
+}
+
+/*---------------------------- public newtype ------------------------------*/
+
+#[repr(transparent)]
+#[derive(Copy, Clone)]
 pub struct ContainerKey {
-    pub db_id: DatabaseId,
-    pub c_id: ContainerId,
+    repr: Repr,
 }
 
 impl ContainerKey {
+    #[inline]
     pub fn new(db_id: DatabaseId, c_id: ContainerId) -> Self {
-        ContainerKey { db_id, c_id }
+        Self {
+            repr: Repr {
+                parts: Parts { db_id, c_id },
+            },
+        }
+    }
+
+    #[inline]
+    pub fn from_u32(raw: u32) -> Self {
+        Self {
+            repr: Repr { packed: raw },
+        }
+    }
+
+    /// Safe projection to the packed form.
+    #[inline]
+    pub fn as_u32(self) -> u32 {
+        unsafe { self.repr.packed }
+    }
+
+    #[inline]
+    pub fn db_id(self) -> DatabaseId {
+        unsafe { self.repr.parts.db_id }
+    }
+    #[inline]
+    pub fn c_id(self) -> ContainerId {
+        unsafe { self.repr.parts.c_id }
     }
 }
 
-impl std::fmt::Display for ContainerKey {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "(db:{}, c:{})", self.db_id, self.c_id)
+/*------------------ manual equality & ordering impls ----------------------*/
+
+impl PartialEq for ContainerKey {
+    #[inline]
+    fn eq(&self, other: &Self) -> bool {
+        // Either of the following is fine:
+        //   self.as_u32() == other.as_u32()
+        // or (endianness-independent):
+        (self.db_id(), self.c_id()) == (other.db_id(), other.c_id())
+    }
+}
+impl Eq for ContainerKey {}
+
+impl PartialOrd for ContainerKey {
+    #[inline]
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for ContainerKey {
+    #[inline]
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        // Lexicographic on (db_id, c_id); endian-safe.
+        (self.db_id(), self.c_id()).cmp(&(other.db_id(), other.c_id()))
     }
 }
 
+/*---------------------- the rest of the boilerplate ------------------------*/
+
+impl Hash for ContainerKey {
+    #[inline]
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        state.write_u32(self.as_u32())
+    }
+}
+
+impl fmt::Debug for ContainerKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("ContainerKey")
+            .field(&self.db_id())
+            .field(&self.c_id())
+            .finish()
+    }
+}
+impl fmt::Display for ContainerKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "(db:{}, c:{})", self.db_id(), self.c_id())
+    }
+}
 /// Page key is used to determine a specific page in a container in the database.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PageKey {
@@ -32,9 +124,28 @@ pub struct PageKey {
     pub page_id: PageId,
 }
 
+pub const VMCACHE_MAX_PAGES: u32 = 1 << 25; // 2^25 pages
+
 impl PageKey {
     pub fn new(c_key: ContainerKey, page_id: PageId) -> Self {
         PageKey { c_key, page_id }
+    }
+
+    pub fn serial_number_for_vmcache(&self) -> u32 {
+        // Layout (LSB→MSB):
+        // bits  0-19 : page_id   (20 bits, up to 1 048 575)
+        // bits 20-24 : container (5 bits,   up to      31)
+        // total      : 25 bits   ⇒ 2^25 pages
+        //
+        // With a 16 KiB page, addressable memory = 2^25 × 2^14 B = 2^39 B = 512 GiB.
+
+        assert!(self.c_key.c_id() < (1 << 5)); // fits in 5 bits
+        assert!(self.page_id < (1 << 20)); // fits in 20 bits
+
+        let container_part = (self.c_key.c_id() as u32) << 20;
+        let page_part = self.page_id as u32; // already < 2^20
+
+        container_part | page_part // packed serial number
     }
 }
 
@@ -82,8 +193,7 @@ impl PageFrameKey {
 
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::new();
-        bytes.extend_from_slice(&self.p_key.c_key.db_id.to_be_bytes()); // 2 bytes
-        bytes.extend_from_slice(&self.p_key.c_key.c_id.to_be_bytes()); // 2 bytes
+        bytes.extend_from_slice(&self.p_key.c_key.as_u32().to_be_bytes()); // 4 bytes
         bytes.extend_from_slice(&self.p_key.page_id.to_be_bytes()); // 4 bytes
         bytes.extend_from_slice(&self.frame_id.to_be_bytes()); // 4 bytes
         bytes
@@ -115,6 +225,7 @@ pub enum MemPoolStatus {
     FrameReadLatchGrantFailed,
     FrameWriteLatchGrantFailed,
     CannotEvictPage,
+    MemoryAllocationError(&'static str),
 }
 
 impl From<std::io::Error> for MemPoolStatus {
@@ -137,6 +248,9 @@ impl std::fmt::Display for MemPoolStatus {
             }
             MemPoolStatus::CannotEvictPage => {
                 write!(f, "[MP] All frames are latched and cannot evict page")
+            }
+            MemPoolStatus::MemoryAllocationError(s) => {
+                write!(f, "[MP] Memory allocation error: {}", s)
             }
         }
     }

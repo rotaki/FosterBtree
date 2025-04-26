@@ -150,7 +150,7 @@ impl MemPool for InMemPool {
         self.release_exclusive();
 
         guard.set_id(page_id);
-        *guard.page_key_mut() = Some(PageKey::new(c_key, page_id));
+        guard.set_page_key(Some(PageKey::new(c_key, page_id)));
         Ok(guard)
     }
 
@@ -181,7 +181,7 @@ impl MemPool for InMemPool {
             let page_id = start_page_id + i as u32;
             let mut guard = unsafe { self.alloc_frame(c_key, page_id) };
             guard.set_id(page_id);
-            *guard.page_key_mut() = Some(PageKey::new(c_key, page_id));
+            guard.set_page_key(Some(PageKey::new(c_key, page_id)));
             guards.push(guard);
         }
 
@@ -318,7 +318,7 @@ impl InMemPool {
         let page_to_frame = &*self.page_to_frame.get();
         for (key, index) in page_to_frame.iter() {
             let frame = self.get_read_guard(*index);
-            assert_eq!(*frame.page_key(), Some(*key));
+            assert_eq!(frame.page_key(), Some(*key));
         }
     }
 
@@ -345,7 +345,7 @@ mod tests {
     #[test]
     fn test_mp_and_frame_latch() {
         let mp = InMemPool::new();
-        let c_key = ContainerKey { db_id: 0, c_id: 0 };
+        let c_key = ContainerKey::new(0, 0);
 
         let frame = mp.create_new_page_for_write(c_key).unwrap();
         let page_key = frame.page_frame_key().unwrap();
@@ -388,7 +388,7 @@ mod tests {
     #[test]
     fn test_create_new_page() {
         let mp = InMemPool::new();
-        let c_key = ContainerKey { db_id: 0, c_id: 0 };
+        let c_key = ContainerKey::new(0, 0);
 
         for i in 0..20 {
             let frame = mp.create_new_page_for_write(c_key).unwrap();
@@ -415,7 +415,7 @@ mod tests {
     #[test]
     fn test_concurrent_create_new_page() {
         let mp = InMemPool::new();
-        let c_key = ContainerKey { db_id: 0, c_id: 0 };
+        let c_key = ContainerKey::new(0, 0);
 
         let mut frame1 = mp.create_new_page_for_write(c_key).unwrap();
         frame1[0] = 1;

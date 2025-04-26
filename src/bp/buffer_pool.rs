@@ -5,8 +5,8 @@ use crate::log;
 use crate::file_manager::iouring_async::GlobalRings;
 
 use super::{
-    frame_guards::{FrameMeta, FrameReadGuard, FrameWriteGuard},
     eviction_policy::EvictionPolicy,
+    frame_guards::{FrameMeta, FrameReadGuard, FrameWriteGuard},
     mem_pool_trait::{ContainerKey, MemPool, MemPoolStatus, MemoryStats, PageFrameKey, PageKey},
 };
 use crate::{
@@ -34,7 +34,7 @@ const EVICTION_SCAN_DEPTH: usize = 10;
 
 /// Statistics kept by the buffer pool.
 /// These statistics are used for decision making.
-struct BPStats {
+pub struct BPStats {
     new_page_request: AtomicUsize,
     read_request: AtomicUsize,
     read_request_waiting_for_write: AtomicUsize,
@@ -512,7 +512,7 @@ impl MemPool for BufferPool {
                         let page_to_frame = unsafe { &mut *self.page_to_frame.get() };
                         // Remove the old mapping
                         if let Some(old_key) = victim.page_key() {
-                            page_to_frame.remove(old_key).unwrap(); // Unwrap is safe because victim's write latch is held. No other thread can remove the old key from page_to_frame before this thread.
+                            page_to_frame.remove(&old_key).unwrap(); // Unwrap is safe because victim's write latch is held. No other thread can remove the old key from page_to_frame before this thread.
                         }
                         // Insert the new mapping
                         let container = self.container_manager.get_container(c_key);
@@ -526,7 +526,7 @@ impl MemPool for BufferPool {
 
                     // 4. Initialize the page
                     victim.set_id(page_key.page_id); // Initialize the page with the page id
-                    victim.page_key_mut().replace(page_key); // Set the frame key to the new page key
+                    victim.set_page_key(Some(page_key)); // Set the frame key to the new page key
                     victim.dirty().store(true, Ordering::Release);
 
                     Ok(victim)
@@ -564,7 +564,7 @@ impl MemPool for BufferPool {
                 // Remove the old mapping
                 for victim in victims.iter() {
                     if let Some(old_key) = victim.page_key() {
-                        page_to_frame.remove(old_key).unwrap(); // Unwrap is safe because victim's write latch is held. No other thread can remove the old key from page_to_frame before this thread.
+                        page_to_frame.remove(&old_key).unwrap(); // Unwrap is safe because victim's write latch is held. No other thread can remove the old key from page_to_frame before this thread.
                     }
                 }
 
@@ -587,7 +587,7 @@ impl MemPool for BufferPool {
                 let page_id = start_page_id + i as u32;
                 let key = PageKey::new(c_key, page_id);
                 victim.set_id(page_id);
-                victim.page_key_mut().replace(key);
+                victim.set_page_key(Some(key));
                 victim.dirty().store(true, Ordering::Release);
             }
 
@@ -712,7 +712,7 @@ impl MemPool for BufferPool {
                     // Likely path as the page has not been found in the page_to_frame mapping.
                     // Remove the victim from the page_to_frame mapping
                     if let Some(old_key) = victim.page_key() {
-                        page_to_frame.remove(old_key).unwrap();
+                        page_to_frame.remove(&old_key).unwrap();
                         // Unwrap is safe because victim's write latch is held. No other thread can remove the old key from page_to_frame before this thread.
                     }
                     // Insert the new mapping
@@ -725,7 +725,7 @@ impl MemPool for BufferPool {
                     container
                         .read_page(key.p_key().page_id, &mut victim)
                         .map(|()| {
-                            victim.page_key_mut().replace(key.p_key());
+                            victim.set_page_key(Some(key.p_key()));
                             victim.evict_info().reset();
                             victim.evict_info().update();
                         })?;
@@ -823,7 +823,7 @@ impl MemPool for BufferPool {
                     // Likely path as the page has not been found in the page_to_frame mapping.
                     // Remove the victim from the page_to_frame mapping
                     if let Some(old_key) = victim.page_key() {
-                        page_to_frame.remove(old_key).unwrap(); // Unwrap is safe because victim's write latch is held. No other thread can remove the old key from page_to_frame before this thread.
+                        page_to_frame.remove(&old_key).unwrap(); // Unwrap is safe because victim's write latch is held. No other thread can remove the old key from page_to_frame before this thread.
                     }
                     // Insert the new mapping
                     page_to_frame.insert(key.p_key(), victim.frame_id() as usize);
@@ -834,7 +834,7 @@ impl MemPool for BufferPool {
                     container
                         .read_page(key.p_key().page_id, &mut victim)
                         .map(|()| {
-                            victim.page_key_mut().replace(key.p_key());
+                            victim.set_page_key(Some(key.p_key()));
                             victim.evict_info().reset();
                             victim.evict_info().update();
                         })?;
@@ -1027,7 +1027,7 @@ impl BufferPool {
             if frame_to_page.contains_key(&i) {
                 assert_eq!(frame.page_key().unwrap(), frame_to_page[&i]);
             } else {
-                assert_eq!(frame.page_key(), &None);
+                assert_eq!(frame.page_key(), None);
             }
         }
         // println!("page_to_frame: {:?}", page_to_frame);
