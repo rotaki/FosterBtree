@@ -42,7 +42,7 @@ fn unpack(raw: u64) -> Option<PageKey> {
 
 /// Lock-free `Option<PageKey>` slot.
 #[repr(transparent)]
-pub struct AtomicOptionKey(AtomicU64);
+struct AtomicOptionKey(AtomicU64);
 
 impl AtomicOptionKey {
     pub const fn new_none() -> Self {

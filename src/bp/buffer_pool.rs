@@ -528,6 +528,8 @@ impl MemPool for BufferPool {
                     victim.set_id(page_key.page_id); // Initialize the page with the page id
                     victim.set_page_key(Some(page_key)); // Set the frame key to the new page key
                     victim.dirty().store(true, Ordering::Release);
+                    victim.evict_info().reset(); // Reset the eviction info
+                    victim.evict_info().update(); // Update the eviction info
 
                     Ok(victim)
                 }
@@ -589,6 +591,8 @@ impl MemPool for BufferPool {
                 victim.set_id(page_id);
                 victim.set_page_key(Some(key));
                 victim.dirty().store(true, Ordering::Release);
+                victim.evict_info().reset(); // Reset the eviction info
+                victim.evict_info().update(); // Update the eviction info
             }
 
             Ok(victims)
@@ -603,10 +607,8 @@ impl MemPool for BufferPool {
             // Fast path access to the frame using frame_id
             let frame_id = key.frame_id();
             if (frame_id as usize) < self.num_frames {
-                if let Some(g) = self.try_get_read_guard(frame_id as usize) {
-                    if g.page_key().map(|k| k == key.p_key()).unwrap_or(false) {
-                        return true;
-                    }
+                if unsafe { &(*self.metas.get())[frame_id as usize] }.key() == Some(key.p_key()) {
+                    return true;
                 }
             }
         }
@@ -638,14 +640,17 @@ impl MemPool for BufferPool {
             // Fast path access to the frame using frame_id
             let frame_id = key.frame_id();
             if (frame_id as usize) < self.num_frames {
-                match self.try_get_write_guard(frame_id as usize, false) {
-                    Some(g) if g.page_key().map(|k| k == key.p_key()).unwrap_or(false) => {
-                        g.evict_info().update();
-                        g.dirty().store(true, Ordering::Release);
-                        log_debug!("Page fast path write: {}", key);
-                        return Ok(g);
+                // Check the page_key first to avoid acquiring the latch of a not-matching pageA
+                if unsafe { &(*self.metas.get())[frame_id as usize] }.key() == Some(key.p_key()) {
+                    match self.try_get_write_guard(frame_id as usize, false) {
+                        Some(g) if g.page_key().map(|k| k == key.p_key()).unwrap_or(false) => {
+                            g.evict_info().update();
+                            g.dirty().store(true, Ordering::Release);
+                            log_debug!("Page fast path write: {}", key);
+                            return Ok(g);
+                        }
+                        _ => {}
                     }
-                    _ => {}
                 }
             }
             // Failed due to one of the following reasons:
@@ -745,15 +750,18 @@ impl MemPool for BufferPool {
             // Fast path access to the frame using frame_id
             let frame_id = key.frame_id();
             if (frame_id as usize) < self.num_frames {
-                let guard = self.try_get_read_guard(frame_id as usize);
-                match guard {
-                    Some(g) if g.page_key().map(|k| k == key.p_key()).unwrap_or(false) => {
-                        // Update the eviction info
-                        g.evict_info().update();
-                        log_debug!("Page fast path read: {}", key);
-                        return Ok(g);
+                // Check the page_key first to avoid acquiring the latch of a not-matching page
+                if unsafe { &(*self.metas.get())[frame_id as usize] }.key() == Some(key.p_key()) {
+                    let guard = self.try_get_read_guard(frame_id as usize);
+                    match guard {
+                        Some(g) if g.page_key().map(|k| k == key.p_key()).unwrap_or(false) => {
+                            // Update the eviction info
+                            g.evict_info().update();
+                            log_debug!("Page fast path read: {}", key);
+                            return Ok(g);
+                        }
+                        _ => {}
                     }
-                    _ => {}
                 }
             }
             // Failed due to one of the following reasons:
@@ -887,8 +895,7 @@ impl MemPool for BufferPool {
         let write_count = self.stats.write_count();
         let mut num_frames_per_container = BTreeMap::new();
         for i in 0..self.num_frames {
-            let frame = self.get_read_guard(i);
-            if let Some(key) = frame.page_key() {
+            if let Some(key) = unsafe { &*self.metas.get() }[i].key() {
                 *num_frames_per_container.entry(key.c_key).or_insert(0) += 1;
             }
         }
