@@ -654,7 +654,7 @@ pub fn main() {
     // Print the stats of primary, seocondary, and bp
     println!("Primary stats: \n{}", primary.page_stats(false));
     println!("Secondary stats: \n{}", secondary.stats());
-    println!("BP stats: \n{}", bp.stats());
+    println!("BP stats: \n{}", unsafe { bp.stats() });
 
     // Check the correctness of the hints in the secondary index
     println!(

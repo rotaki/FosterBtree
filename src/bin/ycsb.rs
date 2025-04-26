@@ -51,7 +51,7 @@ pub fn main() {
     let tbl_info = ycsb_load_all_tables(&txn_storage, &config);
     ycsb_show_table_stats(&txn_storage, &tbl_info);
 
-    println!("BP stats after load: \n{}", bp.stats());
+    println!("BP stats after load: \n{}", unsafe { bp.stats() });
 
     // ycsb_preliminary_secondary_scan(&txn_storage, &tbl_info);
 
@@ -91,7 +91,7 @@ pub fn main() {
         // Automatically join all threads
     });
 
-    println!("BP stats after warmup: \n{}", bp.stats());
+    println!("BP stats after warmup: \n{}", unsafe { bp.stats() });
 
     flag.store(true, Ordering::Release);
     // Run the benchmark
@@ -173,7 +173,7 @@ pub fn main() {
     println!("\nStat Details:");
     println!("{}", final_stat);
 
-    println!("BP stats: \n{}", bp.stats());
+    println!("BP stats: \n{}", unsafe { bp.stats() });
 }
 
 pub fn test_all_transactions<T: TxnStorageTrait>(

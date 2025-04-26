@@ -500,7 +500,7 @@ pub fn one_experiment(params: SecBenchParams) {
         &primary,
         perm.perm[0..params.num_keys].iter().copied(),
     );
-    println!("BP stats: \n{}", bp.stats());
+    println!("BP stats: \n{}", unsafe { bp.stats() });
     println!("Tree stats: \n{}", primary.page_stats(false));
     println!("++++++++++++++++++++++++++++++++++++++++++++");
     println!("[Page, Frame, Slot] hint");
@@ -597,7 +597,7 @@ pub fn one_experiment(params: SecBenchParams) {
             println!("Scan test {}: {:.2} keys/sec", j, throughput);
         }
     }
-    println!("BP stats: \n{}", bp.stats());
+    println!("BP stats: \n{}", unsafe { bp.stats() });
     bp.clear_dirty_flags().unwrap();
 }
 

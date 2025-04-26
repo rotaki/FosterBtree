@@ -376,7 +376,7 @@ fn run_secondary_lookups<M: MemPool>(
 ) {
     println!("{}", secondary.stats());
 
-    let bp_stats_pre = bp.stats();
+    let bp_stats_pre = unsafe { bp.stats() };
     let hint_hit_stats_pre = HINT_HINT_STATS.current();
     let start = std::time::Instant::now();
     // Only read num_keys keys from the permutation
@@ -392,7 +392,7 @@ fn run_secondary_lookups<M: MemPool>(
     //     black_box(result);
     // }
     let elapsed = start.elapsed();
-    let bp_stats_post = bp.stats();
+    let bp_stats_post = unsafe { bp.stats() };
     let hint_hit_stats_post = HINT_HINT_STATS.current();
     let bp_stats_diff = bp_stats_post.diff(&bp_stats_pre);
     let hint_hit_stats_diff = hint_hit_stats_post.diff(&hint_hit_stats_pre);
@@ -422,7 +422,7 @@ fn main() {
         let perm = Permutation::new(0, total_num_keys - 1);
         load_table(&params, &primary, perm.clone());
         // Print the page stats
-        println!("BP stats: \n{}", bp.stats());
+        println!("BP stats: \n{}", unsafe { bp.stats() });
         println!("Tree stats: \n{}", primary.page_stats(false));
         println!("++++++++++++++++++++++++++++++++++++++++++++");
         println!("[Page, Frame, Slot] hint");
@@ -433,9 +433,9 @@ fn main() {
             &with_slot_hint.secondary,
             perm.clone(),
         );
-        println!("BP stats: \n{}", bp.stats());
+        println!("BP stats: \n{}", unsafe { bp.stats() });
         run_secondary_lookups(&params, &with_slot_hint, &bp, perm.clone());
-        println!("BP stats: \n{}", bp.stats());
+        println!("BP stats: \n{}", unsafe { bp.stats() });
         println!("Tree stats: \n{}", primary.page_stats(false));
         println!("=========================================================================================");
     }

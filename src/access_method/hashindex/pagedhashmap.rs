@@ -41,7 +41,7 @@ struct _BucketMeta {
 }
 
 /// Opportunistically try to fix the child page frame id
-fn fix_frame_id<'a>(this: FrameReadGuard<'a>, new_frame_key: &PageFrameKey) -> FrameReadGuard<'a> {
+fn fix_frame_id(this: FrameReadGuard, new_frame_key: &PageFrameKey) -> FrameReadGuard {
     match this.try_upgrade(true) {
         Ok(mut write_guard) => {
             write_guard.set_next_frame_id(new_frame_key.frame_id());
@@ -660,7 +660,7 @@ unsafe impl<T: MemPool> Send for PagedHashMap<T> {}
 
 pub struct PagedHashMapIter<T: MemPool> {
     map: Arc<PagedHashMap<T>>,
-    current_page: Option<FrameReadGuard<'static>>,
+    current_page: Option<FrameReadGuard>,
     current_index: usize,
     current_bucket: usize,
     initialized: bool,
@@ -682,11 +682,7 @@ impl<T: MemPool> PagedHashMapIter<T> {
     fn initialize(&mut self) {
         assert!(!self.initialized);
         let page_key = PageFrameKey::new(self.map.c_key, 1);
-        let first_page = unsafe {
-            std::mem::transmute::<FrameReadGuard, FrameReadGuard<'static>>(
-                self.map.read_page(page_key),
-            )
-        };
+        let first_page = self.map.read_page(page_key);
         self.current_page = Some(first_page);
     }
 }
@@ -725,11 +721,7 @@ impl<T: MemPool> Iterator for PagedHashMapIter<T> {
             // If end of current page, fetch next
             if next_page_id != 0 {
                 let nex_page_key = PageFrameKey::new(self.map.c_key, next_page_id);
-                let next_page = unsafe {
-                    std::mem::transmute::<FrameReadGuard, FrameReadGuard<'static>>(
-                        self.map.read_page(nex_page_key),
-                    )
-                };
+                let next_page = self.map.read_page(nex_page_key);
                 self.current_page = Some(next_page);
                 self.current_index = 0;
                 continue;
@@ -739,11 +731,7 @@ impl<T: MemPool> Iterator for PagedHashMapIter<T> {
             self.current_bucket += 1;
             if self.current_bucket <= self.map.bucket_num {
                 let next_page_key = PageFrameKey::new(self.map.c_key, self.current_bucket as u32);
-                let next_page = unsafe {
-                    std::mem::transmute::<FrameReadGuard, FrameReadGuard<'static>>(
-                        self.map.read_page(next_page_key),
-                    )
-                };
+                let next_page = self.map.read_page(next_page_key);
                 self.current_page = Some(next_page);
                 self.current_index = 0;
                 continue;

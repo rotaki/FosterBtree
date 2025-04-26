@@ -2,7 +2,6 @@ use rand::RngCore;
 
 use crate::random::small_thread_rng;
 
-use super::buffer_frame::BufferFrame;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 // Static atomic counter for LRU timestamp
@@ -13,11 +12,7 @@ static LRU_COUNTER: AtomicU64 = AtomicU64::new(INITIAL_COUNTER);
 // It must ensure that multiple threads can safely update the internal states concurrently.
 pub trait EvictionPolicy: Send + Sync {
     fn new() -> Self;
-    /// Returns the eviction score of the buffer frame.
-    /// The lower the score, the more likely the buffer frame is to be evicted.
-    fn score(&self, frame: &BufferFrame) -> u64
-    where
-        Self: Sized;
+    fn score(&self) -> u64;
     fn update(&self);
     fn reset(&self);
 }
@@ -30,7 +25,7 @@ impl EvictionPolicy for DummyEvictionPolicy {
     }
 
     #[inline]
-    fn score(&self, _frame: &BufferFrame) -> u64 {
+    fn score(&self) -> u64 {
         0
     }
 
@@ -42,7 +37,7 @@ impl EvictionPolicy for DummyEvictionPolicy {
 }
 
 pub struct LRUEvictionPolicy {
-    pub score: AtomicU64,
+    score: AtomicU64,
 }
 
 impl EvictionPolicy for LRUEvictionPolicy {
@@ -52,7 +47,7 @@ impl EvictionPolicy for LRUEvictionPolicy {
         }
     }
 
-    fn score(&self, _: &BufferFrame) -> u64
+    fn score(&self) -> u64
     where
         Self: Sized,
     {

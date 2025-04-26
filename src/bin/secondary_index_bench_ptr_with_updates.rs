@@ -484,7 +484,7 @@ fn bench_secondary<M: MemPool>(
 
     let mut avg = 0;
     for i in 0..warmup + exec {
-        // let bp_stats_pre = bp.stats();
+        // let bp_stats_pre = unsafe { bp.stats() };
         let perm = Permutation::new(0, params.num_keys - 1);
         let start = std::time::Instant::now();
         for key in perm {
@@ -503,7 +503,7 @@ fn bench_secondary<M: MemPool>(
         //     black_box(result);
         // }
         let elapsed = start.elapsed();
-        // let bp_stats_post = bp.stats();
+        // let bp_stats_post = unsafe { bp.stats() };
         // let diff = bp_stats_post.diff(&bp_stats_pre);
         let name = if i < warmup { "Warmup" } else { "Execution" };
         println!("Iteration({}) {}: time: {:?}", name, i, elapsed,);
@@ -551,7 +551,7 @@ fn main() {
         let primary = Arc::new(FosterBtree::new(ContainerKey::new(0, 0), Arc::clone(&bp)));
         load_table(&params, &primary);
         // Print the page stats
-        println!("BP stats: \n{}", bp.stats());
+        println!("BP stats: \n{}", unsafe { bp.stats() });
         println!("Tree stats: \n{}", primary.page_stats(false));
         println!("++++++++++++++++++++++++++++++++++++++++++++");
         println!("[Page, Frame, Slot] hint");
@@ -560,13 +560,13 @@ fn main() {
             "Pre hint correctness: {}",
             with_slot_hint.check_hint_correctness()
         );
-        println!("BP stats: \n{}", bp.stats());
+        println!("BP stats: \n{}", unsafe { bp.stats() });
         let with_slot_hint_time = bench_secondary(&params, &with_slot_hint, &bp);
         println!(
             "Post hint correctness: {}",
             with_slot_hint.check_hint_correctness()
         );
-        println!("BP stats: \n{}", bp.stats());
+        println!("BP stats: \n{}", unsafe { bp.stats() });
         println!("++++++++++++++++++++++++++++++++++++++++++++");
         println!("Summary");
         println!("With all hints enabled: {} ms", with_slot_hint_time);

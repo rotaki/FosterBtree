@@ -505,7 +505,7 @@ impl<T: MemPool> ReadOptimizedChain<T> {
 }
 
 /// Opportunistically try to fix the next page frame id
-fn fix_frame_id<'a>(this: FrameReadGuard<'a>, new_frame_key: &PageFrameKey) -> FrameReadGuard<'a> {
+fn fix_frame_id(this: FrameReadGuard, new_frame_key: &PageFrameKey) -> FrameReadGuard {
     match this.try_upgrade(true) {
         Ok(mut write_guard) => {
             write_guard.set_next_page(new_frame_key.p_key().page_id, new_frame_key.frame_id());
@@ -533,7 +533,7 @@ pub struct ReadOptimizedChainRangeScanner<T: MemPool> {
     // States
     initialized: bool,
     finished: bool,
-    current_page: Option<FrameReadGuard<'static>>, // As long as chain is alive, bp is alive so the frame is alive
+    current_page: Option<FrameReadGuard>, // As long as chain is alive, bp is alive so the frame is alive
     current_slot_id: u32,
 }
 
@@ -588,8 +588,6 @@ impl<T: MemPool> ReadOptimizedChainRangeScanner<T> {
     fn initialize(&mut self) {
         // Start scanning from the first page
         let first_page = self.chain.first_page();
-        let first_page =
-            unsafe { std::mem::transmute::<FrameReadGuard, FrameReadGuard<'static>>(first_page) };
         let slot_id = first_page.binary_search(&self.l_key).1;
 
         self.current_page = Some(first_page);
@@ -634,11 +632,6 @@ impl<T: MemPool> Iterator for ReadOptimizedChainRangeScanner<T> {
                             next_page_id,
                             next_frame_id,
                         ));
-                        let next_page = unsafe {
-                            std::mem::transmute::<FrameReadGuard, FrameReadGuard<'static>>(
-                                next_page,
-                            )
-                        };
                         self.current_slot_id = next_page.binary_search(&self.l_key).1;
                         self.current_page = Some(next_page);
                         continue;
@@ -660,9 +653,6 @@ impl<T: MemPool> Iterator for ReadOptimizedChainRangeScanner<T> {
                     next_page_id,
                     next_frame_id,
                 ));
-                let next_page = unsafe {
-                    std::mem::transmute::<FrameReadGuard, FrameReadGuard<'static>>(next_page)
-                };
                 self.current_slot_id = next_page.binary_search(&self.l_key).1;
                 self.current_page = Some(next_page);
                 continue;

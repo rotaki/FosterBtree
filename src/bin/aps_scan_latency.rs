@@ -122,7 +122,7 @@ fn main() {
     println!("Loading table...");
     load_table(&params, &table);
 
-    println!("Buffer pool stats after load: {}", bp.stats());
+    println!("Buffer pool stats after load: {}", unsafe { bp.stats() });
 
     println!("Num KVs: {}", table.num_kvs());
     println!("Num pages: {}", table.num_pages());
@@ -130,12 +130,12 @@ fn main() {
     bp.flush_all().unwrap(); // Ensure no dirty pages are left behind
 
     println!("Resetting stats...");
-    bp.reset_stats();
+    unsafe { bp.reset_stats() };
 
     println!("Executing warmup...");
     let dur = execute_workload(&params, table.clone());
     println!("Warmup Latency: {:?}", dur);
-    bp.reset_stats();
+    unsafe { bp.reset_stats() };
 
     println!("Executing workload...");
     let num_scans = 3;
@@ -144,9 +144,9 @@ fn main() {
         let dur = execute_workload(&params, table.clone());
         total_time += dur;
         println!("Scan {} took {:?}", i, dur);
-        println!("Buffer pool stats after exec: {}", bp.stats());
+        println!("Buffer pool stats after exec: {}", unsafe { bp.stats() });
         bp.flush_all().unwrap();
-        bp.reset_stats();
+        unsafe { bp.reset_stats() };
     }
     println!("Avg Latency: {:?}", total_time / num_scans);
 }

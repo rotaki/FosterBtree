@@ -42,7 +42,7 @@ pub fn main() {
     let tbl_info = tpcc_load_all_tables(&txn_storage, &config);
     tpcc_show_table_stats(&txn_storage, &tbl_info);
 
-    println!("BP stats after load: \n{}", bp.stats());
+    println!("BP stats after load: \n{}", unsafe { bp.stats() });
 
     let mut stats_and_outs = Vec::with_capacity(config.num_threads);
     let flag = AtomicBool::new(true); // while flag is true, keep running the benchmark
@@ -72,7 +72,7 @@ pub fn main() {
         // Automatically join all threads
     });
 
-    println!("BP stats after warmup: \n{}", bp.stats());
+    println!("BP stats after warmup: \n{}", unsafe { bp.stats() });
 
     flag.store(true, Ordering::Release);
     // Run the benchmark
@@ -163,7 +163,7 @@ pub fn main() {
     DeliveryTxn::print_abort_details(&final_stat[TPCCTxnProfileID::DeliveryTxn].abort_details);
     StockLevelTxn::print_abort_details(&final_stat[TPCCTxnProfileID::StockLevelTxn].abort_details);
 
-    println!("BP stats: \n{}", bp.stats());
+    println!("BP stats: \n{}", unsafe { bp.stats() });
 }
 
 pub fn test_all_transactions<T: TxnStorageTrait>(

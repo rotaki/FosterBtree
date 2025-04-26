@@ -25,15 +25,17 @@ fn main() {
 
     run_bench(insert_params, kvs, tree.clone());
 
-    println!("After Insertion\n{}", tree.mem_pool.stats());
+    println!("After Insertion\n{}", unsafe { tree.mem_pool.stats() });
 
     println!("Btree page stats: ");
     println!("{}", tree.page_stats(false));
 
     tree.mem_pool.flush_all().unwrap();
-    println!("After Flushing\n{}", tree.mem_pool.stats());
-    tree.mem_pool.reset_stats();
-    println!("After Resetting Stats\n{}", tree.mem_pool.stats());
+    println!("After Flushing\n{}", unsafe { tree.mem_pool.stats() });
+    unsafe { tree.mem_pool.reset_stats() };
+    println!("After Resetting Stats\n{}", unsafe {
+        tree.mem_pool.stats()
+    });
 
     #[cfg(feature = "stat")]
     {
@@ -60,11 +62,13 @@ fn main() {
     // Done inserting
     run_bench(get_params, kvs, tree.clone());
 
-    println!("After Get\n{}", tree.mem_pool.stats());
+    println!("After Get\n{}", unsafe { tree.mem_pool.stats() });
     tree.mem_pool.flush_all().unwrap();
-    println!("After Flushing\n{}", tree.mem_pool.stats());
-    tree.mem_pool.reset_stats();
-    println!("After Resetting Stats\n{}", tree.mem_pool.stats());
+    println!("After Flushing\n{}", unsafe { tree.mem_pool.stats() });
+    unsafe { tree.mem_pool.reset_stats() };
+    println!("After Resetting Stats\n{}", unsafe {
+        tree.mem_pool.stats()
+    });
 
     #[cfg(feature = "stat")]
     {

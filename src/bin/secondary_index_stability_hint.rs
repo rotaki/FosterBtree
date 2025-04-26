@@ -465,7 +465,7 @@ pub fn insert_experiment(params: SecBenchParams) {
         &primary,
         perm.perm[0..params.num_keys].iter().copied(),
     );
-    println!("BP stats: \n{}", bp.stats());
+    println!("BP stats: \n{}", unsafe { bp.stats() });
     println!("Tree stats: \n{}", primary.page_stats(false));
     println!("++++++++++++++++++++++++++++++++++++++++++++");
     println!("[Page, Frame, Slot] hint");
@@ -476,7 +476,7 @@ pub fn insert_experiment(params: SecBenchParams) {
     );
     println!("Hint correctness: {}", secondary.check_hint_correctness());
 
-    println!("bp stats: \n{}", bp.stats());
+    println!("bp stats: \n{}", unsafe { bp.stats() });
 
     let num_insertions = 10;
 
@@ -500,10 +500,10 @@ pub fn insert_experiment(params: SecBenchParams) {
             perm.perm[start_idx..end_idx].iter().copied(),
         );
         println!("Hint correctness: {}", secondary.check_hint_correctness());
-        println!("bp stats: \n{}", bp.stats());
+        println!("bp stats: \n{}", unsafe { bp.stats() });
     }
 
-    println!("BP stats: \n{}", bp.stats());
+    println!("BP stats: \n{}", unsafe { bp.stats() });
     bp.clear_dirty_flags().unwrap();
 }
 
@@ -519,7 +519,7 @@ pub fn delete_experiment(params: SecBenchParams) {
         &primary,
         perm.perm[0..params.num_keys].iter().copied(),
     );
-    println!("BP stats: \n{}", bp.stats());
+    println!("BP stats: \n{}", unsafe { bp.stats() });
     println!("Tree stats: \n{}", primary.page_stats(false));
     println!("++++++++++++++++++++++++++++++++++++++++++++");
     println!("[Page, Frame, Slot] hint");
@@ -549,7 +549,7 @@ pub fn delete_experiment(params: SecBenchParams) {
         println!("Hint correctness: {}", secondary.check_hint_correctness());
     }
 
-    println!("BP stats: \n{}", bp.stats());
+    println!("BP stats: \n{}", unsafe { bp.stats() });
     bp.clear_dirty_flags().unwrap();
 }
 

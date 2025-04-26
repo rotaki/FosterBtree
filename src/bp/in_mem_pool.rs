@@ -1,7 +1,6 @@
 use std::{
     cell::UnsafeCell,
     collections::{hash_map::Entry, BTreeMap, HashMap},
-    mem::ManuallyDrop,
 };
 
 use crate::{
@@ -10,7 +9,7 @@ use crate::{
 };
 
 use super::{
-    buffer_frame::{box_as_mut_ptr, BufferFrame, FrameMeta},
+    buffer_frame::{box_as_mut_ptr, FrameMeta},
     mem_pool_trait::{MemPool, MemoryStats, PageKey},
     prelude::{ContainerKey, FrameReadGuard, FrameWriteGuard, MemPoolStatus, PageFrameKey},
 };
@@ -22,21 +21,12 @@ use super::{
 /// Getting a page for read or write requires a shared latch.
 pub struct InMemPool {
     latch: RwLatch,
-    frames: ManuallyDrop<UnsafeCell<Vec<Box<BufferFrame>>>>, // Box is required to ensure that the frame does not move when the vector is resized
-    pages: ManuallyDrop<UnsafeCell<Vec<Box<Page>>>>,
-    metas: ManuallyDrop<UnsafeCell<Vec<Box<FrameMeta>>>>,
+    #[allow(clippy::vec_box)]
+    pages: UnsafeCell<Vec<Box<Page>>>, // This must be a vector of boxes to allow for dynamic size of the vector
+    #[allow(clippy::vec_box)]
+    metas: UnsafeCell<Vec<Box<FrameMeta>>>, // This must be a vector of boxes to allow for dynamic size of the vector
     page_to_frame: UnsafeCell<HashMap<PageKey, usize>>,
     container_page_count: UnsafeCell<HashMap<ContainerKey, u32>>,
-}
-
-impl Drop for InMemPool {
-    fn drop(&mut self) {
-        unsafe {
-            ManuallyDrop::drop(&mut self.frames); // Frames must be dropped first because it contains pointers to metas and pages
-            ManuallyDrop::drop(&mut self.pages);
-            ManuallyDrop::drop(&mut self.metas);
-        }
-    }
 }
 
 impl Default for InMemPool {
@@ -49,9 +39,8 @@ impl InMemPool {
     pub fn new() -> Self {
         InMemPool {
             latch: RwLatch::default(),
-            frames: ManuallyDrop::new(UnsafeCell::new(Vec::new())),
-            pages: ManuallyDrop::new(UnsafeCell::new(Vec::new())),
-            metas: ManuallyDrop::new(UnsafeCell::new(Vec::new())),
+            pages: UnsafeCell::new(Vec::new()),
+            metas: UnsafeCell::new(Vec::new()),
             page_to_frame: UnsafeCell::new(HashMap::new()),
             container_page_count: UnsafeCell::new(HashMap::new()),
         }
@@ -74,26 +63,58 @@ impl InMemPool {
     }
 
     unsafe fn alloc_frame(&self, c_key: ContainerKey, page_id: PageId) -> FrameWriteGuard {
-        let frames = &mut *self.frames.get();
         let pages = &mut *self.pages.get();
         let metas = &mut *self.metas.get();
         let page_to_frame = &mut *self.page_to_frame.get();
-        let frame_index = frames.len();
+        let frame_index = pages.len();
 
         let meta = Box::new(FrameMeta::new(frame_index as u32));
         metas.push(meta);
         let page = Box::new(Page::new_empty());
         pages.push(page);
-        let buffer_frame = Box::new(BufferFrame::new(
-            box_as_mut_ptr(&mut metas[frame_index]),
-            box_as_mut_ptr(&mut pages[frame_index]),
-        ));
-        frames.push(buffer_frame);
 
         let page_key = PageKey::new(c_key, page_id);
         page_to_frame.insert(page_key, frame_index);
-        let guard = (frames.get(frame_index).unwrap()).write(true);
-        guard
+
+        FrameWriteGuard::new(
+            box_as_mut_ptr(&mut metas[frame_index]),
+            box_as_mut_ptr(&mut pages[frame_index]),
+            true,
+        )
+    }
+
+    // Unsafe because a push to the vector may cause a reallocation
+    // of the metas and pages vectors.
+    unsafe fn get_read_guard(&self, frame_index: usize) -> FrameReadGuard {
+        let metas = unsafe { &mut *self.metas.get() };
+        let pages = unsafe { &mut *self.pages.get() };
+        FrameReadGuard::new(
+            box_as_mut_ptr(&mut metas[frame_index]),
+            box_as_mut_ptr(&mut pages[frame_index]),
+        )
+    }
+
+    // Unsafe because a push to the vector may cause a reallocation
+    // of the metas and pages vectors.
+    unsafe fn try_get_read_guard(&self, frame_index: usize) -> Option<FrameReadGuard> {
+        let metas = unsafe { &mut *self.metas.get() };
+        let pages = unsafe { &mut *self.pages.get() };
+        FrameReadGuard::try_new(
+            box_as_mut_ptr(&mut metas[frame_index]),
+            box_as_mut_ptr(&mut pages[frame_index]),
+        )
+    }
+
+    // Unsafe because a push to the vector may cause a reallocation
+    // of the metas and pages vectors.
+    unsafe fn try_get_write_guard(&self, frame_index: usize) -> Option<FrameWriteGuard> {
+        let metas = unsafe { &mut *self.metas.get() };
+        let pages = unsafe { &mut *self.pages.get() };
+        FrameWriteGuard::try_new(
+            box_as_mut_ptr(&mut metas[frame_index]),
+            box_as_mut_ptr(&mut pages[frame_index]),
+            true,
+        )
     }
 }
 
@@ -192,7 +213,6 @@ impl MemPool for InMemPool {
 
     fn get_page_for_write(&self, key: PageFrameKey) -> Result<FrameWriteGuard, MemPoolStatus> {
         self.shared();
-        let frames = unsafe { &*self.frames.get() };
         let page_to_frame = unsafe { &*self.page_to_frame.get() };
         let frame_index = match page_to_frame.get(&key.p_key()) {
             Some(index) => *index,
@@ -202,7 +222,7 @@ impl MemPool for InMemPool {
             }
         };
 
-        let frame = (frames.get(frame_index).unwrap()).try_write(true);
+        let frame = unsafe { self.try_get_write_guard(frame_index) };
         self.release_shared();
         if let Some(frame) = frame {
             Ok(frame)
@@ -213,7 +233,6 @@ impl MemPool for InMemPool {
 
     fn get_page_for_read(&self, key: PageFrameKey) -> Result<FrameReadGuard, MemPoolStatus> {
         self.shared();
-        let frames = unsafe { &*self.frames.get() };
         let page_to_frame = unsafe { &*self.page_to_frame.get() };
         let frame_index = match page_to_frame.get(&key.p_key()) {
             Some(index) => *index,
@@ -223,7 +242,7 @@ impl MemPool for InMemPool {
             }
         };
 
-        let frame = (frames.get(frame_index).unwrap()).try_read();
+        let frame = unsafe { self.try_get_read_guard(frame_index) };
         self.release_shared();
         if let Some(frame) = frame {
             Ok(frame)
@@ -236,11 +255,11 @@ impl MemPool for InMemPool {
         Ok(())
     }
 
-    fn stats(&self) -> MemoryStats {
-        let num_frames = unsafe { &*self.frames.get() }.len();
+    unsafe fn stats(&self) -> MemoryStats {
+        let num_frames = (*self.pages.get()).len();
         let mut containers = BTreeMap::new();
-        for frame in unsafe { &*self.frames.get() }.iter() {
-            let frame = frame.read();
+        for i in 0..num_frames {
+            let frame = unsafe { self.get_read_guard(i) };
             if let Some(key) = frame.page_key() {
                 *containers.entry(key.c_key).or_insert(0) += 1;
             }
@@ -259,7 +278,7 @@ impl MemPool for InMemPool {
         }
     }
 
-    fn reset_stats(&self) {
+    unsafe fn reset_stats(&self) {
         // Do nothing
     }
 
@@ -282,28 +301,33 @@ impl MemPool for InMemPool {
 
 #[cfg(test)]
 impl InMemPool {
-    pub fn check_all_frames_unlatched(&self) {
-        let frames = unsafe { &*self.frames.get() };
-        for frame in frames.iter() {
-            frame.try_write(false).unwrap();
+    /// # Safety
+    ///
+    /// The caller must ensure that the pool is not being modified while this function is called.
+    unsafe fn check_all_frames_unlatched(&self) {
+        for i in 0..(*self.pages.get()).len() {
+            unsafe { self.try_get_write_guard(i) }.unwrap();
         }
     }
 
-    // Invariant: page_to_frame contains all pages in frames
-    pub fn check_page_to_frame(&self) {
-        let frames = unsafe { &*self.frames.get() };
-        let page_to_frame = unsafe { &*self.page_to_frame.get() };
+    /// Invariant: page_to_frame contains all pages in frames
+    /// # Safety
+    ///
+    /// The caller must ensure that the pool is not being modified while this function is called.
+    unsafe fn check_page_to_frame(&self) {
+        let page_to_frame = &*self.page_to_frame.get();
         for (key, index) in page_to_frame.iter() {
-            let frame = &frames[*index];
-            let frame = frame.read();
+            let frame = self.get_read_guard(*index);
             assert_eq!(*frame.page_key(), Some(*key));
         }
     }
 
-    pub fn check_frame_id_and_page_id_match(&self) {
-        let frames = unsafe { &*self.frames.get() };
-        for frame in frames.iter() {
-            let frame = frame.read();
+    /// # Safety
+    ///
+    /// The caller must ensure that the pool is not being modified while this function is called.
+    unsafe fn check_frame_id_and_page_id_match(&self) {
+        for i in 0..(*self.pages.get()).len() {
+            let frame = self.get_read_guard(i);
             let key = frame.page_key().unwrap();
             let page_id = frame.get_id();
             assert_eq!(key.page_id, page_id);
@@ -348,9 +372,15 @@ mod tests {
             }
         });
 
-        mp.check_all_frames_unlatched();
-        mp.check_page_to_frame();
-        mp.check_frame_id_and_page_id_match();
+        unsafe {
+            mp.check_all_frames_unlatched();
+        }
+        unsafe {
+            mp.check_page_to_frame();
+        }
+        unsafe {
+            mp.check_frame_id_and_page_id_match();
+        }
         let guard = mp.get_page_for_read(page_key).unwrap();
         assert_eq!(guard[0], num_threads * num_iterations);
     }
@@ -371,9 +401,15 @@ mod tests {
             assert_eq!(frame.page_key().unwrap(), PageKey::new(c_key, i));
         }
 
-        mp.check_all_frames_unlatched();
-        mp.check_page_to_frame();
-        mp.check_frame_id_and_page_id_match();
+        unsafe {
+            mp.check_all_frames_unlatched();
+        }
+        unsafe {
+            mp.check_page_to_frame();
+        }
+        unsafe {
+            mp.check_frame_id_and_page_id_match();
+        }
     }
 
     #[test]

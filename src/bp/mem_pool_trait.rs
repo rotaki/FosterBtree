@@ -352,8 +352,16 @@ pub trait MemPool: Sync + Send {
     fn fast_evict(&self, frame_id: u32) -> Result<(), MemPoolStatus>;
 
     /// Return the runtime statistics of the memory pool.
-    fn stats(&self) -> MemoryStats;
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that the memory pool is not in use when calling this function.
+    unsafe fn stats(&self) -> MemoryStats;
 
     /// Reset the runtime statistics of the memory pool.
-    fn reset_stats(&self);
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that the memory pool is not in use when calling this function.
+    unsafe fn reset_stats(&self);
 }

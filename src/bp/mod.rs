@@ -6,7 +6,7 @@ mod mem_pool_trait;
 
 use std::sync::Arc;
 
-pub use buffer_frame::{BufferFrame, FrameReadGuard, FrameWriteGuard};
+pub use buffer_frame::{FrameReadGuard, FrameWriteGuard};
 pub use buffer_pool::BufferPool;
 pub use in_mem_pool::InMemPool;
 pub use mem_pool_trait::{
@@ -31,8 +31,7 @@ pub fn get_in_mem_pool() -> Arc<InMemPool> {
 }
 pub mod prelude {
     pub use super::{
-        get_in_mem_pool, get_test_bp, BufferFrame, BufferPool, ContainerId, ContainerKey,
-        DatabaseId, FrameReadGuard, FrameWriteGuard, InMemPool, MemPool, MemPoolStatus,
-        PageFrameKey,
+        get_in_mem_pool, get_test_bp, BufferPool, ContainerId, ContainerKey, DatabaseId,
+        FrameReadGuard, FrameWriteGuard, InMemPool, MemPool, MemPoolStatus, PageFrameKey,
     };
 }

@@ -155,16 +155,12 @@ impl<T: MemPool> AppendOnlyStore<T> {
         }
     }
 
-    fn read_page(&self, page_key: PageFrameKey) -> FrameReadGuard<'static> {
+    fn read_page(&self, page_key: PageFrameKey) -> FrameReadGuard {
         let base: u64 = 2;
         let mut attempts = 0;
         loop {
             match self.mem_pool.get_page_for_read(page_key) {
-                Ok(page) => {
-                    return unsafe {
-                        std::mem::transmute::<FrameReadGuard, FrameReadGuard<'static>>(page)
-                    }
-                }
+                Ok(page) => return page,
                 Err(MemPoolStatus::FrameReadLatchGrantFailed) => {
                     std::thread::sleep(Duration::from_nanos(base.pow(attempts)));
                     attempts += 1;
@@ -246,7 +242,7 @@ pub struct AppendOnlyStoreScanner<T: MemPool> {
 
     initialized: bool,
     finished: bool,
-    current_page: Option<FrameReadGuard<'static>>,
+    current_page: Option<FrameReadGuard>,
     current_slot_id: u32,
 }
 

@@ -88,7 +88,7 @@ fn main() {
     println!("BP Foster BTree Insertion Parallel: {:?}", elapsed);
 
     // BP stats
-    let stats = bp.stats();
+    let stats = unsafe { bp.stats() };
     println!("BP Stats: {}", stats);
     bp.clear_dirty_flags().unwrap();
 }

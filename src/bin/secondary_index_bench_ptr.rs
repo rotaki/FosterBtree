@@ -672,7 +672,7 @@ fn bench_secondary<M: MemPool, T: SecondaryIndex<M>>(
 
     let mut avg = 0;
     for i in 0..warmup + exec {
-        let bp_stats_pre = bp.stats();
+        let bp_stats_pre = unsafe { bp.stats() };
         let perm = Permutation::new(0, params.num_keys - 1);
         let start = std::time::Instant::now();
         for key in perm {
@@ -687,7 +687,7 @@ fn bench_secondary<M: MemPool, T: SecondaryIndex<M>>(
         //     black_box(result);
         // }
         let elapsed = start.elapsed();
-        let bp_stats_post = bp.stats();
+        let bp_stats_post = unsafe { bp.stats() };
         let diff = bp_stats_post.diff(&bp_stats_pre);
         let name = if i < warmup { "Warmup" } else { "Execution" };
         println!(
@@ -730,15 +730,15 @@ fn main() {
         let primary = Arc::new(FosterBtree::new(ContainerKey::new(0, 0), Arc::clone(&bp)));
         load_table(&params, &primary);
         // Print the page stats
-        println!("BP stats: \n{}", bp.stats());
+        println!("BP stats: \n{}", unsafe { bp.stats() });
         println!("Tree stats: \n{}", primary.page_stats(false));
         println!("++++++++++++++++++++++++++++++++++++++++++++");
         println!("No hint");
         let normal = SecondaryNoHint::new(&primary, 10);
         bp.flush_all_and_reset().unwrap();
-        println!("BP stats: \n{}", bp.stats());
+        println!("BP stats: \n{}", unsafe { bp.stats() });
         let normal_time = bench_secondary(&params, &normal, &bp);
-        println!("BP stats: \n{}", bp.stats());
+        println!("BP stats: \n{}", unsafe { bp.stats() });
         println!("Summary");
         println!("Without hint: {} ms", normal_time);
         println!("=========================================================================================");
@@ -751,15 +751,15 @@ fn main() {
         let primary = Arc::new(FosterBtree::new(ContainerKey::new(0, 0), Arc::clone(&bp)));
         load_table(&params, &primary);
         // Print the page stats
-        println!("BP stats: \n{}", bp.stats());
+        println!("BP stats: \n{}", unsafe { bp.stats() });
         println!("Tree stats: \n{}", primary.page_stats(false));
         println!("++++++++++++++++++++++++++++++++++++++++++++");
         println!("[Page] hint");
         let with_page_hint = SecondaryLeafPageHint::new(&primary, 20);
         bp.flush_all_and_reset().unwrap();
-        println!("BP stats: \n{}", bp.stats());
+        println!("BP stats: \n{}", unsafe { bp.stats() });
         let with_page_hint_time = bench_secondary(&params, &with_page_hint, &bp);
-        println!("BP stats: \n{}", bp.stats());
+        println!("BP stats: \n{}", unsafe { bp.stats() });
         println!("Summary");
         println!("With leaf hint: {} ms", with_page_hint_time);
         println!("=========================================================================================");
@@ -772,15 +772,15 @@ fn main() {
         let primary = Arc::new(FosterBtree::new(ContainerKey::new(0, 0), Arc::clone(&bp)));
         load_table(&params, &primary);
         // Print the page stats
-        println!("BP stats: \n{}", bp.stats());
+        println!("BP stats: \n{}", unsafe { bp.stats() });
         println!("Tree stats: \n{}", primary.page_stats(false));
         println!("++++++++++++++++++++++++++++++++++++++++++++");
         println!("[Page, Frame] hint");
         let with_frame_hint = SecondaryLeafPageFrameHint::new(&primary, 30);
         bp.flush_all_and_reset().unwrap();
-        println!("BP stats: \n{}", bp.stats());
+        println!("BP stats: \n{}", unsafe { bp.stats() });
         let with_frame_hint_time = bench_secondary(&params, &with_frame_hint, &bp);
-        println!("BP stats: \n{}", bp.stats());
+        println!("BP stats: \n{}", unsafe { bp.stats() });
         println!("Summary");
         println!("With leaf hint: {} ms", with_frame_hint_time);
         println!("=========================================================================================");
@@ -792,15 +792,15 @@ fn main() {
         let primary = Arc::new(FosterBtree::new(ContainerKey::new(0, 0), Arc::clone(&bp)));
         load_table(&params, &primary);
         // Print the page stats
-        println!("BP stats: \n{}", bp.stats());
+        println!("BP stats: \n{}", unsafe { bp.stats() });
         println!("Tree stats: \n{}", primary.page_stats(false));
         println!("++++++++++++++++++++++++++++++++++++++++++++");
         println!("[Page, Slot] hint");
         let with_slot_hint = SecondaryPageSlotHint::new(&primary, 40);
         bp.flush_all_and_reset().unwrap();
-        println!("BP stats: \n{}", bp.stats());
+        println!("BP stats: \n{}", unsafe { bp.stats() });
         let with_slot_hint_time = bench_secondary(&params, &with_slot_hint, &bp);
-        println!("BP stats: \n{}", bp.stats());
+        println!("BP stats: \n{}", unsafe { bp.stats() });
         println!("++++++++++++++++++++++++++++++++++++++++++++");
         println!("Summary");
         println!("With slot hint: {} ms", with_slot_hint_time);
@@ -814,15 +814,15 @@ fn main() {
         let primary = Arc::new(FosterBtree::new(ContainerKey::new(0, 0), Arc::clone(&bp)));
         load_table(&params, &primary);
         // Print the page stats
-        println!("BP stats: \n{}", bp.stats());
+        println!("BP stats: \n{}", unsafe { bp.stats() });
         println!("Tree stats: \n{}", primary.page_stats(false));
         println!("++++++++++++++++++++++++++++++++++++++++++++");
         println!("[Page, Frame, Slot] hint");
         let with_slot_hint = SecondaryPageFrameSlotHint::new(&primary, 50);
         bp.flush_all_and_reset().unwrap();
-        println!("BP stats: \n{}", bp.stats());
+        println!("BP stats: \n{}", unsafe { bp.stats() });
         let with_slot_hint_time = bench_secondary(&params, &with_slot_hint, &bp);
-        println!("BP stats: \n{}", bp.stats());
+        println!("BP stats: \n{}", unsafe { bp.stats() });
         println!("++++++++++++++++++++++++++++++++++++++++++++");
         println!("Summary");
         println!("With slot hint: {} ms", with_slot_hint_time);

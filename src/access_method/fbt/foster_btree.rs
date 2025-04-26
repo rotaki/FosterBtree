@@ -645,11 +645,11 @@ fn should_root_descend(this: &Page, child: &Page) -> bool {
 
 /// Opportunistically try to fix the child page frame id
 #[inline]
-fn fix_frame_id<'a>(
-    this: FrameReadGuard<'a>,
+fn fix_frame_id(
+    this: FrameReadGuard,
     slot_id: u32,
     new_frame_key: &PageFrameKey,
-) -> FrameReadGuard<'a> {
+) -> FrameReadGuard {
     #[cfg(feature = "no_bp_hint")]
     {
         this
@@ -1570,13 +1570,13 @@ impl<T: MemPool> FosterBtree<T> {
     }
 
     #[inline]
-    fn modify_structure_if_needed_for_read<'a>(
+    fn modify_structure_if_needed_for_read(
         &self,
         is_foster_relationship: bool,
-        this: FrameReadGuard<'a>,
-        child: FrameReadGuard<'a>,
+        this: FrameReadGuard,
+        child: FrameReadGuard,
         op_byte: &mut OpByte,
-    ) -> (Option<OpType>, FrameReadGuard<'a>, FrameReadGuard<'a>) {
+    ) -> (Option<OpType>, FrameReadGuard, FrameReadGuard) {
         if should_split_this(&this, op_byte) {
             log_info!("Should split this page: {}", this.get_id());
             #[cfg(feature = "stat")]
@@ -2157,7 +2157,7 @@ pub struct FosterBtreeCursor<T: MemPool> {
     r_key: Vec<u8>,
 
     // States
-    current_leaf_page: Option<FrameReadGuard<'static>>,
+    current_leaf_page: Option<FrameReadGuard>,
     current_slot_id: u32,
     current_high_fence: Option<Vec<u8>>,
     visited: Vec<PageFrameKey>,
@@ -2214,9 +2214,7 @@ impl<T: MemPool> FosterBtreeCursor<T> {
                     continue; // Go to the foster child
                 }
                 // We have reached the wanted leaf page.
-                let leaf_page = unsafe {
-                    std::mem::transmute::<FrameReadGuard, FrameReadGuard<'static>>(this_page)
-                };
+                let leaf_page = this_page;
 
                 if slot == 0 {
                     slot = 1; // Skip the lower fence
@@ -2398,9 +2396,6 @@ impl<T: MemPool> FosterBtreeCursor<T> {
                     .mem_pool
                     .get_page_for_read(foster_page_key)
                     .unwrap();
-                let foster_page = unsafe {
-                    std::mem::transmute::<FrameReadGuard, FrameReadGuard<'static>>(foster_page)
-                };
                 // Evict the current page as soon as possible
                 // self.btree
                 //     .mem_pool
@@ -2461,11 +2456,7 @@ impl<T: MemPool> FosterBtreeCursor<T> {
                             self.visited.push(foster_page_key); // Push the visiting page to the stack
                             continue;
                         } else {
-                            let leaf_page = unsafe {
-                                std::mem::transmute::<FrameReadGuard, FrameReadGuard<'static>>(
-                                    this_page,
-                                )
-                            };
+                            let leaf_page = this_page;
                             self.current_slot_id = 1; // Skip the lower fence. This could be a high fence slot.
                             self.current_high_fence = Some(
                                 leaf_page
