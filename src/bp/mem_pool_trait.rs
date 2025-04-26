@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use super::buffer_frame::{FrameReadGuard, FrameWriteGuard};
+use super::frame_guards::{FrameReadGuard, FrameWriteGuard};
 
 use crate::page::PageId;
 

@@ -1,4 +1,4 @@
-mod buffer_frame;
+mod frame_guards;
 mod buffer_pool;
 mod eviction_policy;
 mod in_mem_pool;
@@ -6,7 +6,7 @@ mod mem_pool_trait;
 
 use std::sync::Arc;
 
-pub use buffer_frame::{FrameReadGuard, FrameWriteGuard};
+pub use frame_guards::{FrameReadGuard, FrameWriteGuard};
 pub use buffer_pool::BufferPool;
 pub use in_mem_pool::InMemPool;
 pub use mem_pool_trait::{

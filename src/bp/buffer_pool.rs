@@ -5,12 +5,12 @@ use crate::log;
 use crate::file_manager::iouring_async::GlobalRings;
 
 use super::{
-    buffer_frame::{FrameMeta, FrameReadGuard, FrameWriteGuard},
+    frame_guards::{FrameMeta, FrameReadGuard, FrameWriteGuard},
     eviction_policy::EvictionPolicy,
     mem_pool_trait::{ContainerKey, MemPool, MemPoolStatus, MemoryStats, PageFrameKey, PageKey},
 };
 use crate::{
-    bp::buffer_frame::box_as_mut_ptr,
+    bp::frame_guards::box_as_mut_ptr,
     container::ContainerManager,
     log_debug,
     page::{Page, PageId},

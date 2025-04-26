@@ -9,7 +9,7 @@ use crate::{
 };
 
 use super::{
-    buffer_frame::{box_as_mut_ptr, FrameMeta},
+    frame_guards::{box_as_mut_ptr, FrameMeta},
     mem_pool_trait::{MemPool, MemoryStats, PageKey},
     prelude::{ContainerKey, FrameReadGuard, FrameWriteGuard, MemPoolStatus, PageFrameKey},
 };
