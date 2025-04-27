@@ -9,7 +9,6 @@ use crate::{
     container::ContainerManager,
     page::{Page, PageId, PAGE_SIZE},
 };
-use concurrent_queue::ConcurrentQueue;
 use libc::{
     madvise, mmap, munmap, pread, pwrite, MADV_DONTNEED, MAP_ANONYMOUS, MAP_FAILED, MAP_NORESERVE,
     MAP_PRIVATE, O_DIRECT, PROT_READ, PROT_WRITE,
@@ -26,6 +25,7 @@ use super::{
     buffer_pool::BPStats,
     frame_guards::FrameMeta,
     mem_pool_trait::{MemoryStats, PageKey},
+    resident_set::ResidentPageSet,
     ContainerKey, FrameReadGuard, FrameWriteGuard, MemPool, MemPoolStatus, PageFrameKey,
 };
 
@@ -38,6 +38,7 @@ const fn page_key_to_offset_large(page_key: &PageKey) -> usize {
     //
     // With a 16 KiB page, addressable memory = 2^25 × 2^14 B = 2^39 B = 512 GiB.
 
+    assert!(page_key.c_key.db_id() == 0);
     assert!(page_key.c_key.c_id() < (1 << 5)); // fits in 5 bits
     assert!(page_key.page_id < (1 << 20)); // fits in 20 bits
 
@@ -50,6 +51,13 @@ const fn page_key_to_offset_large(page_key: &PageKey) -> usize {
 pub const VMCACHE_SMALL_PAGE_ENTRIES: usize = 1 << 10; // 2^10 pages = 16 MiB with 16 KiB page size
 const fn page_key_to_offset_small(page_key: &PageKey) -> usize {
     // Layout (LSB→MSB):
+    // bits  0-8  : page_id   (9 bits, up to 511)
+    // bits  9-9  : container (1 bit, up to      1)
+    // total      : 10 bits   ⇒ 2^10 pages
+    //
+    // With a 16 KiB page, addressable memory = 2^10 × 2^14 B = 2^24 B = 16 MiB.
+
+    assert!(page_key.c_key.db_id() == 0);
     assert!(page_key.c_key.c_id() < (1 << 1)); // fits in 1 bit
     assert!(page_key.page_id < (1 << 9)); // fits in 9 bits
 
@@ -79,6 +87,7 @@ unsafe impl Send for PagePtrWrap {}
 /// 5 bits (2^5) for container id and 20 bits (2^20) for page id for each container.
 pub struct VMCachePool<const IS_SMALL: bool> {
     num_frames: usize,
+    resident_set: ResidentPageSet,
     container_manager: Arc<ContainerManager>,
     pages: PagePtrWrap,
     metas: UnsafeCell<Vec<Box<FrameMeta>>>,
@@ -133,6 +142,7 @@ impl<const IS_SMALL: bool> VMCachePool<IS_SMALL> {
 
         Ok(VMCachePool {
             num_frames,
+            resident_set: ResidentPageSet::new(num_frames as u64 * 2),
             container_manager,
             pages: PagePtrWrap::new(raw as *mut Page),
             metas,

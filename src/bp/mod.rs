@@ -3,6 +3,7 @@ mod eviction_policy;
 mod frame_guards;
 mod in_mem_pool;
 mod mem_pool_trait;
+mod resident_set;
 mod vmcache;
 
 use std::sync::Arc;
