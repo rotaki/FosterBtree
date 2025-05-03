@@ -367,7 +367,7 @@ impl ThreadLocalData {
 pub fn not_successful<K>(config: &TPCCConfig, res: &Result<K, TxnStorageStatus>) -> bool {
     match res {
         Err(_e) => {
-            log_info!("Error: {:?}", e);
+            log_info!("Error: {:?}", _e);
             true // System abort
         }
         Ok(_) => {

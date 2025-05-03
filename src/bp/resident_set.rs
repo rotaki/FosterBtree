@@ -92,6 +92,10 @@ impl ResidentPageSet {
         }
     }
 
+    pub fn len(&self) -> usize {
+        self.cnt as usize
+    }
+
     /// Pointer helper: get a reference to entry `idx`.
     #[inline(always)]
     unsafe fn entry(&self, idx: u64) -> &AtomicU64 {
@@ -147,12 +151,12 @@ impl ResidentPageSet {
 
     /// Iterate the next `batch` entries of the global clock, calling `f(pid)`
     /// for every live PID encountered.
-    pub fn clock_batch_iter(&self, batch: u64) -> impl Iterator<Item = u64> + '_ {
+    pub fn clock_batch_iter(&self, batch: usize) -> impl Iterator<Item = u64> + '_ {
         // Atomically grab a window of the clock.
         let start = self
             .clock_pos
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |pos| {
-                Some((pos + batch) & self.mask)
+                Some((pos + batch as u64) & self.mask)
             })
             .expect("Should not fail because the func always returns Some");
 
@@ -172,6 +176,12 @@ impl ResidentPageSet {
             }
             None
         })
+    }
+
+    pub fn clear(&self) {
+        let bytes = self.cnt as usize * mem::size_of::<Entry>();
+        unsafe { ptr::write_bytes(self.ht.cast::<u8>(), 0xFF, bytes) };
+        self.clock_pos.store(0, Ordering::Release);
     }
 }
 
@@ -201,7 +211,7 @@ mod tests {
     /// Collect *all* live PIDs by sweeping the entire table once.
     /// (Slow but handy for asserts in tests.)
     fn collect_all(set: &ResidentPageSet) -> HashSet<u64> {
-        set.clock_batch_iter(set.cnt).collect()
+        set.clock_batch_iter(set.cnt as usize).collect()
     }
 
     // -------- basic single-threaded tests ---------------------------------

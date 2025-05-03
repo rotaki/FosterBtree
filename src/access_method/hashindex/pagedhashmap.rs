@@ -1,5 +1,5 @@
 #![allow(unused_imports)]
-use crate::{access_method::AccessMethodError, logger::log};
+use crate::{access_method::AccessMethodError, bp::EvictionPolicy, logger::log};
 
 use core::panic;
 use std::{
@@ -41,7 +41,10 @@ struct _BucketMeta {
 }
 
 /// Opportunistically try to fix the child page frame id
-fn fix_frame_id(this: FrameReadGuard, new_frame_key: &PageFrameKey) -> FrameReadGuard {
+fn fix_frame_id<T: EvictionPolicy>(
+    this: FrameReadGuard<T>,
+    new_frame_key: &PageFrameKey,
+) -> FrameReadGuard<T> {
     match this.try_upgrade(true) {
         Ok(mut write_guard) => {
             write_guard.set_next_frame_id(new_frame_key.frame_id());
@@ -170,7 +173,7 @@ impl<T: MemPool> PagedHashMap<T> {
         &self,
         page_key: PageFrameKey,
         key: &[u8],
-    ) -> Result<FrameWriteGuard, AccessMethodError> {
+    ) -> Result<FrameWriteGuard<T::EP>, AccessMethodError> {
         let base = Duration::from_millis(1);
         let mut attempts = 0;
         loop {
@@ -197,7 +200,7 @@ impl<T: MemPool> PagedHashMap<T> {
         &self,
         page_key: PageFrameKey,
         key: &[u8],
-    ) -> Result<FrameWriteGuard, AccessMethodError> {
+    ) -> Result<FrameWriteGuard<T::EP>, AccessMethodError> {
         let mut current_page = self.read_page(page_key);
         if current_page.frame_id() != page_key.frame_id() {
             self.frame_buckets[page_key.p_key().page_id as usize].store(
@@ -234,7 +237,7 @@ impl<T: MemPool> PagedHashMap<T> {
     }
 
     // read_page and update frame_buckets
-    fn read_page(&self, page_key: PageFrameKey) -> FrameReadGuard {
+    fn read_page(&self, page_key: PageFrameKey) -> FrameReadGuard<T::EP> {
         loop {
             let page = self.bp.get_page_for_read(page_key);
             match page {
@@ -260,7 +263,7 @@ impl<T: MemPool> PagedHashMap<T> {
         }
     }
 
-    fn write_page(&self, page_key: PageFrameKey) -> FrameWriteGuard {
+    fn write_page(&self, page_key: PageFrameKey) -> FrameWriteGuard<T::EP> {
         loop {
             let page = self.bp.get_page_for_write(page_key);
             match page {
@@ -339,7 +342,7 @@ impl<T: MemPool> PagedHashMap<T> {
         &self,
         page_key: PageFrameKey,
         key: &[u8],
-    ) -> Result<(FrameWriteGuard, u16), AccessMethodError> {
+    ) -> Result<(FrameWriteGuard<T::EP>, u16), AccessMethodError> {
         let base = Duration::from_millis(1);
         let mut attempts = 0;
         loop {
@@ -366,7 +369,7 @@ impl<T: MemPool> PagedHashMap<T> {
         &self,
         page_key: PageFrameKey,
         key: &[u8],
-    ) -> Result<(FrameWriteGuard, u16), AccessMethodError> {
+    ) -> Result<(FrameWriteGuard<T::EP>, u16), AccessMethodError> {
         let mut current_page = self.read_page(page_key);
         loop {
             let (slot_id, _) = current_page.is_exist(key);
@@ -660,7 +663,7 @@ unsafe impl<T: MemPool> Send for PagedHashMap<T> {}
 
 pub struct PagedHashMapIter<T: MemPool> {
     map: Arc<PagedHashMap<T>>,
-    current_page: Option<FrameReadGuard>,
+    current_page: Option<FrameReadGuard<T::EP>>,
     current_index: usize,
     current_bucket: usize,
     initialized: bool,

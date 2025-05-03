@@ -1,17 +1,25 @@
+#[allow(unused)]
+use crate::log;
+
 use std::{
     cell::UnsafeCell,
     collections::BTreeMap,
-    sync::{atomic::Ordering, Arc},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
 };
 
 use crate::{
     bp::{eviction_policy::EvictionPolicy, frame_guards::box_as_mut_ptr},
     container::ContainerManager,
+    log_info,
     page::{Page, PageId, PAGE_SIZE},
 };
 use libc::{
-    madvise, mmap, munmap, pread, pwrite, MADV_DONTNEED, MAP_ANONYMOUS, MAP_FAILED, MAP_NORESERVE,
-    MAP_PRIVATE, O_DIRECT, PROT_READ, PROT_WRITE,
+    c_int, c_uchar, c_void, madvise, mincore, mmap, munmap, pread, pwrite, size_t, sysconf,
+    MADV_DONTNEED, MAP_ANONYMOUS, MAP_FAILED, MAP_NORESERVE, MAP_PRIVATE, O_DIRECT, PROT_READ,
+    PROT_WRITE, _SC_PAGESIZE,
 };
 use std::{
     fs::{File, OpenOptions},
@@ -23,11 +31,16 @@ use std::{
 
 use super::{
     buffer_pool::BPStats,
+    eviction_policy::ClockEvictionPolicy,
     frame_guards::FrameMeta,
     mem_pool_trait::{MemoryStats, PageKey},
     resident_set::ResidentPageSet,
     ContainerKey, FrameReadGuard, FrameWriteGuard, MemPool, MemPoolStatus, PageFrameKey,
 };
+
+type FMeta = FrameMeta<ClockEvictionPolicy>;
+type FWGuard = FrameWriteGuard<ClockEvictionPolicy>;
+type FRGuard = FrameReadGuard<ClockEvictionPolicy>;
 
 pub const VMCACHE_LARGE_PAGE_ENTRIES: usize = 1 << 25; // 2^25 pages = 512 GiB with 16 KiB page size
 const fn page_key_to_offset_large(page_key: &PageKey) -> usize {
@@ -85,18 +98,24 @@ unsafe impl Send for PagePtrWrap {}
 /// 1 bit (2^1) for container id and 9 bits (2^9) for page id for each container.
 /// IS_SMALL=false has 2^25 pages = 512 GiB with 16 KiB page size.
 /// 5 bits (2^5) for container id and 20 bits (2^20) for page id for each container.
-pub struct VMCachePool<const IS_SMALL: bool> {
+pub struct VMCachePool<const IS_SMALL: bool = true, const EVICTION_BATCH_SIZE: usize = 64> {
     num_frames: usize,
+    used_frames: AtomicUsize,
     resident_set: ResidentPageSet,
     container_manager: Arc<ContainerManager>,
     pages: PagePtrWrap,
-    metas: UnsafeCell<Vec<Box<FrameMeta>>>,
+    metas: UnsafeCell<Vec<Box<FMeta>>>,
     stats: BPStats,
 }
 
-unsafe impl<const IS_SMALL: bool> Sync for VMCachePool<IS_SMALL> {}
+unsafe impl<const IS_SMALL: bool, const EVICTION_BATCH_SIZE: usize> Sync
+    for VMCachePool<IS_SMALL, EVICTION_BATCH_SIZE>
+{
+}
 
-impl<const IS_SMALL: bool> Drop for VMCachePool<IS_SMALL> {
+impl<const IS_SMALL: bool, const EVICTION_BATCH_SIZE: usize> Drop
+    for VMCachePool<IS_SMALL, EVICTION_BATCH_SIZE>
+{
     fn drop(&mut self) {
         let size = Self::PAGE_ENTRIES * PAGE_SIZE;
         unsafe {
@@ -107,7 +126,9 @@ impl<const IS_SMALL: bool> Drop for VMCachePool<IS_SMALL> {
     }
 }
 
-impl<const IS_SMALL: bool> VMCachePool<IS_SMALL> {
+impl<const IS_SMALL: bool, const EVICTION_BATCH_SIZE: usize>
+    VMCachePool<IS_SMALL, EVICTION_BATCH_SIZE>
+{
     pub const PAGE_ENTRIES: usize = if IS_SMALL {
         VMCACHE_SMALL_PAGE_ENTRIES
     } else {
@@ -136,13 +157,14 @@ impl<const IS_SMALL: bool> VMCachePool<IS_SMALL> {
         }
         let metas = UnsafeCell::new(
             (0..Self::PAGE_ENTRIES)
-                .map(|i| Box::new(FrameMeta::new(i as u32)))
+                .map(|i| Box::new(FMeta::new(i as u32)))
                 .collect::<Vec<_>>(),
         );
 
         Ok(VMCachePool {
             num_frames,
-            resident_set: ResidentPageSet::new(num_frames as u64 * 2),
+            used_frames: AtomicUsize::new(0),
+            resident_set: ResidentPageSet::new(num_frames as u64),
             container_manager,
             pages: PagePtrWrap::new(raw as *mut Page),
             metas,
@@ -150,38 +172,13 @@ impl<const IS_SMALL: bool> VMCachePool<IS_SMALL> {
         })
     }
 
-    /// Choose a victim frame to be evicted.
-    /// If all the frames are latched, then return None.
-    fn choose_victim(&self) -> Option<FrameWriteGuard> {
-        todo!()
+    pub fn used_frames(&self) -> usize {
+        self.used_frames.load(Ordering::Acquire)
     }
 
     // The exclusive latch is NOT NEEDED when calling this function
     // This function will write the victim page to disk if it is dirty, and set the dirty bit to false.
-    fn write_victim_to_disk_if_dirty_w(
-        &self,
-        victim: &FrameWriteGuard,
-    ) -> Result<(), MemPoolStatus> {
-        if let Some(key) = victim.page_key() {
-            if victim
-                .dirty()
-                .compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok()
-            {
-                let container = self.container_manager.get_container(key.c_key);
-                container.write_page(key.page_id, victim)?;
-            }
-        }
-
-        Ok(())
-    }
-
-    // The exclusive latch is NOT NEEDED when calling this function
-    // This function will write the victim page to disk if it is dirty, and set the dirty bit to false.
-    fn write_victim_to_disk_if_dirty_r(
-        &self,
-        victim: &FrameReadGuard,
-    ) -> Result<(), MemPoolStatus> {
+    fn write_victim_to_disk_if_dirty_r(&self, victim: &FRGuard) -> Result<(), MemPoolStatus> {
         if let Some(key) = victim.page_key() {
             // Compare and swap is_dirty because we don't want to write the page if it is already written by another thread.
             if victim
@@ -197,32 +194,176 @@ impl<const IS_SMALL: bool> VMCachePool<IS_SMALL> {
         Ok(())
     }
 
-    fn remove_page_entry(&self, page_key: &PageKey) -> Result<(), MemPoolStatus> {
-        let page_offset = self.page_key_to_offset(page_key);
-        assert!(
-            page_offset < Self::PAGE_ENTRIES,
-            "Page offset out of bounds {}/{}",
-            page_offset,
-            Self::PAGE_ENTRIES
-        );
-        let ret = unsafe {
-            madvise(
-                (self.pages.ptr as *mut u8).add(self.page_key_to_offset(page_key) * PAGE_SIZE)
-                    as *mut libc::c_void,
-                PAGE_SIZE,
-                MADV_DONTNEED,
-            )
-        };
-        if ret != 0 {
-            eprintln!("madvise failed: {}", std::io::Error::last_os_error());
-            Err(MemPoolStatus::MemoryAllocationError("madvise failed"))
+    // A write guard is needed when calling this function because madvise will zero out the page.
+    fn remove_page_entry(&self, guard: &FWGuard) -> Result<(), MemPoolStatus> {
+        if let Some(page_key) = guard.page_key() {
+            let page_offset = self.page_key_to_offset(&page_key);
+            assert!(
+                page_offset < Self::PAGE_ENTRIES,
+                "Page offset out of bounds {}/{}",
+                page_offset,
+                Self::PAGE_ENTRIES
+            );
+            let ret = unsafe {
+                madvise(
+                    (self.pages.ptr as *mut u8).add(self.page_key_to_offset(&page_key) * PAGE_SIZE)
+                        as *mut libc::c_void,
+                    PAGE_SIZE,
+                    MADV_DONTNEED,
+                )
+            };
+            if ret != 0 {
+                eprintln!("madvise failed: {}", std::io::Error::last_os_error());
+                Err(MemPoolStatus::MemoryAllocationError("madvise failed"))
+            } else {
+                Ok(())
+            }
         } else {
             Ok(())
         }
     }
+
+    fn ensure_free_pages(&self) -> Result<(), MemPoolStatus> {
+        let used_percent = self.used_frames.load(Ordering::Acquire) as f64 / self.num_frames as f64;
+        if used_percent > 0.95 {
+            log_info!(
+                "Used frames: {}/{}({}). Evicting pages...",
+                self.used_frames.load(Ordering::Acquire),
+                self.num_frames,
+                used_percent
+            );
+            self.evict_batch()
+        } else {
+            log_info!(
+                "Used frames: {}/{}({}). No eviction needed.",
+                self.used_frames.load(Ordering::Acquire),
+                self.num_frames,
+                used_percent
+            );
+            Ok(())
+        }
+    }
+
+    fn evict_batch(&self) -> Result<(), MemPoolStatus> {
+        // Rule1. We need a read-latch of the frame when writing the page to disk.
+        // Rule2. We need a write-latch of the frame when removing the page from the page-table.
+        // Rule3. We don't want to hold the write-latch of the frame for too long (i.e. while writing to disk).
+        // Rule4. We want to evict the pages from the page-table or page-to-frame mapping in batches.
+
+        // This suggests that we should first get a read-latch on the dirty pages and write them to disk
+        // without holding any write-latch of other frames. We keep the read-latch on the dirty pages until
+        // we finish writing all the dirty pages to disk.
+        // Then, we get the write-latches on both dirty and clean pages and remove them from the page-table
+        // all at once.
+
+        log_info!(
+            "Resident Set Cnt: {}, Used Frame Cnt: {}",
+            self.resident_set
+                .clock_batch_iter(self.resident_set.len())
+                .count(),
+            self.used_frames.load(Ordering::Acquire)
+        );
+
+        let mut clean_victims = Vec::with_capacity(EVICTION_BATCH_SIZE);
+        let mut dirty_victims = Vec::with_capacity(EVICTION_BATCH_SIZE);
+        let mut to_evict = Vec::with_capacity(EVICTION_BATCH_SIZE);
+
+        while clean_victims.len() + dirty_victims.len() < EVICTION_BATCH_SIZE {
+            for i in self.resident_set.clock_batch_iter(EVICTION_BATCH_SIZE) {
+                let meta = &mut unsafe { &mut *self.metas.get() }[i as usize];
+                let is_marked = meta.evict_info.score() > 0;
+                let is_latched = meta.latch.is_locked();
+                if is_latched {
+                    continue; // Skip the page if it is latched.
+                }
+                if is_marked {
+                    // (marked and unlatched)
+                    // Marked and not latched.
+                    if meta.is_dirty.load(Ordering::Acquire) {
+                        // Get a read latch on the page.
+                        // If the page is dirty, we need to write it to disk.
+                        let guard = FRGuard::try_new(box_as_mut_ptr(meta), unsafe {
+                            self.pages.ptr.add(i as usize)
+                        });
+                        if let Some(guard) = guard {
+                            dirty_victims.push((i, guard));
+                        } else {
+                            // Latched. Skip it.
+                            continue;
+                        }
+                    } else {
+                        // Clean page. Add to the eviction list.
+                        clean_victims.push((i, meta));
+                    }
+                } else {
+                    // Mark the page if it is unmarked and not latched.
+                    meta.evict_info.update();
+                }
+            }
+        }
+
+        log_info!(
+            "Evicting {} pages ({} dirty, {} clean)",
+            dirty_victims.len() + clean_victims.len(),
+            dirty_victims.len(),
+            clean_victims.len()
+        );
+        // Note: the sum of dirty and clean victims may be at most 2 times the batch size - 1
+        // because the first clock_batch_iter() call may return at most batch size - 1 pages
+        // and the second call may return at most batch size pages.
+
+        // 1. Write the dirty pages to disk.
+        for (_, guard) in dirty_victims.iter() {
+            self.write_victim_to_disk_if_dirty_r(guard)?;
+        }
+
+        // 2. Try to get a write latch on the clean pages.
+        for (i, meta) in clean_victims.into_iter() {
+            // We need to get a write latch on the page to remove it from the page table.
+            if let Some(guard) = FWGuard::try_new(
+                box_as_mut_ptr(meta),
+                unsafe { self.pages.ptr.add(i as usize) },
+                false,
+            ) {
+                to_evict.push((i, guard));
+            }
+        }
+
+        // 3. Try to upgrade the dirty pages to write latches.
+        for (i, guard) in dirty_victims.into_iter() {
+            // We need to get a write latch on the page to remove it from the page table.
+            if let Ok(guard) = guard.try_upgrade(false) {
+                to_evict.push((i, guard));
+            }
+        }
+
+        // 4. Remove the pages from the page table.
+        for (_, guard) in to_evict.iter() {
+            // Remove the page from the page table.
+            self.remove_page_entry(&guard)?;
+        }
+
+        // 5. Remove from the resident set and update the eviction policy.
+        let mut count = 0;
+        for (i, guard) in to_evict.into_iter() {
+            count += 1;
+            // Remove the page from the resident set.
+            self.resident_set.remove(i);
+            // Update the eviction policy.
+            guard.evict_info().reset();
+        }
+
+        self.used_frames.fetch_sub(count, Ordering::AcqRel);
+
+        Ok(())
+    }
 }
 
-impl<const IS_SMALL: bool> MemPool for VMCachePool<IS_SMALL> {
+impl<const IS_SMALL: bool, const EVICTION_BATCH_SIZE: usize> MemPool
+    for VMCachePool<IS_SMALL, EVICTION_BATCH_SIZE>
+{
+    type EP = ClockEvictionPolicy;
+
     fn create_container(
         &self,
         c_key: super::ContainerKey,
@@ -235,11 +376,11 @@ impl<const IS_SMALL: bool> MemPool for VMCachePool<IS_SMALL> {
         Ok(())
     }
 
-    fn create_new_page_for_write(
-        &self,
-        c_key: ContainerKey,
-    ) -> Result<FrameWriteGuard, MemPoolStatus> {
+    fn create_new_page_for_write(&self, c_key: ContainerKey) -> Result<FWGuard, MemPoolStatus> {
         self.stats.inc_new_page();
+
+        self.ensure_free_pages()?;
+        self.used_frames.fetch_add(1, Ordering::AcqRel);
 
         let container = self.container_manager.get_container(c_key);
         let (mut guard, page_id) = loop {
@@ -247,7 +388,7 @@ impl<const IS_SMALL: bool> MemPool for VMCachePool<IS_SMALL> {
                 let page_id = current as PageId;
                 let page_key = PageKey::new(c_key, page_id);
                 let page_offset = self.page_key_to_offset(&page_key);
-                FrameWriteGuard::try_new(
+                FWGuard::try_new(
                     box_as_mut_ptr(&mut unsafe { &mut *self.metas.get() }[page_offset]),
                     unsafe { self.pages.ptr.add(page_offset) },
                     true,
@@ -264,6 +405,8 @@ impl<const IS_SMALL: bool> MemPool for VMCachePool<IS_SMALL> {
         guard.dirty().store(true, Ordering::Release);
         guard.evict_info().reset();
         guard.evict_info().update();
+        self.resident_set
+            .insert(self.page_key_to_offset(&guard.page_key().unwrap()) as u64);
 
         Ok(guard)
         // TODO: We need to evict a page if the buffer pool is almost full.
@@ -273,7 +416,7 @@ impl<const IS_SMALL: bool> MemPool for VMCachePool<IS_SMALL> {
         &self,
         c_key: ContainerKey,
         num_pages: usize,
-    ) -> Result<Vec<FrameWriteGuard>, MemPoolStatus> {
+    ) -> Result<Vec<FWGuard>, MemPoolStatus> {
         unimplemented!()
     }
 
@@ -299,7 +442,7 @@ impl<const IS_SMALL: bool> MemPool for VMCachePool<IS_SMALL> {
         todo!()
     }
 
-    fn get_page_for_write(&self, key: PageFrameKey) -> Result<FrameWriteGuard, MemPoolStatus> {
+    fn get_page_for_write(&self, key: PageFrameKey) -> Result<FWGuard, MemPoolStatus> {
         let page_offset = self.page_key_to_offset(&key.p_key());
         assert!(
             page_offset < Self::PAGE_ENTRIES,
@@ -310,18 +453,20 @@ impl<const IS_SMALL: bool> MemPool for VMCachePool<IS_SMALL> {
 
         let meta = &mut unsafe { &mut *self.metas.get() }[page_offset];
         let page: *mut Page = unsafe { self.pages.ptr.add(page_offset) };
-        let mut guard = FrameWriteGuard::try_new(box_as_mut_ptr(meta), page, true)
+        let mut guard = FWGuard::try_new(box_as_mut_ptr(meta), page, true)
             .ok_or(MemPoolStatus::FrameWriteLatchGrantFailed)?;
 
         match guard.page_key() {
             Some(k) => {
                 // Page is already in memory
                 debug_assert!(k == key.p_key(), "Page key mismatch");
-                guard.evict_info().update();
+                guard.evict_info().reset(); // Reset unmarks the page
                 Ok(guard)
             }
             None => {
                 // The page is not in memory. Load it from disk.
+                self.ensure_free_pages()?;
+                self.used_frames.fetch_add(1, Ordering::AcqRel);
                 // TODO: We need to evict a page if the buffer pool is almost full.
 
                 let container = self.container_manager.get_container(key.p_key().c_key);
@@ -329,15 +474,16 @@ impl<const IS_SMALL: bool> MemPool for VMCachePool<IS_SMALL> {
                     .read_page(key.p_key().page_id, &mut guard)
                     .map(|()| {
                         guard.set_page_key(Some(key.p_key()));
-                        guard.evict_info().reset();
-                        guard.evict_info().update();
+                        guard.evict_info().reset(); // Reset unmarks the page
                     })?;
+
+                self.resident_set.insert(page_offset as u64);
                 Ok(guard)
             }
         }
     }
 
-    fn get_page_for_read(&self, key: PageFrameKey) -> Result<FrameReadGuard, MemPoolStatus> {
+    fn get_page_for_read(&self, key: PageFrameKey) -> Result<FRGuard, MemPoolStatus> {
         let page_offset = self.page_key_to_offset(&key.p_key());
         assert!(
             page_offset < Self::PAGE_ENTRIES,
@@ -351,31 +497,32 @@ impl<const IS_SMALL: bool> MemPool for VMCachePool<IS_SMALL> {
 
         match meta.key() {
             Some(k) => {
-                let guard = FrameReadGuard::try_new(box_as_mut_ptr(meta), page)
+                let guard = FRGuard::try_new(box_as_mut_ptr(meta), page)
                     .ok_or(MemPoolStatus::FrameReadLatchGrantFailed)?;
 
                 // Page is already in memory
                 debug_assert!(k == key.p_key(), "Page key mismatch");
-                guard.evict_info().update();
+                guard.evict_info().reset();
                 Ok(guard)
             }
             None => {
                 // We need to evict a page if the buffer pool is almost full.
+                self.ensure_free_pages()?;
+                self.used_frames.fetch_add(1, Ordering::AcqRel);
 
                 // The page is not in memory. Load it from disk.
                 // 1. First, we need to get a write guard on the page to be able to read the page into the frame.
                 // 2. Then, we covert the write guard to a read guard by downgrading it.
-                let mut guard = FrameWriteGuard::try_new(box_as_mut_ptr(meta), page, false)
-                    .ok_or(MemPoolStatus::FrameWriteLatchGrantFailed)?;
-
                 let container = self.container_manager.get_container(key.p_key().c_key);
+                let mut guard = FWGuard::try_new(box_as_mut_ptr(meta), page, false)
+                    .ok_or(MemPoolStatus::FrameWriteLatchGrantFailed)?;
                 container
                     .read_page(key.p_key().page_id, &mut guard)
                     .map(|()| {
                         guard.set_page_key(Some(key.p_key()));
                         guard.evict_info().reset();
-                        guard.evict_info().update();
                     })?;
+                self.resident_set.insert(page_offset as u64);
 
                 Ok(guard.downgrade())
             }
@@ -387,7 +534,16 @@ impl<const IS_SMALL: bool> MemPool for VMCachePool<IS_SMALL> {
     }
 
     fn flush_all(&self) -> Result<(), MemPoolStatus> {
-        // TODO: For all the dirty pages in the buffer pool, write them to disk.
+        for i in self.resident_set.clock_batch_iter(self.resident_set.len()) {
+            let guard = FRGuard::try_new(
+                box_as_mut_ptr(&mut unsafe { &mut *self.metas.get() }[i as usize]),
+                unsafe { self.pages.ptr.add(i as usize) },
+            )
+            .ok_or(MemPoolStatus::FrameReadLatchGrantFailed)?;
+            self.write_victim_to_disk_if_dirty_r(&guard)?;
+        }
+
+        self.container_manager.flush_all()?;
         Ok(())
     }
 
@@ -442,38 +598,138 @@ impl<const IS_SMALL: bool> MemPool for VMCachePool<IS_SMALL> {
     }
 
     fn flush_all_and_reset(&self) -> Result<(), MemPoolStatus> {
-        // TODO: For all the dirty pages in the buffer pool, write them to disk and clear all the frames
+        self.flush_all()?;
+        for i in self.resident_set.clock_batch_iter(self.resident_set.len()) {
+            let meta = &mut unsafe { &mut *self.metas.get() }[i as usize];
+            let guard = FWGuard::try_new(
+                box_as_mut_ptr(meta),
+                unsafe { self.pages.ptr.add(i as usize) },
+                false,
+            )
+            .ok_or(MemPoolStatus::FrameWriteLatchGrantFailed)?;
+            self.remove_page_entry(&guard)?;
+            guard.set_page_key(None);
+        }
+
+        self.resident_set.clear();
+        self.used_frames.store(0, Ordering::Release);
+
         Ok(())
     }
 
     fn clear_dirty_flags(&self) -> Result<(), MemPoolStatus> {
-        // TODO: For all the dirty pages in the buffer pool, clear the dirty flags
+        for i in self.resident_set.clock_batch_iter(self.resident_set.len()) {
+            let meta = &mut unsafe { &mut *self.metas.get() }[i as usize];
+            let guard = FWGuard::try_new(
+                box_as_mut_ptr(meta),
+                unsafe { self.pages.ptr.add(i as usize) },
+                false,
+            )
+            .ok_or(MemPoolStatus::FrameWriteLatchGrantFailed)?;
+            guard.dirty().store(false, Ordering::Release);
+        }
+
         Ok(())
     }
 }
 
 #[cfg(test)]
+impl<const IS_SMALL: bool, const EVICTION_BATCH_SIZE: usize>
+    VMCachePool<IS_SMALL, EVICTION_BATCH_SIZE>
+{
+    unsafe fn run_checks(&self) {
+        self.check_all_frames_unlatched();
+        self.check_memory_resident_pages();
+    }
+
+    unsafe fn check_all_frames_unlatched(&self) {
+        for i in self.resident_set.clock_batch_iter(self.resident_set.len()) {
+            let meta = &mut unsafe { &mut *self.metas.get() }[i as usize];
+            assert!(!meta.latch.is_locked(), "Frame {} is latched", i);
+        }
+    }
+
+    unsafe fn check_memory_resident_pages(&self) {
+        for i in self.resident_set.clock_batch_iter(self.resident_set.len()) {
+            let meta = &mut unsafe { &mut *self.metas.get() }[i as usize];
+            assert!(meta.key().is_some(), "Frame {} is not in memory", i);
+            assert_eq!(
+                i as usize,
+                self.page_key_to_offset(&meta.key().unwrap()),
+                "Frame {} does not match page key",
+                i
+            );
+            assert!(
+                unsafe { self.page_resident(&meta.key().unwrap()) },
+                "Frame {} is not resident",
+                i
+            );
+        }
+    }
+
+    /// Return `true` if the page is present in physical memory, `false` otherwise.
+    ///
+    /// This is a direct Rust translation of the C helper that uses `mincore(2)`.
+    unsafe fn page_resident(&self, page_key: &PageKey) -> bool {
+        // 1. Get the page address.
+        let i = self.page_key_to_offset(page_key);
+        let addr = self.pages.ptr.add(i as usize) as *mut c_void;
+
+        // 2. Get system page size.
+        let page_sz = sysconf(_SC_PAGESIZE) as usize;
+        if page_sz <= 0 {
+            return false; // sysconf failed
+        }
+
+        // 2. Check if the page is aligned to the page boundary
+        if (addr as usize) % page_sz != 0 {
+            eprintln!(
+                "Address {} is not aligned to page size {}",
+                addr as usize, page_sz
+            );
+            return false; // Address is not aligned
+        }
+
+        // 3. Call mincore(); it fills one byte per page in `vec`.
+        let mut vec: c_uchar = 0;
+        let ret: c_int = mincore(addr, page_sz as size_t, &mut vec as *mut c_uchar);
+
+        if ret == -1 {
+            // mincore failed (e.g., the page is not mapped in this process)
+            return false;
+        }
+
+        // 4. Bit 0 == 1 → page is resident.
+        (vec & 1) == 1
+    }
+}
+
+#[cfg(test)]
 mod tests {
+    use tempfile::TempDir;
+
     use crate::random::gen_random_pathname;
 
     use super::*;
     use std::{hint::black_box, thread};
 
-    fn get_test_vmcache<const IS_SMALL: bool>(num_frames: usize) -> Arc<VMCachePool<IS_SMALL>> {
+    fn get_test_vmcache<const IS_SMALL: bool, const EVICTION_BATCH_SIZE: usize>(
+        num_frames: usize,
+    ) -> Arc<VMCachePool<IS_SMALL, EVICTION_BATCH_SIZE>> {
         let base_dir = gen_random_pathname(Some("test_bp_direct"));
         let cm = Arc::new(ContainerManager::new(base_dir, true, true).unwrap());
-        Arc::new(VMCachePool::<IS_SMALL>::new(num_frames, cm).unwrap())
+        Arc::new(VMCachePool::<IS_SMALL, EVICTION_BATCH_SIZE>::new(num_frames, cm).unwrap())
     }
 
     #[test]
-    fn test_small_allocation() {
-        let mp = get_test_vmcache::<true>(10);
+    fn test_vmc_small_allocation() {
+        let mp = get_test_vmcache::<true, 2>(10);
         black_box(mp);
     }
 
     #[test]
     fn test_frame_latch() {
-        let vmc = get_test_vmcache::<true>(10);
+        let vmc = get_test_vmcache::<true, 2>(10);
         let c_key = ContainerKey::new(0, 0);
 
         let frame = vmc.create_new_page_for_write(c_key).unwrap();
@@ -501,22 +757,15 @@ mod tests {
             }
         });
 
-        // unsafe {
-        //     vmc.check_all_frames_unlatched();
-        // }
-        // unsafe {
-        //     vmc.check_page_to_frame();
-        // }
-        // unsafe {
-        //     vmc.check_frame_id_and_page_id_match();
-        // }
+        unsafe { vmc.run_checks() };
+
         let guard = vmc.get_page_for_read(page_key).unwrap();
         assert_eq!(guard[0], num_threads * num_iterations);
     }
 
     #[test]
     fn test_create_new_page() {
-        let vmc = get_test_vmcache::<true>(10);
+        let vmc = get_test_vmcache::<true, 2>(10);
         let c_key = ContainerKey::new(0, 0);
 
         for i in 0..20 {
@@ -530,20 +779,12 @@ mod tests {
             assert_eq!(frame.page_key().unwrap(), PageKey::new(c_key, i));
         }
 
-        // unsafe {
-        //     vmc.check_all_frames_unlatched();
-        // }
-        // unsafe {
-        //     vmc.check_page_to_frame();
-        // }
-        // unsafe {
-        //     vmc.check_frame_id_and_page_id_match();
-        // }
+        unsafe { vmc.run_checks() };
     }
 
     #[test]
     fn test_concurrent_create_new_page() {
-        let vmc = get_test_vmcache::<true>(10);
+        let vmc = get_test_vmcache::<true, 2>(10);
         let c_key = ContainerKey::new(0, 0);
 
         let mut frame1 = vmc.create_new_page_for_write(c_key).unwrap();
@@ -555,9 +796,61 @@ mod tests {
         drop(frame1);
         drop(frame2);
 
-        let frame1 = vmc.get_page_for_read(PageFrameKey::new(c_key, 0)).unwrap();
+        let frame1: FrameReadGuard<ClockEvictionPolicy> =
+            vmc.get_page_for_read(PageFrameKey::new(c_key, 0)).unwrap();
         let frame2 = vmc.get_page_for_read(PageFrameKey::new(c_key, 1)).unwrap();
         assert_eq!(frame1[0], 1);
         assert_eq!(frame2[0], 2);
+
+        unsafe { vmc.run_checks() };
+    }
+
+    #[test]
+    fn test_vmc_clear_frames_durable() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_id = 0;
+        let num_frames = 10;
+        let mut keys = Vec::new();
+
+        {
+            let cm = Arc::new(ContainerManager::new(&temp_dir, false, false).unwrap());
+            let vmc1 = Arc::new(VMCachePool::<true, 2>::new(num_frames, cm).unwrap());
+            let c_key = ContainerKey::new(db_id, 0);
+
+            for i in 0..num_frames * 10 {
+                log_info!("Creating page {}", i);
+                let mut guard = vmc1.create_new_page_for_write(c_key).unwrap();
+                guard[0] = i as u8;
+                keys.push(guard.page_frame_key().unwrap());
+            }
+
+            unsafe {
+                vmc1.run_checks();
+            }
+
+            // Clear the buffer pool
+            vmc1.flush_all_and_reset().unwrap();
+
+            unsafe {
+                vmc1.run_checks();
+            }
+        }
+
+        log_info!("Creating a new VMCachePool");
+
+        {
+            let cm = Arc::new(ContainerManager::new(&temp_dir, false, false).unwrap());
+            let vmc2 = Arc::new(VMCachePool::<true, 2>::new(num_frames, cm).unwrap());
+
+            // Check the contents of the pages
+            for (i, key) in keys.iter().enumerate() {
+                let guard = vmc2.get_page_for_read(*key).unwrap();
+                assert_eq!(guard[0], i as u8);
+            }
+
+            unsafe {
+                vmc2.run_checks();
+            }
+        }
     }
 }

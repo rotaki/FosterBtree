@@ -9,6 +9,7 @@ mod vmcache;
 use std::sync::Arc;
 
 pub use buffer_pool::BufferPool;
+pub use eviction_policy::EvictionPolicy;
 pub use frame_guards::{FrameReadGuard, FrameWriteGuard};
 pub use in_mem_pool::InMemPool;
 pub use mem_pool_trait::{
