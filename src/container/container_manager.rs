@@ -48,6 +48,28 @@ impl Container {
         self.page_count.fetch_add(count, Ordering::Relaxed)
     }
 
+    pub fn inc_page_count_if<F, R>(&self, count: usize, func: F) -> Option<(R, usize)>
+    where
+        F: Fn(usize) -> Option<R>,
+    {
+        // Will hold the closure’s return value if we decide to increment.
+        let mut result: Option<R> = None;
+
+        // Atomically try to bump the counter.
+        let prev = self
+            .page_count
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |cur| {
+                func(cur).map(|r| {
+                    result = Some(r); // remember what the caller wants back
+                    cur + count // new counter value
+                })
+            });
+
+        // If the fetch-update succeeded, `prev` is Ok(old_value) and `result` is Some(_).
+        // unwrap will be safe because we know the closure returned Some(_).
+        prev.ok().map(|old| (result.unwrap(), old))
+    }
+
     pub fn get_stats(&self) -> FileStats {
         self.file_manager.get_stats()
     }

@@ -2,7 +2,7 @@ use rand::RngCore;
 
 use crate::random::small_thread_rng;
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 // Static atomic counter for LRU timestamp
 pub const INITIAL_COUNTER: u64 = 1;
@@ -65,6 +65,33 @@ impl EvictionPolicy for LRUEvictionPolicy {
 
     fn reset(&self) {
         self.score.store(INITIAL_COUNTER, Ordering::Release);
+    }
+}
+
+pub struct ClockEvictionPolicy {
+    mark: AtomicBool,
+}
+
+impl EvictionPolicy for ClockEvictionPolicy {
+    fn new() -> Self {
+        ClockEvictionPolicy {
+            mark: AtomicBool::new(false),
+        }
+    }
+
+    fn score(&self) -> u64
+    where
+        Self: Sized,
+    {
+        self.mark.load(Ordering::Acquire) as u64 // 0 if not marked, 1 if marked
+    }
+
+    fn update(&self) {
+        self.mark.store(true, Ordering::Release);
+    }
+
+    fn reset(&self) {
+        self.mark.store(false, Ordering::Release);
     }
 }
 

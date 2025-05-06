@@ -140,7 +140,7 @@ impl<T: MemPool> AppendOnlyStore<T> {
         storage
     }
 
-    fn write_page(&self, page_key: &PageFrameKey) -> FrameWriteGuard {
+    fn write_page(&self, page_key: &PageFrameKey) -> FrameWriteGuard<T::EP> {
         let base = Duration::from_micros(10);
         let mut attempts = 0;
         loop {
@@ -155,7 +155,7 @@ impl<T: MemPool> AppendOnlyStore<T> {
         }
     }
 
-    fn read_page(&self, page_key: PageFrameKey) -> FrameReadGuard {
+    fn read_page(&self, page_key: PageFrameKey) -> FrameReadGuard<T::EP> {
         let base: u64 = 2;
         let mut attempts = 0;
         loop {
@@ -242,7 +242,7 @@ pub struct AppendOnlyStoreScanner<T: MemPool> {
 
     initialized: bool,
     finished: bool,
-    current_page: Option<FrameReadGuard>,
+    current_page: Option<FrameReadGuard<T::EP>>,
     current_slot_id: u32,
 }
 

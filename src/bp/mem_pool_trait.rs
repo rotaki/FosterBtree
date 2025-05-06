@@ -4,7 +4,10 @@ use std::{
     hash::{Hash, Hasher},
 };
 
-use super::frame_guards::{FrameReadGuard, FrameWriteGuard};
+use super::{
+    eviction_policy::EvictionPolicy,
+    frame_guards::{FrameReadGuard, FrameWriteGuard},
+};
 
 use crate::page::PageId;
 
@@ -37,7 +40,7 @@ pub struct ContainerKey {
 
 impl ContainerKey {
     #[inline]
-    pub fn new(db_id: DatabaseId, c_id: ContainerId) -> Self {
+    pub const fn new(db_id: DatabaseId, c_id: ContainerId) -> Self {
         Self {
             repr: Repr {
                 parts: Parts { db_id, c_id },
@@ -46,7 +49,7 @@ impl ContainerKey {
     }
 
     #[inline]
-    pub fn from_u32(raw: u32) -> Self {
+    pub const fn from_u32(raw: u32) -> Self {
         Self {
             repr: Repr { packed: raw },
         }
@@ -54,16 +57,16 @@ impl ContainerKey {
 
     /// Safe projection to the packed form.
     #[inline]
-    pub fn as_u32(self) -> u32 {
+    pub const fn as_u32(self) -> u32 {
         unsafe { self.repr.packed }
     }
 
     #[inline]
-    pub fn db_id(self) -> DatabaseId {
+    pub const fn db_id(self) -> DatabaseId {
         unsafe { self.repr.parts.db_id }
     }
     #[inline]
-    pub fn c_id(self) -> ContainerId {
+    pub const fn c_id(self) -> ContainerId {
         unsafe { self.repr.parts.c_id }
     }
 }
@@ -124,28 +127,9 @@ pub struct PageKey {
     pub page_id: PageId,
 }
 
-pub const VMCACHE_MAX_PAGES: u32 = 1 << 25; // 2^25 pages
-
 impl PageKey {
     pub fn new(c_key: ContainerKey, page_id: PageId) -> Self {
         PageKey { c_key, page_id }
-    }
-
-    pub fn serial_number_for_vmcache(&self) -> u32 {
-        // Layout (LSB→MSB):
-        // bits  0-19 : page_id   (20 bits, up to 1 048 575)
-        // bits 20-24 : container (5 bits,   up to      31)
-        // total      : 25 bits   ⇒ 2^25 pages
-        //
-        // With a 16 KiB page, addressable memory = 2^25 × 2^14 B = 2^39 B = 512 GiB.
-
-        assert!(self.c_key.c_id() < (1 << 5)); // fits in 5 bits
-        assert!(self.page_id < (1 << 20)); // fits in 20 bits
-
-        let container_part = (self.c_key.c_id() as u32) << 20;
-        let page_part = self.page_id as u32; // already < 2^20
-
-        container_part | page_part // packed serial number
     }
 }
 
@@ -370,6 +354,8 @@ impl std::fmt::Display for MemoryStats {
 }
 
 pub trait MemPool: Sync + Send {
+    type EP: EvictionPolicy;
+
     /// Create a container.
     /// A container is basically a file in the file system if a disk-based storage is used.
     /// If an in-memory storage is used, a container is a logical separation of pages.
@@ -400,7 +386,7 @@ pub trait MemPool: Sync + Send {
     fn create_new_page_for_write(
         &self,
         c_key: ContainerKey,
-    ) -> Result<FrameWriteGuard, MemPoolStatus>;
+    ) -> Result<FrameWriteGuard<Self::EP>, MemPoolStatus>;
 
     /// Create new pages for write.
     /// This function will allocate multiple new pages in memory and return a list of FrameWriteGuard.
@@ -415,7 +401,7 @@ pub trait MemPool: Sync + Send {
         &self,
         c_key: ContainerKey,
         num_pages: usize,
-    ) -> Result<Vec<FrameWriteGuard>, MemPoolStatus>;
+    ) -> Result<Vec<FrameWriteGuard<Self::EP>>, MemPoolStatus>;
 
     /// Check if a page is cached in the memory pool.
     /// This function will return true if the page is in memory, false otherwise.
@@ -431,12 +417,18 @@ pub trait MemPool: Sync + Send {
     /// Get a page for write.
     /// This function will return a FrameWriteGuard.
     /// This function assumes that a page is already created and either in memory or on disk.
-    fn get_page_for_write(&self, key: PageFrameKey) -> Result<FrameWriteGuard, MemPoolStatus>;
+    fn get_page_for_write(
+        &self,
+        key: PageFrameKey,
+    ) -> Result<FrameWriteGuard<Self::EP>, MemPoolStatus>;
 
     /// Get a page for read.
     /// This function will return a FrameReadGuard.
     /// This function assumes that a page is already created and either in memory or on disk.
-    fn get_page_for_read(&self, key: PageFrameKey) -> Result<FrameReadGuard, MemPoolStatus>;
+    fn get_page_for_read(
+        &self,
+        key: PageFrameKey,
+    ) -> Result<FrameReadGuard<Self::EP>, MemPoolStatus>;
 
     /// Prefetch page
     /// Load the page into memory so that read access will be faster.

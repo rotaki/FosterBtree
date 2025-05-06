@@ -46,6 +46,9 @@ pub struct Page(Vec<u8>); // A page with large size must be heap allocated. Othe
 #[repr(C, align(4096))] // Align to 4K. If we don't align to 4K, it might break O_DIRECT writes.
 pub struct Page([u8; PAGE_SIZE]);
 
+unsafe impl Sync for Page {}
+unsafe impl Send for Page {}
+
 impl Page {
     pub fn new(page_id: PageId) -> Self {
         #[cfg(feature = "heap_allocated_page")]

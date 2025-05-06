@@ -9,10 +9,14 @@ use crate::{
 };
 
 use super::{
+    eviction_policy::DummyEvictionPolicy,
     frame_guards::{box_as_mut_ptr, FrameMeta},
     mem_pool_trait::{MemPool, MemoryStats, PageKey},
     prelude::{ContainerKey, FrameReadGuard, FrameWriteGuard, MemPoolStatus, PageFrameKey},
 };
+
+type FWGuard = FrameWriteGuard<DummyEvictionPolicy>;
+type FRGuard = FrameReadGuard<DummyEvictionPolicy>;
 
 /// A simple in-memory page pool.
 /// All the pages are stored in a vector in memory.
@@ -24,7 +28,7 @@ pub struct InMemPool {
     #[allow(clippy::vec_box)]
     pages: UnsafeCell<Vec<Box<Page>>>, // This must be a vector of boxes to allow for dynamic size of the vector
     #[allow(clippy::vec_box)]
-    metas: UnsafeCell<Vec<Box<FrameMeta>>>, // This must be a vector of boxes to allow for dynamic size of the vector
+    metas: UnsafeCell<Vec<Box<FrameMeta<DummyEvictionPolicy>>>>, // This must be a vector of boxes to allow for dynamic size of the vector
     page_to_frame: UnsafeCell<HashMap<PageKey, usize>>,
     container_page_count: UnsafeCell<HashMap<ContainerKey, u32>>,
 }
@@ -62,7 +66,7 @@ impl InMemPool {
         self.latch.release_exclusive();
     }
 
-    unsafe fn alloc_frame(&self, c_key: ContainerKey, page_id: PageId) -> FrameWriteGuard {
+    unsafe fn alloc_frame(&self, c_key: ContainerKey, page_id: PageId) -> FWGuard {
         let pages = &mut *self.pages.get();
         let metas = &mut *self.metas.get();
         let page_to_frame = &mut *self.page_to_frame.get();
@@ -76,7 +80,7 @@ impl InMemPool {
         let page_key = PageKey::new(c_key, page_id);
         page_to_frame.insert(page_key, frame_index);
 
-        FrameWriteGuard::new(
+        FWGuard::new(
             box_as_mut_ptr(&mut metas[frame_index]),
             box_as_mut_ptr(&mut pages[frame_index]),
             true,
@@ -85,10 +89,10 @@ impl InMemPool {
 
     // Unsafe because a push to the vector may cause a reallocation
     // of the metas and pages vectors.
-    unsafe fn get_read_guard(&self, frame_index: usize) -> FrameReadGuard {
+    unsafe fn get_read_guard(&self, frame_index: usize) -> FRGuard {
         let metas = unsafe { &mut *self.metas.get() };
         let pages = unsafe { &mut *self.pages.get() };
-        FrameReadGuard::new(
+        FRGuard::new(
             box_as_mut_ptr(&mut metas[frame_index]),
             box_as_mut_ptr(&mut pages[frame_index]),
         )
@@ -96,10 +100,10 @@ impl InMemPool {
 
     // Unsafe because a push to the vector may cause a reallocation
     // of the metas and pages vectors.
-    unsafe fn try_get_read_guard(&self, frame_index: usize) -> Option<FrameReadGuard> {
+    unsafe fn try_get_read_guard(&self, frame_index: usize) -> Option<FRGuard> {
         let metas = unsafe { &mut *self.metas.get() };
         let pages = unsafe { &mut *self.pages.get() };
-        FrameReadGuard::try_new(
+        FRGuard::try_new(
             box_as_mut_ptr(&mut metas[frame_index]),
             box_as_mut_ptr(&mut pages[frame_index]),
         )
@@ -107,7 +111,7 @@ impl InMemPool {
 
     // Unsafe because a push to the vector may cause a reallocation
     // of the metas and pages vectors.
-    unsafe fn try_get_write_guard(&self, frame_index: usize) -> Option<FrameWriteGuard> {
+    unsafe fn try_get_write_guard(&self, frame_index: usize) -> Option<FWGuard> {
         let metas = unsafe { &mut *self.metas.get() };
         let pages = unsafe { &mut *self.pages.get() };
         FrameWriteGuard::try_new(
@@ -119,6 +123,8 @@ impl InMemPool {
 }
 
 impl MemPool for InMemPool {
+    type EP = DummyEvictionPolicy;
+
     fn create_container(&self, _c_key: ContainerKey, _is_temp: bool) -> Result<(), MemPoolStatus> {
         Ok(())
     }
@@ -127,10 +133,7 @@ impl MemPool for InMemPool {
         Ok(())
     }
 
-    fn create_new_page_for_write(
-        &self,
-        c_key: ContainerKey,
-    ) -> Result<FrameWriteGuard, MemPoolStatus> {
+    fn create_new_page_for_write(&self, c_key: ContainerKey) -> Result<FWGuard, MemPoolStatus> {
         self.exclusive();
         let container_page_count = unsafe { &mut *self.container_page_count.get() };
 
@@ -158,7 +161,7 @@ impl MemPool for InMemPool {
         &self,
         c_key: ContainerKey,
         num_pages: usize,
-    ) -> Result<Vec<FrameWriteGuard>, MemPoolStatus> {
+    ) -> Result<Vec<FWGuard>, MemPoolStatus> {
         self.exclusive();
         let container_page_count = unsafe { &mut *self.container_page_count.get() };
 
@@ -211,7 +214,7 @@ impl MemPool for InMemPool {
         keys
     }
 
-    fn get_page_for_write(&self, key: PageFrameKey) -> Result<FrameWriteGuard, MemPoolStatus> {
+    fn get_page_for_write(&self, key: PageFrameKey) -> Result<FWGuard, MemPoolStatus> {
         self.shared();
         let page_to_frame = unsafe { &*self.page_to_frame.get() };
         let frame_index = match page_to_frame.get(&key.p_key()) {
@@ -231,7 +234,7 @@ impl MemPool for InMemPool {
         }
     }
 
-    fn get_page_for_read(&self, key: PageFrameKey) -> Result<FrameReadGuard, MemPoolStatus> {
+    fn get_page_for_read(&self, key: PageFrameKey) -> Result<FRGuard, MemPoolStatus> {
         self.shared();
         let page_to_frame = unsafe { &*self.page_to_frame.get() };
         let frame_index = match page_to_frame.get(&key.p_key()) {

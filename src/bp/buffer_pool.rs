@@ -5,7 +5,7 @@ use crate::log;
 use crate::file_manager::iouring_async::GlobalRings;
 
 use super::{
-    eviction_policy::EvictionPolicy,
+    eviction_policy::{ClockEvictionPolicy, EvictionPolicy},
     frame_guards::{FrameMeta, FrameReadGuard, FrameWriteGuard},
     mem_pool_trait::{ContainerKey, MemPool, MemPoolStatus, MemoryStats, PageFrameKey, PageKey},
 };
@@ -26,6 +26,10 @@ use std::{
         Arc,
     },
 };
+
+type FMeta = FrameMeta<ClockEvictionPolicy>;
+type FWGuard = FrameWriteGuard<ClockEvictionPolicy>;
+type FRGuard = FrameReadGuard<ClockEvictionPolicy>;
 
 use concurrent_queue::ConcurrentQueue;
 
@@ -202,7 +206,7 @@ pub struct BufferPool {
     #[allow(clippy::vec_box)]
     pages: UnsafeCell<Vec<Box<Page>>>, // Boxed to be able to use box::as_mut_ptr to have multiple mutable references to the same object
     #[allow(clippy::vec_box)]
-    metas: UnsafeCell<Vec<Box<FrameMeta>>>, // Boxed to be able to use box::as_mut_ptr to have multiple mutable references to the same object
+    metas: UnsafeCell<Vec<Box<FMeta>>>, // Boxed to be able to use box::as_mut_ptr to have multiple mutable references to the same object
     page_to_frame: UnsafeCell<PageToFrame>, // (c_key, page_id) -> frame_index
     stats: BPStats,
 }
@@ -237,9 +241,9 @@ impl BufferPool {
                 .collect(),
         );
 
-        let metas: UnsafeCell<Vec<Box<FrameMeta>>> = UnsafeCell::new(
+        let metas: UnsafeCell<Vec<Box<FMeta>>> = UnsafeCell::new(
             (0..num_frames)
-                .map(|i| Box::new(FrameMeta::new(i as u32)))
+                .map(|i| Box::new(FMeta::new(i as u32)))
                 .collect(),
         );
 
@@ -279,28 +283,29 @@ impl BufferPool {
         self.latch.release_exclusive();
     }
 
-    fn get_read_guard(&self, index: usize) -> FrameReadGuard {
+    #[allow(dead_code)]
+    fn get_read_guard(&self, index: usize) -> FRGuard {
         let metas = unsafe { &mut *self.metas.get() };
         let pages = unsafe { &mut *self.pages.get() };
-        FrameReadGuard::new(
+        FRGuard::new(
             box_as_mut_ptr(&mut metas[index]),
             box_as_mut_ptr(&mut pages[index]),
         )
     }
 
-    fn try_get_read_guard(&self, index: usize) -> Option<FrameReadGuard> {
+    fn try_get_read_guard(&self, index: usize) -> Option<FRGuard> {
         let metas = unsafe { &mut *self.metas.get() };
         let pages = unsafe { &mut *self.pages.get() };
-        FrameReadGuard::try_new(
+        FRGuard::try_new(
             box_as_mut_ptr(&mut metas[index]),
             box_as_mut_ptr(&mut pages[index]),
         )
     }
 
-    fn try_get_write_guard(&self, index: usize, make_dirty: bool) -> Option<FrameWriteGuard> {
+    fn try_get_write_guard(&self, index: usize, make_dirty: bool) -> Option<FWGuard> {
         let metas = unsafe { &mut *self.metas.get() };
         let pages = unsafe { &mut *self.pages.get() };
-        FrameWriteGuard::try_new(
+        FWGuard::try_new(
             box_as_mut_ptr(&mut metas[index]),
             box_as_mut_ptr(&mut pages[index]),
             make_dirty,
@@ -309,7 +314,7 @@ impl BufferPool {
 
     /// Choose a victim frame to be evicted.
     /// If all the frames are latched, then return None.
-    fn choose_victim(&self) -> Option<FrameWriteGuard> {
+    fn choose_victim(&self) -> Option<FWGuard> {
         // First, try the eviction hints
         while let Ok(victim) = self.eviction_hints.pop() {
             let frame = self.try_get_write_guard(victim, false);
@@ -326,7 +331,7 @@ impl BufferPool {
     /// Choose multiple victims to be evicted
     /// The returned vector may contain fewer frames thant he requested number of victims.
     /// It can also return an empty vector.
-    fn choose_victims(&self, num_victims: usize) -> Vec<FrameWriteGuard> {
+    fn choose_victims(&self, num_victims: usize) -> Vec<FWGuard> {
         let num_victims = self.num_frames.min(num_victims);
         let mut victims = Vec::with_capacity(num_victims);
 
@@ -354,7 +359,7 @@ impl BufferPool {
         victims
     }
 
-    fn thread_local_choose_eviction_candidate(&self) -> Option<FrameWriteGuard> {
+    fn thread_local_choose_eviction_candidate(&self) -> Option<FWGuard> {
         let num_frames = self.num_frames;
         let mut result = None;
 
@@ -389,7 +394,7 @@ impl BufferPool {
                 log_debug!("Eviction candidates: {:?}", self.eviction_candidates);
 
                 // Go through the eviction candidates and find the victim
-                let mut frame_with_min_score: Option<FrameWriteGuard> = None;
+                let mut frame_with_min_score: Option<FWGuard> = None;
                 for i in eviction_candidates.iter() {
                     if i == &usize::MAX {
                         // Skip the invalid index
@@ -430,10 +435,7 @@ impl BufferPool {
 
     // The exclusive latch is NOT NEEDED when calling this function
     // This function will write the victim page to disk if it is dirty, and set the dirty bit to false.
-    fn write_victim_to_disk_if_dirty_w(
-        &self,
-        victim: &FrameWriteGuard,
-    ) -> Result<(), MemPoolStatus> {
+    fn write_victim_to_disk_if_dirty_w(&self, victim: &FWGuard) -> Result<(), MemPoolStatus> {
         if let Some(key) = victim.page_key() {
             if victim
                 .dirty()
@@ -450,10 +452,7 @@ impl BufferPool {
 
     // The exclusive latch is NOT NEEDED when calling this function
     // This function will write the victim page to disk if it is dirty, and set the dirty bit to false.
-    fn write_victim_to_disk_if_dirty_r(
-        &self,
-        victim: &FrameReadGuard,
-    ) -> Result<(), MemPoolStatus> {
+    fn write_victim_to_disk_if_dirty_r(&self, victim: &FRGuard) -> Result<(), MemPoolStatus> {
         if let Some(key) = victim.page_key() {
             // Compare and swap is_dirty because we don't want to write the page if it is already written by another thread.
             if victim
@@ -471,6 +470,8 @@ impl BufferPool {
 }
 
 impl MemPool for BufferPool {
+    type EP = ClockEvictionPolicy;
+
     fn create_container(&self, c_key: ContainerKey, is_temp: bool) -> Result<(), MemPoolStatus> {
         self.container_manager.create_container(c_key, is_temp);
         Ok(())
@@ -492,10 +493,7 @@ impl MemPool for BufferPool {
     /// See more at `handle_page_fault(key, new_page=true)`
     /// The newly allocated page is not formatted except for the page id.
     /// The caller is responsible for initializing the page.
-    fn create_new_page_for_write(
-        &self,
-        c_key: ContainerKey,
-    ) -> Result<FrameWriteGuard, MemPoolStatus> {
+    fn create_new_page_for_write(&self, c_key: ContainerKey) -> Result<FWGuard, MemPoolStatus> {
         self.stats.inc_new_page();
 
         // 1. Choose victim
@@ -528,6 +526,8 @@ impl MemPool for BufferPool {
                     victim.set_id(page_key.page_id); // Initialize the page with the page id
                     victim.set_page_key(Some(page_key)); // Set the frame key to the new page key
                     victim.dirty().store(true, Ordering::Release);
+                    victim.evict_info().reset(); // Reset the eviction info
+                    victim.evict_info().update(); // Update the eviction info
 
                     Ok(victim)
                 }
@@ -543,7 +543,7 @@ impl MemPool for BufferPool {
         &self,
         c_key: ContainerKey,
         num_pages: usize,
-    ) -> Result<Vec<FrameWriteGuard>, MemPoolStatus> {
+    ) -> Result<Vec<FWGuard>, MemPoolStatus> {
         assert!(num_pages > 0);
         self.stats.inc_new_pages(num_pages);
 
@@ -589,6 +589,8 @@ impl MemPool for BufferPool {
                 victim.set_id(page_id);
                 victim.set_page_key(Some(key));
                 victim.dirty().store(true, Ordering::Release);
+                victim.evict_info().reset(); // Reset the eviction info
+                victim.evict_info().update(); // Update the eviction info
             }
 
             Ok(victims)
@@ -602,12 +604,10 @@ impl MemPool for BufferPool {
         {
             // Fast path access to the frame using frame_id
             let frame_id = key.frame_id();
-            if (frame_id as usize) < self.num_frames {
-                if let Some(g) = self.try_get_read_guard(frame_id as usize) {
-                    if g.page_key().map(|k| k == key.p_key()).unwrap_or(false) {
-                        return true;
-                    }
-                }
+            if (frame_id as usize) < self.num_frames
+                && unsafe { &(*self.metas.get())[frame_id as usize] }.key() == Some(key.p_key())
+            {
+                return true;
             }
         }
 
@@ -629,7 +629,7 @@ impl MemPool for BufferPool {
         keys
     }
 
-    fn get_page_for_write(&self, key: PageFrameKey) -> Result<FrameWriteGuard, MemPoolStatus> {
+    fn get_page_for_write(&self, key: PageFrameKey) -> Result<FWGuard, MemPoolStatus> {
         log_debug!("Page write: {}", key);
         self.stats.inc_write_count();
 
@@ -638,14 +638,17 @@ impl MemPool for BufferPool {
             // Fast path access to the frame using frame_id
             let frame_id = key.frame_id();
             if (frame_id as usize) < self.num_frames {
-                match self.try_get_write_guard(frame_id as usize, false) {
-                    Some(g) if g.page_key().map(|k| k == key.p_key()).unwrap_or(false) => {
-                        g.evict_info().update();
-                        g.dirty().store(true, Ordering::Release);
-                        log_debug!("Page fast path write: {}", key);
-                        return Ok(g);
+                // Check the page_key first to avoid acquiring the latch of a not-matching pageA
+                if unsafe { &(*self.metas.get())[frame_id as usize] }.key() == Some(key.p_key()) {
+                    match self.try_get_write_guard(frame_id as usize, false) {
+                        Some(g) if g.page_key().map(|k| k == key.p_key()).unwrap_or(false) => {
+                            g.evict_info().update();
+                            g.dirty().store(true, Ordering::Release);
+                            log_debug!("Page fast path write: {}", key);
+                            return Ok(g);
+                        }
+                        _ => {}
                     }
-                    _ => {}
                 }
             }
             // Failed due to one of the following reasons:
@@ -736,7 +739,7 @@ impl MemPool for BufferPool {
         }
     }
 
-    fn get_page_for_read(&self, key: PageFrameKey) -> Result<FrameReadGuard, MemPoolStatus> {
+    fn get_page_for_read(&self, key: PageFrameKey) -> Result<FRGuard, MemPoolStatus> {
         log_debug!("Page read: {}", key);
         self.stats.inc_read_count();
 
@@ -745,15 +748,18 @@ impl MemPool for BufferPool {
             // Fast path access to the frame using frame_id
             let frame_id = key.frame_id();
             if (frame_id as usize) < self.num_frames {
-                let guard = self.try_get_read_guard(frame_id as usize);
-                match guard {
-                    Some(g) if g.page_key().map(|k| k == key.p_key()).unwrap_or(false) => {
-                        // Update the eviction info
-                        g.evict_info().update();
-                        log_debug!("Page fast path read: {}", key);
-                        return Ok(g);
+                // Check the page_key first to avoid acquiring the latch of a not-matching page
+                if unsafe { &(*self.metas.get())[frame_id as usize] }.key() == Some(key.p_key()) {
+                    let guard = self.try_get_read_guard(frame_id as usize);
+                    match guard {
+                        Some(g) if g.page_key().map(|k| k == key.p_key()).unwrap_or(false) => {
+                            // Update the eviction info
+                            g.evict_info().update();
+                            log_debug!("Page fast path read: {}", key);
+                            return Ok(g);
+                        }
+                        _ => {}
                     }
-                    _ => {}
                 }
             }
             // Failed due to one of the following reasons:
@@ -887,8 +893,7 @@ impl MemPool for BufferPool {
         let write_count = self.stats.write_count();
         let mut num_frames_per_container = BTreeMap::new();
         for i in 0..self.num_frames {
-            let frame = self.get_read_guard(i);
-            if let Some(key) = frame.page_key() {
+            if let Some(key) = unsafe { &*self.metas.get() }[i].key() {
                 *num_frames_per_container.entry(key.c_key).or_insert(0) += 1;
             }
         }
@@ -982,9 +987,6 @@ impl MemPool for BufferPool {
         self.container_manager.flush_all().inspect_err(|_| {
             self.release_exclusive();
         })?;
-
-        // container_to_file.clear();
-        self.stats.clear();
 
         self.release_exclusive();
         Ok(())

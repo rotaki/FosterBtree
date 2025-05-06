@@ -480,6 +480,9 @@ mod tests {
 
     use std::{collections::HashSet, fs::File, sync::Arc};
 
+    #[allow(unused_imports)]
+    use crate::log;
+
     use crate::{
         access_method::AccessMethodError,
         bp::{get_in_mem_pool, get_test_bp, BufferPool},

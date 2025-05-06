@@ -8,7 +8,7 @@ use std::{
 use crate::log;
 use crate::{
     access_method::{AccessMethodError, FilterType},
-    bp::prelude::*,
+    bp::{prelude::*, EvictionPolicy},
     log_debug, log_info, log_trace,
     page::{Page, PageId},
 };
@@ -51,7 +51,7 @@ impl<T: MemPool> ReadOptimizedChain<T> {
         generator.to_string()
     }
 
-    fn read_page(&self, page_key: PageFrameKey) -> FrameReadGuard {
+    fn read_page(&self, page_key: PageFrameKey) -> FrameReadGuard<T::EP> {
         let base = 2;
         let mut attempts = 0;
         loop {
@@ -88,7 +88,7 @@ impl<T: MemPool> ReadOptimizedChain<T> {
         )
     }
 
-    fn first_page(&self) -> FrameReadGuard {
+    fn first_page(&self) -> FrameReadGuard<T::EP> {
         let first_frame_id = self
             .first_frame_id
             .load(std::sync::atomic::Ordering::Acquire);
@@ -139,7 +139,7 @@ impl<T: MemPool> ReadOptimizedChain<T> {
         &self,
         page_key: PageFrameKey,
         key: &[u8],
-    ) -> Result<FrameWriteGuard, AccessMethodError> {
+    ) -> Result<FrameWriteGuard<T::EP>, AccessMethodError> {
         let base = 2;
         let mut attempts = 0;
         loop {
@@ -171,7 +171,7 @@ impl<T: MemPool> ReadOptimizedChain<T> {
         &self,
         page_key: PageFrameKey,
         key: &[u8],
-    ) -> Result<FrameWriteGuard, AccessMethodError> {
+    ) -> Result<FrameWriteGuard<T::EP>, AccessMethodError> {
         let mut current_page = self.read_page(page_key);
         loop {
             if let Some((next_page_id, next_frame_id)) = current_page.next_page() {
@@ -256,7 +256,7 @@ impl<T: MemPool> ReadOptimizedChain<T> {
         page_key: PageFrameKey,
         key: &[u8],
         value: &[u8],
-    ) -> Result<FrameWriteGuard, AccessMethodError> {
+    ) -> Result<FrameWriteGuard<T::EP>, AccessMethodError> {
         let base = 2;
         let mut attempts = 0;
         loop {
@@ -295,7 +295,7 @@ impl<T: MemPool> ReadOptimizedChain<T> {
         page_key: PageFrameKey,
         key: &[u8],
         value: &[u8],
-    ) -> Result<FrameWriteGuard, AccessMethodError> {
+    ) -> Result<FrameWriteGuard<T::EP>, AccessMethodError> {
         let mut current_page = self.read_page(page_key);
         loop {
             let (found, slot_id) = current_page.binary_search(key);
@@ -356,7 +356,7 @@ impl<T: MemPool> ReadOptimizedChain<T> {
         page_key: PageFrameKey,
         key: &[u8],
         value: &[u8],
-    ) -> Result<FrameWriteGuard, AccessMethodError> {
+    ) -> Result<FrameWriteGuard<T::EP>, AccessMethodError> {
         let base = 2;
         let mut attempts = 0;
         loop {
@@ -395,7 +395,7 @@ impl<T: MemPool> ReadOptimizedChain<T> {
         page_key: PageFrameKey,
         key: &[u8],
         value: &[u8],
-    ) -> Result<FrameWriteGuard, AccessMethodError> {
+    ) -> Result<FrameWriteGuard<T::EP>, AccessMethodError> {
         let mut current_page = self.read_page(page_key);
         loop {
             let (found, slot_id) = current_page.binary_search(key);
@@ -505,7 +505,10 @@ impl<T: MemPool> ReadOptimizedChain<T> {
 }
 
 /// Opportunistically try to fix the next page frame id
-fn fix_frame_id(this: FrameReadGuard, new_frame_key: &PageFrameKey) -> FrameReadGuard {
+fn fix_frame_id<T: EvictionPolicy>(
+    this: FrameReadGuard<T>,
+    new_frame_key: &PageFrameKey,
+) -> FrameReadGuard<T> {
     match this.try_upgrade(true) {
         Ok(mut write_guard) => {
             write_guard.set_next_page(new_frame_key.p_key().page_id, new_frame_key.frame_id());
@@ -533,7 +536,7 @@ pub struct ReadOptimizedChainRangeScanner<T: MemPool> {
     // States
     initialized: bool,
     finished: bool,
-    current_page: Option<FrameReadGuard>, // As long as chain is alive, bp is alive so the frame is alive
+    current_page: Option<FrameReadGuard<T::EP>>, // As long as chain is alive, bp is alive so the frame is alive
     current_slot_id: u32,
 }
 
