@@ -2914,6 +2914,7 @@ mod tests {
 
     use crate::access_method::fbt::foster_btree::FosterBtreeCursor;
     use crate::access_method::fbt::foster_btree::{deserialize_page_id, InnerVal};
+    use crate::bp::get_test_vmcache;
     #[allow(unused_imports)]
     use crate::log;
     use crate::log_info;
@@ -2949,6 +2950,7 @@ mod tests {
     #[rstest]
     #[case::bp(get_test_bp(1))]
     #[case::in_mem(get_in_mem_pool())]
+    #[case::vmc(get_test_vmcache::<true, 1>(1))]
     fn test_page_setup<T: MemPool>(#[case] mp: Arc<T>) {
         let c_key = ContainerKey::new(0, 0);
         let mut p = mp.create_new_page_for_write(c_key).unwrap();
@@ -3050,6 +3052,7 @@ mod tests {
     #[rstest]
     #[case::bp(get_test_bp(2))]
     #[case::in_mem(get_in_mem_pool())]
+    #[case::vmc(get_test_vmcache::<true, 1>(2))]
     fn test_page_merge<T: MemPool>(#[case] bp: Arc<T>) {
         test_page_merge_detail(bp.clone(), 10, 20, 30, vec![], vec![]);
         test_page_merge_detail(bp.clone(), 10, 20, 30, vec![10, 15], vec![20, 25, 29]);
@@ -3158,6 +3161,7 @@ mod tests {
     #[rstest]
     #[case::bp(get_test_bp(2))]
     #[case::in_mem(get_in_mem_pool())]
+    #[case::vmc(get_test_vmcache::<true, 1>(2))]
     fn test_page_balance<T: MemPool>(#[case] bp: Arc<T>) {
         test_page_balance_detail(bp.clone(), 10, 20, 30, vec![], vec![]);
         test_page_balance_detail(bp.clone(), 10, 20, 30, vec![10, 15], vec![]);
@@ -3291,6 +3295,7 @@ mod tests {
     #[rstest]
     #[case::bp(get_test_bp(3))]
     #[case::in_mem(get_in_mem_pool())]
+    #[case::vmc(get_test_vmcache::<true, 1>(3))]
     fn test_page_adopt<T: MemPool>(#[case] bp: Arc<T>) {
         test_page_adopt_detail(bp.clone(), 10, 20, 30, vec![], vec![]);
         test_page_adopt_detail(bp.clone(), 10, 20, 30, vec![10, 15], vec![20, 25, 29]);
@@ -3413,6 +3418,7 @@ mod tests {
     #[rstest]
     #[case::bp(get_test_bp(3))]
     #[case::in_mem(get_in_mem_pool())]
+    #[case::vmc(get_test_vmcache::<true, 1>(3))]
     fn test_page_anti_adopt<T: MemPool>(#[case] bp: Arc<T>) {
         test_page_anti_adopt_detail(bp.clone(), 10, 20, 30, vec![], vec![]);
         test_page_anti_adopt_detail(bp.clone(), 10, 20, 30, vec![10, 15], vec![20, 25, 29]);
@@ -3423,6 +3429,7 @@ mod tests {
     #[rstest]
     #[case::bp(get_test_bp(3))]
     #[case::in_mem(get_in_mem_pool())]
+    #[case::vmc(get_test_vmcache::<true, 1>(3))]
     fn test_root_page_ascend<T: MemPool>(#[case] bp: Arc<T>) {
         let (db_id, c_id) = (0, 0);
         let c_key = ContainerKey::new(db_id, c_id);
@@ -3508,6 +3515,7 @@ mod tests {
     #[rstest]
     #[case::bp(get_test_bp(3))]
     #[case::in_mem(get_in_mem_pool())]
+    #[case::vmc(get_test_vmcache::<true, 1>(3))]
     fn test_root_page_descend<T: MemPool>(#[case] bp: Arc<T>) {
         let (db_id, c_id) = (0, 0);
         let c_key = ContainerKey::new(db_id, c_id);
@@ -3639,6 +3647,7 @@ mod tests {
     #[rstest]
     #[case::bp(get_test_bp(3))]
     #[case::in_mem(get_in_mem_pool())]
+    #[case::vmc(get_test_vmcache::<true, 1>(3))]
     fn test_foster_relationship_structure_modification_criteria<T: MemPool>(#[case] bp: Arc<T>) {
         {
             // Should merge, root_ascend
@@ -3926,6 +3935,7 @@ mod tests {
     #[rstest]
     #[case::bp(get_test_bp(3))]
     #[case::in_mem(get_in_mem_pool())]
+    #[case::vmc(get_test_vmcache::<true, 1>(3))]
     fn test_parent_child_relationship_structure_modification_criteria<T: MemPool>(
         #[case] bp: Arc<T>,
     ) {
@@ -4015,6 +4025,7 @@ mod tests {
     #[rstest]
     #[case::bp(get_test_bp(3))]
     #[case::in_mem(get_in_mem_pool())]
+    #[case::vmc(get_test_vmcache::<true, 1>(3))]
     fn test_sorted_insertion<T: MemPool>(#[case] bp: Arc<T>) {
         let btree = setup_btree_empty(bp.clone());
         // Insert 1024 bytes
@@ -4041,6 +4052,7 @@ mod tests {
     #[rstest]
     #[case::bp(get_test_bp(3))]
     #[case::in_mem(get_in_mem_pool())]
+    #[case::vmc(get_test_vmcache::<true, 1>(3))]
     fn test_random_insertion<T: MemPool>(#[case] bp: Arc<T>) {
         let btree = setup_btree_empty(bp.clone());
         // Insert 1024 bytes
@@ -4068,6 +4080,7 @@ mod tests {
     #[rstest]
     #[case::bp(get_test_bp(3))]
     #[case::in_mem(get_in_mem_pool())]
+    #[case::vmc(get_test_vmcache::<true, 1>(3))]
     fn test_ghost_insertion<T: MemPool>(#[case] bp: Arc<T>) {
         let btree = setup_btree_empty(bp.clone());
         // Insert 1024 bytes
@@ -4162,6 +4175,7 @@ mod tests {
     #[rstest]
     #[case::bp(get_test_bp(3))]
     #[case::in_mem(get_in_mem_pool())]
+    #[case::vmc(get_test_vmcache::<true, 1>(3))]
     fn test_random_updates<T: MemPool>(#[case] bp: Arc<T>) {
         let btree = setup_btree_empty(bp.clone());
         // Insert 1024 bytes
@@ -4216,6 +4230,7 @@ mod tests {
     #[rstest]
     #[case::bp(get_test_bp(3))]
     #[case::in_mem(get_in_mem_pool())]
+    #[case::vmc(get_test_vmcache::<true, 1>(3))]
     fn test_random_deletion<T: MemPool>(#[case] bp: Arc<T>) {
         let btree = setup_btree_empty(bp.clone());
         // Insert 1024 bytes
@@ -4251,6 +4266,7 @@ mod tests {
     #[rstest]
     #[case::bp(get_test_bp(3))]
     #[case::in_mem(get_in_mem_pool())]
+    #[case::vmc(get_test_vmcache::<true, 1>(3))]
     fn test_random_upserts<T: MemPool>(#[case] bp: Arc<T>) {
         let btree = setup_btree_empty(bp.clone());
         // Insert 1024 bytes
@@ -4314,6 +4330,7 @@ mod tests {
     #[rstest]
     #[case::bp(get_test_bp(3))]
     #[case::in_mem(get_in_mem_pool())]
+    #[case::vmc(get_test_vmcache::<true, 1>(3))]
     fn test_upsert_with_merge<T: MemPool>(#[case] bp: Arc<T>) {
         let btree = setup_btree_empty(bp.clone());
         // Insert 1024 bytes
@@ -4342,6 +4359,7 @@ mod tests {
     #[rstest]
     #[case::bp(get_test_bp(5))]
     #[case::in_mem(get_in_mem_pool())]
+    #[case::vmc(get_test_vmcache::<true, 2>(5))]
     fn test_scan<T: MemPool>(#[case] bp: Arc<T>) {
         let btree = Arc::new(setup_btree_empty(bp.clone()));
         // Scan empty
@@ -4417,6 +4435,7 @@ mod tests {
     #[rstest]
     #[case::bp(get_test_bp(5))]
     #[case::in_mem(get_in_mem_pool())]
+    #[case::vmc(get_test_vmcache::<true, 2>(5))]
     fn test_cursor<T: MemPool>(#[case] bp: Arc<T>) {
         let btree = Arc::new(setup_btree_empty(bp.clone()));
         // Insert 1024 bytes
@@ -4482,6 +4501,7 @@ mod tests {
     #[rstest]
     #[case::in_mem(get_in_mem_pool())]
     #[ignore]
+    #[case::vmc(get_test_vmcache::<false, 32>(1024))]
     fn test_scan_heavy<T: MemPool>(#[case] bp: Arc<T>) {
         let btree = Arc::new(setup_btree_empty(bp.clone()));
         let val = vec![1; 1024];
@@ -4529,6 +4549,7 @@ mod tests {
     #[rstest]
     #[case::in_mem(get_in_mem_pool())]
     #[ignore]
+    #[case::vmc(get_test_vmcache::<false, 32>(1024))]
     fn test_cursor_heavy<T: MemPool>(#[case] bp: Arc<T>) {
         let btree = Arc::new(setup_btree_empty(bp.clone()));
         let val = vec![1; 1024];
@@ -4578,6 +4599,7 @@ mod tests {
     #[rstest]
     #[case::bp(get_test_bp(5))]
     #[case::in_mem(get_in_mem_pool())]
+    #[case::vmc(get_test_vmcache::<true, 2>(5))]
     fn test_scan_with_filter<T: MemPool>(#[case] bp: Arc<T>) {
         let btree = Arc::new(setup_btree_empty(bp.clone()));
         // Insert 512 and 1024 bytes. Odd keys have 512 bytes and even keys have 1024 bytes.
@@ -4633,6 +4655,7 @@ mod tests {
     #[rstest]
     #[case::bp(get_test_bp(100))]
     #[case::in_mem(get_in_mem_pool())]
+    #[case::vmc(get_test_vmcache::<true, 10>(100))]
     fn test_insertion_stress<T: MemPool>(#[case] bp: Arc<T>) {
         let num_keys = 10000;
         let key_size = 8;
@@ -4711,6 +4734,7 @@ mod tests {
     #[rstest]
     #[case::bp(get_test_bp(100))]
     #[case::in_mem(get_in_mem_pool())]
+    #[case::vmc(get_test_vmcache::<true, 10>(100))]
     #[ignore]
     fn replay_stress<T: MemPool>(#[case] bp: Arc<T>) {
         let btree = setup_btree_empty(bp.clone());
@@ -4805,6 +4829,7 @@ mod tests {
     #[rstest]
     #[case::bp(get_test_bp(100))]
     #[case::in_mem(get_in_mem_pool())]
+    #[case::vmc(get_test_vmcache::<false, 10>(100))]
     fn test_bulk_insert_create<T: MemPool>(#[case] bp: Arc<T>) {
         let num_keys = 100000;
         let key_size = 8;
@@ -4842,6 +4867,7 @@ mod tests {
     #[rstest]
     #[case::bp(get_test_bp(100))]
     #[case::in_mem(get_in_mem_pool())]
+    #[case::vmc(get_test_vmcache::<false, 10>(100))]
     fn test_parallel_insertion<T: MemPool>(#[case] bp: Arc<T>) {
         // init_test_logger();
         let btree = Arc::new(setup_btree_empty(bp.clone()));
@@ -4893,6 +4919,7 @@ mod tests {
     #[rstest]
     #[case::bp(get_test_bp(100))]
     #[case::in_mem(get_in_mem_pool())]
+    #[case::vmc(get_test_vmcache::<false, 10>(100))]
     #[ignore]
     fn test_page_split_triple<T: MemPool>(#[case] bp: Arc<T>) {
         let btree = setup_btree_empty(bp.clone());
@@ -4931,8 +4958,9 @@ mod tests {
     }
 
     #[rstest]
-    #[case::bp(get_test_bp(100))]
+    #[case::bp(get_test_bp(5))]
     #[case::in_mem(get_in_mem_pool())]
+    #[case::vmc(get_test_vmcache::<true, 2>(5))]
     fn test_append<T: MemPool>(#[case] bp: Arc<T>) {
         let btree = Arc::new(setup_btree_append_only_empty(bp.clone()));
         // Insert 1024 bytes
@@ -4958,8 +4986,9 @@ mod tests {
     }
 
     #[rstest]
-    #[case::bp(get_test_bp(100))]
+    #[case::bp(get_test_bp(5))]
     #[case::in_mem(get_in_mem_pool())]
+    #[case::vmc(get_test_vmcache::<true, 2>(5))]
     fn test_append_large<T: MemPool>(#[case] bp: Arc<T>) {
         let btree = Arc::new(setup_btree_append_only_empty(bp.clone()));
         // Insert 1024 bytes
@@ -4986,8 +5015,9 @@ mod tests {
     }
 
     #[rstest]
-    #[case::bp(get_test_bp(100))]
+    #[case::bp(get_test_bp(5))]
     #[case::in_mem(get_in_mem_pool())]
+    #[case::vmc(get_test_vmcache::<true, 2>(5))]
     fn test_concurrent_append<T: MemPool>(#[case] bp: Arc<T>) {
         let btree = Arc::new(setup_btree_append_only_empty(bp.clone()));
         let num_keys = 1000;

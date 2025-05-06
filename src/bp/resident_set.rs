@@ -54,7 +54,7 @@ unsafe fn alloc_huge(len: usize) -> *mut u8 {
     let flags = MAP_PRIVATE | MAP_ANONYMOUS;
     let prot = PROT_READ | PROT_WRITE;
     let raw = mmap(ptr::null_mut(), size, prot, flags, -1, 0);
-    if raw == MAP_FAILED {
+    if std::ptr::eq(raw, MAP_FAILED) {
         panic!("mmap failed: {}", std::io::Error::last_os_error());
     }
     madvise(raw, size, MADV_HUGEPAGE);
@@ -76,7 +76,7 @@ unsafe impl Sync for ResidentPageSet {}
 impl ResidentPageSet {
     /// Create a table that can hold at least `max_count` elements.
     pub fn new(max_count: u64) -> Self {
-        let raw_cnt = (max_count * 3 + 1) / 2; // ≈ max_count × 1.5
+        let raw_cnt = (max_count * 3).div_ceil(2); // ≈ max_count × 1.5
         let cnt = next_pow2(raw_cnt);
         let bytes = cnt as usize * mem::size_of::<Entry>();
 
@@ -102,37 +102,59 @@ impl ResidentPageSet {
         &(*self.ht.add(idx as usize)).pid
     }
 
-    /// Insert `pid`; assumes it is not already present.
-    pub fn insert(&self, pid: u64) {
-        let mut pos = hash(pid) & self.mask;
-        loop {
-            let curr = unsafe { self.entry(pos).load(Ordering::Acquire) };
-            assert!(curr != pid, "duplicate insert detected: {}", pid);
-
-            if curr == EMPTY || curr == TOMBSTONE {
-                if unsafe {
-                    self.entry(pos)
-                        .compare_exchange(curr, pid, Ordering::AcqRel, Ordering::Acquire)
-                }
-                .is_ok()
-                {
-                    return;
-                }
-            }
-            pos = (pos + 1) & self.mask;
-        }
-    }
-
-    /// Remove `pid`; returns `true` if it was found.
-    pub fn remove(&self, pid: u64) -> bool {
-        let mut pos = hash(pid) & self.mask;
+    pub fn contains(&self, pid: u64) -> bool {
+        let start = hash(pid) & self.mask;
+        let mut pos = start;
         loop {
             let curr = unsafe { self.entry(pos).load(Ordering::Acquire) };
             if curr == EMPTY {
                 return false; // gave up: not present
             }
             if curr == pid {
-                if unsafe {
+                return true; // found it
+            }
+            pos = (pos + 1) & self.mask;
+            if pos == start {
+                return false; // gave up: not present
+            }
+        }
+    }
+
+    /// Insert `pid`; assumes it is not already present.
+    pub fn insert(&self, pid: u64) {
+        let start = hash(pid) & self.mask;
+        let mut pos = start;
+        loop {
+            let curr = unsafe { self.entry(pos).load(Ordering::Acquire) };
+            assert!(curr != pid, "duplicate insert detected: {}", pid);
+
+            if (curr == EMPTY || curr == TOMBSTONE)
+                && unsafe {
+                    self.entry(pos)
+                        .compare_exchange(curr, pid, Ordering::AcqRel, Ordering::Acquire)
+                }
+                .is_ok()
+            {
+                return;
+            }
+            pos = (pos + 1) & self.mask;
+            if pos == start {
+                panic!("table is full, cannot insert {}", pid);
+            }
+        }
+    }
+
+    /// Remove `pid`; returns `true` if it was found.
+    pub fn remove(&self, pid: u64) -> bool {
+        let start = hash(pid) & self.mask;
+        let mut pos = start;
+        loop {
+            let curr = unsafe { self.entry(pos).load(Ordering::Acquire) };
+            if curr == EMPTY {
+                return false; // gave up: not present
+            }
+            if curr == pid
+                && unsafe {
                     self.entry(pos).compare_exchange(
                         curr,
                         TOMBSTONE,
@@ -141,11 +163,13 @@ impl ResidentPageSet {
                     )
                 }
                 .is_ok()
-                {
-                    return true;
-                }
+            {
+                return true;
             }
             pos = (pos + 1) & self.mask;
+            if pos == start {
+                return false; // gave up: not present
+            }
         }
     }
 
@@ -200,7 +224,6 @@ mod tests {
     use std::{
         collections::HashSet,
         hint::black_box,
-        panic,
         sync::{Arc, Barrier},
         thread,
         time::Duration,

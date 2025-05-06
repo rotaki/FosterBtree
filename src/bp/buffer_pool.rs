@@ -283,6 +283,7 @@ impl BufferPool {
         self.latch.release_exclusive();
     }
 
+    #[allow(dead_code)]
     fn get_read_guard(&self, index: usize) -> FRGuard {
         let metas = unsafe { &mut *self.metas.get() };
         let pages = unsafe { &mut *self.pages.get() };
@@ -603,10 +604,10 @@ impl MemPool for BufferPool {
         {
             // Fast path access to the frame using frame_id
             let frame_id = key.frame_id();
-            if (frame_id as usize) < self.num_frames {
-                if unsafe { &(*self.metas.get())[frame_id as usize] }.key() == Some(key.p_key()) {
-                    return true;
-                }
+            if (frame_id as usize) < self.num_frames
+                && unsafe { &(*self.metas.get())[frame_id as usize] }.key() == Some(key.p_key())
+            {
+                return true;
             }
         }
 

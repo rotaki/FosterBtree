@@ -367,7 +367,7 @@ impl NewOrderTxnInput {
             if self.is_remote { "t" } else { "f" },
             self.ol_cnt
         );
-        for (_i, _item) in self.items.iter().enumerate() {
+        for _item in self.items.iter() {
             log_info!(
                 " ({}): ol_i_id={} ol_supply_w_id={} c_quantity={}",
                 _i + 1,

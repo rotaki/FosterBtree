@@ -17,17 +17,10 @@ use crate::{
     page::{Page, PageId, PAGE_SIZE},
 };
 use libc::{
-    c_int, c_uchar, c_void, madvise, mincore, mmap, munmap, pread, pwrite, size_t, sysconf,
-    MADV_DONTNEED, MAP_ANONYMOUS, MAP_FAILED, MAP_NORESERVE, MAP_PRIVATE, O_DIRECT, PROT_READ,
-    PROT_WRITE, _SC_PAGESIZE,
+    c_int, c_uchar, c_void, madvise, mincore, mmap, munmap, size_t, sysconf, MADV_DONTNEED,
+    MAP_ANONYMOUS, MAP_FAILED, MAP_NORESERVE, MAP_PRIVATE, PROT_READ, PROT_WRITE, _SC_PAGESIZE,
 };
-use std::{
-    fs::{File, OpenOptions},
-    io,
-    ops::{Deref, DerefMut},
-    os::unix::fs::OpenOptionsExt,
-    ptr,
-};
+use std::{io, ptr};
 
 use super::{
     buffer_pool::BPStats,
@@ -104,6 +97,7 @@ pub struct VMCachePool<const IS_SMALL: bool = true, const EVICTION_BATCH_SIZE: u
     resident_set: ResidentPageSet,
     container_manager: Arc<ContainerManager>,
     pages: PagePtrWrap,
+    #[allow(clippy::vec_box)]
     metas: UnsafeCell<Vec<Box<FMeta>>>,
     stats: BPStats,
 }
@@ -172,10 +166,6 @@ impl<const IS_SMALL: bool, const EVICTION_BATCH_SIZE: usize>
         })
     }
 
-    pub fn used_frames(&self) -> usize {
-        self.used_frames.load(Ordering::Acquire)
-    }
-
     // The exclusive latch is NOT NEEDED when calling this function
     // This function will write the victim page to disk if it is dirty, and set the dirty bit to false.
     fn write_victim_to_disk_if_dirty_r(&self, victim: &FRGuard) -> Result<(), MemPoolStatus> {
@@ -224,23 +214,37 @@ impl<const IS_SMALL: bool, const EVICTION_BATCH_SIZE: usize>
     }
 
     fn ensure_free_pages(&self) -> Result<(), MemPoolStatus> {
-        let used_percent = self.used_frames.load(Ordering::Acquire) as f64 / self.num_frames as f64;
-        if used_percent > 0.95 {
-            log_info!(
-                "Used frames: {}/{}({}). Evicting pages...",
-                self.used_frames.load(Ordering::Acquire),
-                self.num_frames,
-                used_percent
-            );
-            self.evict_batch()
-        } else {
-            log_info!(
-                "Used frames: {}/{}({}). No eviction needed.",
-                self.used_frames.load(Ordering::Acquire),
-                self.num_frames,
-                used_percent
-            );
-            Ok(())
+        let mut eviction_trial_count = 0;
+        loop {
+            if eviction_trial_count > 5 {
+                log_info!(
+                    "[EVICT{}] Eviction trial count exceeded. Cannot evict pages.",
+                    eviction_trial_count
+                );
+                return Err(MemPoolStatus::CannotEvictPage);
+            }
+            let used_percent =
+                self.used_frames.load(Ordering::Acquire) as f64 / self.num_frames as f64;
+            if used_percent > 0.95 {
+                log_info!(
+                    "[EVICT{}] Used frames: {}/{}({}). Evicting pages...",
+                    eviction_trial_count,
+                    self.used_frames.load(Ordering::Acquire),
+                    self.num_frames,
+                    used_percent
+                );
+                let _ = self.evict_batch();
+            } else {
+                log_info!(
+                    "[EVICT{}] Used frames: {}/{}({}). No eviction needed.",
+                    eviction_trial_count,
+                    self.used_frames.load(Ordering::Acquire),
+                    self.num_frames,
+                    used_percent
+                );
+                return Ok(());
+            }
+            eviction_trial_count += 1;
         }
     }
 
@@ -257,7 +261,7 @@ impl<const IS_SMALL: bool, const EVICTION_BATCH_SIZE: usize>
         // all at once.
 
         log_info!(
-            "Resident Set Cnt: {}, Used Frame Cnt: {}",
+            "    Resident Set Cnt: {}, Used Frame Cnt: {}",
             self.resident_set
                 .clock_batch_iter(self.resident_set.len())
                 .count(),
@@ -268,7 +272,19 @@ impl<const IS_SMALL: bool, const EVICTION_BATCH_SIZE: usize>
         let mut dirty_victims = Vec::with_capacity(EVICTION_BATCH_SIZE);
         let mut to_evict = Vec::with_capacity(EVICTION_BATCH_SIZE);
 
+        let mut num_iterations = 0;
         while clean_victims.len() + dirty_victims.len() < EVICTION_BATCH_SIZE {
+            if num_iterations > 5 {
+                if clean_victims.len() + dirty_victims.len() == 0 {
+                    log_info!(
+                        "    Could not evict pages after {} iterations",
+                        num_iterations
+                    );
+                    return Err(MemPoolStatus::CannotEvictPage);
+                } else {
+                    break;
+                }
+            }
             for i in self.resident_set.clock_batch_iter(EVICTION_BATCH_SIZE) {
                 let meta = &mut unsafe { &mut *self.metas.get() }[i as usize];
                 let is_marked = meta.evict_info.score() > 0;
@@ -300,10 +316,11 @@ impl<const IS_SMALL: bool, const EVICTION_BATCH_SIZE: usize>
                     meta.evict_info.update();
                 }
             }
+            num_iterations += 1;
         }
 
         log_info!(
-            "Evicting {} pages ({} dirty, {} clean)",
+            "    Trying to evict {} pages ({} dirty, {} clean)",
             dirty_victims.len() + clean_victims.len(),
             dirty_victims.len(),
             clean_victims.len()
@@ -337,25 +354,70 @@ impl<const IS_SMALL: bool, const EVICTION_BATCH_SIZE: usize>
             }
         }
 
-        // 4. Remove the pages from the page table.
+        // 4. Validate that the pages are still in the resident set.
+        // Resident set is not transactional so we use the frame guards as locks
+        // in OCC and check the resident set after we get the write latches.
+        to_evict.retain(|(i, _guard)| self.resident_set.contains(*i));
+
+        // 5. Remove the pages from the page table.
         for (_, guard) in to_evict.iter() {
             // Remove the page from the page table.
-            self.remove_page_entry(&guard)?;
+            self.remove_page_entry(guard)?;
         }
 
-        // 5. Remove from the resident set and update the eviction policy.
+        // 6. Remove from the resident set and update the eviction policy.
         let mut count = 0;
         for (i, guard) in to_evict.into_iter() {
             count += 1;
             // Remove the page from the resident set.
             self.resident_set.remove(i);
+            // Remove the frame info.
+            guard.set_page_key(None);
             // Update the eviction policy.
             guard.evict_info().reset();
         }
 
+        log_info!("    Evicted {} pages", count,);
+
         self.used_frames.fetch_sub(count, Ordering::AcqRel);
 
         Ok(())
+    }
+
+    /// Return `true` if the page is present in physical memory, `false` otherwise.
+    ///
+    /// This is a direct Rust translation of the C helper that uses `mincore(2)`.
+    unsafe fn page_resident(&self, page_key: &PageKey) -> bool {
+        // 1. Get the page address.
+        let i = self.page_key_to_offset(page_key);
+        let addr = self.pages.ptr.add(i) as *mut c_void;
+
+        // 2. Get system page size.
+        let page_sz = sysconf(_SC_PAGESIZE) as usize;
+        if page_sz == 0 {
+            return false; // sysconf failed
+        }
+
+        // 2. Check if the page is aligned to the page boundary
+        if (addr as usize) % page_sz != 0 {
+            eprintln!(
+                "Address {} is not aligned to page size {}",
+                addr as usize, page_sz
+            );
+            return false; // Address is not aligned
+        }
+
+        // 3. Call mincore(); it fills one byte per page in `vec`.
+        let mut vec: c_uchar = 0;
+        let ret: c_int = mincore(addr, page_sz as size_t, &mut vec as *mut c_uchar);
+
+        if ret == -1 {
+            // mincore failed (e.g., the page is not mapped in this process)
+            return false;
+        }
+
+        // 4. Bit 0 == 1 → page is resident.
+        (vec & 1) == 1
     }
 }
 
@@ -364,15 +426,11 @@ impl<const IS_SMALL: bool, const EVICTION_BATCH_SIZE: usize> MemPool
 {
     type EP = ClockEvictionPolicy;
 
-    fn create_container(
-        &self,
-        c_key: super::ContainerKey,
-        is_temp: bool,
-    ) -> Result<(), MemPoolStatus> {
+    fn create_container(&self, _c_key: ContainerKey, _is_temp: bool) -> Result<(), MemPoolStatus> {
         Ok(())
     }
 
-    fn drop_container(&self, c_key: super::ContainerKey) -> Result<(), MemPoolStatus> {
+    fn drop_container(&self, _c_key: ContainerKey) -> Result<(), MemPoolStatus> {
         Ok(())
     }
 
@@ -414,31 +472,17 @@ impl<const IS_SMALL: bool, const EVICTION_BATCH_SIZE: usize> MemPool
 
     fn create_new_pages_for_write(
         &self,
-        c_key: ContainerKey,
-        num_pages: usize,
+        _c_key: ContainerKey,
+        _num_pages: usize,
     ) -> Result<Vec<FWGuard>, MemPoolStatus> {
         unimplemented!()
     }
 
     fn is_in_mem(&self, key: PageFrameKey) -> bool {
-        let page_offset = self.page_key_to_offset(&key.p_key());
-        assert!(
-            page_offset < Self::PAGE_ENTRIES,
-            "Page offset out of bounds {}/{}",
-            page_offset,
-            Self::PAGE_ENTRIES
-        );
-
-        let meta = &unsafe { &mut *self.metas.get() }[page_offset];
-        if meta.key().is_some() {
-            debug_assert!(meta.key().unwrap() == key.p_key(), "Page key mismatch");
-            true
-        } else {
-            false
-        }
+        unsafe { self.page_resident(&key.p_key()) }
     }
 
-    fn get_page_keys_in_mem(&self, c_key: ContainerKey) -> Vec<PageFrameKey> {
+    fn get_page_keys_in_mem(&self, _c_key: ContainerKey) -> Vec<PageFrameKey> {
         todo!()
     }
 
@@ -529,7 +573,7 @@ impl<const IS_SMALL: bool, const EVICTION_BATCH_SIZE: usize> MemPool
         }
     }
 
-    fn prefetch_page(&self, key: PageFrameKey) -> Result<(), MemPoolStatus> {
+    fn prefetch_page(&self, _key: PageFrameKey) -> Result<(), MemPoolStatus> {
         Ok(())
     }
 
@@ -547,7 +591,7 @@ impl<const IS_SMALL: bool, const EVICTION_BATCH_SIZE: usize> MemPool
         Ok(())
     }
 
-    fn fast_evict(&self, frame_id: u32) -> Result<(), MemPoolStatus> {
+    fn fast_evict(&self, _frame_id: u32) -> Result<(), MemPoolStatus> {
         // do nothing for now.
         Ok(())
     }
@@ -643,6 +687,7 @@ impl<const IS_SMALL: bool, const EVICTION_BATCH_SIZE: usize>
     }
 
     unsafe fn check_all_frames_unlatched(&self) {
+        log_info!("[CHECK] Checking all frames are unlatched...");
         for i in self.resident_set.clock_batch_iter(self.resident_set.len()) {
             let meta = &mut unsafe { &mut *self.metas.get() }[i as usize];
             assert!(!meta.latch.is_locked(), "Frame {} is latched", i);
@@ -650,6 +695,7 @@ impl<const IS_SMALL: bool, const EVICTION_BATCH_SIZE: usize>
     }
 
     unsafe fn check_memory_resident_pages(&self) {
+        log_info!("[CHECK] Checking memory resident pages...");
         for i in self.resident_set.clock_batch_iter(self.resident_set.len()) {
             let meta = &mut unsafe { &mut *self.metas.get() }[i as usize];
             assert!(meta.key().is_some(), "Frame {} is not in memory", i);
@@ -665,42 +711,23 @@ impl<const IS_SMALL: bool, const EVICTION_BATCH_SIZE: usize>
                 i
             );
         }
-    }
-
-    /// Return `true` if the page is present in physical memory, `false` otherwise.
-    ///
-    /// This is a direct Rust translation of the C helper that uses `mincore(2)`.
-    unsafe fn page_resident(&self, page_key: &PageKey) -> bool {
-        // 1. Get the page address.
-        let i = self.page_key_to_offset(page_key);
-        let addr = self.pages.ptr.add(i as usize) as *mut c_void;
-
-        // 2. Get system page size.
-        let page_sz = sysconf(_SC_PAGESIZE) as usize;
-        if page_sz <= 0 {
-            return false; // sysconf failed
+        // Traverse metas to check if all pages are resident.
+        let meta = &mut unsafe { &mut *self.metas.get() };
+        for i in 0..meta.len() {
+            // log_info!("Checking frame {}...", i);
+            let meta = &mut meta[i];
+            if let Some(key) = meta.key() {
+                assert_eq!(
+                    { i },
+                    self.page_key_to_offset(&key),
+                    "Frame {} does not match page key",
+                    i
+                );
+                assert!(self.resident_set.contains(i as u64));
+            } else {
+                assert!(!self.resident_set.contains(i as u64));
+            }
         }
-
-        // 2. Check if the page is aligned to the page boundary
-        if (addr as usize) % page_sz != 0 {
-            eprintln!(
-                "Address {} is not aligned to page size {}",
-                addr as usize, page_sz
-            );
-            return false; // Address is not aligned
-        }
-
-        // 3. Call mincore(); it fills one byte per page in `vec`.
-        let mut vec: c_uchar = 0;
-        let ret: c_int = mincore(addr, page_sz as size_t, &mut vec as *mut c_uchar);
-
-        if ret == -1 {
-            // mincore failed (e.g., the page is not mapped in this process)
-            return false;
-        }
-
-        // 4. Bit 0 == 1 → page is resident.
-        (vec & 1) == 1
     }
 }
 
@@ -728,7 +755,7 @@ mod tests {
     }
 
     #[test]
-    fn test_frame_latch() {
+    fn test_vmc_frame_latch() {
         let vmc = get_test_vmcache::<true, 2>(10);
         let c_key = ContainerKey::new(0, 0);
 
@@ -759,50 +786,172 @@ mod tests {
 
         unsafe { vmc.run_checks() };
 
-        let guard = vmc.get_page_for_read(page_key).unwrap();
-        assert_eq!(guard[0], num_threads * num_iterations);
-    }
-
-    #[test]
-    fn test_create_new_page() {
-        let vmc = get_test_vmcache::<true, 2>(10);
-        let c_key = ContainerKey::new(0, 0);
-
-        for i in 0..20 {
-            let frame = vmc.create_new_page_for_write(c_key).unwrap();
-            assert_eq!(frame.page_key().unwrap(), PageKey::new(c_key, i));
-            drop(frame);
-        }
-
-        for i in 0..20 {
-            let frame = vmc.get_page_for_read(PageFrameKey::new(c_key, i)).unwrap();
-            assert_eq!(frame.page_key().unwrap(), PageKey::new(c_key, i));
+        {
+            assert!(vmc.is_in_mem(page_key));
+            let guard = vmc.get_page_for_read(page_key).unwrap();
+            assert_eq!(guard[0], num_threads * num_iterations);
         }
 
         unsafe { vmc.run_checks() };
     }
 
     #[test]
-    fn test_concurrent_create_new_page() {
-        let vmc = get_test_vmcache::<true, 2>(10);
+    fn test_vmc_write_back_simple() {
+        let vmc = get_test_vmcache::<true, 1>(1);
         let c_key = ContainerKey::new(0, 0);
 
-        let mut frame1 = vmc.create_new_page_for_write(c_key).unwrap();
-        frame1[0] = 1;
-        let mut frame2 = vmc.create_new_page_for_write(c_key).unwrap();
-        frame2[0] = 2;
-        assert_eq!(frame1.page_key().unwrap(), PageKey::new(c_key, 0));
-        assert_eq!(frame2.page_key().unwrap(), PageKey::new(c_key, 1));
-        drop(frame1);
-        drop(frame2);
+        let key1 = {
+            let mut guard = vmc.create_new_page_for_write(c_key).unwrap();
+            guard[0] = 1;
+            guard.page_frame_key().unwrap()
+        };
+        let key2 = {
+            let mut guard = vmc.create_new_page_for_write(c_key).unwrap();
+            guard[0] = 2;
+            guard.page_frame_key().unwrap()
+        };
+        unsafe {
+            vmc.run_checks();
+        }
+        // check contents of evicted page
+        {
+            assert!(!vmc.is_in_mem(key1));
+            let guard = vmc.get_page_for_read(key1).unwrap();
+            assert_eq!(guard[0], 1);
+        }
+        // check contents of the second page
+        {
+            assert!(!vmc.is_in_mem(key2));
+            let guard = vmc.get_page_for_read(key2).unwrap();
+            assert_eq!(guard[0], 2);
+        }
+        unsafe {
+            vmc.run_checks();
+        }
+    }
 
-        let frame1: FrameReadGuard<ClockEvictionPolicy> =
-            vmc.get_page_for_read(PageFrameKey::new(c_key, 0)).unwrap();
-        let frame2 = vmc.get_page_for_read(PageFrameKey::new(c_key, 1)).unwrap();
-        assert_eq!(frame1[0], 1);
-        assert_eq!(frame2[0], 2);
+    #[test]
+    fn test_vmc_write_back_many() {
+        let mut keys = Vec::new();
+        let vmc = get_test_vmcache::<true, 1>(1);
+        let c_key = ContainerKey::new(0, 0);
 
-        unsafe { vmc.run_checks() };
+        for i in 0..100 {
+            let mut guard = vmc.create_new_page_for_write(c_key).unwrap();
+            guard[0] = i;
+            keys.push(guard.page_frame_key().unwrap());
+        }
+        unsafe {
+            vmc.run_checks();
+        }
+        for (i, key) in keys.iter().enumerate() {
+            let guard = vmc.get_page_for_read(*key).unwrap();
+            assert_eq!(guard[0], i as u8);
+        }
+        unsafe {
+            vmc.run_checks();
+        }
+    }
+
+    #[test]
+    fn test_vmc_create_new_page() {
+        let db_id = 0;
+
+        let num_frames = 2;
+        let bp = get_test_vmcache::<true, 1>(num_frames);
+        let c_key = ContainerKey::new(db_id, 0);
+
+        let num_traversal = 100;
+
+        let mut count = 0;
+        let mut keys = Vec::new();
+
+        for _ in 0..num_traversal {
+            let mut guard1 = bp.create_new_page_for_write(c_key).unwrap();
+            guard1[0] = count;
+            count += 1;
+            keys.push(guard1.page_frame_key().unwrap());
+
+            let mut guard2 = bp.create_new_page_for_write(c_key).unwrap();
+            guard2[0] = count;
+            count += 1;
+            keys.push(guard2.page_frame_key().unwrap());
+        }
+
+        unsafe {
+            bp.run_checks();
+        }
+
+        // Traverse by 2 pages at a time
+        for i in 0..num_traversal {
+            let guard1 = bp.get_page_for_read(keys[i * 2]).unwrap();
+            assert_eq!(guard1[0], i as u8 * 2);
+            let guard2 = bp.get_page_for_read(keys[i * 2 + 1]).unwrap();
+            assert_eq!(guard2[0], i as u8 * 2 + 1);
+        }
+
+        unsafe {
+            bp.run_checks();
+        }
+    }
+
+    #[test]
+    fn test_vmc_all_frames_latched() {
+        let db_id = 0;
+
+        let num_frames = 1;
+        let vmc = get_test_vmcache::<true, 1>(num_frames);
+        let c_key = ContainerKey::new(db_id, 0);
+
+        let mut guard1 = vmc.create_new_page_for_write(c_key).unwrap();
+        guard1[0] = 1;
+
+        // Try to get a new page for write. This should fail because all the frames are latched.
+        let res = vmc.create_new_page_for_write(c_key);
+        assert_eq!(res.unwrap_err(), MemPoolStatus::CannotEvictPage);
+
+        drop(guard1);
+
+        // Now, we should be able to get a new page for write.
+        let guard2 = vmc.create_new_page_for_write(c_key).unwrap();
+        drop(guard2);
+    }
+
+    #[test]
+    fn test_vmc_clear_frames() {
+        let db_id = 0;
+
+        let num_frames = 10;
+        let vmc = get_test_vmcache::<true, 2>(num_frames);
+        let c_key = ContainerKey::new(db_id, 0);
+
+        let mut keys = Vec::new();
+        for i in 0..num_frames * 2 {
+            let mut guard = vmc.create_new_page_for_write(c_key).unwrap();
+            guard[0] = i as u8;
+            keys.push(guard.page_frame_key().unwrap());
+        }
+
+        unsafe {
+            vmc.run_checks();
+        }
+
+        // Clear the buffer pool
+        vmc.flush_all_and_reset().unwrap();
+
+        unsafe {
+            vmc.run_checks();
+        }
+
+        // Check the contents of the pages
+        for (i, key) in keys.iter().enumerate() {
+            let guard = vmc.get_page_for_read(*key).unwrap();
+            assert_eq!(guard[0], i as u8);
+        }
+
+        unsafe {
+            vmc.run_checks();
+        }
     }
 
     #[test]
@@ -824,12 +973,17 @@ mod tests {
                 keys.push(guard.page_frame_key().unwrap());
             }
 
+            log_info!("Created {} pages", keys.len());
             unsafe {
                 vmc1.run_checks();
             }
 
+            log_info!("Flushing all pages");
+
             // Clear the buffer pool
             vmc1.flush_all_and_reset().unwrap();
+
+            log_info!("Flushed all pages");
 
             unsafe {
                 vmc1.run_checks();

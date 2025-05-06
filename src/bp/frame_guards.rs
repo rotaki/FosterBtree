@@ -8,7 +8,6 @@ use crate::page::{Page, PageId};
 use crate::rwlatch::RwLatch;
 use std::sync::atomic::AtomicU64;
 use std::{
-    cell::UnsafeCell,
     fmt::Debug,
     ops::{Deref, DerefMut},
     ptr::NonNull,
@@ -48,6 +47,7 @@ impl AtomicOptionKey {
     pub const fn new_none() -> Self {
         Self(AtomicU64::new(EMPTY))
     }
+    #[allow(dead_code)]
     pub fn new_some(k: PageKey) -> Self {
         Self(AtomicU64::new(pack(k)))
     }
@@ -56,16 +56,19 @@ impl AtomicOptionKey {
     pub fn get(&self) -> Option<PageKey> {
         unpack(self.0.load(Ordering::Acquire))
     }
+    #[allow(dead_code)]
     #[inline]
     pub fn is_none(&self) -> bool {
         self.get().is_none()
     }
+    #[allow(dead_code)]
     #[inline]
     pub fn is_some(&self) -> bool {
         self.get().is_some()
     }
 
     /// `take()` – fetch-and-clear
+    #[allow(dead_code)]
     #[inline]
     pub fn take(&self) -> Option<PageKey> {
         unpack(self.0.swap(EMPTY, Ordering::AcqRel))
@@ -79,6 +82,7 @@ impl AtomicOptionKey {
     }
 
     /// CAS: claim the slot only if it is currently empty.
+    #[allow(dead_code)]
     pub fn try_claim_empty(&self, key: PageKey) -> Result<(), Option<PageKey>> {
         let wanted = pack(key);
         match self
@@ -409,6 +413,7 @@ pub fn box_as_mut_ptr<T>(b: &mut Box<T>) -> *mut T {
 mod tests {
 
     use super::*;
+    use std::cell::UnsafeCell;
     use std::thread;
 
     fn make_meta_and_page(frame_id: usize) -> (Box<FrameMeta>, Box<Page>) {

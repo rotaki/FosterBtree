@@ -67,7 +67,7 @@ impl Container {
 
         // If the fetch-update succeeded, `prev` is Ok(old_value) and `result` is Some(_).
         // unwrap will be safe because we know the closure returned Some(_).
-        prev.ok().and_then(|old| Some((result.unwrap(), old)))
+        prev.ok().map(|old| (result.unwrap(), old))
     }
 
     pub fn get_stats(&self) -> FileStats {
