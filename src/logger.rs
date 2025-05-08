@@ -1,7 +1,6 @@
 use chrono::Local;
 use std::io::{self, Write};
 
-/*
 // Multi-buffer logger
 use std::cell::RefCell;
 use std::fs::{File, OpenOptions};
@@ -34,8 +33,8 @@ pub fn log(level: &str, file: &str, line: u32, message: &str) {
         }
     });
 }
-*/
 
+/*
 use lazy_static::lazy_static;
 use std::sync::Mutex;
 use std::thread;
@@ -60,6 +59,7 @@ pub fn log(level: &str, file: &str, line: u32, message: &str) {
     let _ = stdout.write_all(log_message.as_bytes());
     let _ = stdout.flush();
 }
+*/
 
 #[macro_export]
 macro_rules! log_error {

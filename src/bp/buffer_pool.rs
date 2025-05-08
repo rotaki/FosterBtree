@@ -5,7 +5,7 @@ use crate::log;
 use crate::file_manager::iouring_async::GlobalRings;
 
 use super::{
-    eviction_policy::{ClockEvictionPolicy, EvictionPolicy},
+    eviction_policy::{EvictionPolicy, LRUEvictionPolicy},
     frame_guards::{FrameMeta, FrameReadGuard, FrameWriteGuard},
     mem_pool_trait::{ContainerKey, MemPool, MemPoolStatus, MemoryStats, PageFrameKey, PageKey},
 };
@@ -27,9 +27,10 @@ use std::{
     },
 };
 
-type FMeta = FrameMeta<ClockEvictionPolicy>;
-type FWGuard = FrameWriteGuard<ClockEvictionPolicy>;
-type FRGuard = FrameReadGuard<ClockEvictionPolicy>;
+type EvictionPolicyImpl = LRUEvictionPolicy;
+type FMeta = FrameMeta<EvictionPolicyImpl>;
+type FWGuard = FrameWriteGuard<EvictionPolicyImpl>;
+type FRGuard = FrameReadGuard<EvictionPolicyImpl>;
 
 use concurrent_queue::ConcurrentQueue;
 
@@ -470,7 +471,7 @@ impl BufferPool {
 }
 
 impl MemPool for BufferPool {
-    type EP = ClockEvictionPolicy;
+    type EP = EvictionPolicyImpl;
 
     fn create_container(&self, c_key: ContainerKey, is_temp: bool) -> Result<(), MemPoolStatus> {
         self.container_manager.create_container(c_key, is_temp);

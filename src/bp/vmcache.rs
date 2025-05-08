@@ -13,7 +13,7 @@ use std::{
 use crate::{
     bp::{eviction_policy::EvictionPolicy, frame_guards::box_as_mut_ptr},
     container::ContainerManager,
-    log_info,
+    log_warn,
     page::{Page, PageId, PAGE_SIZE},
 };
 use libc::{
@@ -217,7 +217,7 @@ impl<const IS_SMALL: bool, const EVICTION_BATCH_SIZE: usize>
         let mut eviction_trial_count = 0;
         loop {
             if eviction_trial_count > 5 {
-                log_info!(
+                log_warn!(
                     "[EVICT{}] Eviction trial count exceeded. Cannot evict pages.",
                     eviction_trial_count
                 );
@@ -226,7 +226,7 @@ impl<const IS_SMALL: bool, const EVICTION_BATCH_SIZE: usize>
             let used_percent =
                 self.used_frames.load(Ordering::Acquire) as f64 / self.num_frames as f64;
             if used_percent > 0.95 {
-                log_info!(
+                log_warn!(
                     "[EVICT{}] Used frames: {}/{}({}). Evicting pages...",
                     eviction_trial_count,
                     self.used_frames.load(Ordering::Acquire),
@@ -235,13 +235,6 @@ impl<const IS_SMALL: bool, const EVICTION_BATCH_SIZE: usize>
                 );
                 let _ = self.evict_batch();
             } else {
-                log_info!(
-                    "[EVICT{}] Used frames: {}/{}({}). No eviction needed.",
-                    eviction_trial_count,
-                    self.used_frames.load(Ordering::Acquire),
-                    self.num_frames,
-                    used_percent
-                );
                 return Ok(());
             }
             eviction_trial_count += 1;
@@ -260,11 +253,8 @@ impl<const IS_SMALL: bool, const EVICTION_BATCH_SIZE: usize>
         // Then, we get the write-latches on both dirty and clean pages and remove them from the page-table
         // all at once.
 
-        log_info!(
-            "    Resident Set Cnt: {}, Used Frame Cnt: {}",
-            self.resident_set
-                .clock_batch_iter(self.resident_set.len())
-                .count(),
+        log_warn!(
+            "    Used Frame Cnt: {}",
             self.used_frames.load(Ordering::Acquire)
         );
 
@@ -276,7 +266,7 @@ impl<const IS_SMALL: bool, const EVICTION_BATCH_SIZE: usize>
         while clean_victims.len() + dirty_victims.len() < EVICTION_BATCH_SIZE {
             if num_iterations > 5 {
                 if clean_victims.len() + dirty_victims.len() == 0 {
-                    log_info!(
+                    log_warn!(
                         "    Could not evict pages after {} iterations",
                         num_iterations
                     );
@@ -319,7 +309,7 @@ impl<const IS_SMALL: bool, const EVICTION_BATCH_SIZE: usize>
             num_iterations += 1;
         }
 
-        log_info!(
+        log_warn!(
             "    Trying to evict {} pages ({} dirty, {} clean)",
             dirty_victims.len() + clean_victims.len(),
             dirty_victims.len(),
@@ -377,7 +367,7 @@ impl<const IS_SMALL: bool, const EVICTION_BATCH_SIZE: usize>
             guard.evict_info().reset();
         }
 
-        log_info!("    Evicted {} pages", count,);
+        log_warn!("    Evicted {} pages", count,);
 
         self.used_frames.fetch_sub(count, Ordering::AcqRel);
 
@@ -521,6 +511,11 @@ impl<const IS_SMALL: bool, const EVICTION_BATCH_SIZE: usize> MemPool
                         guard.evict_info().reset(); // Reset unmarks the page
                     })?;
 
+                log_warn!(
+                    "    Read page {} for write from container {}",
+                    key.p_key().page_id,
+                    key.p_key().c_key
+                );
                 self.resident_set.insert(page_offset as u64);
                 Ok(guard)
             }
@@ -538,12 +533,11 @@ impl<const IS_SMALL: bool, const EVICTION_BATCH_SIZE: usize> MemPool
 
         let meta = &mut unsafe { &mut *self.metas.get() }[page_offset];
         let page: *mut Page = unsafe { self.pages.ptr.add(page_offset) };
+        let guard = FRGuard::try_new(box_as_mut_ptr(meta), page)
+            .ok_or(MemPoolStatus::FrameReadLatchGrantFailed)?;
 
-        match meta.key() {
+        match guard.page_key() {
             Some(k) => {
-                let guard = FRGuard::try_new(box_as_mut_ptr(meta), page)
-                    .ok_or(MemPoolStatus::FrameReadLatchGrantFailed)?;
-
                 // Page is already in memory
                 debug_assert!(k == key.p_key(), "Page key mismatch");
                 guard.evict_info().reset();
@@ -558,14 +552,20 @@ impl<const IS_SMALL: bool, const EVICTION_BATCH_SIZE: usize> MemPool
                 // 1. First, we need to get a write guard on the page to be able to read the page into the frame.
                 // 2. Then, we covert the write guard to a read guard by downgrading it.
                 let container = self.container_manager.get_container(key.p_key().c_key);
-                let mut guard = FWGuard::try_new(box_as_mut_ptr(meta), page, false)
-                    .ok_or(MemPoolStatus::FrameWriteLatchGrantFailed)?;
+                let mut guard = guard
+                    .try_upgrade(false)
+                    .map_err(|_| MemPoolStatus::FrameWriteLatchGrantFailed)?;
                 container
                     .read_page(key.p_key().page_id, &mut guard)
                     .map(|()| {
                         guard.set_page_key(Some(key.p_key()));
                         guard.evict_info().reset();
                     })?;
+                log_warn!(
+                    "    Read page {} for read from container {}",
+                    key.p_key().page_id,
+                    key.p_key().c_key
+                );
                 self.resident_set.insert(page_offset as u64);
 
                 Ok(guard.downgrade())
@@ -687,7 +687,7 @@ impl<const IS_SMALL: bool, const EVICTION_BATCH_SIZE: usize>
     }
 
     unsafe fn check_all_frames_unlatched(&self) {
-        log_info!("[CHECK] Checking all frames are unlatched...");
+        log_warn!("[CHECK] Checking all frames are unlatched...");
         for i in self.resident_set.clock_batch_iter(self.resident_set.len()) {
             let meta = &mut unsafe { &mut *self.metas.get() }[i as usize];
             assert!(!meta.latch.is_locked(), "Frame {} is latched", i);
@@ -695,7 +695,7 @@ impl<const IS_SMALL: bool, const EVICTION_BATCH_SIZE: usize>
     }
 
     unsafe fn check_memory_resident_pages(&self) {
-        log_info!("[CHECK] Checking memory resident pages...");
+        log_warn!("[CHECK] Checking memory resident pages...");
         for i in self.resident_set.clock_batch_iter(self.resident_set.len()) {
             let meta = &mut unsafe { &mut *self.metas.get() }[i as usize];
             assert!(meta.key().is_some(), "Frame {} is not in memory", i);
@@ -714,7 +714,7 @@ impl<const IS_SMALL: bool, const EVICTION_BATCH_SIZE: usize>
         // Traverse metas to check if all pages are resident.
         let meta = &mut unsafe { &mut *self.metas.get() };
         for i in 0..meta.len() {
-            // log_info!("Checking frame {}...", i);
+            // log_warn!("Checking frame {}...", i);
             let meta = &mut meta[i];
             if let Some(key) = meta.key() {
                 assert_eq!(
@@ -967,30 +967,30 @@ mod tests {
             let c_key = ContainerKey::new(db_id, 0);
 
             for i in 0..num_frames * 10 {
-                log_info!("Creating page {}", i);
+                log_warn!("Creating page {}", i);
                 let mut guard = vmc1.create_new_page_for_write(c_key).unwrap();
                 guard[0] = i as u8;
                 keys.push(guard.page_frame_key().unwrap());
             }
 
-            log_info!("Created {} pages", keys.len());
+            log_warn!("Created {} pages", keys.len());
             unsafe {
                 vmc1.run_checks();
             }
 
-            log_info!("Flushing all pages");
+            log_warn!("Flushing all pages");
 
             // Clear the buffer pool
             vmc1.flush_all_and_reset().unwrap();
 
-            log_info!("Flushed all pages");
+            log_warn!("Flushed all pages");
 
             unsafe {
                 vmc1.run_checks();
             }
         }
 
-        log_info!("Creating a new VMCachePool");
+        log_warn!("Creating a new VMCachePool");
 
         {
             let cm = Arc::new(ContainerManager::new(&temp_dir, false, false).unwrap());

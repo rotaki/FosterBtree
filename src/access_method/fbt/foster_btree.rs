@@ -1465,7 +1465,8 @@ impl<T: MemPool> FosterBtree<T> {
                     inc_shared_page_latch_failures(page.is_leaf(), attempts as usize);
                     return page;
                 }
-                Err(MemPoolStatus::FrameReadLatchGrantFailed) => {
+                Err(MemPoolStatus::FrameReadLatchGrantFailed)
+                | Err(MemPoolStatus::FrameWriteLatchGrantFailed) => {
                     log_info!(
                         "Read latch grant failed for page: {}, attempts: {}",
                         page_key,

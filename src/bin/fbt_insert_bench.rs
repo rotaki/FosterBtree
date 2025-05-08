@@ -1,6 +1,6 @@
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use fbtree::{
-    bp::{get_test_bp, ContainerKey, MemPool},
+    bp::{get_test_bp, get_test_vmcache, ContainerKey, MemPool},
     prelude::{FosterBtree, UniqueKeyIndex},
     random::RandomKVs,
 };
@@ -12,6 +12,13 @@ fn measure_time(title: &str, f: impl FnOnce()) {
     f();
     let elapsed = start.elapsed();
     println!("{}: {:?}", title, elapsed);
+}
+
+/// Which buffer‑pool implementation to use.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+pub enum BPType {
+    Ours,
+    VMCache,
 }
 
 #[derive(Debug, Parser, Clone)]
@@ -26,6 +33,9 @@ pub struct Params {
     pub val_min_size: usize,
     #[clap(long, default_value = "100")]
     pub val_max_size: usize,
+    /// Buffer‑pool type (ours | vmcache)
+    #[arg(long, value_enum, default_value_t = BPType::Ours)]
+    pub bp_type: BPType,
 }
 
 fn main() {
@@ -46,49 +56,55 @@ fn main() {
         params.val_min_size,
         params.val_max_size,
     );
-    let bp_size = 100000;
-
-    // measure_time("Non-BP Foster BTree Insertion", || {
-    //     insert_into_foster_tree(gen_foster_btree_in_mem(), &kvs)
-    // });
-
-    // measure_time("Non-BP Foster BTree Insertion Parallel", || {
-    //     insert_into_foster_tree_parallel(gen_foster_btree_in_mem(), &kvs)
-    // });
-
-    // measure_time("BP Foster BTree Insertion", || {
-    //     insert_into_foster_tree(gen_foster_btree_on_disk(bp_size), &kvs)
-    // });
-
-    // measure_time("BP Foster BTree Insertion Parallel", || {
-    //     insert_into_foster_tree_parallel(gen_foster_btree_on_disk(bp_size), &kvs)
-    // });
-
-    // measure_time("BTreeMap Insertion", || {
-    //     insert_into_btree_map(BTreeMap::new(), &kvs)
-    // });
-
     let (db_id, c_id) = (0, 0);
     let c_key = ContainerKey::new(db_id, c_id);
-    let bp = get_test_bp(bp_size);
-    let btree = Arc::new(FosterBtree::new(c_key, bp.clone()));
+    let bp_size = 100000;
+    match params.bp_type {
+        BPType::Ours => {
+            let bp = get_test_bp(bp_size);
+            let btree = Arc::new(FosterBtree::new(c_key, bp.clone()));
 
-    let start = std::time::Instant::now();
-    std::thread::scope(|s| {
-        for partition in kvs.iter() {
-            let btree = btree.clone();
-            s.spawn(move || {
-                for (k, v) in partition.iter() {
-                    btree.insert(k, v).unwrap();
+            let start = std::time::Instant::now();
+            std::thread::scope(|s| {
+                for partition in kvs.iter() {
+                    let btree = btree.clone();
+                    s.spawn(move || {
+                        for (k, v) in partition.iter() {
+                            btree.insert(k, v).unwrap();
+                        }
+                    });
                 }
             });
-        }
-    });
-    let elapsed = start.elapsed();
-    println!("BP Foster BTree Insertion Parallel: {:?}", elapsed);
+            let elapsed = start.elapsed();
+            println!("BP Foster BTree Insertion Parallel: {:?}", elapsed);
 
-    // BP stats
-    let stats = unsafe { bp.stats() };
-    println!("BP Stats: {}", stats);
-    bp.clear_dirty_flags().unwrap();
+            // BP stats
+            let stats = unsafe { bp.stats() };
+            println!("BP Stats: {}", stats);
+            bp.clear_dirty_flags().unwrap();
+        }
+        BPType::VMCache => {
+            let bp = get_test_vmcache::<false, 128>(bp_size);
+            let btree = Arc::new(FosterBtree::new(c_key, bp.clone()));
+
+            let start = std::time::Instant::now();
+            std::thread::scope(|s| {
+                for partition in kvs.iter() {
+                    let btree = btree.clone();
+                    s.spawn(move || {
+                        for (k, v) in partition.iter() {
+                            btree.insert(k, v).unwrap();
+                        }
+                    });
+                }
+            });
+            let elapsed = start.elapsed();
+            println!("BP Foster BTree Insertion Parallel: {:?}", elapsed);
+
+            // BP stats
+            let stats = unsafe { bp.stats() };
+            println!("BP Stats: {}", stats);
+            bp.clear_dirty_flags().unwrap();
+        }
+    };
 }
