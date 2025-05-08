@@ -1,9 +1,6 @@
 #[allow(unused_imports)]
 use crate::log;
 
-#[cfg(feature = "iouring_async")]
-use crate::file_manager::iouring_async::GlobalRings;
-
 use super::{
     eviction_policy::{EvictionPolicy, LRUEvictionPolicy},
     frame_guards::{FrameMeta, FrameReadGuard, FrameWriteGuard},

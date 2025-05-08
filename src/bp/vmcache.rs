@@ -216,7 +216,7 @@ impl<const IS_SMALL: bool, const EVICTION_BATCH_SIZE: usize>
     fn ensure_free_pages(&self) -> Result<(), MemPoolStatus> {
         let mut eviction_trial_count = 0;
         loop {
-            if eviction_trial_count > 5 {
+            if eviction_trial_count > 100 {
                 log_warn!(
                     "[EVICT{}] Eviction trial count exceeded. Cannot evict pages.",
                     eviction_trial_count
@@ -264,7 +264,7 @@ impl<const IS_SMALL: bool, const EVICTION_BATCH_SIZE: usize>
 
         let mut num_iterations = 0;
         while clean_victims.len() + dirty_victims.len() < EVICTION_BATCH_SIZE {
-            if num_iterations > 5 {
+            if num_iterations > 10 {
                 if clean_victims.len() + dirty_victims.len() == 0 {
                     log_warn!(
                         "    Could not evict pages after {} iterations",
@@ -363,7 +363,7 @@ impl<const IS_SMALL: bool, const EVICTION_BATCH_SIZE: usize>
             self.resident_set.remove(i);
             // Remove the frame info.
             guard.set_page_key(None);
-            // Update the eviction policy.
+            // Reset the mark
             guard.evict_info().reset();
         }
 
@@ -452,7 +452,6 @@ impl<const IS_SMALL: bool, const EVICTION_BATCH_SIZE: usize> MemPool
         guard.set_page_key(Some(page_key)); // Set the frame key to the new page key
         guard.dirty().store(true, Ordering::Release);
         guard.evict_info().reset();
-        guard.evict_info().update();
         self.resident_set
             .insert(self.page_key_to_offset(&guard.page_key().unwrap()) as u64);
 
@@ -602,8 +601,10 @@ impl<const IS_SMALL: bool, const EVICTION_BATCH_SIZE: usize> MemPool
         let read_count_waiting_for_write = self.stats.read_request_waiting_for_write_count();
         let write_count = self.stats.write_count();
         let mut num_frames_per_container = BTreeMap::new();
-        for i in 0..self.num_frames {
-            if let Some(key) = unsafe { &*self.metas.get() }[i].key() {
+        // Traverse the resident set to count the number of frames per container.
+        for i in self.resident_set.clock_batch_iter(self.resident_set.len()) {
+            let meta = &mut unsafe { &mut *self.metas.get() }[i as usize];
+            if let Some(key) = meta.key() {
                 *num_frames_per_container.entry(key.c_key).or_insert(0) += 1;
             }
         }

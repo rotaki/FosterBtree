@@ -1,3 +1,5 @@
+#[cfg(feature = "iouring_async")]
+use super::file_manager::iouring_async::GlobalRings;
 use super::{FileManager, FileManagerTrait, FileStats};
 use crate::bp::prelude::{ContainerKey, MemPoolStatus};
 use crate::page::{Page, PageId};
@@ -186,9 +188,9 @@ impl ContainerManager {
             let db_path = self.base_dir.join(c_key.db_id().to_string());
             #[cfg(feature = "iouring_async")]
             let fm = if self.direct {
-                FileManager::new(&db_path, c_key.c_id, self.ring.clone()).unwrap()
+                FileManager::new(&db_path, c_key.c_id(), self.ring.clone()).unwrap()
             } else {
-                FileManager::with_kpc(&db_path, c_key.c_id, self.ring.clone()).unwrap()
+                FileManager::with_kpc(&db_path, c_key.c_id(), self.ring.clone()).unwrap()
             };
             #[cfg(not(feature = "iouring_async"))]
             let fm = if self.direct {
@@ -206,9 +208,9 @@ impl ContainerManager {
             let db_path = self.base_dir.join(c_key.db_id().to_string());
             #[cfg(feature = "iouring_async")]
             let fm = if self.direct {
-                FileManager::new(&db_path, c_key.c_id, self.ring.clone()).unwrap()
+                FileManager::new(&db_path, c_key.c_id(), self.ring.clone()).unwrap()
             } else {
-                FileManager::with_kpc(&db_path, c_key.c_id, self.ring.clone()).unwrap()
+                FileManager::with_kpc(&db_path, c_key.c_id(), self.ring.clone()).unwrap()
             };
             #[cfg(not(feature = "iouring_async"))]
             let fm = if self.direct {

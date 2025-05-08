@@ -1,12 +1,10 @@
 use core::panic;
 use std::cmp;
-use std::io::{Cursor, Write};
-use std::net::UdpSocket;
 use std::ops::{Index, IndexMut};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::OnceLock;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+#[cfg(feature = "influxdb_trace")]
+use crate::influxdb_trace::INFLUX_TRACE;
 // do not warn about unused imports
 #[allow(unused_imports)]
 use crate::log;
@@ -526,31 +524,8 @@ where
     }
 }
 
-#[cfg(feature = "influxdb_trace")]
-use std::cell::RefCell;
-
-#[cfg(feature = "influxdb_trace")]
-thread_local! {
-    pub static INFLUX_TRACE: RefCell<TxnInflux> = RefCell::new(TxnInflux::new("127.0.0.1", 8089).unwrap());
-}
-
-#[inline(always)]
-fn now_ns() -> u64 {
-    // (t0, epoch_ns) initialised once
-    static BASE: OnceLock<(Instant, u64)> = OnceLock::new();
-    let (t0, epoch_ns) = *BASE.get_or_init(|| {
-        let realtime = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
-        (Instant::now(), realtime.as_nanos() as u64)
-    });
-
-    // time elapsed since t0 as nanoseconds
-    let delta = Instant::now().duration_since(t0).as_nanos() as u64;
-
-    epoch_ns + delta
-}
-
 pub fn run_tpcc_for_thread<T>(
-    is_warmup: bool,
+    _is_warmup: bool,
     thread_id: usize,
     config: &TPCCConfig,
     txn_storage: &T,
@@ -565,9 +540,6 @@ where
 
     while flag.load(Ordering::Acquire) {
         let x = urand_int(1, 100);
-
-        // #[cfg(feature = "influxdb_trace")]
-        // let start_ns = now_ns();
 
         let _txn_type = if x <= 4 {
             run_with_retry::<T, StockLevelTxn>(
@@ -621,89 +593,12 @@ where
             TPCCTxnProfileID::NewOrderTxn
         };
 
-        #[cfg(feature = "influxdb_trace")]
-        if !is_warmup {
-            let commit_ns = now_ns();
+        if !_is_warmup {
+            #[cfg(feature = "influxdb_trace")]
             INFLUX_TRACE.with(|influx| {
-                influx.borrow_mut().append(_txn_type, commit_ns);
+                influx.borrow_mut().append_txn(_txn_type.as_u8());
             });
         }
     }
     (stat, out)
 }
-
-const BUF_SIZE: usize = 64 * 1024 - 512; // one UDP datagram on local host
-
-/// Batches points and ships them via UDP/Telegraf.
-pub struct TxnInflux {
-    sock: UdpSocket,
-    buf: [u8; BUF_SIZE],
-    pos: usize,
-}
-
-impl TxnInflux {
-    /// Connects the socket (non-blocking) to `host:port`.
-    pub fn new(host: &str, port: u16) -> std::io::Result<Self> {
-        let sock = UdpSocket::bind("0.0.0.0:0")?;
-        sock.connect((host, port))?;
-        sock.set_nonblocking(true)?;
-        Ok(Self {
-            sock,
-            buf: [0; BUF_SIZE],
-            pos: 0,
-        })
-    }
-
-    /// Appends one transaction record; flushes if buffer/txn-cap/time limit hit.
-    #[inline(always)]
-    pub fn append(&mut self, kind: TPCCTxnProfileID, commit_ns: u64) {
-        // Soft flush limits
-        if self.pos > BUF_SIZE - 128
-        // space for ~3 lines
-        {
-            self.flush();
-        }
-
-        let mut cur = Cursor::new(&mut self.buf[self.pos..]);
-
-        // Example measurement: "tpcc_txn"
-        // Tag `k` = integer txn type; fields end; timestamp = commit time.
-        // Line-protocol integers need an `i` suffix.
-        write!(
-            cur,
-            "t,k={} v=1i {}\n",
-            kind.as_u8(),
-            commit_ns, // use commit time as point timestamp
-        )
-        .unwrap();
-
-        self.pos += cur.position() as usize;
-    }
-
-    /// Explicit flush; ignores EWOULDBLOCK / ENOBUFS so hot path never panics.
-    pub fn flush(&mut self) {
-        if self.pos == 0 {
-            return;
-        }
-        let _ = self.sock.send(&self.buf[..self.pos]); // best-effort
-        self.pos = 0;
-    }
-}
-
-impl Drop for TxnInflux {
-    fn drop(&mut self) {
-        self.flush();
-    }
-}
-
-/* ------------------------------ Usage sketch ------------------------------
-
-let mut out = TxnInflux::new("127.0.0.1", 8089)?;
-
-loop {
-    // ... run a transaction ...
-    out.append(TxnType::Payment, start_ns, commit_ns);
-}
-
-out.flush();   // after the workload (or rely on Drop)
---------------------------------------------------------------------------- */

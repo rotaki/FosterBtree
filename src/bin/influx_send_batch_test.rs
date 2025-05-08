@@ -23,19 +23,36 @@ fn main() -> std::io::Result<()> {
             .as_nanos() as u64
     };
 
+    // for i in 0..5 {
+    //     let start = now_ns();
+    //     let end = start + 5_000; // pretend 5 µs later
+    //     let kind = i % 5; // cycle 0..4
+
+    //     // measurement: tpcc_txn, tag k=kind
+    //     write!(
+    //         cur,
+    //         "tpcc_txn,k={} start={}i,end={}i {}\n",
+    //         kind, start, end, end
+    //     )
+    //     .unwrap();
+    // }
+
     for i in 0..5 {
+        // diskio: container, read/write
         let start = now_ns();
         let end = start + 5_000; // pretend 5 µs later
-        let kind = i % 5; // cycle 0..4
-
-        // measurement: tpcc_txn, tag k=kind
+        let container = i % 5; // cycle 0..4
+        let is_read = i % 2 == 0; // cycle true/false
+        let op = if is_read { "read" } else { "write" };
+        // measurement: diskio, tag container=container, op=read/write
         write!(
             cur,
-            "tpcc_txn,k={} start={}i,end={}i {}\n",
-            kind, start, end, end
+            "diskio,container={},op={} start={}i,end={}i {}\n",
+            container, op, start, end, end
         )
         .unwrap();
     }
+
     let len = cur.position() as usize;
 
     // ── 3. transmit datagram ────────────────────────────────────────────────

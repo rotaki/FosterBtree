@@ -1440,7 +1440,7 @@ impl<T: MemPool> FosterBtree<T> {
             let page = self.mem_pool.create_new_page_for_write(self.c_key);
             match page {
                 Ok(page) => break page,
-                Err(MemPoolStatus::FrameWriteLatchGrantFailed) => {
+                Err(MemPoolStatus::FrameWriteLatchGrantFailed | MemPoolStatus::CannotEvictPage) => {
                     std::hint::spin_loop();
                 }
                 Err(e) => {
