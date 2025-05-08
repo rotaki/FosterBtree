@@ -1,3 +1,4 @@
+use rayon::prelude::*;
 use std::{collections::HashMap, ops::Index};
 
 use crate::{
@@ -270,9 +271,14 @@ fn create_and_insert_neworder_record(
 ///       - NewOrders
 fn load_item_table(txn_storage: &impl TxnStorageTrait, table_info: &TPCCTableInfo) {
     println!("Loading item table");
-    for i_id in 1..=Item::ITEMS {
-        create_and_insert_item_record(txn_storage, table_info, i_id as u32);
-    }
+    (1..Item::ITEMS + 1)
+        .into_par_iter()
+        .chunks(1000)
+        .for_each(|chunk| {
+            for i_id in chunk {
+                create_and_insert_item_record(txn_storage, table_info, i_id as u32);
+            }
+        });
 }
 
 fn load_warehouse_table(
@@ -280,19 +286,24 @@ fn load_warehouse_table(
     table_info: &TPCCTableInfo,
     config: &TPCCConfig,
 ) {
+    println!("Loading warehouse table");
     let num_warehouses = config.num_warehouses;
-    for w_id in 1..=num_warehouses {
-        println!("Loading warehouse and other tables: {}", w_id);
+    (1..num_warehouses + 1).into_par_iter().for_each(|w_id| {
         create_and_insert_warehouse_record(txn_storage, table_info, w_id);
         load_stock_table(txn_storage, table_info, w_id);
         load_district_table(txn_storage, table_info, w_id);
-    }
+    });
 }
 
 fn load_stock_table(txn_storage: &impl TxnStorageTrait, table_info: &TPCCTableInfo, w_id: u16) {
-    for s_i_id in 1..=Stock::STOCKS_PER_WARE {
-        create_and_insert_stock_record(txn_storage, table_info, w_id, s_i_id as u32);
-    }
+    (1..Stock::STOCKS_PER_WARE + 1)
+        .into_par_iter()
+        .chunks(1000)
+        .for_each(|chunk| {
+            for s_i_id in chunk {
+                create_and_insert_stock_record(txn_storage, table_info, w_id, s_i_id as u32);
+            }
+        });
 }
 
 fn load_district_table(
@@ -300,11 +311,13 @@ fn load_district_table(
     table_info: &TPCCTableInfo,
     d_w_id: u16,
 ) {
-    for d_id in 1..=District::DISTS_PER_WARE {
-        create_and_insert_district_record(txn_storage, table_info, d_w_id, d_id as u8);
-        load_customer_table(txn_storage, table_info, d_w_id, d_id as u8);
-        load_order_table(txn_storage, table_info, d_w_id, d_id as u8);
-    }
+    (1..District::DISTS_PER_WARE + 1)
+        .into_par_iter()
+        .for_each(|d_id| {
+            create_and_insert_district_record(txn_storage, table_info, d_w_id, d_id as u8);
+            load_customer_table(txn_storage, table_info, d_w_id, d_id as u8);
+            load_order_table(txn_storage, table_info, d_w_id, d_id as u8);
+        })
 }
 
 fn load_customer_table(
@@ -314,10 +327,22 @@ fn load_customer_table(
     c_d_id: u8,
 ) {
     let t = get_timestamp();
-    for c_id in 1..=Customer::CUSTS_PER_DIST {
-        create_and_insert_customer_record(txn_storage, table_info, c_w_id, c_d_id, c_id as u32, t);
-        load_history_table(txn_storage, table_info, c_w_id, c_d_id, c_id as u32);
-    }
+    (1..Customer::CUSTS_PER_DIST + 1)
+        .into_par_iter()
+        .chunks(1000)
+        .for_each(|chunk| {
+            for c_id in chunk {
+                create_and_insert_customer_record(
+                    txn_storage,
+                    table_info,
+                    c_w_id,
+                    c_d_id,
+                    c_id as u32,
+                    t,
+                );
+                load_history_table(txn_storage, table_info, c_w_id, c_d_id, c_id as u32);
+            }
+        })
 }
 
 fn load_history_table(
@@ -337,29 +362,34 @@ fn load_order_table(
     o_d_id: u8,
 ) {
     let p = Permutation::new(1, Order::ORDS_PER_DIST);
-    for o_id in 1..=Order::ORDS_PER_DIST {
-        let o_c_id = p[o_id - 1];
-        let (o_entry_d, ol_cnt) = create_and_insert_order_record(
-            txn_storage,
-            table_info,
-            o_w_id,
-            o_d_id,
-            o_id as u32,
-            o_c_id as u32,
-        );
-        load_orderline_table(
-            txn_storage,
-            table_info,
-            ol_cnt,
-            o_w_id,
-            o_d_id,
-            o_id as u32,
-            o_entry_d,
-        );
-        if o_id > 2100 {
-            load_neworder_table(txn_storage, table_info, o_w_id, o_d_id, o_id as u32);
-        }
-    }
+    (1..Order::ORDS_PER_DIST + 1)
+        .into_par_iter()
+        .chunks(1000)
+        .for_each(|chunk| {
+            for o_id in chunk {
+                let o_c_id = p[o_id - 1];
+                let (o_entry_d, ol_cnt) = create_and_insert_order_record(
+                    txn_storage,
+                    table_info,
+                    o_w_id,
+                    o_d_id,
+                    o_id as u32,
+                    o_c_id as u32,
+                );
+                load_orderline_table(
+                    txn_storage,
+                    table_info,
+                    ol_cnt,
+                    o_w_id,
+                    o_d_id,
+                    o_id as u32,
+                    o_entry_d,
+                );
+                if o_id > 2100 {
+                    load_neworder_table(txn_storage, table_info, o_w_id, o_d_id, o_id as u32);
+                }
+            }
+        })
 }
 
 fn load_orderline_table(

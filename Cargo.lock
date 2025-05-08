@@ -383,6 +383,7 @@ dependencies = [
  "libc",
  "memchr",
  "rand",
+ "rayon",
  "rstest",
  "serde",
  "serde_cbor",
