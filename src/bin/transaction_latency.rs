@@ -54,6 +54,7 @@ pub fn main() {
             let flag_ref = &flag;
             s.spawn(move || {
                 run_tpcc_for_thread(
+                    true,
                     thread_id,
                     config_ref,
                     txn_storage_ref,
@@ -83,6 +84,7 @@ pub fn main() {
             let flag_ref = &flag;
             let handler = s.spawn(move || {
                 run_tpcc_for_thread(
+                    false,
                     thread_id,
                     config_ref,
                     txn_storage_ref,

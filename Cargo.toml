@@ -36,6 +36,9 @@ preadpwrite_sync = [] # synchronous I/O implementation using pread/pwrite. Defau
 iouring_sync = [] # synchronous I/O implementation using io-uring
 iouring_async = [] # asynchronous I/O implementation using io-uring
 
+# Trace using influxdb
+influxdb_trace = []
+
 [dependencies]
 tempfile = "3.16.0"
 rand = {version = "0.9.0", features = ["small_rng"]}
