@@ -120,7 +120,7 @@ pub trait FileManagerTrait: Send + Sync {
 pub mod preadpwrite_sync {
     use super::{ContainerId, FileManagerTrait, FileStats};
     #[cfg(feature = "influxdb_trace")]
-    use crate::influxdb_trace::INFLUX_TRACE;
+    use crate::influxdb_trace::influxdb_trace::INFLUX_TRACE;
     #[allow(unused_imports)]
     use crate::log;
     use crate::log_trace;
@@ -592,7 +592,7 @@ pub mod inmemory_async_simulator {
 pub mod iouring_async {
     use super::{ContainerId, FileManagerTrait, FileStats};
     #[cfg(feature = "influxdb_trace")]
-    use crate::influxdb_trace::INFLUX_TRACE;
+    use crate::influxdb_trace::influxdb_trace::INFLUX_TRACE;
     #[allow(unused_imports)]
     use crate::log;
 

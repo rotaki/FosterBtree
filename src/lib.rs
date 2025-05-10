@@ -1,4 +1,5 @@
 pub mod access_method;
+pub mod affinity;
 pub mod bench_utils;
 pub mod bp;
 pub mod container;

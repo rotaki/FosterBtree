@@ -7,13 +7,10 @@ use crate::{
     utils::Permutation,
 };
 
-use super::{
-    record_definitions::{
-        get_timestamp, urand_int, Customer, CustomerKey, CustomerSecondaryKey, District,
-        DistrictKey, Item, ItemKey, NewOrder, NewOrderKey, Order, OrderKey, OrderLine,
-        OrderLineKey, OrderSecondaryKey, Stock, StockKey, Timestamp, Warehouse, WarehouseKey,
-    },
-    txn_utils::TPCCConfig,
+use super::record_definitions::{
+    get_timestamp, urand_int, Customer, CustomerKey, CustomerSecondaryKey, District, DistrictKey,
+    Item, ItemKey, NewOrder, NewOrderKey, Order, OrderKey, OrderLine, OrderLineKey,
+    OrderSecondaryKey, Stock, StockKey, Timestamp, Warehouse, WarehouseKey,
 };
 
 pub const DB_ID: u16 = 0;
@@ -284,10 +281,9 @@ fn load_item_table(txn_storage: &impl TxnStorageTrait, table_info: &TPCCTableInf
 fn load_warehouse_table(
     txn_storage: &impl TxnStorageTrait,
     table_info: &TPCCTableInfo,
-    config: &TPCCConfig,
+    num_warehouses: u16,
 ) {
     println!("Loading warehouse table");
-    let num_warehouses = config.num_warehouses;
     (1..num_warehouses + 1).into_par_iter().for_each(|w_id| {
         create_and_insert_warehouse_record(txn_storage, table_info, w_id);
         load_stock_table(txn_storage, table_info, w_id);
@@ -427,9 +423,59 @@ fn load_neworder_table(
     create_and_insert_neworder_record(txn_storage, table_info, no_w_id, no_d_id, no_o_id);
 }
 
-pub fn tpcc_load_all_tables(
+pub fn tpcc_load_schema(txn_storage: &impl TxnStorageTrait) -> TPCCTableInfo {
+    let containers = txn_storage.list_containers(DB_ID).unwrap();
+    let mut table_info = TPCCTableInfo::new();
+    for (c_id, options) in containers {
+        let table = match options.name().as_str() {
+            "item" => TPCCTable::Item,
+            "warehouse" => TPCCTable::Warehouse,
+            "stock" => TPCCTable::Stock,
+            "district" => TPCCTable::District,
+            "customer" => TPCCTable::Customer,
+            "customer_secondary" => TPCCTable::CustomerSecondary,
+            "order" => TPCCTable::Order,
+            "order_secondary" => TPCCTable::OrderSecondary,
+            "orderline" => TPCCTable::OrderLine,
+            "neworder" => TPCCTable::NewOrder,
+            "history" => TPCCTable::History,
+            _ => {
+                println!("Unknown table: {}", options.name());
+                continue;
+            }
+        };
+        table_info.insert(table, c_id);
+    }
+    println!("======== Containers ========");
+    println!("Item container id: {}", table_info[TPCCTable::Item]);
+    println!(
+        "Warehouse container id: {}",
+        table_info[TPCCTable::Warehouse]
+    );
+    println!("Stock container id: {}", table_info[TPCCTable::Stock]);
+    println!("District container id: {}", table_info[TPCCTable::District]);
+    println!("Customer container id: {}", table_info[TPCCTable::Customer]);
+    println!(
+        "Customer secondary container id: {}",
+        table_info[TPCCTable::CustomerSecondary]
+    );
+    println!("Orders container id: {}", table_info[TPCCTable::Order]);
+    println!(
+        "Orders secondary container id: {}",
+        table_info[TPCCTable::OrderSecondary]
+    );
+    println!(
+        "OrderLine container id: {}",
+        table_info[TPCCTable::OrderLine]
+    );
+    println!("NewOrder container id: {}", table_info[TPCCTable::NewOrder]);
+    println!("History container id: {}", table_info[TPCCTable::History]);
+    table_info
+}
+
+pub fn tpcc_gen_all_tables(
     txn_storage: &impl TxnStorageTrait,
-    config: &TPCCConfig,
+    num_warehouses: u16,
 ) -> TPCCTableInfo {
     let mut table_info = TPCCTableInfo::new();
     let db_id = txn_storage.open_db(DBOptions::new("tpcc")).unwrap();
@@ -548,7 +594,7 @@ pub fn tpcc_load_all_tables(
 
     let time = std::time::Instant::now();
     load_item_table(txn_storage, &table_info);
-    load_warehouse_table(txn_storage, &table_info, config);
+    load_warehouse_table(txn_storage, &table_info, num_warehouses);
     let elapsed = time.elapsed();
     println!(
         "======== Finished Loading Tables ========\nElapsed time: {:?}",

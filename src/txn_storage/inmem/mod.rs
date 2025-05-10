@@ -1,6 +1,6 @@
 use std::{
     cell::UnsafeCell,
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, HashMap},
     sync::{Arc, Mutex, RwLock},
 };
 
@@ -432,13 +432,26 @@ impl TxnStorageTrait for InMemStorage {
     }
 
     // List all container names in the db
-    fn list_containers(&self, db_id: DatabaseId) -> Result<HashSet<ContainerId>, TxnStorageStatus> {
+    fn list_containers(
+        &self,
+        db_id: DatabaseId,
+    ) -> Result<Vec<(ContainerId, ContainerOptions)>, TxnStorageStatus> {
         if db_id != 0 {
             return Err(TxnStorageStatus::DBNotFound);
         }
         let _guard = self.container_lock.read().unwrap();
         let containers = unsafe { &mut *self.containers.get() };
-        Ok((0..containers.len() as ContainerId).collect())
+        Ok((0..containers.len() as ContainerId)
+            .map(|i| {
+                let c_ds = match containers[i as usize].as_ref() {
+                    Storage::HashMap(..) => ContainerDS::Hash,
+                    Storage::BTreeMap(..) => ContainerDS::BTree,
+                    Storage::AppendOnly(..) => ContainerDS::AppendOnly,
+                };
+                let options = ContainerOptions::primary("no_name_for_now", c_ds);
+                (i, options)
+            })
+            .collect())
     }
 
     fn raw_insert_value(

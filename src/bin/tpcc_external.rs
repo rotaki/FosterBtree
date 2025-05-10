@@ -1,12 +1,17 @@
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Barrier,
+};
 
 use clap::Parser;
 use fbtree::{
-    bp::{get_test_vmcache, MemPool},
+    affinity::{get_current_cpu, get_num_cores, set_affinity},
+    bp::{BufferPool, MemPool},
+    container::ContainerManager,
     prelude::{
-        run_tpcc_for_thread, tpcc_load_all_tables, tpcc_show_table_stats, DeliveryTxn, NewOrderTxn,
-        OrderStatusTxn, PaymentTxn, StockLevelTxn, TPCCConfig, TPCCOutput, TPCCStat, TPCCTableInfo,
-        TPCCTxnProfile, TPCCTxnProfileID, TxnStorageTrait, PAGE_SIZE,
+        run_tpcc_for_thread, tpcc_load_schema, DeliveryTxn, NewOrderTxn, OrderStatusTxn,
+        PaymentTxn, StockLevelTxn, TPCCConfig, TPCCOutput, TPCCStat, TPCCTableInfo, TPCCTxnProfile,
+        TPCCTxnProfileID, TxnStorageTrait, PAGE_SIZE,
     },
     txn_storage::NoWaitTxnStorage,
 };
@@ -32,55 +37,95 @@ pub fn main() {
     {
         println!("BP hint enabled");
     }
-    let config = TPCCConfig::parse();
+    let mut config = TPCCConfig::parse();
+    config.fixed_warehouse_per_thread = false;
+    config.warmup_time = 0;
     println!("config: {:?}", config);
+    println!("Fixed warehouse per thread is set to false for external TPCC benchmark");
+    println!("Warmup time is set to 0 for external TPCC benchmark");
 
-    // Set frames for 1GB memory per warehouses
-    let num_frames = config.num_warehouses as usize * 1024 * 1024 * 1024 / PAGE_SIZE;
-    let bp = get_test_vmcache::<false, 64>(num_frames);
-    let txn_storage = NoWaitTxnStorage::new(&bp);
-    let tbl_info = tpcc_load_all_tables(&txn_storage, &config);
-    tpcc_show_table_stats(&txn_storage, &tbl_info);
+    let num_cores = get_num_cores();
+    if config.num_threads + 1 > num_cores {
+        panic!(
+            "Number of worker threads + main thread {} exceeds number of cores {}",
+            config.num_threads, num_cores
+        );
+    }
 
-    println!("BP stats after load: \n{}", unsafe { bp.stats() });
+    // Set frames for 32GB of BP (assume that PAGE_SIZE is 16KB)
+    let num_frames = 2 * 1024 * 1024;
+    println!(
+        "BP size: {} GB",
+        num_frames * PAGE_SIZE / (1024 * 1024 * 1024)
+    );
+
+    let base_dir = format!("tpcc_db_w{}", config.num_warehouses);
+    // Check if the directory exists
+    if !std::path::Path::new(&base_dir).exists() {
+        panic!(
+            "Directory {} does not exist. Please run tpcc_db_gen first.",
+            base_dir
+        );
+    }
+    println!("Reading from directory: {}", base_dir);
+    let cm = Arc::new(ContainerManager::new(base_dir, true, false).unwrap());
+
+    #[cfg(feature = "use_vmc_tpcc")]
+    let bp = Arc::new(VMCachePool::<false, 64>::new(num_frames, cm).unwrap());
+    #[cfg(not(feature = "use_vmc_tpcc"))]
+    let bp = Arc::new(BufferPool::new(num_frames, cm).unwrap());
+
+    // Load the database from the directory.
+    let txn_storage = NoWaitTxnStorage::load(&bp);
+    let tbl_info = tpcc_load_schema(&txn_storage);
+
+    set_affinity(get_num_cores() - 1).unwrap();
+    let current_cpu = get_current_cpu();
+    println!("Main thread pinned to CPU {}", current_cpu);
 
     let mut stats_and_outs = Vec::with_capacity(config.num_threads);
     let flag = AtomicBool::new(true); // while flag is true, keep running the benchmark
 
     // Warmup
-    std::thread::scope(|s| {
-        for i in 0..config.num_threads {
-            let thread_id = i;
-            let config_ref = &config;
-            let txn_storage_ref = &txn_storage;
-            let tbl_info_ref = &tbl_info;
-            let flag_ref = &flag;
-            s.spawn(move || {
-                run_tpcc_for_thread(
-                    true,
-                    thread_id,
-                    config_ref,
-                    txn_storage_ref,
-                    tbl_info_ref,
-                    flag_ref,
-                );
-            });
-        }
-        // Start timer for config duration
-        std::thread::sleep(std::time::Duration::from_secs(config.warmup_time));
-        flag.store(false, Ordering::Release);
-
-        // Automatically join all threads
-    });
-
-    println!("BP stats after warmup: \n{}", unsafe { bp.stats() });
+    // let warmup_barrier = Arc::new(Barrier::new(config.num_threads + 1));
+    // std::thread::scope(|s| {
+    //     for i in 0..config.num_threads {
+    //         let thread_id = i;
+    //         let warmup_barrier = warmup_barrier.clone();
+    //         let config_ref = &config;
+    //         let txn_storage_ref = &txn_storage;
+    //         let tbl_info_ref = &tbl_info;
+    //         let flag_ref = &flag;
+    //         s.spawn(move || {
+    //             run_tpcc_for_thread(
+    //                 true,
+    //                 thread_id,
+    //                 true,
+    //                 warmup_barrier,
+    //                 config_ref,
+    //                 txn_storage_ref,
+    //                 tbl_info_ref,
+    //                 flag_ref,
+    //             );
+    //         });
+    //     }
+    //     // Start timer for config duration
+    //     warmup_barrier.wait();
+    //     std::thread::sleep(std::time::Duration::from_secs(config.warmup_time));
+    //     flag.store(false, Ordering::Release);
+    //     // Automatically join all threads
+    // });
+    // println!("BP stats after warmup: \n{}", unsafe { bp.stats() });
+    println!("Warm up skipped in external TPCC benchmark");
 
     flag.store(true, Ordering::Release);
     // Run the benchmark
+    let run_barrier = Arc::new(Barrier::new(config.num_threads + 1));
     std::thread::scope(|s| {
         let mut handlers = Vec::with_capacity(config.num_threads);
         for i in 0..config.num_threads {
             let thread_id = i;
+            let run_barrier = run_barrier.clone();
             let config_ref = &config;
             let txn_storage_ref = &txn_storage;
             let tbl_info_ref = &tbl_info;
@@ -89,6 +134,8 @@ pub fn main() {
                 run_tpcc_for_thread(
                     false,
                     thread_id,
+                    true,
+                    run_barrier,
                     config_ref,
                     txn_storage_ref,
                     tbl_info_ref,
@@ -98,6 +145,7 @@ pub fn main() {
             handlers.push(handler);
         }
         // Start timer for config duration
+        run_barrier.wait();
         std::thread::sleep(std::time::Duration::from_secs(config.exec_time));
         flag.store(false, Ordering::Release);
 

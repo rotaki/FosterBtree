@@ -2,9 +2,11 @@ use core::panic;
 use std::cmp;
 use std::ops::{Index, IndexMut};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Barrier};
 
+use crate::affinity::{get_current_cpu, get_num_cores, set_affinity};
 #[cfg(feature = "influxdb_trace")]
-use crate::influxdb_trace::INFLUX_TRACE;
+use crate::influxdb_trace::influxdb_trace::INFLUX_TRACE;
 // do not warn about unused imports
 #[allow(unused_imports)]
 use crate::log;
@@ -524,9 +526,12 @@ where
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn run_tpcc_for_thread<T>(
     _is_warmup: bool,
     thread_id: usize,
+    cpu_affinity: bool,
+    barrier: Arc<Barrier>,
     config: &TPCCConfig,
     txn_storage: &T,
     tbl_info: &TPCCTableInfo,
@@ -535,8 +540,23 @@ pub fn run_tpcc_for_thread<T>(
 where
     T: TxnStorageTrait,
 {
+    if cpu_affinity {
+        let num_cores = get_num_cores();
+        if thread_id >= num_cores {
+            panic!(
+                "Thread ID {} exceeds number of cores {}",
+                thread_id, num_cores
+            );
+        }
+        set_affinity(thread_id).unwrap();
+        let current_cpu = get_current_cpu();
+        println!("Thread {} pinned to CPU {}", thread_id, current_cpu);
+    }
+
     let mut stat = TPCCStat::new();
     let mut out = TPCCOutput::new();
+
+    barrier.wait(); // Wait for all threads to be ready
 
     while flag.load(Ordering::Acquire) {
         let x = urand_int(1, 100);

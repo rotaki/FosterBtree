@@ -45,9 +45,9 @@ fn main() -> std::io::Result<()> {
         let is_read = i % 2 == 0; // cycle true/false
         let op = if is_read { "read" } else { "write" };
         // measurement: diskio, tag container=container, op=read/write
-        write!(
+        writeln!(
             cur,
-            "diskio,container={},op={} start={}i,end={}i {}\n",
+            "diskio,container={},op={} start={}i,end={}i {}",
             container, op, start, end, end
         )
         .unwrap();

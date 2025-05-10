@@ -1,6 +1,6 @@
 use core::panic;
 use std::cell::UnsafeCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fmt::Display;
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::Arc;
@@ -202,7 +202,8 @@ impl ReadWriteSet {
     }
 }
 
-static CONTAINER_ID_COUNTER: AtomicU16 = AtomicU16::new(0);
+// ContainerId starts from 1. 0 is reserved for metadata.
+static CONTAINER_ID_COUNTER: AtomicU16 = AtomicU16::new(1);
 
 // UniqueKeyIndex
 pub struct PrimaryStorage<M: MemPool> {
@@ -247,6 +248,20 @@ impl<M: MemPool> PrimaryStorages<M> {
             }),
         );
         c_id
+    }
+
+    pub fn load(&self, bp: &Arc<M>, c_id: ContainerId) {
+        let map: &mut HashMap<u16, Arc<PrimaryStorage<M>>> = unsafe { &mut *self.map.get() };
+        let btree = Arc::new(FosterBtree::load(ContainerKey::new(0, c_id), bp.clone(), 0));
+        let locktable = Arc::new(LockTable::new());
+        map.insert(
+            c_id,
+            Arc::new(PrimaryStorage {
+                c_id,
+                btree,
+                locktable,
+            }),
+        );
     }
 }
 
@@ -299,6 +314,25 @@ impl<M: MemPool> SecondaryStorages<M> {
             }),
         );
         c_id
+    }
+
+    pub fn load(&self, bp: &Arc<M>, c_id: ContainerId, ps: &Arc<PrimaryStorage<M>>) {
+        let map: &mut HashMap<u16, Arc<SecondaryStorage<M>>> = unsafe { &mut *self.map.get() };
+        let btree = Arc::new(FosterBtreeAppendOnly::load(
+            ContainerKey::new(0, c_id),
+            bp.clone(),
+            0,
+        ));
+        let locktable = Arc::new(LockTable::new());
+        map.insert(
+            c_id,
+            Arc::new(SecondaryStorage {
+                c_id,
+                btree,
+                locktable,
+                ps: ps.clone(),
+            }),
+        );
     }
 }
 
@@ -874,6 +908,7 @@ impl<M: MemPool> SecondaryIterator<M> {
 }
 
 pub struct NoWaitTxnStorage<M: MemPool> {
+    metadata: Arc<FosterBtree<M>>,
     bp: Arc<M>,
     pss: PrimaryStorages<M>,
     sss: SecondaryStorages<M>,
@@ -882,9 +917,53 @@ pub struct NoWaitTxnStorage<M: MemPool> {
 impl<M: MemPool> NoWaitTxnStorage<M> {
     pub fn new(bp: &Arc<M>) -> Self {
         NoWaitTxnStorage {
+            metadata: Arc::new(FosterBtree::new(
+                ContainerKey::new(0, 0), // Metadata container id is 0
+                bp.clone(),
+            )),
             bp: bp.clone(),
             pss: PrimaryStorages::new(),
             sss: SecondaryStorages::new(),
+        }
+    }
+
+    pub fn load(bp: &Arc<M>) -> Self {
+        let metadata = Arc::new(FosterBtree::<M>::load(
+            ContainerKey::new(0, 0),
+            bp.clone(),
+            0,
+        ));
+        let iter = metadata.scan();
+        let mut primary_storages = Vec::new();
+        let mut secondary_storages = Vec::new();
+        for (k, v) in iter {
+            let c_id = ContainerId::from_be_bytes(k.try_into().unwrap());
+            let c_type = ContainerOptions::from_bytes(&v);
+            match c_type.container_type() {
+                ContainerType::Primary => {
+                    primary_storages.push(c_id);
+                }
+                ContainerType::Secondary(primary_c_id) => {
+                    secondary_storages.push((c_id, primary_c_id));
+                }
+            }
+        }
+        // Load the primary storages first.
+        let pss = PrimaryStorages::new();
+        for c_id in primary_storages {
+            pss.load(bp, c_id);
+        }
+        // Load the secondary storages after.
+        let sss = SecondaryStorages::new();
+        for (c_id, primary_c_id) in secondary_storages {
+            sss.load(bp, c_id, pss.get(primary_c_id).unwrap());
+        }
+
+        NoWaitTxnStorage {
+            metadata,
+            bp: bp.clone(),
+            pss,
+            sss,
         }
     }
 }
@@ -916,10 +995,20 @@ impl<M: MemPool> TxnStorageTrait for NoWaitTxnStorage<M> {
     ) -> Result<ContainerId, TxnStorageStatus> {
         debug_assert_eq!(db_id, 0);
         match options.container_type() {
-            ContainerType::Primary => Ok(self.pss.create_new(&self.bp)),
+            ContainerType::Primary => {
+                let c_id = self.pss.create_new(&self.bp);
+                self.metadata
+                    .insert(&(c_id as ContainerId).to_be_bytes(), &options.to_bytes())
+                    .unwrap();
+                Ok(c_id)
+            }
             ContainerType::Secondary(primary_c_id) => {
                 let ps = self.pss.get(primary_c_id).unwrap();
-                Ok(self.sss.create_new(&self.bp, ps))
+                let c_id = self.sss.create_new(&self.bp, ps);
+                self.metadata
+                    .insert(&(c_id as ContainerId).to_be_bytes(), &options.to_bytes())
+                    .unwrap();
+                Ok(c_id)
             }
         }
     }
@@ -950,9 +1039,16 @@ impl<M: MemPool> TxnStorageTrait for NoWaitTxnStorage<M> {
 
     fn list_containers(
         &self,
-        _db_id: DatabaseId,
-    ) -> Result<HashSet<ContainerId>, TxnStorageStatus> {
-        unimplemented!();
+        db_id: DatabaseId,
+    ) -> Result<Vec<(ContainerId, ContainerOptions)>, TxnStorageStatus> {
+        debug_assert_eq!(db_id, 0);
+        let mut containers = Vec::new();
+        for (k, v) in self.metadata.scan() {
+            let c_id = ContainerId::from_be_bytes(k.try_into().unwrap());
+            let c_type = ContainerOptions::from_bytes(&v);
+            containers.push((c_id, c_type));
+        }
+        Ok(containers)
     }
 
     fn raw_insert_value(
@@ -1211,11 +1307,7 @@ mod tests {
     fn test_insert_and_read_back() {
         // Create a NoWaitTxnStorage
         let bp = get_test_bp(10);
-        let storage = NoWaitTxnStorage {
-            bp: bp.clone(),
-            pss: PrimaryStorages::new(),
-            sss: SecondaryStorages::new(),
-        };
+        let storage = NoWaitTxnStorage::new(&bp);
 
         // Open a database
         let db_id = storage.open_db(DBOptions::new("testdb")).unwrap();
@@ -1258,11 +1350,7 @@ mod tests {
     fn test_insert_and_update_in_same_txn() {
         // Create a NoWaitTxnStorage
         let bp = get_test_bp(10);
-        let storage = NoWaitTxnStorage {
-            bp: bp.clone(),
-            pss: PrimaryStorages::new(),
-            sss: SecondaryStorages::new(),
-        };
+        let storage = NoWaitTxnStorage::new(&bp);
 
         // Open a database
         let db_id = storage.open_db(DBOptions::new("testdb")).unwrap();
@@ -1313,11 +1401,7 @@ mod tests {
     fn test_insert_and_delete_in_same_txn() {
         // Create a NoWaitTxnStorage
         let bp = get_test_bp(10);
-        let storage = NoWaitTxnStorage {
-            bp: bp.clone(),
-            pss: PrimaryStorages::new(),
-            sss: SecondaryStorages::new(),
-        };
+        let storage = NoWaitTxnStorage::new(&bp);
 
         // Open a database
         let db_id = storage.open_db(DBOptions::new("testdb")).unwrap();
@@ -1365,11 +1449,7 @@ mod tests {
     fn test_conflicting_transactions() {
         // Create a NoWaitTxnStorage
         let bp = get_test_bp(10);
-        let storage = NoWaitTxnStorage {
-            bp: bp.clone(),
-            pss: PrimaryStorages::new(),
-            sss: SecondaryStorages::new(),
-        };
+        let storage = NoWaitTxnStorage::new(&bp);
 
         // Open a database
         let db_id = storage.open_db(DBOptions::new("testdb")).unwrap();
@@ -1413,11 +1493,7 @@ mod tests {
     fn test_transaction_abort() {
         // Create a NoWaitTxnStorage
         let bp = get_test_bp(10);
-        let storage = NoWaitTxnStorage {
-            bp: bp.clone(),
-            pss: PrimaryStorages::new(),
-            sss: SecondaryStorages::new(),
-        };
+        let storage = NoWaitTxnStorage::new(&bp);
 
         // Open a database
         let db_id = storage.open_db(DBOptions::new("testdb")).unwrap();
@@ -1448,5 +1524,40 @@ mod tests {
         assert!(matches!(result, Err(TxnStorageStatus::KeyNotFound)));
 
         storage.commit_txn(&txn2, false).unwrap();
+    }
+
+    #[test]
+    fn test_container_durability() {
+        // Create a NoWaitTxnStorage
+        let bp = get_test_bp(10);
+        let storage = NoWaitTxnStorage::new(&bp);
+
+        // Open a database
+        let db_id = storage.open_db(DBOptions::new("testdb")).unwrap();
+
+        let mut options = vec![];
+        let option = ContainerOptions::primary("testtable1", ContainerDS::BTree);
+        // Create a container
+        let c_id1 = storage.create_container(db_id, option.clone()).unwrap();
+        options.push((c_id1, option));
+
+        // Create a secondary container
+        let option = ContainerOptions::secondary("testtable2", ContainerDS::BTree, c_id1);
+        let s_id1 = storage.create_container(db_id, option.clone()).unwrap();
+        options.push((s_id1, option));
+
+        // Create another container
+        let option = ContainerOptions::primary("testtable3", ContainerDS::BTree);
+        let c_id2 = storage.create_container(db_id, option.clone()).unwrap();
+        options.push((c_id2, option));
+
+        // Load the storage again to verify durability
+        let new_storage = NoWaitTxnStorage::load(&bp);
+        let mut all_containers = new_storage.list_containers(0).unwrap();
+
+        // Check that all containers are present
+        options.sort_by(|a, b| a.0.cmp(&b.0));
+        all_containers.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(options, all_containers);
     }
 }

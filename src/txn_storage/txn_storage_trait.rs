@@ -2,7 +2,6 @@ use crate::{
     access_method::AccessMethodError,
     bp::prelude::{ContainerId, DatabaseId},
 };
-use std::collections::HashSet;
 
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub enum TxnStorageStatus {
@@ -74,7 +73,7 @@ impl DBOptions {
 }
 
 /// Container data structure
-#[derive(Clone)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ContainerDS {
     Hash,
     BTree,
@@ -100,12 +99,44 @@ impl ContainerDS {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ContainerType {
     Primary,
     Secondary(ContainerId), // Secondary container with primary container id
 }
 
+impl ContainerType {
+    pub fn byte_length() -> usize {
+        3
+    }
+
+    pub fn to_bytes(&self) -> [u8; 3] {
+        match self {
+            ContainerType::Primary => [0, 0, 0],
+            ContainerType::Secondary(c_id) => {
+                let mut bytes = [0; 3];
+                bytes[0] = 1;
+                bytes[1..].copy_from_slice(&c_id.to_be_bytes()[..2]);
+                bytes
+            }
+        }
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Self {
+        match bytes[0] {
+            0 => ContainerType::Primary,
+            1 => {
+                let c_id = ContainerId::from_be_bytes(
+                    bytes[1..].try_into().expect("Invalid container id length"),
+                );
+                ContainerType::Secondary(c_id)
+            }
+            _ => panic!("Invalid container type"),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ContainerOptions {
     name: String,
     c_ds: ContainerDS,
@@ -134,11 +165,25 @@ impl ContainerOptions {
     }
 
     pub fn data_structure(&self) -> ContainerDS {
-        self.c_ds.clone()
+        self.c_ds
     }
 
     pub fn container_type(&self) -> ContainerType {
-        self.c_type.clone()
+        self.c_type
+    }
+
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut bytes = self.c_ds.to_bytes();
+        bytes.extend_from_slice(&self.c_type.to_bytes());
+        bytes.extend_from_slice(self.name.as_bytes());
+        bytes
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Self {
+        let c_ds = ContainerDS::from_bytes(&bytes[0..1]); // 1 byte
+        let c_type = ContainerType::from_bytes(&bytes[1..4]); // 3 byte
+        let name = String::from_utf8(bytes[4..].to_vec()).expect("Invalid container name");
+        ContainerOptions { name, c_ds, c_type }
     }
 }
 
@@ -193,7 +238,10 @@ pub trait TxnStorageTrait: Send + Sync {
     }
 
     // List all container names in the db
-    fn list_containers(&self, db_id: DatabaseId) -> Result<HashSet<ContainerId>, TxnStorageStatus>;
+    fn list_containers(
+        &self,
+        db_id: DatabaseId,
+    ) -> Result<Vec<(ContainerId, ContainerOptions)>, TxnStorageStatus>;
 
     // Insert value without transaction support
     fn raw_insert_value(

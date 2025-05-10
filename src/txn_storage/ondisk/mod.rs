@@ -1,6 +1,5 @@
 use std::{
     cell::UnsafeCell,
-    collections::HashSet,
     sync::{Arc, Mutex, RwLock},
 };
 
@@ -301,13 +300,26 @@ impl<M: MemPool> TxnStorageTrait for OnDiskStorage<M> {
     }
 
     // List all container names in the db
-    fn list_containers(&self, db_id: DatabaseId) -> Result<HashSet<ContainerId>, TxnStorageStatus> {
+    fn list_containers(
+        &self,
+        db_id: DatabaseId,
+    ) -> Result<Vec<(ContainerId, ContainerOptions)>, TxnStorageStatus> {
         if db_id != 0 {
             return Err(TxnStorageStatus::DBNotFound);
         }
         let _guard = self.container_lock.read().unwrap();
         let containers = unsafe { &mut *self.containers.get() };
-        Ok((0..containers.len() as ContainerId).collect())
+        Ok((0..containers.len() as ContainerId)
+            .map(|c_id| {
+                let c_id = c_id as ContainerId;
+                let storage = containers[c_id as usize].as_ref();
+                let c_ds = match storage {
+                    Storage::BTreeMap(_) => ContainerDS::BTree,
+                    Storage::AppendOnly(_) => ContainerDS::AppendOnly,
+                };
+                (c_id, ContainerOptions::primary("no_name_for_now", c_ds))
+            })
+            .collect())
     }
 
     fn raw_insert_value(

@@ -15,7 +15,7 @@ pub use in_mem_pool::InMemPool;
 pub use mem_pool_trait::{
     ContainerId, ContainerKey, DatabaseId, MemPool, MemPoolStatus, PageFrameKey,
 };
-use vmcache::VMCachePool;
+pub use vmcache::VMCachePool;
 
 use crate::{container::ContainerManager, random::gen_random_pathname};
 

@@ -1,10 +1,13 @@
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Barrier,
+};
 
 use clap::Parser;
 use fbtree::{
     bp::{get_test_bp, MemPool},
     prelude::{
-        run_tpcc_for_thread, tpcc_load_all_tables, DeliveryTxn, NewOrderTxn, OrderStatusTxn,
+        run_tpcc_for_thread, tpcc_gen_all_tables, DeliveryTxn, NewOrderTxn, OrderStatusTxn,
         PaymentTxn, StockLevelTxn, TPCCConfig, TPCCOutput, TPCCStat, TPCCTableInfo, TPCCTxnProfile,
         TPCCTxnProfileID, TxnStorageTrait, PAGE_SIZE,
     },
@@ -36,7 +39,7 @@ pub fn main() {
     let num_frames = config.num_warehouses as usize * 1024 * 1024 * 1024 / PAGE_SIZE;
     let bp = get_test_bp(num_frames);
     let txn_storage = NoWaitTxnStorage::new(&bp);
-    let tbl_info = tpcc_load_all_tables(&txn_storage, &config);
+    let tbl_info = tpcc_gen_all_tables(&txn_storage, config.num_warehouses);
     // show_table_stats(&txn_storage, &tbl_info);
 
     println!("BP stats after load: \n{}", unsafe { bp.stats() });
@@ -45,9 +48,11 @@ pub fn main() {
     let flag = AtomicBool::new(true); // while flag is true, keep running the benchmark
 
     // Warmup
+    let warmup_barrier = Arc::new(Barrier::new(config.num_threads + 1));
     std::thread::scope(|s| {
         for i in 0..config.num_threads {
             let thread_id = i;
+            let warmup_barrier = warmup_barrier.clone();
             let config_ref = &config;
             let txn_storage_ref = &txn_storage;
             let tbl_info_ref = &tbl_info;
@@ -56,6 +61,8 @@ pub fn main() {
                 run_tpcc_for_thread(
                     true,
                     thread_id,
+                    true,
+                    warmup_barrier,
                     config_ref,
                     txn_storage_ref,
                     tbl_info_ref,
@@ -64,6 +71,7 @@ pub fn main() {
             });
         }
         // Start timer for config duration
+        warmup_barrier.wait();
         std::thread::sleep(std::time::Duration::from_secs(config.warmup_time));
         flag.store(false, Ordering::Release);
 
@@ -74,10 +82,12 @@ pub fn main() {
 
     flag.store(true, Ordering::Release);
     // Run the benchmark
+    let run_barrier = Arc::new(Barrier::new(config.num_threads + 1));
     std::thread::scope(|s| {
         let mut handlers = Vec::with_capacity(config.num_threads);
         for i in 0..config.num_threads {
             let thread_id = i;
+            let run_barrier = run_barrier.clone();
             let config_ref = &config;
             let txn_storage_ref = &txn_storage;
             let tbl_info_ref = &tbl_info;
@@ -86,6 +96,8 @@ pub fn main() {
                 run_tpcc_for_thread(
                     false,
                     thread_id,
+                    true,
+                    run_barrier,
                     config_ref,
                     txn_storage_ref,
                     tbl_info_ref,
@@ -95,6 +107,7 @@ pub fn main() {
             handlers.push(handler);
         }
         // Start timer for config duration
+        run_barrier.wait();
         std::thread::sleep(std::time::Duration::from_secs(config.exec_time));
         flag.store(false, Ordering::Release);
 
