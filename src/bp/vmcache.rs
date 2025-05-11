@@ -142,6 +142,9 @@ impl<const IS_SMALL: bool, const EVICTION_BATCH_SIZE: usize>
         num_frames: usize,
         container_manager: Arc<ContainerManager>,
     ) -> Result<Self, MemPoolStatus> {
+        if num_frames < EVICTION_BATCH_SIZE {
+            panic!("num_frames must be greater or equal to EVICTION_BATCH_SIZE");
+        }
         let size = Self::PAGE_ENTRIES * PAGE_SIZE;
         let flags = MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE;
         let prot = PROT_READ | PROT_WRITE;
@@ -243,9 +246,11 @@ impl<const IS_SMALL: bool, const EVICTION_BATCH_SIZE: usize>
 
     fn evict_batch(&self) -> Result<(), MemPoolStatus> {
         // Rule1. We need a read-latch of the frame when writing the page to disk.
-        // Rule2. We need a write-latch of the frame when removing the page from the page-table.
+        // Rule2. We need a write-latch of the frame when removing the page from the page-table because the OS will
+        // zero out the page when we remove it from the page-table and we need to make sure that no one else 
+        // is using the page while we are removing it from the page-table.
         // Rule3. We don't want to hold the write-latch of the frame for too long (i.e. while writing to disk).
-        // Rule4. We want to evict the pages from the page-table or page-to-frame mapping in batches.
+        // Rule4. We want to be able to evict the pages from the page-table or page-to-frame mapping in batches.
 
         // This suggests that we should first get a read-latch on the dirty pages and write them to disk
         // without holding any write-latch of other frames. We keep the read-latch on the dirty pages until
