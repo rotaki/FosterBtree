@@ -8,6 +8,11 @@ pub mod influxdb_trace {
 
     use crate::{prelude::urand_int, time::now_ns};
 
+    const INFLUX_DB_SUFFIX: &str = match option_env!("INFLUX_DB_SUFFIX") {
+        Some(val) => val,
+        None => "",
+    };
+
     thread_local! {
         pub static INFLUX_TRACE: RefCell<TxnInflux> = RefCell::new(TxnInflux::new("127.0.0.1", 8089).unwrap());
     }
@@ -38,7 +43,6 @@ pub mod influxdb_trace {
         /// Appends one transaction record; flushes if buffer/txn-cap/time limit hit.
         #[inline(always)]
         pub fn append_txn(&mut self, _kind: u8) {
-            #[cfg(feature = "influxdb_trace")]
             if urand_int(1, 100) <= 1 {
                 self.flush_if_needed();
 
@@ -46,7 +50,7 @@ pub mod influxdb_trace {
 
                 write!(
                     cur,
-                    "t,k={} v=1i {}\n", // v=1i is a dummy value needed for InfluxDB
+                    "t{INFLUX_DB_SUFFIX},k={} v=1i {}\n", // v=1i is a dummy value needed for InfluxDB
                     _kind,
                     now_ns(),
                 )
@@ -58,7 +62,6 @@ pub mod influxdb_trace {
 
         #[inline(always)]
         pub fn append_diskio<const IS_READ: bool>(&mut self, _container: u8) {
-            #[cfg(feature = "influxdb_trace")]
             if IS_READ {
                 // once in 10 times for read
                 if urand_int(1, 100) <= 1 {
@@ -66,7 +69,7 @@ pub mod influxdb_trace {
                     let mut cur = Cursor::new(&mut self.buf[self.pos..]);
                     write!(
                         cur,
-                        "d,c={},o=r v=1i {}\n", // o=r means read
+                        "d{INFLUX_DB_SUFFIX},c={},o=r v=1i {}\n", // o=r means read
                         _container,
                         now_ns(),
                     )
@@ -80,7 +83,7 @@ pub mod influxdb_trace {
                     let mut cur = Cursor::new(&mut self.buf[self.pos..]);
                     write!(
                         cur,
-                        "d,c={},o=w v=1i {}\n", // o=w means write
+                        "d{INFLUX_DB_SUFFIX},c={},o=w v=1i {}\n", // o=w means write
                         _container,
                         now_ns(),
                     )

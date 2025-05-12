@@ -75,16 +75,18 @@ pub fn main() {
     println!("Reading from directory: {}", base_dir);
     let cm = Arc::new(ContainerManager::new(base_dir, true, false).unwrap());
 
+    println!("Allocating buffer pool");
     #[cfg(feature = "use_vmc_tpcc")]
     let bp = {
-        use fbtree::bp::VMCBufferPool;
-        let bp = Arc::new(VMCachePool::<false, 64>::new(num_frames, cm).unwrap());
+        use fbtree::bp::VMCachePool;
+        Arc::new(VMCachePool::<false, 64>::new(num_frames, cm).unwrap())
     };
     #[cfg(not(feature = "use_vmc_tpcc"))]
     let bp = {
         use fbtree::bp::BufferPoolClock;
         Arc::new(BufferPoolClock::<64>::new(num_frames, cm).unwrap())
     };
+    println!("Done allocating buffer pool");
 
     // Load the database from the directory.
     let txn_storage = NoWaitTxnStorage::load(&bp);

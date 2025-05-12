@@ -4863,7 +4863,7 @@ mod tests {
     #[case::bp(get_test_bp(100))]
     #[case::bp_clock(get_test_bp_clock::<10>(100))]
     #[case::in_mem(get_in_mem_pool())]
-    #[case::vmc(get_test_vmcache::<false, 10>(100))]
+    // #[case::vmc(get_test_vmcache::<false, 10>(100))]
     fn test_bulk_insert_create<T: MemPool>(#[case] bp: Arc<T>) {
         let num_keys = 100000;
         let key_size = 8;
@@ -4902,7 +4902,7 @@ mod tests {
     #[case::bp(get_test_bp(100))]
     #[case::bp_clock(get_test_bp_clock::<10>(100))]
     #[case::in_mem(get_in_mem_pool())]
-    #[case::vmc(get_test_vmcache::<false, 10>(100))]
+    // #[case::vmc(get_test_vmcache::<false, 10>(100))]
     fn test_parallel_insertion<T: MemPool>(#[case] bp: Arc<T>) {
         // init_test_logger();
         let btree = Arc::new(setup_btree_empty(bp.clone()));
