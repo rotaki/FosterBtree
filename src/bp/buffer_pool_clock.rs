@@ -654,7 +654,6 @@ impl<const EVICTION_BATCH_SIZE: usize> MemPool for BufferPoolClock<EVICTION_BATC
             log_debug!("Page fast path read failed: {}", key);
         };
 
-        // Critical section.
         // 1. Check the page-to-frame mapping and get a frame index.
         // 2. If the page is found, then try to acquire a read-latch, after which, the critical section ends.
         // 3. If the page is not found, then a victim must be chosen to evict.
@@ -796,14 +795,8 @@ impl<const EVICTION_BATCH_SIZE: usize> MemPool for BufferPoolClock<EVICTION_BATC
 
     fn clear_dirty_flags(&self) -> Result<(), MemPoolStatus> {
         for i in 0..self.num_frames {
-            let frame = loop {
-                if let Some(guard) = self.try_get_write_guard(i, false) {
-                    break guard;
-                }
-                // spin
-                std::hint::spin_loop();
-            };
-            frame.dirty().store(false, Ordering::Release);
+            let meta = &mut unsafe { &mut *self.metas.get() }[i];
+            meta.is_dirty.store(false, Ordering::Release);
         }
 
         self.container_manager.flush_all()?;

@@ -214,6 +214,7 @@ pub fn main() {
     StockLevelTxn::print_abort_details(&final_stat[TPCCTxnProfileID::StockLevelTxn].abort_details);
 
     println!("BP stats: \n{}", unsafe { bp.stats() });
+    bp.clear_dirty_flags().unwrap();
 }
 
 pub fn test_all_transactions<T: TxnStorageTrait>(

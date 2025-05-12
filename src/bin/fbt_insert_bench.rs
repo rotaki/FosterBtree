@@ -1,6 +1,6 @@
 use clap::{Parser, ValueEnum};
 use fbtree::{
-    bp::{get_test_bp, get_test_vmcache, ContainerKey, MemPool},
+    bp::{get_test_bp, get_test_bp_clock, get_test_vmcache, ContainerKey, MemPool},
     prelude::{FosterBtree, UniqueKeyIndex},
     random::RandomKVs,
 };
@@ -17,7 +17,8 @@ fn measure_time(title: &str, f: impl FnOnce()) {
 /// Which buffer‑pool implementation to use.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
 pub enum BPType {
-    Ours,
+    BPLRU,
+    BPClock,
     VMCache,
 }
 
@@ -33,8 +34,8 @@ pub struct Params {
     pub val_min_size: usize,
     #[clap(long, default_value = "100")]
     pub val_max_size: usize,
-    /// Buffer‑pool type (ours | vmcache)
-    #[arg(long, value_enum, default_value_t = BPType::Ours)]
+    /// Buffer‑pool type
+    #[arg(long, value_enum, default_value_t = BPType::BPLRU)]
     pub bp_type: BPType,
 }
 
@@ -60,8 +61,31 @@ fn main() {
     let c_key = ContainerKey::new(db_id, c_id);
     let bp_size = 100000;
     match params.bp_type {
-        BPType::Ours => {
+        BPType::BPLRU => {
             let bp = get_test_bp(bp_size);
+            let btree = Arc::new(FosterBtree::new(c_key, bp.clone()));
+
+            let start = std::time::Instant::now();
+            std::thread::scope(|s| {
+                for partition in kvs.iter() {
+                    let btree = btree.clone();
+                    s.spawn(move || {
+                        for (k, v) in partition.iter() {
+                            btree.insert(k, v).unwrap();
+                        }
+                    });
+                }
+            });
+            let elapsed = start.elapsed();
+            println!("BP Foster BTree Insertion Parallel: {:?}", elapsed);
+
+            // BP stats
+            let stats = unsafe { bp.stats() };
+            println!("BP Stats: {}", stats);
+            bp.clear_dirty_flags().unwrap();
+        }
+        BPType::BPClock => {
+            let bp = get_test_bp_clock::<128>(bp_size);
             let btree = Arc::new(FosterBtree::new(c_key, bp.clone()));
 
             let start = std::time::Instant::now();

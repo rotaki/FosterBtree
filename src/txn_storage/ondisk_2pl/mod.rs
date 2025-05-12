@@ -745,6 +745,7 @@ impl NoWaitTxn {
             let (p_value, p_addr) = self.read(ps, p_key, Some(p_hint.clone()))?;
             // println!("Hint: {}, Actual: {}", p_hint, p_addr);
             // Rewrite the physical address in the secondary index. The last 8 bytes should be updated with the new physical address.
+            #[cfg(not(feature = "no_tree_hint"))]
             if p_hint != p_addr {
                 // Update the physical address in the secondary index
                 // println!("Sec Update From: {}, To: {}", p_hint, p_addr);
