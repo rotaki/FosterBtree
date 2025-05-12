@@ -3,7 +3,7 @@ use crate::log;
 
 use super::{
     buffer_pool::BPStats,
-    eviction_policy::{ClockEvictionPolicy, EvictionPolicy, LRUEvictionPolicy},
+    eviction_policy::{ClockEvictionPolicy, EvictionPolicy},
     frame_guards::{FrameMeta, FrameReadGuard, FrameWriteGuard},
     mem_pool_trait::{ContainerKey, MemPool, MemPoolStatus, MemoryStats, PageFrameKey, PageKey},
 };
@@ -12,13 +12,11 @@ use crate::{
     container::ContainerManager,
     log_debug, log_error, log_warn,
     page::{Page, PageId},
-    random::gen_random_int,
-    rwlatch::RwLatch,
 };
 
 use std::{
-    cell::{RefCell, UnsafeCell},
-    collections::{BTreeMap, HashMap},
+    cell::UnsafeCell,
+    collections::BTreeMap,
     sync::{
         atomic::{AtomicUsize, Ordering},
         Arc,
@@ -32,7 +30,7 @@ type FRGuard = FrameReadGuard<EvictionPolicyImpl>;
 
 use concurrent_queue::ConcurrentQueue;
 use dashmap::{
-    mapref::{entry, one::Ref},
+    mapref::entry,
     DashMap,
 };
 
@@ -103,6 +101,7 @@ impl PageToFrame {
         }
     }
 
+    #[allow(dead_code)]
     pub fn clear(&mut self) {
         self.map.clear();
     }
@@ -123,6 +122,7 @@ impl PageToFrame {
         })
     }
 
+    #[allow(dead_code)]
     pub fn iter_container(
         &self,
         c_key: ContainerKey,
@@ -542,14 +542,14 @@ impl<const EVICTION_BATCH_SIZE: usize> MemPool for BufferPoolClock<EVICTION_BATC
 
         // Critical section.
         {
-            let res = self.page_to_frame.contains_key(&key.p_key());
-            res
+            
+            self.page_to_frame.contains_key(&key.p_key())
         }
     }
 
     fn get_page_keys_in_mem(&self, c_key: ContainerKey) -> Vec<PageFrameKey> {
-        let keys = self.page_to_frame.get_page_keys(c_key);
-        keys
+        
+        self.page_to_frame.get_page_keys(c_key)
     }
 
     fn get_page_for_write(&self, key: PageFrameKey) -> Result<FWGuard, MemPoolStatus> {
@@ -616,7 +616,7 @@ impl<const EVICTION_BATCH_SIZE: usize> MemPool for BufferPoolClock<EVICTION_BATC
                 })?;
             victim.dirty().store(true, Ordering::Release); // Prepare the page for writing.
 
-            return Ok(victim);
+            Ok(victim)
         }
     }
 
@@ -687,7 +687,7 @@ impl<const EVICTION_BATCH_SIZE: usize> MemPool for BufferPoolClock<EVICTION_BATC
                     victim.set_page_key(Some(key.p_key()));
                     victim.evict_info().reset();
                 })?;
-            return Ok(victim.downgrade());
+            Ok(victim.downgrade())
         }
     }
 
@@ -829,6 +829,7 @@ impl<const EVICTION_BATCH_SIZE: usize> BufferPoolClock<EVICTION_BATCH_SIZE> {
     ///
     /// The caller must ensure that the buffer pool is not being used by any other thread.
     unsafe fn check_page_to_frame(&self) {
+        use std::collections::HashMap;
         let mut frame_to_page = HashMap::new();
         for (c, k, v) in self.page_to_frame.iter() {
             let p_key = PageKey::new(c, k);
