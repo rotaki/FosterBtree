@@ -6,7 +6,7 @@ use std::sync::{
 use clap::Parser;
 use fbtree::{
     affinity::{get_current_cpu, get_num_cores, set_affinity},
-    bp::{BufferPool, MemPool},
+    bp::MemPool,
     container::ContainerManager,
     prelude::{
         run_tpcc_for_thread, tpcc_load_schema, DeliveryTxn, NewOrderTxn, OrderStatusTxn,
@@ -18,7 +18,6 @@ use fbtree::{
 
 // #[global_allocator]
 // static ALLOC: rpmalloc::RpMalloc = rpmalloc::RpMalloc;
-
 
 use mimalloc::MiMalloc;
 
@@ -77,9 +76,15 @@ pub fn main() {
     let cm = Arc::new(ContainerManager::new(base_dir, true, false).unwrap());
 
     #[cfg(feature = "use_vmc_tpcc")]
-    let bp = Arc::new(VMCachePool::<false, 64>::new(num_frames, cm).unwrap());
+    let bp = {
+        use fbtree::bp::VMCBufferPool;
+        let bp = Arc::new(VMCachePool::<false, 64>::new(num_frames, cm).unwrap());
+    };
     #[cfg(not(feature = "use_vmc_tpcc"))]
-    let bp = Arc::new(BufferPool::new(num_frames, cm).unwrap());
+    let bp = {
+        use fbtree::bp::BufferPoolClock;
+        Arc::new(BufferPoolClock::<64>::new(num_frames, cm).unwrap())
+    };
 
     // Load the database from the directory.
     let txn_storage = NoWaitTxnStorage::load(&bp);

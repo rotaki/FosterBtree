@@ -35,21 +35,21 @@ type FMeta = FrameMeta<ClockEvictionPolicy>;
 type FWGuard = FrameWriteGuard<ClockEvictionPolicy>;
 type FRGuard = FrameReadGuard<ClockEvictionPolicy>;
 
-pub const VMCACHE_LARGE_PAGE_ENTRIES: usize = 1 << 25; // 2^25 pages = 512 GiB with 16 KiB page size
+pub const VMCACHE_LARGE_PAGE_ENTRIES: usize = 1 << 26; // 2^26 pages = 1 TiB with 16 KiB page size
 const fn page_key_to_offset_large(page_key: &PageKey) -> usize {
     // Layout (LSB→MSB):
-    // bits  0-19 : page_id   (20 bits, up to 1 048 575)
-    // bits 20-24 : container (5 bits,   up to      31)
-    // total      : 25 bits   ⇒ 2^25 pages
+    // bits  0-21 : page_id   (22 bits, 2^22 * 2^14 = 2^36 B = 64 GiB)
+    // bits 22-25 : container (4 bits,  up to 15)
+    // total      : 26 bits   ⇒ 2^26 pages
     //
-    // With a 16 KiB page, addressable memory = 2^25 × 2^14 B = 2^39 B = 512 GiB.
+    // With a 16 KiB page, addressable memory = 2^26 × 2^14 B = 2^40 B = 1 TiB.
 
     assert!(page_key.c_key.db_id() == 0);
-    assert!(page_key.c_key.c_id() < (1 << 5)); // fits in 5 bits
-    assert!(page_key.page_id < (1 << 20)); // fits in 20 bits
+    assert!(page_key.c_key.c_id() < (1 << 4)); // fits in 4 bits
+    assert!(page_key.page_id < (1 << 22)); // fits in 22 bits
 
-    let container_part = (page_key.c_key.c_id() as usize) << 20;
-    let page_part = page_key.page_id as usize; // already < 2^20
+    let container_part = (page_key.c_key.c_id() as usize) << 22;
+    let page_part = page_key.page_id as usize; // already < 2^22
 
     container_part | page_part
 }
@@ -362,7 +362,7 @@ impl<const IS_SMALL: bool, const EVICTION_BATCH_SIZE: usize>
 
         // 6. Remove from the resident set and update the eviction policy.
         let mut count = 0;
-        for (i, guard) in to_evict.into_iter() {
+        for (i, guard) in to_evict.drain(..) {
             count += 1;
             // Remove the page from the resident set.
             self.resident_set.remove(i);

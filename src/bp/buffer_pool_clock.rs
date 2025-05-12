@@ -29,10 +29,7 @@ type FWGuard = FrameWriteGuard<EvictionPolicyImpl>;
 type FRGuard = FrameReadGuard<EvictionPolicyImpl>;
 
 use concurrent_queue::ConcurrentQueue;
-use dashmap::{
-    mapref::entry,
-    DashMap,
-};
+use dashmap::{mapref::entry, DashMap};
 
 pub struct PageToFrame {
     map: DashMap<ContainerKey, Arc<DashMap<PageId, usize>>>, // (c_key, page_id) -> frame_index
@@ -542,13 +539,11 @@ impl<const EVICTION_BATCH_SIZE: usize> MemPool for BufferPoolClock<EVICTION_BATC
 
         // Critical section.
         {
-            
             self.page_to_frame.contains_key(&key.p_key())
         }
     }
 
     fn get_page_keys_in_mem(&self, c_key: ContainerKey) -> Vec<PageFrameKey> {
-        
         self.page_to_frame.get_page_keys(c_key)
     }
 
