@@ -320,13 +320,15 @@ impl<const EVICTION_BATCH_SIZE: usize> BufferPoolClock<EVICTION_BATCH_SIZE> {
             self.write_victim_to_disk_if_dirty_r(guard)?;
         }
 
-        // 2. Try to get a write latch on the clean pages
+        // 2. Try to get a write latch on the clean pages. The clean page might get dirty while we are
+        // trying to get a write latch on it. So we need to check if the page is still clean.
         for (index, meta) in clean_victims.into_iter() {
             if let Some(guard) = FWGuard::try_new(
                 box_as_mut_ptr(meta),
                 box_as_mut_ptr(&mut unsafe { &mut *self.pages.get() }[index]),
                 false,
             ) {
+                self.write_victim_to_disk_if_dirty_w(&guard)?;
                 to_evict.push((index, guard));
             } else {
                 // The frame is latched. Try the next frame.
@@ -363,6 +365,7 @@ impl<const EVICTION_BATCH_SIZE: usize> BufferPoolClock<EVICTION_BATCH_SIZE> {
         let mut count = 0;
         for (index, guard) in to_evict.drain(..) {
             count += 1;
+            assert!(!guard.dirty().load(Ordering::Acquire));
             guard.set_page_key(None); // Remove the page key from the frame
             guard.evict_info().reset(); // Reset the eviction info
             self.eviction_hints.push(index).unwrap(); // Push the frame index to the eviction hints

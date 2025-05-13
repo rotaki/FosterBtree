@@ -169,7 +169,22 @@ impl<const IS_SMALL: bool, const EVICTION_BATCH_SIZE: usize>
         })
     }
 
-    // The exclusive latch is NOT NEEDED when calling this function
+    // This function will write the victim page to disk if it is dirty, and set the dirty bit to false.
+    fn write_victim_to_disk_if_dirty_w(&self, victim: &FWGuard) -> Result<(), MemPoolStatus> {
+        if let Some(key) = victim.page_key() {
+            if victim
+                .dirty()
+                .compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                let container = self.container_manager.get_container(key.c_key);
+                container.write_page(key.page_id, victim)?;
+            }
+        }
+
+        Ok(())
+    }
+
     // This function will write the victim page to disk if it is dirty, and set the dirty bit to false.
     fn write_victim_to_disk_if_dirty_r(&self, victim: &FRGuard) -> Result<(), MemPoolStatus> {
         if let Some(key) = victim.page_key() {
@@ -337,6 +352,7 @@ impl<const IS_SMALL: bool, const EVICTION_BATCH_SIZE: usize>
                 unsafe { self.pages.ptr.add(i as usize) },
                 false,
             ) {
+                self.write_victim_to_disk_if_dirty_w(&guard)?;
                 to_evict.push((i, guard));
             }
         }
@@ -350,26 +366,20 @@ impl<const IS_SMALL: bool, const EVICTION_BATCH_SIZE: usize>
         }
 
         // 4. Validate that the pages are still in the resident set.
-        // Resident set is not transactional so we use the frame guards as locks
+        // Resident set is not transactional so we use the frame guards like locks
         // in OCC and check the resident set after we get the write latches.
         to_evict.retain(|(i, _guard)| self.resident_set.contains(*i));
 
         // 5. Remove the pages from the page table.
-        for (_, guard) in to_evict.iter() {
-            // Remove the page from the page table.
-            self.remove_page_entry(guard)?;
-        }
-
-        // 6. Remove from the resident set and update the eviction policy.
         let mut count = 0;
         for (i, guard) in to_evict.drain(..) {
             count += 1;
-            // Remove the page from the resident set.
-            self.resident_set.remove(i);
-            // Remove the frame info.
+            assert!(!guard.dirty().load(Ordering::Acquire));
+            // Remove the page from the page table.
+            self.remove_page_entry(&guard)?;
             guard.set_page_key(None);
-            // Reset the mark
             guard.evict_info().reset();
+            self.resident_set.remove(i);
         }
 
         log_warn!("    Evicted {} pages", count,);
