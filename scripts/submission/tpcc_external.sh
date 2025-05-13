@@ -2,7 +2,8 @@
 # benchmark_tpcc.sh
 # ---------------------------------------------------------------------------
 # Build tpcc_external variants, then regenerate & benchmark the TPCC database.
-# Now accepts -w, -t, -D command-line overrides so you can do quick local runs.
+# Now accepts -w, -t, -D command‑line overrides so you can do quick local runs.
+# Results from each benchmark run are captured under ./results/ …
 # ---------------------------------------------------------------------------
 
 set -euo pipefail
@@ -12,7 +13,7 @@ WAREHOUSES=500       # -w
 THREADS=40           # -t
 DURATION=200         # -D
 
-# ───────────── Parse command-line switches  ────────────────────────────────
+# ───────────── Parse command‑line switches  ────────────────────────────────
 usage() {
   echo "Usage: $0 [-w warehouses] [-t threads] [-D duration]" >&2
   exit 1
@@ -33,9 +34,13 @@ shift $((OPTIND - 1))
 # ───────────── Paths & variant table  ──────────────────────────────────────
 TARGET_DIR="./target/release"
 INFLUX_SETUP="./influxdb_setup.sh"
+RESULTS_DIR="./results"
+mkdir -p "$RESULTS_DIR"
 
 declare -A VARIANTS=(
   [tpcc_external_vmc]="no_tree_hint no_bp_hint use_vmc_tpcc iouring_async influxdb_trace"
+  [tpcc_external_vmc_tree_hint]="no_bp_hint use_vmc_tpcc iouring_async influxdb_trace"
+  [tpcc_external_vmc_tree_hint_inmem]="inmem_hint_only no_bp_hint use_vmc_tpcc iouring_async influxdb_trace"
   [tpcc_external_no_hint]="no_tree_hint no_bp_hint iouring_async influxdb_trace"
   [tpcc_external_tree_hint]="no_bp_hint iouring_async influxdb_trace"
   [tpcc_external_bp_hint]="no_tree_hint iouring_async influxdb_trace"
@@ -44,11 +49,12 @@ declare -A VARIANTS=(
 )
 
 # ───────────── Build phase  ────────────────────────────────────────────────
-echo "▶ Building tpcc_db_gen..."
+echo "▶ Building tpcc_db_gen…"
 cargo build --release --features "iouring_async" --bin tpcc_db_gen
 
+echo "▶ Building tpcc_external variants…"
 for BIN in "${!VARIANTS[@]}"; do
-  echo "▶ Building ${BIN}..."
+  echo "  • $BIN"
   cargo build --release --features "${VARIANTS[$BIN]}" --bin tpcc_external
   mv -f "${TARGET_DIR}/tpcc_external" "${TARGET_DIR}/${BIN}"
 done
@@ -64,18 +70,23 @@ fi
 # ───────────── Benchmark runs  ─────────────────────────────────────────────
 SUFFIX=1
 for BIN in "${!VARIANTS[@]}"; do
-  echo "═══════════════════════════════════════════════════════════════════════"
-  echo "▶▶ Run #${SUFFIX}: ${BIN}  (w=${WAREHOUSES}, t=${THREADS}, D=${DURATION})"
-  echo "═══════════════════════════════════════════════════════════════════════"
+  LOG_FILE="${RESULTS_DIR}/${BIN}_w${WAREHOUSES}_t${THREADS}_D${DURATION}_run${SUFFIX}.log"
 
-  rm -rf "./tpcc_db_w${WAREHOUSES}"
+  {
+    echo "═══════════════════════════════════════════════════════════════════════"
+    echo "▶▶ Run #${SUFFIX}: ${BIN}  (w=${WAREHOUSES}, t=${THREADS}, D=${DURATION})"
+    echo "═══════════════════════════════════════════════════════════════════════"
 
-  INFLUX_DB_SUFFIX=${SUFFIX} \
-    "${TARGET_DIR}/tpcc_db_gen" -w "${WAREHOUSES}"
+    # Fresh DB for each run
+    rm -rf "./tpcc_db_w${WAREHOUSES}"
 
-  INFLUX_DB_SUFFIX=${SUFFIX} \
-    "${TARGET_DIR}/${BIN}" \
-      -w "${WAREHOUSES}" -t "${THREADS}" -D "${DURATION}"
+    INFLUX_DB_SUFFIX=${SUFFIX} \
+      "${TARGET_DIR}/tpcc_db_gen" -w "${WAREHOUSES}"
+
+    INFLUX_DB_SUFFIX=${SUFFIX} \
+      "${TARGET_DIR}/${BIN}" \
+        -w "${WAREHOUSES}" -t "${THREADS}" -D "${DURATION}"
+  } |& tee "${LOG_FILE}"
 
   ((SUFFIX++))
 done

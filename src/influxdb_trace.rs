@@ -8,11 +8,6 @@ pub mod influxdb_trace {
 
     use crate::{prelude::urand_int, time::now_ns};
 
-    const INFLUX_DB_SUFFIX: &str = match option_env!("INFLUX_DB_SUFFIX") {
-        Some(val) => val,
-        None => "",
-    };
-
     thread_local! {
         pub static INFLUX_TRACE: RefCell<TxnInflux> = RefCell::new(TxnInflux::new("127.0.0.1", 8089).unwrap());
     }
@@ -21,6 +16,7 @@ pub mod influxdb_trace {
 
     /// Batches points and ships them via UDP/Telegraf.
     pub struct TxnInflux {
+        suffix: String,
         sock: UdpSocket,
         buf: [u8; BUF_SIZE],
         pos: usize,
@@ -30,10 +26,12 @@ pub mod influxdb_trace {
         /// Connects the socket (non-blocking) to `host:port`.
         #[allow(dead_code)]
         fn new(host: &str, port: u16) -> std::io::Result<Self> {
+            let suffix = std::env::var("INFLUX_DB_SUFFIX").unwrap_or_else(|_| "".to_string());
             let sock = UdpSocket::bind("0.0.0.0:0")?;
             sock.connect((host, port))?;
             sock.set_nonblocking(true)?;
             Ok(Self {
+                suffix,
                 sock,
                 buf: [0; BUF_SIZE],
                 pos: 0,
@@ -50,7 +48,8 @@ pub mod influxdb_trace {
 
                 write!(
                     cur,
-                    "t{INFLUX_DB_SUFFIX},k={} v=1i {}\n", // v=1i is a dummy value needed for InfluxDB
+                    "t{},k={} v=1i {}\n", // v=1i is a dummy value needed for InfluxDB
+                    self.suffix,
                     _kind,
                     now_ns(),
                 )
@@ -69,7 +68,8 @@ pub mod influxdb_trace {
                     let mut cur = Cursor::new(&mut self.buf[self.pos..]);
                     write!(
                         cur,
-                        "d{INFLUX_DB_SUFFIX},c={},o=r v=1i {}\n", // o=r means read
+                        "d{},c={},o=r v=1i {}\n", // o=r means read
+                        self.suffix,
                         _container,
                         now_ns(),
                     )
@@ -83,7 +83,8 @@ pub mod influxdb_trace {
                     let mut cur = Cursor::new(&mut self.buf[self.pos..]);
                     write!(
                         cur,
-                        "d{INFLUX_DB_SUFFIX},c={},o=w v=1i {}\n", // o=w means write
+                        "d{},c={},o=w v=1i {}\n", // o=w means write
+                        self.suffix,
                         _container,
                         now_ns(),
                     )

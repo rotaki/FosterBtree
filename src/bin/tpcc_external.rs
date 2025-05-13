@@ -76,6 +76,7 @@ pub fn main() {
     let cm = Arc::new(ContainerManager::new(base_dir, true, false).unwrap());
 
     println!("Allocating buffer pool");
+    let start = std::time::Instant::now();
     #[cfg(feature = "use_vmc_tpcc")]
     let bp = {
         use fbtree::bp::VMCachePool;
@@ -86,7 +87,8 @@ pub fn main() {
         use fbtree::bp::BufferPoolClock;
         Arc::new(BufferPoolClock::<64>::new(num_frames, cm).unwrap())
     };
-    println!("Done allocating buffer pool");
+    let elapsed = start.elapsed();
+    println!("Done allocating buffer pool: {:?}", elapsed);
 
     // Load the database from the directory.
     let txn_storage = NoWaitTxnStorage::load(&bp);
