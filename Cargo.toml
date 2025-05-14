@@ -5,7 +5,7 @@ edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [features]
-default = []
+default = ["iouring_async"]
 log_trace = []
 log_debug = []
 log_info = []
@@ -44,6 +44,9 @@ use_vmc_tpcc = []
 
 # Inmem hint only
 inmem_hint_only = []
+
+# Write back page hint
+write_back_page_hint = []
 
 [dependencies]
 rayon = "1.10.0"

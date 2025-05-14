@@ -29,7 +29,7 @@ pub fn log(level: &str, file: &str, line: u32, message: &str) {
     LOG_FILE.with(|log_file| {
         if let Ok(writer) = &mut *log_file.borrow_mut() {
             let _ = writer.write_all(log_message.as_bytes());
-            let _ = writer.flush();
+            // let _ = writer.flush();
         }
     });
 }

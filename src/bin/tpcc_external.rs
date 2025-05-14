@@ -60,8 +60,9 @@ pub fn main() {
     // Set frames for 32GB of BP (assume that PAGE_SIZE is 16KB)
     let num_frames = 2 * 1024 * 1024;
     println!(
-        "BP size: {} GB",
-        num_frames * PAGE_SIZE / (1024 * 1024 * 1024)
+        "BP size: {} GB ({} frames)",
+        num_frames * PAGE_SIZE / (1024 * 1024 * 1024),
+        num_frames
     );
 
     let base_dir = format!("tpcc_db_w{}", config.num_warehouses);
@@ -84,8 +85,8 @@ pub fn main() {
     };
     #[cfg(not(feature = "use_vmc_tpcc"))]
     let bp = {
-        use fbtree::bp::BufferPoolClock;
-        Arc::new(BufferPoolClock::<64>::new(num_frames, cm).unwrap())
+        use fbtree::bp::BufferPool;
+        Arc::new(BufferPool::new(num_frames, cm).unwrap())
     };
     let elapsed = start.elapsed();
     println!("Done allocating buffer pool: {:?}", elapsed);

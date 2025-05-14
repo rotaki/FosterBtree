@@ -127,3 +127,19 @@ metricsForPair(bucket: "tlb", tMeas: "t5", dMeas: "d5", suffix: "_run5")
 metricsForPair(bucket: "tlb", tMeas: "t6", dMeas: "d6", suffix: "_run6")
 metricsForPair(bucket: "tlb", tMeas: "t7", dMeas: "d7", suffix: "_run7")
 metricsForPair(bucket: "tlb", tMeas: "t8", dMeas: "d8", suffix: "_run8")
+
+
+data =
+    from(bucket: "tlb")
+        |> range(start: v.timeRangeStart, stop: v.timeRangeStop)
+        |> filter(fn: (r) =>
+            r._measurement == "s20" and
+            (r._field == "h" or r._field == "p" or r._field == "f") and
+            (r.c == "6" or r.c == "8")
+        )
+
+// ─── 1 second sum for every field ───
+data
+    |> group(columns: ["_field"])        // drop “c” so 6 + 8 are combined
+    |> aggregateWindow(every: 1s, fn: sum, createEmpty: false)
+    |> yield(name: "sum_per_sec")

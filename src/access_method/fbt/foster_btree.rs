@@ -2547,6 +2547,10 @@ impl<T: MemPool> FosterBtreeAppendOnlyCursor<T> {
     pub fn get_physical_address(&self) -> (PageId, u32, u32) {
         self.cursor.get_physical_address()
     }
+
+    pub fn c_key(&self) -> ContainerKey {
+        self.cursor.btree.c_key
+    }
 }
 /// Tree index for non-unique keys.
 ///

@@ -492,6 +492,7 @@ impl MemPool for BufferPool {
     /// The newly allocated page is not formatted except for the page id.
     /// The caller is responsible for initializing the page.
     fn create_new_page_for_write(&self, c_key: ContainerKey) -> Result<FWGuard, MemPoolStatus> {
+        log_debug!("Page create: {}", c_key);
         self.stats.inc_new_page();
 
         // 1. Choose victim

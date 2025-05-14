@@ -4,6 +4,8 @@ use super::{
     eviction_policy::{EvictionPolicy, LRUEvictionPolicy},
     mem_pool_trait::PageKey,
 };
+#[allow(unused_imports)]
+use crate::log;
 use crate::page::{Page, PageId};
 use crate::rwlatch::RwLatch;
 use std::sync::atomic::AtomicU64;

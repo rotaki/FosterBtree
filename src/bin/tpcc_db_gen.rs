@@ -31,8 +31,9 @@ pub fn main() {
     let num_frames =
         (config.num_warehouses as usize * 1024 * 1024 * 1024 / PAGE_SIZE).min(num_frames_32gb);
     println!(
-        "BP size: {} GB",
-        num_frames * PAGE_SIZE / (1024 * 1024 * 1024)
+        "BP size: {} GB ({} frames)",
+        num_frames * PAGE_SIZE / (1024 * 1024 * 1024),
+        num_frames
     );
 
     let base_dir = format!("tpcc_db_w{}", config.num_warehouses);

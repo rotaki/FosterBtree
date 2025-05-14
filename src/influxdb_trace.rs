@@ -94,6 +94,32 @@ pub mod influxdb_trace {
             }
         }
 
+        #[inline(always)]
+        pub fn append_sec_index_hit_rate(
+            &mut self,
+            container: u8,
+            hint_worked: usize,
+            page_hint_failed: usize,
+            frame_hint_failed: usize,
+        ) {
+            if unrand_int(1, 100) <= 1 {
+                self.flush_if_needed();
+                let mut cur = Cursor::new(&mut self.buf[self.pos..]);
+                write!(
+                    cur,
+                    "s{},c={} h={}i,p={}i,f={}i,v=1i {}\n",
+                    self.suffix,
+                    container,
+                    hint_worked,
+                    page_hint_failed,
+                    frame_hint_failed,
+                    now_ns(),
+                )
+                .unwrap();
+                self.pos += cur.position() as usize;
+            }
+        }
+
         #[allow(dead_code)]
         fn flush_if_needed(&mut self) {
             // Soft flush limits

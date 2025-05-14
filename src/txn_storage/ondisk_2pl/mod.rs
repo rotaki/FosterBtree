@@ -9,6 +9,8 @@ use crate::access_method::fbt::{
     BTreeKey, FosterBtreeAppendOnly, FosterBtreeAppendOnlyCursor, FosterBtreeCursor,
 };
 use crate::bp::PageFrameKey;
+#[cfg(feature = "influxdb_trace")]
+use crate::influxdb_trace::influxdb_trace::INFLUX_TRACE;
 use crate::page::PageId;
 use crate::prelude::{FosterBtreePage, UniqueKeyIndex};
 use crate::txn_storage::TxnStorageStatus;
@@ -751,7 +753,18 @@ impl NoWaitTxn {
                 // println!("Sec Update From: {}, To: {}", p_hint, p_addr);
                 let new_p_addr = p_addr.to_bytes();
                 let new_s_val = [p_key, &new_p_addr].concat();
-                si.cursor.opportunistic_update(&new_s_val, false);
+                if p_hint.page_id != p_addr.page_id {
+                    #[cfg(feature = "write_back_page_hint")]
+                    si.cursor.opportunistic_update(&new_s_val, true);
+                    #[cfg(not(feature = "write_back_page_hint"))]
+                    si.cursor.opportunistic_update(&new_s_val, false);
+                    si.page_hint_failed += 1;
+                } else if p_hint.frame_id != p_addr.frame_id {
+                    si.cursor.opportunistic_update(&new_s_val, false);
+                    si.frame_hint_failed += 1;
+                }
+            } else {
+                si.hint_worked += 1;
             }
             si.cursor.go_to_next_kv();
 
@@ -898,13 +911,38 @@ impl<M: MemPool> PrimaryIterator<M> {
 }
 
 pub struct SecondaryIterator<M: MemPool> {
+    hint_worked: usize,
+    page_hint_failed: usize,
+    frame_hint_failed: usize,
     cursor: FosterBtreeAppendOnlyCursor<M>,
     ss: Arc<SecondaryStorage<M>>,
 }
 
 impl<M: MemPool> SecondaryIterator<M> {
     pub fn new(cursor: FosterBtreeAppendOnlyCursor<M>, ss: Arc<SecondaryStorage<M>>) -> Self {
-        SecondaryIterator { cursor, ss }
+        SecondaryIterator {
+            hint_worked: 0,
+            page_hint_failed: 0,
+            frame_hint_failed: 0,
+            cursor,
+            ss,
+        }
+    }
+}
+
+impl<M: MemPool> Drop for SecondaryIterator<M> {
+    fn drop(&mut self) {
+        #[cfg(feature = "influxdb_trace")]
+        {
+            INFLUX_TRACE.with(|trace| {
+                trace.borrow_mut().append_sec_index_hit_rate(
+                    self.cursor.c_key().c_id() as u8,
+                    self.hint_worked,
+                    self.page_hint_failed,
+                    self.frame_hint_failed,
+                );
+            })
+        }
     }
 }
 
