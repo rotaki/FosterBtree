@@ -102,7 +102,7 @@ pub mod influxdb_trace {
             page_hint_failed: usize,
             frame_hint_failed: usize,
         ) {
-            if unrand_int(1, 100) <= 1 {
+            if urand_int(1, 100) <= 1 {
                 self.flush_if_needed();
                 let mut cur = Cursor::new(&mut self.buf[self.pos..]);
                 write!(
