@@ -61,7 +61,7 @@ pub fn main() {
 
     let txn_storage = NoWaitTxnStorage::new(&bp);
     let tbl_info = tpcc_gen_all_tables(&txn_storage, config.num_warehouses);
-    tpcc_show_table_stats(&txn_storage, &tbl_info);
+    // tpcc_show_table_stats(&txn_storage, &tbl_info);
 
     println!("BP stats after load: \n{}", unsafe { bp.stats() });
 
@@ -72,35 +72,35 @@ pub fn main() {
     let mut stats_and_outs = Vec::with_capacity(config.num_threads);
     let flag = AtomicBool::new(true); // while flag is true, keep running the benchmark
 
-    // Warmup
-    let warmup_barrier = Arc::new(Barrier::new(config.num_threads + 1));
-    std::thread::scope(|s| {
-        for i in 0..config.num_threads {
-            let thread_id = i;
-            let warmup_barrier = warmup_barrier.clone();
-            let config_ref = &config;
-            let txn_storage_ref = &txn_storage;
-            let tbl_info_ref = &tbl_info;
-            let flag_ref = &flag;
-            s.spawn(move || {
-                run_tpcc_for_thread(
-                    true,
-                    thread_id,
-                    true,
-                    warmup_barrier,
-                    config_ref,
-                    txn_storage_ref,
-                    tbl_info_ref,
-                    flag_ref,
-                );
-            });
-        }
-        // Start timer for config duration
-        warmup_barrier.wait();
-        std::thread::sleep(std::time::Duration::from_secs(config.warmup_time));
-        flag.store(false, Ordering::Release);
-        // Automatically join all threads
-    });
+    // // Warmup
+    // let warmup_barrier = Arc::new(Barrier::new(config.num_threads + 1));
+    // std::thread::scope(|s| {
+    //     for i in 0..config.num_threads {
+    //         let thread_id = i;
+    //         let warmup_barrier = warmup_barrier.clone();
+    //         let config_ref = &config;
+    //         let txn_storage_ref = &txn_storage;
+    //         let tbl_info_ref = &tbl_info;
+    //         let flag_ref = &flag;
+    //         s.spawn(move || {
+    //             run_tpcc_for_thread(
+    //                 true,
+    //                 thread_id,
+    //                 true,
+    //                 warmup_barrier,
+    //                 config_ref,
+    //                 txn_storage_ref,
+    //                 tbl_info_ref,
+    //                 flag_ref,
+    //             );
+    //         });
+    //     }
+    //     // Start timer for config duration
+    //     warmup_barrier.wait();
+    //     std::thread::sleep(std::time::Duration::from_secs(config.warmup_time));
+    //     flag.store(false, Ordering::Release);
+    //     // Automatically join all threads
+    // });
 
     println!("BP stats after warmup: \n{}", unsafe { bp.stats() });
 
