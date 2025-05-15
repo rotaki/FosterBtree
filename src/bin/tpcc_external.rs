@@ -13,6 +13,7 @@ use fbtree::{
         PaymentTxn, StockLevelTxn, TPCCConfig, TPCCOutput, TPCCStat, TPCCTableInfo, TPCCTxnProfile,
         TPCCTxnProfileID, TxnStorageTrait, PAGE_SIZE,
     },
+    print_cfg_flags,
     txn_storage::NoWaitTxnStorage,
 };
 
@@ -24,118 +25,34 @@ use mimalloc::MiMalloc;
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
 
-pub fn main() {
-    println!("Page size: {}", PAGE_SIZE);
-    #[cfg(feature = "no_tree_hint")]
+pub fn get_bp(num_frames: usize, cm: Arc<ContainerManager>) -> Arc<impl MemPool> {
+    #[cfg(feature = "vmcache")]
     {
-        println!("Tree hint disabled");
-    }
-    #[cfg(not(feature = "no_tree_hint"))]
-    {
-        println!("Tree hint enabled");
-    }
-    #[cfg(feature = "no_bp_hint")]
-    {
-        println!("BP hint disabled");
-    }
-    #[cfg(not(feature = "no_bp_hint"))]
-    {
-        println!("BP hint enabled");
-    }
-    let mut config = TPCCConfig::parse();
-    config.fixed_warehouse_per_thread = false;
-    config.warmup_time = 0;
-    println!("config: {:?}", config);
-    println!("Fixed warehouse per thread is set to false for external TPCC benchmark");
-    println!("Warmup time is set to 0 for external TPCC benchmark");
-
-    let num_cores = get_num_cores();
-    if config.num_threads + 1 > num_cores {
-        panic!(
-            "Number of worker threads + main thread {} exceeds number of cores {}",
-            config.num_threads, num_cores
-        );
-    }
-
-    // Set frames for 32GB of BP (assume that PAGE_SIZE is 16KB)
-    let num_frames = 2 * 1024 * 1024;
-    println!(
-        "BP size: {} GB ({} frames)",
-        num_frames * PAGE_SIZE / (1024 * 1024 * 1024),
-        num_frames
-    );
-
-    let base_dir = format!("tpcc_db_w{}", config.num_warehouses);
-    // Check if the directory exists
-    if !std::path::Path::new(&base_dir).exists() {
-        panic!(
-            "Directory {} does not exist. Please run tpcc_db_gen first.",
-            base_dir
-        );
-    }
-    println!("Reading from directory: {}", base_dir);
-    let cm = Arc::new(ContainerManager::new(base_dir, true, false).unwrap());
-
-    println!("Allocating buffer pool");
-    let start = std::time::Instant::now();
-    #[cfg(feature = "use_vmc_tpcc")]
-    let bp = {
         use fbtree::bp::VMCachePool;
         Arc::new(VMCachePool::<false, 64>::new(num_frames, cm).unwrap())
-    };
-    #[cfg(not(feature = "use_vmc_tpcc"))]
-    let bp = {
+    }
+    #[cfg(feature = "bp_clock")]
+    {
+        use fbtree::bp::BufferPoolClock;
+        Arc::new(BufferPoolClock::<64>::new(num_frames, cm).unwrap())
+    }
+    #[cfg(not(any(feature = "vmcache", feature = "bp_clock")))]
+    {
         use fbtree::bp::BufferPool;
         Arc::new(BufferPool::new(num_frames, cm).unwrap())
-    };
-    let elapsed = start.elapsed();
-    println!("Done allocating buffer pool: {:?}", elapsed);
+    }
+}
 
-    // Load the database from the directory.
-    let txn_storage = NoWaitTxnStorage::load(&bp);
-    let tbl_info = tpcc_load_schema(&txn_storage);
-
-    set_affinity(get_num_cores() - 1).unwrap();
-    let current_cpu = get_current_cpu();
-    println!("Main thread pinned to CPU {}", current_cpu);
-
+pub fn run_bench(
+    is_warmup: bool,
+    config: &TPCCConfig,
+    txn_storage: &impl TxnStorageTrait,
+    tbl_info: &TPCCTableInfo,
+) -> Vec<(TPCCStat, TPCCOutput)> {
     let mut stats_and_outs = Vec::with_capacity(config.num_threads);
+
     let flag = AtomicBool::new(true); // while flag is true, keep running the benchmark
-
-    // Warmup
-    // let warmup_barrier = Arc::new(Barrier::new(config.num_threads + 1));
-    // std::thread::scope(|s| {
-    //     for i in 0..config.num_threads {
-    //         let thread_id = i;
-    //         let warmup_barrier = warmup_barrier.clone();
-    //         let config_ref = &config;
-    //         let txn_storage_ref = &txn_storage;
-    //         let tbl_info_ref = &tbl_info;
-    //         let flag_ref = &flag;
-    //         s.spawn(move || {
-    //             run_tpcc_for_thread(
-    //                 true,
-    //                 thread_id,
-    //                 true,
-    //                 warmup_barrier,
-    //                 config_ref,
-    //                 txn_storage_ref,
-    //                 tbl_info_ref,
-    //                 flag_ref,
-    //             );
-    //         });
-    //     }
-    //     // Start timer for config duration
-    //     warmup_barrier.wait();
-    //     std::thread::sleep(std::time::Duration::from_secs(config.warmup_time));
-    //     flag.store(false, Ordering::Release);
-    //     // Automatically join all threads
-    // });
-    // println!("BP stats after warmup: \n{}", unsafe { bp.stats() });
-    println!("Warm up skipped in external TPCC benchmark");
-
-    flag.store(true, Ordering::Release);
-    // Run the benchmark
+                                      // Run the benchmark
     let run_barrier = Arc::new(Barrier::new(config.num_threads + 1));
     std::thread::scope(|s| {
         let mut handlers = Vec::with_capacity(config.num_threads);
@@ -143,12 +60,12 @@ pub fn main() {
             let thread_id = i;
             let run_barrier = run_barrier.clone();
             let config_ref = &config;
-            let txn_storage_ref = &txn_storage;
+            let txn_storage_ref = txn_storage;
             let tbl_info_ref = &tbl_info;
             let flag_ref = &flag;
             let handler = s.spawn(move || {
                 run_tpcc_for_thread(
-                    false,
+                    is_warmup,
                     thread_id,
                     true,
                     run_barrier,
@@ -170,15 +87,20 @@ pub fn main() {
         }
     });
 
+    stats_and_outs
+}
+
+pub fn print_tpcc_stats(
+    num_warehouses: u16,
+    num_threads: usize,
+    seconds: u64,
+    stats_and_outs: Vec<(TPCCStat, TPCCOutput)>,
+) {
     let mut final_stat = TPCCStat::new();
     for (stat, _) in stats_and_outs {
         final_stat.add(&stat);
     }
     let agg_stat = final_stat.aggregate_perf();
-
-    let num_warehouses = config.num_warehouses;
-    let num_threads = config.num_threads;
-    let seconds = config.exec_time;
 
     println!(
         "{} warehouse(s), {} thread(s), {} second(s)",
@@ -228,6 +150,82 @@ pub fn main() {
     );
     DeliveryTxn::print_abort_details(&final_stat[TPCCTxnProfileID::DeliveryTxn].abort_details);
     StockLevelTxn::print_abort_details(&final_stat[TPCCTxnProfileID::StockLevelTxn].abort_details);
+}
+
+pub fn main() {
+    println!("Page size: {}", PAGE_SIZE);
+    print_cfg_flags::print_cfg_flags();
+
+    let mut config = TPCCConfig::parse();
+    config.fixed_warehouse_per_thread = false;
+    if config.bp_size == 0 {
+        // Set frames with 1GB memory per warehouse if the size is not specified
+        config.bp_size = config.num_warehouses as usize;
+    }
+    println!("config: {:?}", config);
+    println!("Fixed warehouse per thread is set to false for external TPCC benchmark");
+
+    let num_cores = get_num_cores();
+    if config.num_threads + 1 > num_cores {
+        panic!(
+            "Number of worker threads + main thread {} exceeds number of cores {}",
+            config.num_threads, num_cores
+        );
+    }
+
+    // Otherwise, set frames equal to the specified size
+    let num_frames = config.bp_size * 1024 * 1024 * 1024 / PAGE_SIZE;
+    println!(
+        "BP size: {} GB ({} frames)",
+        num_frames * PAGE_SIZE / (1024 * 1024 * 1024),
+        num_frames
+    );
+
+    let base_dir = format!("tpcc_db_w{}", config.num_warehouses);
+    // Check if the directory exists
+    if !std::path::Path::new(&base_dir).exists() {
+        panic!(
+            "Directory {} does not exist. Please run tpcc_db_gen first.",
+            base_dir
+        );
+    }
+    println!("Reading from directory: {}", base_dir);
+    let cm = Arc::new(ContainerManager::new(base_dir, true, false).unwrap());
+
+    println!("Allocating buffer pool");
+    let start = std::time::Instant::now();
+    let bp = get_bp(num_frames, cm);
+    let elapsed = start.elapsed();
+    println!("Done allocating buffer pool: {:?}", elapsed);
+
+    // Load the database from the directory.
+    let txn_storage = NoWaitTxnStorage::load(&bp);
+    let tbl_info = tpcc_load_schema(&txn_storage);
+
+    set_affinity(get_num_cores() - 1).unwrap();
+    let current_cpu = get_current_cpu();
+    println!("Main thread pinned to CPU {}", current_cpu);
+
+    // Warmup
+    if config.warmup_time > 0 {
+        let _ = run_bench(true, &config, &txn_storage, &tbl_info);
+        println!("BP stats after warmup: \n{}", unsafe { bp.stats() });
+    } else {
+        println!("Warm up skipped");
+    }
+
+    // Run the benchmark
+    if config.exec_time == 0 {
+        panic!("Execution time is 0. Please specify a non-zero execution time.");
+    }
+    let stats_and_outs = run_bench(false, &config, &txn_storage, &tbl_info);
+
+    print_tpcc_stats(
+        config.num_warehouses,
+        config.num_threads,
+        config.exec_time,
+        stats_and_outs,
+    );
 
     println!("BP stats: \n{}", unsafe { bp.stats() });
     bp.clear_dirty_flags().unwrap();

@@ -38,9 +38,9 @@ RESULTS_DIR="./results"
 mkdir -p "$RESULTS_DIR"
 
 declare -A VARIANTS=(
-  [tpcc_external_vmc]="no_tree_hint no_bp_hint use_vmc_tpcc iouring_async influxdb_trace"
-  [tpcc_external_vmc_tree_hint]="no_bp_hint use_vmc_tpcc iouring_async influxdb_trace"
-  [tpcc_external_vmc_tree_hint_inmem]="inmem_hint_only no_bp_hint use_vmc_tpcc iouring_async influxdb_trace"
+  [tpcc_external_vmc]="no_tree_hint no_bp_hint vmcache iouring_async influxdb_trace"
+  [tpcc_external_vmc_tree_hint]="no_bp_hint vmcache iouring_async influxdb_trace"
+  [tpcc_external_vmc_tree_hint_inmem]="inmem_hint_only no_bp_hint vmcache iouring_async influxdb_trace"
   [tpcc_external_no_hint]="no_tree_hint no_bp_hint iouring_async influxdb_trace"
   [tpcc_external_tree_hint]="no_bp_hint iouring_async influxdb_trace"
   [tpcc_external_bp_hint]="no_tree_hint iouring_async influxdb_trace"

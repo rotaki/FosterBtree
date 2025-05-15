@@ -54,9 +54,11 @@ pub fn main() {
         num_frames * PAGE_SIZE / (1024 * 1024 * 1024)
     );
 
-    #[cfg(feature = "use_vmc_tpcc")]
+    #[cfg(feature = "vmcache")]
     let bp = get_test_vmcache::<false, 64>(num_frames);
-    #[cfg(not(feature = "use_vmc_tpcc"))]
+    #[cfg(feature = "bp_clock")]
+    let bp = get_test_bp_clock::<64>(num_frames);
+    #[cfg(not(any(feature = "vmcache", feature = "bp_clock")))]
     let bp = get_test_bp(num_frames);
 
     let txn_storage = NoWaitTxnStorage::new(&bp);

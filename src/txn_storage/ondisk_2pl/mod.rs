@@ -754,10 +754,7 @@ impl NoWaitTxn {
                 let new_p_addr = p_addr.to_bytes();
                 let new_s_val = [p_key, &new_p_addr].concat();
                 if p_hint.page_id != p_addr.page_id {
-                    #[cfg(feature = "write_back_page_hint")]
                     si.cursor.opportunistic_update(&new_s_val, true);
-                    #[cfg(not(feature = "write_back_page_hint"))]
-                    si.cursor.opportunistic_update(&new_s_val, false);
                     si.page_hint_failed += 1;
                 } else if p_hint.frame_id != p_addr.frame_id {
                     si.cursor.opportunistic_update(&new_s_val, false);

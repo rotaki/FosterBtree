@@ -31,6 +31,10 @@ macro_rules! write_fields {
 #[derive(Parser, Debug, Clone)]
 #[command(version, about, long_about = None)]
 pub struct TPCCConfig {
+    /// BP size in GB. 0 means 1GB per warehouse.
+    #[arg(short = 'b', long, default_value_t = 0)]
+    pub bp_size: usize,
+
     /// Number of warehouses.
     #[arg(short = 'w', long, default_value_t = 1)]
     pub num_warehouses: u16,

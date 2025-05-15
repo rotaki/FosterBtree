@@ -30,6 +30,11 @@ heap_allocated_page = []
 no_tree_hint = []
 no_bp_hint = []
 
+# BP type
+bp_lru = []
+bp_clock = []
+vmcache = []
+
 # Old iterator for foster btree
 old_iter = []
 preadpwrite_sync = [] # synchronous I/O implementation using pread/pwrite. Default
@@ -38,9 +43,6 @@ iouring_async = [] # asynchronous I/O implementation using io-uring
 
 # Trace using influxdb
 influxdb_trace = []
-
-# Use vmcache for TPC-C
-use_vmc_tpcc = []
 
 # Inmem hint only
 inmem_hint_only = []
