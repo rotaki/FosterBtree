@@ -1,9 +1,10 @@
+use criterion::black_box;
 use rayon::prelude::*;
 use std::{collections::HashMap, ops::Index};
 
 use crate::{
     bp::ContainerId,
-    prelude::{ContainerDS, ContainerOptions, DBOptions, TxnStorageTrait},
+    prelude::{ContainerDS, ContainerOptions, DBOptions, ScanOptions, TxnOptions, TxnStorageTrait},
     utils::Permutation,
 };
 
@@ -600,6 +601,59 @@ pub fn tpcc_gen_all_tables(
         "======== Finished Loading Tables ========\nElapsed time: {:?}",
         elapsed
     );
+
+    // Traverse the secondary index to make sure that the physical address is correct
+    let txn = txn_storage.begin_txn(0, TxnOptions::default()).unwrap();
+    let res = txn_storage.scan_range(
+        &txn,
+        table_info[TPCCTable::CustomerSecondary],
+        ScanOptions {
+            lower: vec![],
+            upper: vec![],
+        },
+    );
+    let iter = res.unwrap();
+    let mut cnt = 0;
+    loop {
+        match txn_storage.iter_next(&txn, &iter) {
+            Ok(Some((s_key, p_value))) => {
+                cnt += 1;
+                black_box((s_key, p_value));
+            }
+            Ok(None) => break,
+            Err(e) => {
+                panic!("Error iterating over customer secondary index");
+            }
+        }
+    }
+    println!("Scanned {} records in customer secondary index", cnt);
+    drop(iter);
+
+    let res = txn_storage.scan_range(
+        &txn,
+        table_info[TPCCTable::OrderSecondary],
+        ScanOptions {
+            lower: vec![],
+            upper: vec![],
+        },
+    );
+    let iter = res.unwrap();
+    let mut cnt = 0;
+    loop {
+        match txn_storage.iter_next(&txn, &iter) {
+            Ok(Some((s_key, p_value))) => {
+                cnt += 1;
+                black_box((s_key, p_value));
+            }
+            Ok(None) => break,
+            Err(e) => {
+                panic!("Error iterating over order secondary index");
+            }
+        }
+    }
+    println!("Scanned {} records in order secondary index", cnt);
+    drop(iter);
+    txn_storage.commit_txn(&txn, false).unwrap();
 
     table_info
 }

@@ -38,12 +38,14 @@ RESULTS_DIR="./results"
 mkdir -p "$RESULTS_DIR"
 
 declare -A VARIANTS=(
-  [tpcc_external_all_hint]="influxdb_trace"
-  [tpcc_external_all_hint_write_back_page_hint]="write_back_page_hint influxdb_trace"
+  [tpcc_external_lipah]="influxdb_trace"
+  [tpcc_external_no_bp_hint]="no_bp_hint influxdb_trace"
+  [tpcc_external_no_tree_hint]="no_tree_hint influxdb_trace"
+  [tpcc_external_no_tree_hint_no_bp_hint]="no_tree_hint no_bp_hint influxdb_trace"
   # [tpcc_external_all_hint_inmem]="inmem_hint_only influxdb_trace"
 )
 
-rm -rf ${TARGET_DIR}/tpcc_*
+rm -rf "${TARGET_DIR}/tpcc_*"
 
 # ───────────── Build phase  ────────────────────────────────────────────────
 echo "▶ Building tpcc_db_gen…"

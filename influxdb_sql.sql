@@ -143,3 +143,52 @@ data
     |> group(columns: ["_field"])        // drop “c” so 6 + 8 are combined
     |> aggregateWindow(every: 1s, fn: sum, createEmpty: false)
     |> yield(name: "sum_per_sec")
+
+// ----------------------------------------------------------------------------
+// helper to build+yield the s-series ×100 for a given ID,
+// with separate lines per (c, _field)
+// ----------------------------------------------------------------------------
+makeAndYieldSum = (id) =>
+  from(bucket: "tlb")
+    |> range(start: v.timeRangeStart, stop: v.timeRangeStop)
+    // pick the right measurement (s1 or s2)
+    |> filter(fn: (r) => r._measurement == "s" + id)
+    // only the three sub-fields we care about
+    |> filter(fn: (r) =>
+         r._field == "h" or r._field == "p" or r._field == "f"
+       )
+    // group by both the field AND the container tag
+    |> group(columns: ["_field", "c"])
+    // sum each (c, field) pair per second
+    |> aggregateWindow(every: 1s, fn: sum, createEmpty: false)
+    // scale by 100
+    |> map(fn: (r) => ({ r with _value: r._value * 100 }))
+    // this single yield now emits SIX lines:
+    //   c=6,h ; c=6,p ; c=6,f
+    //   c=8,h ; c=8,p ; c=8,f
+    |> yield(name: id + " sum_per_sec")
+
+// ── run it for your two IDs ──
+makeAndYieldSum(id: "")
+// makeAndYieldSum(id: "2")
+
+makeAndYield = (id, measPrefix, op, fieldName) =>
+  from(bucket: "tlb")
+    |> range(start: v.timeRangeStart, stop: v.timeRangeStop)
+    |> filter(fn: (r) =>
+         r._measurement == measPrefix + id and
+         r._field == "v" and
+         (op == "" or r.o == op)
+       )
+    |> group(columns: [])
+    |> aggregateWindow(every: 1s, fn: count)
+    |> map(fn: (r) => ({ r with 
+         _value: r._value * 100, 
+         _field: fieldName 
+       }))
+    |> yield(name: id + " " + fieldName)
+
+// ----------------------------------------------------------------------------
+// container 1
+// ----------------------------------------------------------------------------
+makeAndYield(id: "", measPrefix: "t",  op: "",  fieldName: "TPS")
