@@ -1700,7 +1700,7 @@ impl<T: MemPool> FosterBtree<T> {
             // Use the hint to speculatively find the page that contains the key.
             if let Some(hint) = &hint {
                 #[cfg(feature = "inmem_hint_only")]
-                if self.mem_pool.is_in_mem(*hint) {
+                if !self.mem_pool.is_in_mem(*hint) {
                     // If the hinted page is not in the buffer pool, we fall back to the normal traversal
                     // to avoid reading unnecessary pages from the disk.
                     return self.traverse_to_leaf_for_read_from(key, self.root_key);
