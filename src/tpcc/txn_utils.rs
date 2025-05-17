@@ -5,8 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Barrier};
 
 use crate::affinity::{get_current_cpu, get_num_cores, set_affinity};
-#[cfg(feature = "influxdb_trace")]
-use crate::influxdb_trace::influxdb_trace::INFLUX_TRACE;
+use crate::event_tracer::trace_txn;
 // do not warn about unused imports
 #[allow(unused_imports)]
 use crate::log;
@@ -618,10 +617,7 @@ where
         };
 
         if !_is_warmup {
-            #[cfg(feature = "influxdb_trace")]
-            INFLUX_TRACE.with(|influx| {
-                influx.borrow_mut().append_txn(_txn_type.as_u8());
-            });
+            trace_txn(_txn_type.as_u8());
         }
     }
     (stat, out)

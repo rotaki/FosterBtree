@@ -1,3 +1,5 @@
 /target
-/dir_influxdb
-/dir_telegraf
+
+# DuckDB related files for traces
+*.db
+*.db.wal

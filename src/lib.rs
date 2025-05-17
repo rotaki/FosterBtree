@@ -3,7 +3,7 @@ pub mod affinity;
 pub mod bench_utils;
 pub mod bp;
 pub mod container;
-pub mod influxdb_trace;
+pub mod event_tracer;
 pub mod print_cfg_flags;
 pub mod random;
 pub mod time;

@@ -119,8 +119,7 @@ pub trait FileManagerTrait: Send + Sync {
 #[allow(dead_code)]
 pub mod preadpwrite_sync {
     use super::{ContainerId, FileManagerTrait, FileStats};
-    #[cfg(feature = "influxdb_trace")]
-    use crate::influxdb_trace::influxdb_trace::INFLUX_TRACE;
+    use crate::event_tracer::trace_diskio;
     #[allow(unused_imports)]
     use crate::log;
     use crate::log_trace;
@@ -223,10 +222,7 @@ pub mod preadpwrite_sync {
         fn read_page(&self, page_id: PageId, page: &mut Page) -> Result<(), std::io::Error> {
             self.stats.inc_read_count(self.direct);
             log_trace!("Reading page: {} from file: {:?}", page_id, self.path);
-            #[cfg(feature = "influxdb_trace")]
-            INFLUX_TRACE.with(|trace| {
-                trace.borrow_mut().append_diskio::<true>(self._c_id as u8);
-            });
+            trace_diskio(self._c_id as u8, 'R');
             unsafe {
                 let ret = pread(
                     self.file_no,
@@ -245,10 +241,7 @@ pub mod preadpwrite_sync {
         fn write_page(&self, page_id: PageId, page: &Page) -> Result<(), std::io::Error> {
             self.stats.inc_write_count(self.direct);
             log_trace!("Writing page: {} to file: {:?}", page_id, self.path);
-            #[cfg(feature = "influxdb_trace")]
-            INFLUX_TRACE.with(|trace| {
-                trace.borrow_mut().append_diskio::<false>(self._c_id as u8);
-            });
+            trace_diskio(self._c_id as u8, 'W');
             debug_assert!(page.get_id() == page_id, "Page id mismatch");
             unsafe {
                 let ret = pwrite(
@@ -591,11 +584,9 @@ pub mod inmemory_async_simulator {
 #[allow(dead_code)]
 pub mod iouring_async {
     use super::{ContainerId, FileManagerTrait, FileStats};
-    #[cfg(feature = "influxdb_trace")]
-    use crate::influxdb_trace::influxdb_trace::INFLUX_TRACE;
+    use crate::event_tracer::trace_diskio;
     #[allow(unused_imports)]
     use crate::log;
-
     use crate::page::{Page, PageId, PAGE_SIZE};
     use io_uring::{opcode, types, IoUring};
     use libc::{iovec, O_DIRECT};
@@ -1098,10 +1089,7 @@ pub mod iouring_async {
 
         fn read_page(&self, page_id: PageId, page: &mut Page) -> Result<(), std::io::Error> {
             self.stats.inc_read_count(self.direct);
-            #[cfg(feature = "influxdb_trace")]
-            INFLUX_TRACE.with(|trace| {
-                trace.borrow_mut().append_diskio::<true>(self._c_id as u8);
-            });
+            trace_diskio(self.c_id as u8, 'R');
             self.rings.read_page(self.fileno, self.c_id, page_id, page)
         }
 
@@ -1109,10 +1097,7 @@ pub mod iouring_async {
         // We guarantee that the write is completed before a new I/O operation is started on the same page.
         fn write_page(&self, page_id: PageId, page: &Page) -> Result<(), std::io::Error> {
             self.stats.inc_write_count(self.direct);
-            #[cfg(feature = "influxdb_trace")]
-            INFLUX_TRACE.with(|trace| {
-                trace.borrow_mut().append_diskio::<false>(self._c_id as u8);
-            });
+            trace_diskio(self.c_id as u8, 'W');
             self.rings.write_page(self.fileno, self.c_id, page_id, page)
         }
 

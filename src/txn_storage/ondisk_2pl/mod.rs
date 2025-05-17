@@ -9,8 +9,7 @@ use crate::access_method::fbt::{
     BTreeKey, FosterBtreeAppendOnly, FosterBtreeAppendOnlyCursor, FosterBtreeCursor,
 };
 use crate::bp::PageFrameKey;
-#[cfg(feature = "influxdb_trace")]
-use crate::influxdb_trace::influxdb_trace::INFLUX_TRACE;
+use crate::event_tracer::trace_secidx;
 use crate::page::PageId;
 use crate::prelude::{FosterBtreePage, UniqueKeyIndex};
 use crate::txn_storage::TxnStorageStatus;
@@ -929,17 +928,12 @@ impl<M: MemPool> SecondaryIterator<M> {
 
 impl<M: MemPool> Drop for SecondaryIterator<M> {
     fn drop(&mut self) {
-        #[cfg(feature = "influxdb_trace")]
-        {
-            INFLUX_TRACE.with(|trace| {
-                trace.borrow_mut().append_sec_index_hit_rate(
-                    self.cursor.c_key().c_id() as u8,
-                    self.hint_worked,
-                    self.page_hint_failed,
-                    self.frame_hint_failed,
-                );
-            })
-        }
+        trace_secidx(
+            self.cursor.c_key().c_id() as u8,
+            self.hint_worked as u32,
+            self.page_hint_failed as u32,
+            self.frame_hint_failed as u32,
+        );
     }
 }
 

@@ -212,37 +212,26 @@ impl<const EVICTION_BATCH_SIZE: usize> BufferPoolClock<EVICTION_BATCH_SIZE> {
     }
 
     fn ensure_free_frames(&self) -> Result<(), MemPoolStatus> {
-        let mut eviction_trial_count = 0;
-        loop {
-            if eviction_trial_count > 100 {
-                log_warn!(
-                    "[EVICT{}] Eviction trial count exceeded. Cannot evict pages.",
-                    eviction_trial_count
-                );
-                return Err(MemPoolStatus::CannotEvictPage);
-            }
-            let used_frames = self.used_frames.load(Ordering::Acquire);
-            let used_percent = used_frames as f64 / self.num_frames as f64;
-            if used_percent > 0.95 {
-                log_warn!(
-                    "[EVICT{}] Used frames: {}/{}({}). Evicting pages...",
-                    eviction_trial_count,
-                    used_frames,
-                    self.num_frames,
-                    used_percent
-                );
-                let _ = self.evict_batch();
-            } else {
-                log_warn!(
-                    "[EVICT{}] Used frames: {}/{}({}). No eviction needed.",
-                    eviction_trial_count,
-                    used_frames,
-                    self.num_frames,
-                    used_percent
-                );
-                return Ok(());
-            }
-            eviction_trial_count += 1;
+        let used_frames = self.used_frames.load(Ordering::Acquire);
+        let used_percent = used_frames as f64 / self.num_frames as f64;
+        if used_percent > 0.95 {
+            log_warn!(
+                "[EVICT{}] Used frames: {}/{}({}). Evicting pages...",
+                eviction_trial_count,
+                used_frames,
+                self.num_frames,
+                used_percent
+            );
+            self.evict_batch()
+        } else {
+            log_warn!(
+                "[EVICT{}] Used frames: {}/{}({}). No eviction needed.",
+                eviction_trial_count,
+                used_frames,
+                self.num_frames,
+                used_percent
+            );
+            return Ok(());
         }
     }
 

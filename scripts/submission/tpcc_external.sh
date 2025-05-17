@@ -33,24 +33,21 @@ shift $((OPTIND - 1))
 
 # ───────────── Paths & variant table  ──────────────────────────────────────
 TARGET_DIR="./target/release"
-INFLUX_SETUP="./influxdb_setup.sh"
 RESULTS_DIR="./results"
 mkdir -p "$RESULTS_DIR"
 
 declare -A VARIANTS=(
-  [tpcc_external_vmc]="no_tree_hint no_bp_hint vmcache iouring_async influxdb_trace"
-  [tpcc_external_vmc_tree_hint]="no_bp_hint vmcache iouring_async influxdb_trace"
-  [tpcc_external_vmc_tree_hint_inmem]="inmem_hint_only no_bp_hint vmcache iouring_async influxdb_trace"
-  [tpcc_external_no_hint]="no_tree_hint no_bp_hint iouring_async influxdb_trace"
-  [tpcc_external_tree_hint]="no_bp_hint iouring_async influxdb_trace"
-  [tpcc_external_bp_hint]="no_tree_hint iouring_async influxdb_trace"
-  [tpcc_external_all_hint]="iouring_async influxdb_trace"
-  [tpcc_external_all_hint_inmem]="inmem_hint_only iouring_async influxdb_trace"
+  [tpcc_external_vmc]="no_tree_hint no_bp_hint vmcache  event_tracer"
+  [tpcc_external_vmc_tree_hint]="no_bp_hint vmcache  event_tracer"
+  [tpcc_external_no_hint]="no_tree_hint no_bp_hint  event_tracer"
+  [tpcc_external_tree_hint]="no_bp_hint  event_tracer"
+  [tpcc_external_bp_hint]="no_tree_hint  event_tracer"
+  [tpcc_external_all_hint]=" event_tracer"
 )
 
 # ───────────── Build phase  ────────────────────────────────────────────────
 echo "▶ Building tpcc_db_gen…"
-cargo build --release --features "iouring_async" --bin tpcc_db_gen
+cargo build --release --features "" --bin tpcc_db_gen
 
 echo "▶ Building tpcc_external variants…"
 for BIN in "${!VARIANTS[@]}"; do
@@ -58,14 +55,6 @@ for BIN in "${!VARIANTS[@]}"; do
   cargo build --release --features "${VARIANTS[$BIN]}" --bin tpcc_external
   mv -f "${TARGET_DIR}/tpcc_external" "${TARGET_DIR}/${BIN}"
 done
-
-# ───────────── Ensure InfluxDB is running  ─────────────────────────────────
-if ! pgrep -x "influxd" >/dev/null; then
-  echo "▶ InfluxDB not running – starting via '${INFLUX_SETUP}'"
-  "${INFLUX_SETUP}"
-else
-  echo "▶ InfluxDB already running."
-fi
 
 # ───────────── Benchmark runs  ─────────────────────────────────────────────
 SUFFIX=1
@@ -80,10 +69,9 @@ for BIN in "${!VARIANTS[@]}"; do
     # Fresh DB for each run
     rm -rf "./tpcc_db_w${WAREHOUSES}"
 
-    INFLUX_DB_SUFFIX=${SUFFIX} \
-      "${TARGET_DIR}/tpcc_db_gen" -w "${WAREHOUSES}"
+    "${TARGET_DIR}/tpcc_db_gen" -w "${WAREHOUSES}"
 
-    INFLUX_DB_SUFFIX=${SUFFIX} \
+    DB_PATH="./eventdb_${BIN}.db" \
       "${TARGET_DIR}/${BIN}" \
         -w "${WAREHOUSES}" -t "${THREADS}" -D "${DURATION}"
   } |& tee "${LOG_FILE}"

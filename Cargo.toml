@@ -41,14 +41,8 @@ preadpwrite_sync = [] # synchronous I/O implementation using pread/pwrite. Defau
 iouring_sync = [] # synchronous I/O implementation using io-uring
 iouring_async = [] # asynchronous I/O implementation using io-uring
 
-# Trace using influxdb
-influxdb_trace = []
-
-# Inmem hint only
-inmem_hint_only = []
-
-# Write back page hint
-write_back_page_hint = []
+# Event tracer
+event_tracer = ["duckdb"]
 
 [dependencies]
 rayon = "1.10.0"
@@ -67,6 +61,7 @@ dashmap = "6.1"
 criterion = { version = "0.5", features = ["html_reports"]}
 hdrhistogram = "7.5.4"
 mimalloc = "0.1.46"
+duckdb = { version = "1.2.2", features = ["bundled"], optional = true }
 
 [dev-dependencies]
 serde_cbor = "0.11"

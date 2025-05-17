@@ -799,7 +799,7 @@ fn split_insert<T: EvictionPolicy>(
     // If the key is less than the foster key, we insert the key into this.
     // Otherwise, we insert the key into the foster child.
 
-    let res = if key < &foster_key {
+    let res = if *key < *foster_key {
         this.insert(key, value, is_ghost)
     } else {
         foster_child.insert(key, value, is_ghost)
@@ -1699,7 +1699,6 @@ impl<T: MemPool> FosterBtree<T> {
         {
             // Use the hint to speculatively find the page that contains the key.
             if let Some(hint) = &hint {
-                #[cfg(feature = "inmem_hint_only")]
                 if !self.mem_pool.is_in_mem(*hint) {
                     // If the hinted page is not in the buffer pool, we fall back to the normal traversal
                     // to avoid reading unnecessary pages from the disk.
@@ -2407,11 +2406,7 @@ impl<T: MemPool> FosterBtreeCursor<T> {
                 let val = InnerVal::from_bytes(leaf_page.get_foster_val());
                 let foster_page_key =
                     PageFrameKey::new_with_frame_id(self.btree.c_key, val.page_id, val.frame_id);
-                let foster_page = self
-                    .btree
-                    .mem_pool
-                    .get_page_for_read(foster_page_key)
-                    .unwrap();
+                let foster_page = self.btree.read_page(foster_page_key);
                 // Evict the current page as soon as possible
                 // self.btree
                 //     .mem_pool
@@ -2459,7 +2454,7 @@ impl<T: MemPool> FosterBtreeCursor<T> {
                     let this_page = current_page;
                     log_info!("Traversal for read, page: {}", this_page.get_id());
                     if this_page.is_leaf() {
-                        if this_page.has_foster_child() && this_page.get_foster_key() <= key {
+                        if this_page.has_foster_child() && *this_page.get_foster_key() <= **key {
                             // Check whether the foster child should be traversed.
                             let val = InnerVal::from_bytes(this_page.get_foster_val());
                             let foster_page_key = PageFrameKey::new_with_frame_id(

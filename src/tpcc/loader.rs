@@ -621,7 +621,7 @@ pub fn tpcc_gen_all_tables(
                 black_box((s_key, p_value));
             }
             Ok(None) => break,
-            Err(e) => {
+            Err(_e) => {
                 panic!("Error iterating over customer secondary index");
             }
         }
@@ -646,7 +646,7 @@ pub fn tpcc_gen_all_tables(
                 black_box((s_key, p_value));
             }
             Ok(None) => break,
-            Err(e) => {
+            Err(_e) => {
                 panic!("Error iterating over order secondary index");
             }
         }
