@@ -15,11 +15,11 @@ use crate::{
 };
 
 use std::{
-    cell::UnsafeCell,
+    cell::{RefCell, UnsafeCell},
     collections::BTreeMap,
     sync::{
         atomic::{AtomicUsize, Ordering},
-        Arc,
+        Arc, OnceLock,
     },
 };
 
@@ -78,9 +78,8 @@ impl PageToFrame {
         cmap.remove(&p_key.page_id).map(|(_p_id, f_id)| f_id)
     }
 
-    pub fn remove_batch(&self, mut p_keys: Vec<PageKey>) {
-        // Sort the keys by c_key
-        p_keys.sort_by_key(|k| k.c_key);
+    // The p_keys must be sorted by c_key
+    pub fn remove_batch_sorted<T: IntoIterator<Item = PageKey>>(&self, p_keys: T) {
         // Remove it after grouping by c_key
         let mut last_c_key = None;
         let mut page_map: Option<Arc<DashMap<PageId, usize>>> = None;
@@ -136,11 +135,57 @@ impl PageToFrame {
     }
 }
 
+/// Your scratch buffers
+pub struct EvictionScratchSpace {
+    pub clean_pages: Vec<(usize, *mut FMeta)>,
+    pub dirty_pages: Vec<(usize, FRGuard)>,
+    pub to_evict: Vec<(usize, FWGuard)>,
+}
+
+impl EvictionScratchSpace {
+    pub fn new(batch: usize) -> Self {
+        Self {
+            dirty_pages: Vec::with_capacity(batch),
+            clean_pages: Vec::with_capacity(batch),
+            to_evict: Vec::with_capacity(batch),
+        }
+    }
+
+    /// wipe but keep allocations
+    pub fn clear(&mut self) {
+        self.dirty_pages.clear();
+        self.clean_pages.clear();
+        self.to_evict.clear();
+    }
+}
+
+thread_local! {
+    // One slot *per thread*, but initialised lazily
+    static SCRATCH: OnceLock<RefCell<EvictionScratchSpace>> = OnceLock::new();
+}
+
+pub fn with_eviction_scratch<F, R>(batch: usize, f: F) -> R
+where
+    F: FnOnce(&mut EvictionScratchSpace) -> R,
+{
+    SCRATCH.with(|slot| {
+        // First access for this thread?
+        let cell = slot.get_or_init(|| RefCell::new(EvictionScratchSpace::new(batch)));
+
+        let mut borrow = cell.borrow_mut();
+
+        // Already created, but maybe caller asked for a larger batch?
+        borrow.clear(); // start fresh each time (optional)
+
+        f(&mut *borrow) // hand it to the caller
+    })
+}
+
 /// Buffer pool that manages the buffer frames.
 pub struct BufferPoolClock<const EVICTION_BATCH_SIZE: usize> {
     num_frames: usize,
     used_frames: AtomicUsize,
-    clock_start: AtomicUsize,
+    clock_hand: AtomicUsize,
     container_manager: Arc<ContainerManager>,
     eviction_hints: ConcurrentQueue<usize>, // A hint for quickly finding a clean frame or a frame to evict. Whenever a clean frame is found, it is pushed to this queue so that it can be quickly found.
     #[allow(clippy::vec_box)]
@@ -193,7 +238,7 @@ impl<const EVICTION_BATCH_SIZE: usize> BufferPoolClock<EVICTION_BATCH_SIZE> {
         Ok(BufferPoolClock {
             num_frames,
             used_frames: AtomicUsize::new(0),
-            clock_start: AtomicUsize::new(0),
+            clock_hand: AtomicUsize::new(0),
             container_manager,
             page_to_frame: PageToFrame::new(),
             eviction_hints,
@@ -235,134 +280,176 @@ impl<const EVICTION_BATCH_SIZE: usize> BufferPoolClock<EVICTION_BATCH_SIZE> {
         }
     }
 
-    fn evict_batch(&self) -> Result<(), MemPoolStatus> {
-        let mut clean_victims = Vec::with_capacity(EVICTION_BATCH_SIZE);
-        let mut dirty_victims = Vec::with_capacity(EVICTION_BATCH_SIZE);
-        let mut to_evict = Vec::with_capacity(EVICTION_BATCH_SIZE);
+    fn fetch_add_clock_hand(&self, increment: usize) -> usize {
+        self.clock_hand
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |clock_start| {
+                let new_clock_start = (clock_start + increment) % self.num_frames;
+                Some(new_clock_start)
+            })
+            .expect("Should not fail because the func always returns Some")
+    }
 
-        let mut num_iterations = 0;
-        while clean_victims.len() + dirty_victims.len() < EVICTION_BATCH_SIZE {
-            if num_iterations > 10 {
-                if clean_victims.len() + dirty_victims.len() == 0 {
-                    log_warn!(
-                        "    Could not evict pages after {} iterations",
-                        num_iterations
-                    );
+    /// Evict up to `EVICTION_BATCH_SIZE` pages.
+    pub fn evict_batch(&self) -> Result<(), MemPoolStatus> {
+        with_eviction_scratch(EVICTION_BATCH_SIZE, |scratch| {
+            // ─── 1. Collect candidate pages ────────────────────────────
+            // This may return CannotEvictPage if it cannot find any candidates.
+            self.collect_candidates(scratch, EVICTION_BATCH_SIZE)?;
+
+            log_warn!(
+                "    Trying to evict {} pages ({} dirty, {} clean)",
+                scratch.dirty_pages.len() + scratch.clean_pages.len(),
+                scratch.dirty_pages.len(),
+                scratch.clean_pages.len()
+            );
+
+            // ─── 2. Write dirty pages to disk under read‑latch ─────────
+            self.flush_dirty(&scratch.dirty_pages);
+
+            // ─── 3. Latch clean pages for eviction ────────────────────
+            self.latch_clean(&mut scratch.clean_pages, &mut scratch.to_evict);
+
+            // ─── 4. Upgrade dirty‑page latches ────────────────────────
+            self.upgrade_dirty(&mut scratch.dirty_pages, &mut scratch.to_evict);
+
+            // ─── 5. Remove from page table and recycle frames ─────────
+            self.remove_from_page_table(&mut scratch.to_evict);
+            self.finalize_eviction(&mut scratch.to_evict);
+
+            Ok(())
+        })
+    }
+
+    // ───────────────────────── helpers ───────────────────────────────
+
+    /// Scan the clock hand until enough candidates are found.
+    fn collect_candidates(
+        &self,
+        scratch: &mut EvictionScratchSpace,
+        batch: usize,
+    ) -> Result<(), MemPoolStatus> {
+        let max_iter = 2 * self.num_frames / batch;
+        let (clean, dirty) = (&mut scratch.clean_pages, &mut scratch.dirty_pages);
+
+        let mut iters = 0;
+        while clean.len() + dirty.len() < batch {
+            if iters > max_iter {
+                if clean.is_empty() && dirty.is_empty() {
                     return Err(MemPoolStatus::CannotEvictPage);
-                } else {
-                    break;
                 }
+                break;
             }
-            let clock_start = self
-                .clock_start
-                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |clock_start| {
-                    let new_clock_start = (clock_start + EVICTION_BATCH_SIZE) % self.num_frames;
-                    Some(new_clock_start)
-                })
-                .expect("Should not fail because the func always returns Some");
-            for i in clock_start..clock_start + EVICTION_BATCH_SIZE {
-                let index = i % self.num_frames;
-                let meta = &mut unsafe { &mut *self.metas.get() }[index];
-                let is_marked = meta.evict_info.score() > 0;
-                let is_none = meta.key().is_none();
-                let is_latched = meta.latch.is_locked();
-                let is_dirty = meta.is_dirty.load(Ordering::Acquire);
-                if is_none || is_latched {
-                    continue; // Skip the empty frame or the latched frame
-                }
-                if is_marked && is_dirty {
-                    // Get a read latch on the page.
-                    // If the page is dirty, we need to write it to disk.
-                    let guard = FRGuard::try_new(
-                        box_as_mut_ptr(meta),
-                        box_as_mut_ptr(&mut unsafe { &mut *self.pages.get() }[index]),
-                    );
-                    if let Some(guard) = guard {
-                        // Validate that the page is not in the page table
-                        if guard.page_key().is_none() {
-                            continue;
-                        }
-                        dirty_victims.push((index, guard));
-                    } else {
-                        // The frame is latched. Try the next frame.
-                        continue;
-                    }
-                } else if is_marked && !is_dirty {
-                    clean_victims.push((index, meta));
-                } else {
-                    // Not marked. Mark it and continue
-                    meta.evict_info.update();
-                }
+
+            let clock_start = self.fetch_add_clock_hand(batch);
+            for i in clock_start..clock_start + batch {
+                self.classify_frame(i % self.num_frames, clean, dirty);
             }
-            num_iterations += 1;
+            iters += 1;
+        }
+        Ok(())
+    }
+
+    #[inline]
+    fn classify_frame(
+        &self,
+        index: usize,
+        clean: &mut Vec<(usize, *mut FMeta)>,
+        dirty: &mut Vec<(usize, FRGuard)>,
+    ) {
+        let meta = &mut unsafe { &mut *self.metas.get() }[index];
+
+        // Skip empty or latched frames immediately.
+        if meta.key().is_none() || meta.latch.is_locked() {
+            return;
         }
 
-        log_warn!(
-            "    Trying to evict {} pages ({} dirty, {} clean)",
-            dirty_victims.len() + clean_victims.len(),
-            dirty_victims.len(),
-            clean_victims.len()
-        );
-
-        // 1. Write the dirty pages to disk
-        for (_, guard) in dirty_victims.iter() {
-            self.write_victim_to_disk_if_dirty_r(guard)?;
+        let marked = meta.evict_info.score() > 0;
+        if !marked {
+            meta.evict_info.update();
+            return;
         }
 
-        // 2. Try to get a write latch on the clean pages. The clean page might get dirty while we are
-        // trying to get a write latch on it. So we need to check if the page is still clean.
-        for (index, meta) in clean_victims.into_iter() {
-            if let Some(guard) = FWGuard::try_new(
+        let is_dirty = meta.is_dirty.load(Ordering::Acquire);
+        if is_dirty {
+            // Try read‑latch on dirty page
+            if let Some(g) = FRGuard::try_new(
                 box_as_mut_ptr(meta),
+                box_as_mut_ptr(&mut unsafe { &mut *self.pages.get() }[index]),
+            ) {
+                if g.page_key().is_some() {
+                    dirty.push((index, g));
+                }
+            }
+        } else {
+            // Clean and marked
+            clean.push((index, box_as_mut_ptr(meta)));
+        }
+    }
+
+    /// Flush all dirty victims under read latches.
+    fn flush_dirty(&self, dirty_pages: &[(usize, FRGuard)]) {
+        for (_, g) in dirty_pages {
+            self.write_victim_to_disk_if_dirty_r(g).unwrap();
+        }
+    }
+
+    /// Acquire write latches on clean victims and move them to `to_evict`.
+    fn latch_clean(
+        &self,
+        clean_pages: &mut Vec<(usize, *mut FMeta)>,
+        to_evict: &mut Vec<(usize, FWGuard)>,
+    ) {
+        for (index, meta) in clean_pages.drain(..) {
+            if let Some(g) = FWGuard::try_new(
+                meta,
                 box_as_mut_ptr(&mut unsafe { &mut *self.pages.get() }[index]),
                 false,
             ) {
-                self.write_victim_to_disk_if_dirty_w(&guard)?;
-                to_evict.push((index, guard));
-            } else {
-                // The frame is latched. Try the next frame.
-                continue;
+                if g.page_key().is_none() {
+                    continue;
+                }
+                self.write_victim_to_disk_if_dirty_w(&g).unwrap();
+                to_evict.push((index, g));
             }
         }
+    }
 
-        // 3. Try to upgrade the dirty pages to write latches.
-        for (index, guard) in dirty_victims.into_iter() {
-            if guard.page_key().is_none() {
-                // The page is not in the page table. Skip it.
-                continue;
-            }
-            // We need to get a write latch on the page to remove it from the page table
-            // because we don't want other threads to access the page while we are evicting it.
-            if let Ok(guard) = guard.try_upgrade(false) {
-                to_evict.push((index, guard));
-            } else {
-                // The frame is latched. Try the next frame.
-                continue;
+    /// Upgrade read → write latches on dirty pages once they are flushed.
+    fn upgrade_dirty(
+        &self,
+        dirty_pages: &mut Vec<(usize, FRGuard)>,
+        to_evict: &mut Vec<(usize, FWGuard)>,
+    ) {
+        for (index, g) in dirty_pages.drain(..) {
+            // We already checked that the page key is not None for dirty pages
+            // in classify_frame, so we can skip the check here.
+            // if g.page_key().is_none() {
+            //     continue;
+            // }
+            if let Ok(gw) = g.try_upgrade(false) {
+                to_evict.push((index, gw));
             }
         }
+    }
 
-        // 4. Remove the pages from the page table
-        let p_keys = to_evict
-            .iter()
-            .map(|(_, guard)| {
-                guard.page_key().unwrap() // This should not fail because we already checked
-            })
-            .collect::<Vec<_>>();
-        self.page_to_frame.remove_batch(p_keys);
+    /// Remove pages from the page‑table in c_key order.
+    fn remove_from_page_table(&self, to_evict: &mut Vec<(usize, FWGuard)>) {
+        to_evict.sort_unstable_by_key(|(_, g)| g.page_key().unwrap().c_key);
+        self.page_to_frame
+            .remove_batch_sorted(to_evict.iter().map(|(_, g)| g.page_key().unwrap()));
+    }
 
-        // 5. Reset the frames and push them to the eviction hints
-        let mut count = 0;
-        for (index, guard) in to_evict.drain(..) {
-            count += 1;
-            assert!(!guard.dirty().load(Ordering::Acquire));
-            guard.set_page_key(None); // Remove the page key from the frame
-            guard.evict_info().reset(); // Reset the eviction info
-            self.eviction_hints.push(index).unwrap(); // Push the frame index to the eviction hints
+    /// Reset frame metadata and recycle indices.
+    fn finalize_eviction(&self, to_evict: &mut Vec<(usize, FWGuard)>) {
+        let mut freed = 0;
+        for (index, g) in to_evict.drain(..) {
+            freed += 1;
+            assert!(!g.dirty().load(Ordering::Acquire));
+            g.set_page_key(None);
+            g.evict_info().reset();
+            self.eviction_hints.push(index).unwrap();
         }
-
-        self.used_frames.fetch_sub(count, Ordering::AcqRel);
-
-        Ok(())
+        self.used_frames.fetch_sub(freed, Ordering::AcqRel);
     }
 
     #[allow(dead_code)]
@@ -480,34 +567,30 @@ impl<const EVICTION_BATCH_SIZE: usize> MemPool for BufferPoolClock<EVICTION_BATC
         self.used_frames.fetch_add(1, Ordering::AcqRel);
 
         // 1. Choose victim
-        if let Some(mut victim) = self.choose_victim() {
-            // Victim must be clean and empty
-            assert!(victim.page_key().is_none());
-            assert!(!victim.dirty().load(Ordering::Acquire));
+        let mut victim = self.choose_victim().ok_or(MemPoolStatus::CannotEvictPage)?;
+        // Victim must be clean and empty
+        assert!(victim.page_key().is_none());
+        assert!(!victim.dirty().load(Ordering::Acquire));
 
-            // 3. Modify the page_to_frame mapping. Critical section.
-            // Need to remove the old mapping and insert the new mapping.
-            let page_key = {
-                // Insert the new mapping
-                let container = self.container_manager.get_container(c_key);
-                let page_id = container.inc_page_count(1) as PageId;
-                let index = victim.frame_id();
-                let key = PageKey::new(c_key, page_id);
-                self.page_to_frame.insert(key, index as usize);
-                key
-            };
+        // 3. Modify the page_to_frame mapping. Critical section.
+        // Need to remove the old mapping and insert the new mapping.
+        let page_key = {
+            // Insert the new mapping
+            let container = self.container_manager.get_container(c_key);
+            let page_id = container.inc_page_count(1) as PageId;
+            let index = victim.frame_id();
+            let key = PageKey::new(c_key, page_id);
+            self.page_to_frame.insert(key, index as usize);
+            key
+        };
 
-            // 4. Initialize the page
-            victim.set_id(page_key.page_id); // Initialize the page with the page id
-            victim.set_page_key(Some(page_key)); // Set the frame key to the new page key
-            victim.dirty().store(true, Ordering::Release);
-            victim.evict_info().reset(); // Reset the eviction info
+        // 4. Initialize the page
+        victim.set_id(page_key.page_id); // Initialize the page with the page id
+        victim.set_page_key(Some(page_key)); // Set the frame key to the new page key
+        victim.dirty().store(true, Ordering::Release);
+        victim.evict_info().reset(); // Reset the eviction info
 
-            Ok(victim)
-        } else {
-            // Victim Selection failed
-            Err(MemPoolStatus::CannotEvictPage)
-        }
+        Ok(victim)
     }
 
     fn create_new_pages_for_write(
@@ -543,9 +626,6 @@ impl<const EVICTION_BATCH_SIZE: usize> MemPool for BufferPoolClock<EVICTION_BATC
         log_debug!("Page write: {}", key);
         self.stats.inc_write_count();
 
-        // Ensure free frames
-        self.ensure_free_frames()?;
-
         #[cfg(not(feature = "no_bp_hint"))]
         {
             // Fast path access to the frame using frame_id
@@ -572,47 +652,45 @@ impl<const EVICTION_BATCH_SIZE: usize> MemPool for BufferPoolClock<EVICTION_BATC
             log_debug!("Page fast path write failed{}", key);
         }
 
-        {
-            let cmap = self.page_to_frame.get_cmap(&key.p_key().c_key);
-            let mut victim = match cmap.entry(key.p_key().page_id) {
-                dashmap::Entry::Occupied(entry) => {
-                    let guard = self.try_get_write_guard(*entry.get(), true);
-                    return guard
-                        .inspect(|g| {
-                            g.evict_info().reset();
-                        })
-                        .ok_or(MemPoolStatus::FrameWriteLatchGrantFailed);
-                }
-                dashmap::Entry::Vacant(entry) => {
-                    self.used_frames.fetch_add(1, Ordering::AcqRel);
-                    let victim = self.choose_victim().ok_or(MemPoolStatus::CannotEvictPage)?;
-                    entry.insert(victim.frame_id() as usize);
-                    victim
-                }
-            };
-            // Now we have a clean victim that can be used for writing.
-            assert!(victim.page_key().is_none());
-            assert!(!victim.dirty().load(Ordering::Acquire));
+        // Ensure free frames
+        self.ensure_free_frames()?;
 
-            let container = self.container_manager.get_container(key.p_key().c_key);
-            container
-                .read_page(key.p_key().page_id, &mut victim)
-                .map(|()| {
-                    victim.set_page_key(Some(key.p_key()));
-                    victim.evict_info().reset();
-                })?;
-            victim.dirty().store(true, Ordering::Release); // Prepare the page for writing.
+        let cmap = self.page_to_frame.get_cmap(&key.p_key().c_key);
+        let mut victim = match cmap.entry(key.p_key().page_id) {
+            dashmap::Entry::Occupied(entry) => {
+                let guard = self.try_get_write_guard(*entry.get(), true);
+                return guard
+                    .inspect(|g| {
+                        g.evict_info().reset();
+                    })
+                    .ok_or(MemPoolStatus::FrameWriteLatchGrantFailed);
+            }
+            dashmap::Entry::Vacant(entry) => {
+                self.used_frames.fetch_add(1, Ordering::AcqRel);
+                let victim = self.choose_victim().ok_or(MemPoolStatus::CannotEvictPage)?;
+                entry.insert(victim.frame_id() as usize);
+                victim
+            }
+        };
+        // Now we have a clean victim that can be used for writing.
+        assert!(victim.page_key().is_none());
+        assert!(!victim.dirty().load(Ordering::Acquire));
 
-            Ok(victim)
-        }
+        let container = self.container_manager.get_container(key.p_key().c_key);
+        container
+            .read_page(key.p_key().page_id, &mut victim)
+            .map(|()| {
+                victim.set_page_key(Some(key.p_key()));
+                victim.evict_info().reset();
+            })?;
+        victim.dirty().store(true, Ordering::Release); // Prepare the page for writing.
+
+        Ok(victim)
     }
 
     fn get_page_for_read(&self, key: PageFrameKey) -> Result<FRGuard, MemPoolStatus> {
         log_debug!("Page read: {}", key);
         self.stats.inc_read_count();
-
-        // Ensure free frames
-        self.ensure_free_frames()?;
 
         #[cfg(not(feature = "no_bp_hint"))]
         {
@@ -641,41 +719,42 @@ impl<const EVICTION_BATCH_SIZE: usize> MemPool for BufferPoolClock<EVICTION_BATC
             log_debug!("Page fast path read failed: {}", key);
         };
 
+        // Ensure free frames
+        self.ensure_free_frames()?;
+
         // 1. Check the page-to-frame mapping and get a frame index.
         // 2. If the page is found, then try to acquire a read-latch, after which, the critical section ends.
         // 3. If the page is not found, then a victim must be chosen to evict.
-        {
-            let cmap = self.page_to_frame.get_cmap(&key.p_key().c_key);
-            let mut victim = match cmap.entry(key.p_key().page_id) {
-                entry::Entry::Occupied(entry) => {
-                    let guard = self.try_get_read_guard(*entry.get());
-                    return guard
-                        .inspect(|g| {
-                            g.evict_info().reset();
-                        })
-                        .ok_or(MemPoolStatus::FrameReadLatchGrantFailed);
-                }
-                entry::Entry::Vacant(entry) => {
-                    self.used_frames.fetch_add(1, Ordering::AcqRel);
-                    let victim = self.choose_victim().ok_or(MemPoolStatus::CannotEvictPage)?;
-                    entry.insert(victim.frame_id() as usize); // Insert the new mapping
-                    victim
-                }
-            };
+        let cmap = self.page_to_frame.get_cmap(&key.p_key().c_key);
+        let mut victim = match cmap.entry(key.p_key().page_id) {
+            entry::Entry::Occupied(entry) => {
+                let guard = self.try_get_read_guard(*entry.get());
+                return guard
+                    .inspect(|g| {
+                        g.evict_info().reset();
+                    })
+                    .ok_or(MemPoolStatus::FrameReadLatchGrantFailed);
+            }
+            entry::Entry::Vacant(entry) => {
+                self.used_frames.fetch_add(1, Ordering::AcqRel);
+                let victim = self.choose_victim().ok_or(MemPoolStatus::CannotEvictPage)?;
+                entry.insert(victim.frame_id() as usize); // Insert the new mapping
+                victim
+            }
+        };
 
-            // Now we have a clean victim that can be used for reading.
-            assert!(victim.page_key().is_none());
-            assert!(!victim.dirty().load(Ordering::Acquire));
+        // Now we have a clean victim that can be used for reading.
+        assert!(victim.page_key().is_none());
+        assert!(!victim.dirty().load(Ordering::Acquire));
 
-            let container = self.container_manager.get_container(key.p_key().c_key);
-            container
-                .read_page(key.p_key().page_id, &mut victim)
-                .map(|()| {
-                    victim.set_page_key(Some(key.p_key()));
-                    victim.evict_info().reset();
-                })?;
-            Ok(victim.downgrade())
-        }
+        let container = self.container_manager.get_container(key.p_key().c_key);
+        container
+            .read_page(key.p_key().page_id, &mut victim)
+            .map(|()| {
+                victim.set_page_key(Some(key.p_key()));
+                victim.evict_info().reset();
+            })?;
+        Ok(victim.downgrade())
     }
 
     fn prefetch_page(&self, _key: PageFrameKey) -> Result<(), MemPoolStatus> {

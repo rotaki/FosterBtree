@@ -6,7 +6,7 @@ use std::sync::{
 use clap::Parser;
 use fbtree::{
     affinity::{get_current_cpu, get_num_cores, set_affinity},
-    bp::{get_test_bp, get_test_bp_clock, MemPool},
+    bp::{get_test_bp_clock, MemPool},
     prelude::{
         run_tpcc_for_thread, tpcc_gen_all_tables, tpcc_show_table_stats, DeliveryTxn, NewOrderTxn,
         OrderStatusTxn, PaymentTxn, StockLevelTxn, TPCCConfig, TPCCOutput, TPCCStat, TPCCTableInfo,
