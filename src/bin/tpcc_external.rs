@@ -20,10 +20,10 @@ use fbtree::{
 // #[global_allocator]
 // static ALLOC: rpmalloc::RpMalloc = rpmalloc::RpMalloc;
 
-use mimalloc::MiMalloc;
-
-#[global_allocator]
-static GLOBAL: MiMalloc = MiMalloc;
+// use mimalloc::MiMalloc;
+// 
+// #[global_allocator]
+// static GLOBAL: MiMalloc = MiMalloc;
 
 pub fn get_bp(num_frames: usize, cm: Arc<ContainerManager>) -> Arc<impl MemPool> {
     #[cfg(feature = "vmcache")]

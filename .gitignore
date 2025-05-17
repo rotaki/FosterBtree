@@ -3,3 +3,5 @@
 # DuckDB related files for traces
 *.db
 *.db.wal
+
+/results

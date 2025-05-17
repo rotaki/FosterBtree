@@ -37,17 +37,17 @@ RESULTS_DIR="./results"
 mkdir -p "$RESULTS_DIR"
 
 declare -A VARIANTS=(
-  [tpcc_external_vmc]="no_tree_hint no_bp_hint vmcache  event_tracer"
-  [tpcc_external_vmc_tree_hint]="no_bp_hint vmcache  event_tracer"
-  [tpcc_external_no_hint]="no_tree_hint no_bp_hint  event_tracer"
-  [tpcc_external_tree_hint]="no_bp_hint  event_tracer"
-  [tpcc_external_bp_hint]="no_tree_hint  event_tracer"
-  [tpcc_external_all_hint]=" event_tracer"
+  # [tpcc_external_vmc]="no_tree_hint no_bp_hint vmcache  event_tracer"
+  # [tpcc_external_vmc_tree_hint]="no_bp_hint vmcache  event_tracer"
+  [tpcc_external_no_hint]="no_tree_hint no_bp_hint event_tracer"
+  [tpcc_external_tree_hint]="no_bp_hint event_tracer"
+  [tpcc_external_bp_hint]="no_tree_hint event_tracer"
+  [tpcc_external_all_hint]="event_tracer"
 )
 
 # ───────────── Build phase  ────────────────────────────────────────────────
 echo "▶ Building tpcc_db_gen…"
-cargo build --release --features "" --bin tpcc_db_gen
+cargo build --release --bin tpcc_db_gen
 
 echo "▶ Building tpcc_external variants…"
 for BIN in "${!VARIANTS[@]}"; do

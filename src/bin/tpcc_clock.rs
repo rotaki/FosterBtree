@@ -18,6 +18,11 @@ use fbtree::{
 // #[global_allocator]
 // static ALLOC: rpmalloc::RpMalloc = rpmalloc::RpMalloc;
 
+// use mimalloc::MiMalloc;
+// 
+// #[global_allocator]
+// static GLOBAL: MiMalloc = MiMalloc;
+
 pub fn main() {
     println!("Page size: {}", PAGE_SIZE);
     #[cfg(feature = "no_tree_hint")]

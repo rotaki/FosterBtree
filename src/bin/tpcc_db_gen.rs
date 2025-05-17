@@ -12,6 +12,11 @@ use fbtree::{
 // #[global_allocator]
 // static ALLOC: rpmalloc::RpMalloc = rpmalloc::RpMalloc;
 
+// use mimalloc::MiMalloc;
+// 
+// #[global_allocator]
+// static GLOBAL: MiMalloc = MiMalloc;
+
 /// Configuration settings parsed from command-line arguments.
 #[derive(Parser, Debug, Clone)]
 #[command(version, about, long_about = None)]
