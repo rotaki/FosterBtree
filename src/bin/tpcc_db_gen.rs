@@ -24,6 +24,9 @@ pub struct TPCCDBGenConfig {
     /// Number of warehouses.
     #[arg(short = 'w', long, default_value_t = 1)]
     pub num_warehouses: u16,
+    /// Max buffer pool size in GB.
+    #[arg(short = 'b', long, default_value_t = 32)]
+    pub buffer_pool_size_max: u16,
 }
 
 pub fn main() {
@@ -31,10 +34,10 @@ pub fn main() {
     let config = TPCCDBGenConfig::parse();
     println!("DB gen config: {:?}", config);
 
-    // Set frames. We set 32GB as max for the buffer pool.
-    let num_frames_32gb = 32_usize * 1024 * 1024 * 1024 / PAGE_SIZE;
+    // Set frames. We set the max buffer pool size from the command line.
+    let num_frames_max = config.buffer_pool_size_max as usize * 1024 * 1024 * 1024 / PAGE_SIZE;
     let num_frames =
-        (config.num_warehouses as usize * 1024 * 1024 * 1024 / PAGE_SIZE).min(num_frames_32gb);
+        (config.num_warehouses as usize * 1024 * 1024 * 1024 / PAGE_SIZE).min(num_frames_max);
     println!(
         "BP size: {} GB ({} frames)",
         num_frames * PAGE_SIZE / (1024 * 1024 * 1024),
