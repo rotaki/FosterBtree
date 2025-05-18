@@ -68,6 +68,8 @@ for BIN in "${!VARIANTS[@]}"; do
 
     # Fresh DB for each run
     rm -rf "./tpcc_db_w${WAREHOUSES}"
+    rm -rf "./eventdb_${BIN}.db"
+    rm -rf "./eventdb_${BIN}.db.wal"
 
     "${TARGET_DIR}/tpcc_db_gen" -w "${WAREHOUSES}"
 
