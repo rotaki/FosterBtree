@@ -73,7 +73,7 @@ for BIN in "${!VARIANTS[@]}"; do
 
     DB_PATH="./eventdb_${BIN}.db" \
       "${TARGET_DIR}/${BIN}" \
-        -w "${WAREHOUSES}" -t "${THREADS}" -D "${DURATION}"
+        -w "${WAREHOUSES}" -t "${THREADS}" -D "${DURATION}" -d 0 -b 32
   } |& tee "${LOG_FILE}"
 
   ((SUFFIX++))

@@ -39,10 +39,10 @@ pub struct Params {
     pub bp_type: BPType,
 }
 
-use mimalloc::MiMalloc;
-
-#[global_allocator]
-static GLOBAL: MiMalloc = MiMalloc;
+// use mimalloc::MiMalloc;
+//
+// #[global_allocator]
+// static GLOBAL: MiMalloc = MiMalloc;
 
 fn main() {
     #[cfg(feature = "stat")]
