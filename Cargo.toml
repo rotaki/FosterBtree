@@ -31,7 +31,6 @@ no_tree_hint = []
 no_bp_hint = []
 
 # BP type
-bp_lru = []
 bp_clock = []
 vmcache = []
 
