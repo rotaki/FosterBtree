@@ -218,7 +218,7 @@ impl<const EVICTION_BATCH_SIZE: usize> BufferPoolClock<EVICTION_BATCH_SIZE> {
         }
         log_debug!("Buffer pool created: num_frames: {}", num_frames);
 
-        let eviction_hints = ConcurrentQueue::unbounded();
+        let eviction_hints = ConcurrentQueue::bounded(num_frames);
         for i in 0..num_frames {
             eviction_hints.push(i).unwrap();
         }
