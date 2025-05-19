@@ -136,7 +136,7 @@ impl PageToFrame {
 }
 
 /// Your scratch buffers
-pub struct EvictionScratchSpace {
+struct EvictionScratchSpace {
     pub clean_pages: Vec<(usize, *mut FMeta)>,
     pub dirty_pages: Vec<(usize, FRGuard)>,
     pub to_evict: Vec<(usize, FWGuard)>,
@@ -164,7 +164,7 @@ thread_local! {
     static SCRATCH: OnceLock<RefCell<EvictionScratchSpace>> = const { OnceLock::new() };
 }
 
-pub fn with_eviction_scratch<F, R>(batch: usize, f: F) -> R
+fn with_eviction_scratch<F, R>(batch: usize, f: F) -> R
 where
     F: FnOnce(&mut EvictionScratchSpace) -> R,
 {
@@ -261,8 +261,7 @@ impl<const EVICTION_BATCH_SIZE: usize> BufferPoolClock<EVICTION_BATCH_SIZE> {
         let used_percent = used_frames as f64 / self.num_frames as f64;
         if used_percent > 0.95 {
             log_warn!(
-                "[EVICT{}] Used frames: {}/{}({}). Evicting pages...",
-                eviction_trial_count,
+                "[EVICT] Used frames: {}/{}({}). Evicting pages...",
                 used_frames,
                 self.num_frames,
                 used_percent
@@ -270,8 +269,7 @@ impl<const EVICTION_BATCH_SIZE: usize> BufferPoolClock<EVICTION_BATCH_SIZE> {
             self.evict_batch()
         } else {
             log_warn!(
-                "[EVICT{}] Used frames: {}/{}({}). No eviction needed.",
-                eviction_trial_count,
+                "[EVICT] Used frames: {}/{}({}). No eviction needed.",
                 used_frames,
                 self.num_frames,
                 used_percent
@@ -564,7 +562,6 @@ impl<const EVICTION_BATCH_SIZE: usize> MemPool for BufferPoolClock<EVICTION_BATC
         self.stats.inc_new_page();
 
         self.ensure_free_frames()?;
-        self.used_frames.fetch_add(1, Ordering::AcqRel);
 
         // 1. Choose victim
         let mut victim = self.choose_victim().ok_or(MemPoolStatus::CannotEvictPage)?;
@@ -589,6 +586,7 @@ impl<const EVICTION_BATCH_SIZE: usize> MemPool for BufferPoolClock<EVICTION_BATC
         victim.set_page_key(Some(page_key)); // Set the frame key to the new page key
         victim.dirty().store(true, Ordering::Release);
         victim.evict_info().reset(); // Reset the eviction info
+        self.used_frames.fetch_add(1, Ordering::AcqRel);
 
         Ok(victim)
     }

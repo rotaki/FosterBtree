@@ -2,11 +2,11 @@
 use crate::log;
 
 use std::{
-    cell::UnsafeCell,
+    cell::{RefCell, UnsafeCell},
     collections::BTreeMap,
     sync::{
         atomic::{AtomicUsize, Ordering},
-        Arc,
+        Arc, OnceLock,
     },
 };
 
@@ -85,6 +85,52 @@ impl PagePtrWrap {
 
 unsafe impl Sync for PagePtrWrap {}
 unsafe impl Send for PagePtrWrap {}
+
+/// Your scratch buffers
+struct EvictionScratchSpace {
+    pub clean_pages: Vec<(usize, *mut FMeta)>,
+    pub dirty_pages: Vec<(usize, FRGuard)>,
+    pub to_evict: Vec<(usize, FWGuard)>,
+}
+
+impl EvictionScratchSpace {
+    pub fn new(batch: usize) -> Self {
+        Self {
+            dirty_pages: Vec::with_capacity(batch),
+            clean_pages: Vec::with_capacity(batch),
+            to_evict: Vec::with_capacity(batch),
+        }
+    }
+
+    /// wipe but keep allocations
+    pub fn clear(&mut self) {
+        self.dirty_pages.clear();
+        self.clean_pages.clear();
+        self.to_evict.clear();
+    }
+}
+
+thread_local! {
+    // One slot *per thread*, but initialised lazily
+    static SCRATCH: OnceLock<RefCell<EvictionScratchSpace>> = const { OnceLock::new() };
+}
+
+fn with_eviction_scratch<F, R>(batch: usize, f: F) -> R
+where
+    F: FnOnce(&mut EvictionScratchSpace) -> R,
+{
+    SCRATCH.with(|slot| {
+        // First access for this thread?
+        let cell = slot.get_or_init(|| RefCell::new(EvictionScratchSpace::new(batch)));
+
+        let mut borrow = cell.borrow_mut();
+
+        // Already created, but maybe caller asked for a larger batch?
+        borrow.clear(); // start fresh each time (optional)
+
+        f(&mut borrow) // hand it to the caller
+    })
+}
 
 /// A VMCachePool is a memory pool that uses virtual memory to manage pages.
 /// IS_SMALL=true has 2^10 pages = 16 MiB with 16 KiB page size.
@@ -232,30 +278,24 @@ impl<const IS_SMALL: bool, const EVICTION_BATCH_SIZE: usize>
     }
 
     fn ensure_free_pages(&self) -> Result<(), MemPoolStatus> {
-        let mut eviction_trial_count = 0;
-        loop {
-            if eviction_trial_count > 100 {
-                log_warn!(
-                    "[EVICT{}] Eviction trial count exceeded. Cannot evict pages.",
-                    eviction_trial_count
-                );
-                return Err(MemPoolStatus::CannotEvictPage);
-            }
-            let used_percent =
-                self.used_frames.load(Ordering::Acquire) as f64 / self.num_frames as f64;
-            if used_percent > 0.95 {
-                log_warn!(
-                    "[EVICT{}] Used frames: {}/{}({}). Evicting pages...",
-                    eviction_trial_count,
-                    self.used_frames.load(Ordering::Acquire),
-                    self.num_frames,
-                    used_percent
-                );
-                let _ = self.evict_batch();
-            } else {
-                return Ok(());
-            }
-            eviction_trial_count += 1;
+        let used_frames = self.used_frames.load(Ordering::Acquire);
+        let used_percent = used_frames as f64 / self.num_frames as f64;
+        if used_percent > 0.95 {
+            log_warn!(
+                "[EVICT] Used frames: {}/{}({}). Evicting pages...",
+                used_frames,
+                self.num_frames,
+                used_percent
+            );
+            self.evict_batch()
+        } else {
+            log_warn!(
+                "[EVICT] Used frames: {}/{}({}). No eviction needed.",
+                used_frames,
+                self.num_frames,
+                used_percent
+            );
+            Ok(())
         }
     }
 
@@ -272,157 +312,171 @@ impl<const IS_SMALL: bool, const EVICTION_BATCH_SIZE: usize>
         // we finish writing all the dirty pages to disk.
         // Then, we get the write-latches on both dirty and clean pages and remove them from the page-table
         // all at once.
+        with_eviction_scratch(EVICTION_BATCH_SIZE, |scratch| {
+            // ─── 1. Collect candidate pages ────────────────────────────
+            // This may return CannotEvictPage if it cannot find any candidates.
+            self.collect_candidates(scratch, EVICTION_BATCH_SIZE)?;
 
-        log_warn!(
-            "    Used Frame Cnt: {}",
-            self.used_frames.load(Ordering::Acquire)
-        );
+            log_warn!(
+                "    Trying to evict {} pages ({} dirty, {} clean)",
+                scratch.dirty_pages.len() + scratch.clean_pages.len(),
+                scratch.dirty_pages.len(),
+                scratch.clean_pages.len()
+            );
 
-        let mut clean_victims = Vec::with_capacity(EVICTION_BATCH_SIZE);
-        let mut dirty_victims = Vec::with_capacity(EVICTION_BATCH_SIZE);
-        let mut to_evict = Vec::with_capacity(EVICTION_BATCH_SIZE);
+            // ─── 2. Write dirty pages to disk under read‑latch ─────────
+            self.flush_dirty(&scratch.dirty_pages);
 
-        let mut num_iterations = 0;
-        while clean_victims.len() + dirty_victims.len() < EVICTION_BATCH_SIZE {
-            if num_iterations > 10 {
-                if clean_victims.len() + dirty_victims.len() == 0 {
-                    log_warn!(
-                        "    Could not evict pages after {} iterations",
-                        num_iterations
-                    );
+            // ─── 3. Latch clean pages for eviction ────────────────────
+            self.latch_clean(&mut scratch.clean_pages, &mut scratch.to_evict);
+
+            // ─── 4. Upgrade dirty‑page latches ────────────────────────
+            self.upgrade_dirty(&mut scratch.dirty_pages, &mut scratch.to_evict);
+
+            // ─── 5. Remove from page table and recycle frames ─────────
+            self.remove_from_page_table(&mut scratch.to_evict);
+            self.finalize_eviction(&mut scratch.to_evict);
+
+            Ok(())
+        })
+    }
+
+    // ───────────────────────── helpers ───────────────────────────────
+
+    /// Scan the clock hand until enough candidates are found.
+    fn collect_candidates(
+        &self,
+        scratch: &mut EvictionScratchSpace,
+        batch: usize,
+    ) -> Result<(), MemPoolStatus> {
+        let max_iter = 2 * self.resident_set.len() / batch;
+        let (clean, dirty) = (&mut scratch.clean_pages, &mut scratch.dirty_pages);
+
+        let mut iters = 0;
+        while clean.len() + dirty.len() < batch {
+            if iters > max_iter {
+                if clean.is_empty() && dirty.is_empty() {
                     return Err(MemPoolStatus::CannotEvictPage);
-                } else {
-                    break;
                 }
+                break;
             }
-            for i in self.resident_set.clock_batch_iter(EVICTION_BATCH_SIZE) {
-                let meta = &mut unsafe { &mut *self.metas.get() }[i as usize];
-                let is_marked = meta.evict_info.score() > 0;
-                let is_latched = meta.latch.is_locked();
-                if is_latched {
-                    continue; // Skip the page if it is latched.
-                }
-                if is_marked {
-                    // (marked and unlatched)
-                    // Marked and not latched.
-                    if meta.is_dirty.load(Ordering::Acquire) {
-                        // Get a read latch on the page.
-                        // If the page is dirty, we need to write it to disk.
-                        let guard = FRGuard::try_new(box_as_mut_ptr(meta), unsafe {
-                            self.pages.ptr.add(i as usize)
-                        });
-                        if let Some(guard) = guard {
-                            dirty_victims.push((i, guard));
-                        } else {
-                            // Latched. Skip it.
-                            continue;
-                        }
-                    } else {
-                        // Clean page. Add to the eviction list.
-                        clean_victims.push((i, meta));
-                    }
-                } else {
-                    // Mark the page if it is unmarked and not latched.
-                    meta.evict_info.update();
-                }
+
+            for i in self.resident_set.clock_batch_iter(batch) {
+                self.classify_frame(i as usize, clean, dirty);
             }
-            num_iterations += 1;
+            iters += 1;
         }
-
-        log_warn!(
-            "    Trying to evict {} pages ({} dirty, {} clean)",
-            dirty_victims.len() + clean_victims.len(),
-            dirty_victims.len(),
-            clean_victims.len()
-        );
-        // Note: the sum of dirty and clean victims may be at most 2 times the batch size - 1
-        // because the first clock_batch_iter() call may return at most batch size - 1 pages
-        // and the second call may return at most batch size pages.
-
-        // 1. Write the dirty pages to disk.
-        for (_, guard) in dirty_victims.iter() {
-            self.write_victim_to_disk_if_dirty_r(guard)?;
-        }
-
-        // 2. Try to get a write latch on the clean pages.
-        for (i, meta) in clean_victims.into_iter() {
-            // We need to get a write latch on the page to remove it from the page table.
-            if let Some(guard) = FWGuard::try_new(
-                box_as_mut_ptr(meta),
-                unsafe { self.pages.ptr.add(i as usize) },
-                false,
-            ) {
-                self.write_victim_to_disk_if_dirty_w(&guard)?;
-                to_evict.push((i, guard));
-            }
-        }
-
-        // 3. Try to upgrade the dirty pages to write latches.
-        for (i, guard) in dirty_victims.into_iter() {
-            // We need to get a write latch on the page to remove it from the page table.
-            if let Ok(guard) = guard.try_upgrade(false) {
-                to_evict.push((i, guard));
-            }
-        }
-
-        // 4. Validate that the pages are still in the resident set.
-        // Resident set is not transactional so we use the frame guards like locks
-        // in OCC and check the resident set after we get the write latches.
-        to_evict.retain(|(i, _guard)| self.resident_set.contains(*i));
-
-        // 5. Remove the pages from the page table.
-        let mut count = 0;
-        for (i, guard) in to_evict.drain(..) {
-            count += 1;
-            assert!(!guard.dirty().load(Ordering::Acquire));
-            // Remove the page from the page table.
-            self.remove_page_entry(&guard)?;
-            guard.set_page_key(None);
-            guard.evict_info().reset();
-            self.resident_set.remove(i);
-        }
-
-        log_warn!("    Evicted {} pages", count,);
-
-        self.used_frames.fetch_sub(count, Ordering::AcqRel);
-
         Ok(())
     }
 
-    /// Return `true` if the page is present in physical memory, `false` otherwise.
-    ///
-    /// This is a direct Rust translation of the C helper that uses `mincore(2)`.
-    unsafe fn page_resident(&self, page_key: &PageKey) -> bool {
-        // 1. Get the page address.
-        let i = self.page_key_to_offset(page_key);
-        let addr = self.pages.ptr.add(i) as *mut c_void;
+    #[inline]
+    fn classify_frame(
+        &self,
+        index: usize,
+        clean: &mut Vec<(usize, *mut FMeta)>,
+        dirty: &mut Vec<(usize, FRGuard)>,
+    ) {
+        let meta = &mut unsafe { &mut *self.metas.get() }[index];
 
-        // 2. Get system page size.
-        let page_sz = sysconf(_SC_PAGESIZE) as usize;
-        if page_sz == 0 {
-            return false; // sysconf failed
+        // Skip empty or latched frames immediately.
+        if meta.key().is_none() || meta.latch.is_locked() {
+            return;
         }
 
-        // 2. Check if the page is aligned to the page boundary
-        if (addr as usize) % page_sz != 0 {
-            eprintln!(
-                "Address {} is not aligned to page size {}",
-                addr as usize, page_sz
+        let marked = meta.evict_info.score() > 0;
+        if !marked {
+            meta.evict_info.update();
+            return;
+        }
+
+        let is_dirty = meta.is_dirty.load(Ordering::Acquire);
+        if is_dirty {
+            // Try read‑latch on dirty page
+            if let Some(g) =
+                FRGuard::try_new(box_as_mut_ptr(meta), unsafe { self.pages.ptr.add(index) })
+            {
+                if g.page_key().is_some() {
+                    dirty.push((index, g));
+                }
+            }
+        } else {
+            // Clean and marked
+            clean.push((index, box_as_mut_ptr(meta)));
+        }
+    }
+
+    /// Flush all dirty victims under read latches.
+    fn flush_dirty(&self, dirty_pages: &[(usize, FRGuard)]) {
+        for (_, g) in dirty_pages {
+            self.write_victim_to_disk_if_dirty_r(g).unwrap();
+        }
+    }
+
+    /// Acquire write latches on clean victims and move them to `to_evict`.
+    fn latch_clean(
+        &self,
+        clean_pages: &mut Vec<(usize, *mut FMeta)>,
+        to_evict: &mut Vec<(usize, FWGuard)>,
+    ) {
+        for (index, meta) in clean_pages.drain(..) {
+            if let Some(g) = FWGuard::try_new(meta, unsafe { self.pages.ptr.add(index) }, false) {
+                if g.page_key().is_none() {
+                    continue;
+                }
+                self.write_victim_to_disk_if_dirty_w(&g).unwrap();
+                to_evict.push((index, g));
+            }
+        }
+    }
+
+    /// Upgrade read → write latches on dirty pages once they are flushed.
+    fn upgrade_dirty(
+        &self,
+        dirty_pages: &mut Vec<(usize, FRGuard)>,
+        to_evict: &mut Vec<(usize, FWGuard)>,
+    ) {
+        for (index, g) in dirty_pages.drain(..) {
+            // We already checked that the page key is not None for dirty pages
+            // in classify_frame, so we can skip the check here.
+            // if g.page_key().is_none() {
+            //     continue;
+            // }
+            if let Ok(gw) = g.try_upgrade(false) {
+                to_evict.push((index, gw));
+            }
+        }
+    }
+
+    /// Remove pages from the page‑table in c_key order.
+    fn remove_from_page_table(&self, to_evict: &mut [(usize, FWGuard)]) {
+        for (index, _) in to_evict.iter() {
+            let ret = unsafe {
+                madvise(
+                    (self.pages.ptr as *mut u8).add(index * PAGE_SIZE) as *mut libc::c_void,
+                    PAGE_SIZE,
+                    MADV_DONTNEED,
+                )
+            };
+            assert_eq!(
+                ret,
+                0,
+                "madvise failed: {}",
+                std::io::Error::last_os_error()
             );
-            return false; // Address is not aligned
         }
+    }
 
-        // 3. Call mincore(); it fills one byte per page in `vec`.
-        let mut vec: c_uchar = 0;
-        let ret: c_int = mincore(addr, page_sz as size_t, &mut vec as *mut c_uchar);
-
-        if ret == -1 {
-            // mincore failed (e.g., the page is not mapped in this process)
-            return false;
+    /// Reset frame metadata and recycle indices.
+    fn finalize_eviction(&self, to_evict: &mut Vec<(usize, FWGuard)>) {
+        let mut freed = 0;
+        for (index, g) in to_evict.drain(..) {
+            freed += 1;
+            assert!(!g.dirty().load(Ordering::Acquire));
+            g.set_page_key(None);
+            g.evict_info().reset();
+            assert!(self.resident_set.remove(index as u64));
         }
-
-        // 4. Bit 0 == 1 → page is resident.
-        (vec & 1) == 1
+        self.used_frames.fetch_sub(freed, Ordering::AcqRel);
     }
 }
 
@@ -443,10 +497,9 @@ impl<const IS_SMALL: bool, const EVICTION_BATCH_SIZE: usize> MemPool
         self.stats.inc_new_page();
 
         self.ensure_free_pages()?;
-        self.used_frames.fetch_add(1, Ordering::AcqRel);
 
         let container = self.container_manager.get_container(c_key);
-        let (mut guard, page_id) = loop {
+        let (mut guard, page_key) = loop {
             if let Some(res) = container.inc_page_count_if(1, |current| {
                 let page_id = current as PageId;
                 let page_key = PageKey::new(c_key, page_id);
@@ -456,22 +509,22 @@ impl<const IS_SMALL: bool, const EVICTION_BATCH_SIZE: usize> MemPool
                     unsafe { self.pages.ptr.add(page_offset) },
                     true,
                 )
+                .map(|g| (g, page_key))
             }) {
-                break res;
+                break res.0;
             } else {
                 std::hint::spin_loop();
             }
         };
-        let page_key = PageKey::new(c_key, page_id as PageId);
         guard.set_id(page_key.page_id); // Initialize the page with the page id
         guard.set_page_key(Some(page_key)); // Set the frame key to the new page key
         guard.dirty().store(true, Ordering::Release);
         guard.evict_info().reset();
         self.resident_set
-            .insert(self.page_key_to_offset(&guard.page_key().unwrap()) as u64);
+            .insert(self.page_key_to_offset(&page_key) as u64);
+        self.used_frames.fetch_add(1, Ordering::AcqRel);
 
         Ok(guard)
-        // TODO: We need to evict a page if the buffer pool is almost full.
     }
 
     fn create_new_pages_for_write(
@@ -483,7 +536,8 @@ impl<const IS_SMALL: bool, const EVICTION_BATCH_SIZE: usize> MemPool
     }
 
     fn is_in_mem(&self, key: PageFrameKey) -> bool {
-        unsafe { self.page_resident(&key.p_key()) }
+        let meta = &mut unsafe { &mut *self.metas.get() }[self.page_key_to_offset(&key.p_key())];
+        meta.key().is_some()
     }
 
     fn get_page_keys_in_mem(&self, _c_key: ContainerKey) -> Vec<PageFrameKey> {
@@ -507,15 +561,13 @@ impl<const IS_SMALL: bool, const EVICTION_BATCH_SIZE: usize> MemPool
         match guard.page_key() {
             Some(k) => {
                 // Page is already in memory
-                debug_assert!(k == key.p_key(), "Page key mismatch");
+                assert!(k == key.p_key(), "Page key mismatch");
                 guard.evict_info().reset(); // Reset unmarks the page
                 Ok(guard)
             }
             None => {
                 // The page is not in memory. Load it from disk.
                 self.ensure_free_pages()?;
-                self.used_frames.fetch_add(1, Ordering::AcqRel);
-                // TODO: We need to evict a page if the buffer pool is almost full.
 
                 let container = self.container_manager.get_container(key.p_key().c_key);
                 container
@@ -525,12 +577,8 @@ impl<const IS_SMALL: bool, const EVICTION_BATCH_SIZE: usize> MemPool
                         guard.evict_info().reset(); // Reset unmarks the page
                     })?;
 
-                log_warn!(
-                    "    Read page {} for write from container {}",
-                    key.p_key().page_id,
-                    key.p_key().c_key
-                );
                 self.resident_set.insert(page_offset as u64);
+                self.used_frames.fetch_add(1, Ordering::AcqRel);
                 Ok(guard)
             }
         }
@@ -553,34 +601,29 @@ impl<const IS_SMALL: bool, const EVICTION_BATCH_SIZE: usize> MemPool
         match guard.page_key() {
             Some(k) => {
                 // Page is already in memory
-                debug_assert!(k == key.p_key(), "Page key mismatch");
-                guard.evict_info().reset();
+                assert!(k == key.p_key(), "Page key mismatch");
+                guard.evict_info().reset(); // Reset unmarks the page
                 Ok(guard)
             }
             None => {
                 // We need to evict a page if the buffer pool is almost full.
                 self.ensure_free_pages()?;
-                self.used_frames.fetch_add(1, Ordering::AcqRel);
 
                 // The page is not in memory. Load it from disk.
                 // 1. First, we need to get a write guard on the page to be able to read the page into the frame.
                 // 2. Then, we covert the write guard to a read guard by downgrading it.
-                let container = self.container_manager.get_container(key.p_key().c_key);
                 let mut guard = guard
                     .try_upgrade(false)
-                    .map_err(|_| MemPoolStatus::FrameWriteLatchGrantFailed)?;
+                    .map_err(|_| MemPoolStatus::FrameWriteLatchGrantFailed)?; // Write latch is needed to read the page into the frame
+                let container = self.container_manager.get_container(key.p_key().c_key);
                 container
                     .read_page(key.p_key().page_id, &mut guard)
                     .map(|()| {
                         guard.set_page_key(Some(key.p_key()));
                         guard.evict_info().reset();
                     })?;
-                log_warn!(
-                    "    Read page {} for read from container {}",
-                    key.p_key().page_id,
-                    key.p_key().c_key
-                );
                 self.resident_set.insert(page_offset as u64);
+                self.used_frames.fetch_add(1, Ordering::AcqRel);
 
                 Ok(guard.downgrade())
             }
@@ -745,6 +788,42 @@ impl<const IS_SMALL: bool, const EVICTION_BATCH_SIZE: usize>
             }
         }
     }
+
+    /// Return `true` if the page is present in OS page table.
+    ///
+    /// This is a direct Rust translation of the C helper that uses `mincore(2)`.
+    unsafe fn page_resident(&self, page_key: &PageKey) -> bool {
+        // 1. Get the page address.
+        let i = self.page_key_to_offset(page_key);
+        let addr = self.pages.ptr.add(i) as *mut c_void;
+
+        // 2. Get system page size.
+        let page_sz = sysconf(_SC_PAGESIZE) as usize;
+        if page_sz == 0 {
+            return false; // sysconf failed
+        }
+
+        // 2. Check if the page is aligned to the page boundary
+        if (addr as usize) % page_sz != 0 {
+            eprintln!(
+                "Address {} is not aligned to page size {}",
+                addr as usize, page_sz
+            );
+            return false; // Address is not aligned
+        }
+
+        // 3. Call mincore(); it fills one byte per page in `vec`.
+        let mut vec: c_uchar = 0;
+        let ret: c_int = mincore(addr, page_sz as size_t, &mut vec as *mut c_uchar);
+
+        if ret == -1 {
+            // mincore failed (e.g., the page is not mapped in this process)
+            return false;
+        }
+
+        // 4. Bit 0 == 1 → page is resident.
+        (vec & 1) == 1
+    }
 }
 
 #[cfg(test)]
@@ -882,7 +961,7 @@ mod tests {
         let mut count = 0;
         let mut keys = Vec::new();
 
-        for _ in 0..num_traversal {
+        for _i in 0..num_traversal {
             let mut guard1 = bp.create_new_page_for_write(c_key).unwrap();
             guard1[0] = count;
             count += 1;

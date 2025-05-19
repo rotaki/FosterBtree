@@ -32,7 +32,7 @@ no_bp_hint = []
 
 # BP type
 bp_clock = []
-vmcache = []
+vmcache = ["no_bp_hint"] # vmcache does not need a bp hint
 
 # Old iterator for foster btree
 old_iter = []

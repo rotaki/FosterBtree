@@ -1,3 +1,4 @@
+#[allow(unused_imports)]
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc, Barrier,
@@ -6,7 +7,7 @@ use std::sync::{
 use clap::Parser;
 use fbtree::{
     affinity::{get_current_cpu, get_num_cores, set_affinity},
-    bp::{get_test_bp, MemPool},
+    bp::MemPool,
     prelude::{
         run_tpcc_for_thread, tpcc_gen_all_tables, tpcc_show_table_stats, DeliveryTxn, NewOrderTxn,
         OrderStatusTxn, PaymentTxn, StockLevelTxn, TPCCConfig, TPCCOutput, TPCCStat, TPCCTableInfo,
@@ -22,6 +23,24 @@ use fbtree::{
 //
 // #[global_allocator]
 // static GLOBAL: MiMalloc = MiMalloc;
+
+pub fn get_bp(num_frames: usize) -> Arc<impl MemPool> {
+    #[cfg(feature = "vmcache")]
+    {
+        use fbtree::bp::get_test_vmcache;
+        get_test_vmcache::<false, 64>(num_frames)
+    }
+    #[cfg(feature = "bp_clock")]
+    {
+        use fbtree::bp::get_test_bp_clock;
+        get_test_bp_clock::<64>(num_frames)
+    }
+    #[cfg(not(any(feature = "vmcache", feature = "bp_clock")))]
+    {
+        use fbtree::bp::get_test_bp;
+        get_test_bp(num_frames)
+    }
+}
 
 pub fn main() {
     println!("Page size: {}", PAGE_SIZE);
@@ -59,12 +78,7 @@ pub fn main() {
         num_frames * PAGE_SIZE / (1024 * 1024 * 1024)
     );
 
-    #[cfg(feature = "vmcache")]
-    let bp = get_test_vmcache::<false, 64>(num_frames);
-    #[cfg(feature = "bp_clock")]
-    let bp = get_test_bp_clock::<64>(num_frames);
-    #[cfg(not(any(feature = "vmcache", feature = "bp_clock")))]
-    let bp = get_test_bp(num_frames);
+    let bp = get_bp(num_frames);
 
     let txn_storage = NoWaitTxnStorage::new(&bp);
     let tbl_info = tpcc_gen_all_tables(&txn_storage, config.num_warehouses);

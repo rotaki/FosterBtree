@@ -14,6 +14,10 @@ use libc::{
     PROT_WRITE,
 };
 
+#[allow(dead_code)]
+use crate::log;
+use crate::log_warn;
+
 const EMPTY: u64 = u64::MAX; // 0xFFFF‥‥FFFF
 const TOMBSTONE: u64 = u64::MAX - 1; // 0xFFFF‥‥FFFE
 
@@ -21,12 +25,6 @@ const TOMBSTONE: u64 = u64::MAX - 1; // 0xFFFF‥‥FFFE
 #[repr(C)]
 struct Entry {
     pid: AtomicU64,
-}
-
-/// Return the next power-of-two ≥ x (x > 0).
-#[inline(always)]
-fn next_pow2(x: u64) -> u64 {
-    x.next_power_of_two()
 }
 
 /// A very small Murmur ‐ style 64-bit hash identical to the C++ version.
@@ -77,7 +75,7 @@ impl ResidentPageSet {
     /// Create a table that can hold at least `max_count` elements.
     pub fn new(max_count: u64) -> Self {
         let raw_cnt = (max_count * 3).div_ceil(2); // ≈ max_count × 1.5
-        let cnt = next_pow2(raw_cnt);
+        let cnt = raw_cnt.next_power_of_two();
         let bytes = cnt as usize * mem::size_of::<Entry>();
 
         // Allocate & fill with 0xFF so every slot starts at EMPTY.
@@ -183,7 +181,6 @@ impl ResidentPageSet {
                 Some((pos + batch as u64) & self.mask)
             })
             .expect("Should not fail because the func always returns Some");
-
         let mut idx = start;
         let mut remaining = batch;
 
@@ -200,6 +197,17 @@ impl ResidentPageSet {
             }
             None
         })
+    }
+
+    pub fn collect_all(&self) -> Vec<u64> {
+        let mut result = Vec::new();
+        for idx in 0..self.cnt {
+            let pid = unsafe { self.entry(idx).load(Ordering::Acquire) };
+            if pid != EMPTY && pid != TOMBSTONE {
+                result.push(pid);
+            }
+        }
+        result
     }
 
     pub fn clear(&self) {
@@ -229,14 +237,6 @@ mod tests {
         time::Duration,
     };
 
-    // -------- helpers -----------------------------------------------------
-
-    /// Collect *all* live PIDs by sweeping the entire table once.
-    /// (Slow but handy for asserts in tests.)
-    fn collect_all(set: &ResidentPageSet) -> HashSet<u64> {
-        set.clock_batch_iter(set.cnt as usize).collect()
-    }
-
     // -------- basic single-threaded tests ---------------------------------
 
     #[test]
@@ -247,14 +247,14 @@ mod tests {
         for pid in 0..10 {
             set.insert(pid);
         }
-        assert_eq!(collect_all(&set).len(), 10);
+        assert_eq!(set.collect_all().len(), 10);
 
         // second remove ⇒ false
         for pid in 0..10 {
             assert!(set.remove(pid));
             assert!(!set.remove(pid));
         }
-        assert!(collect_all(&set).is_empty());
+        assert!(set.collect_all().is_empty());
     }
 
     #[test]
@@ -304,7 +304,7 @@ mod tests {
             h.join().unwrap();
         }
         // verify every id is present
-        assert_eq!(collect_all(&set).len(), THREADS * PER_THREAD as usize);
+        assert_eq!(set.collect_all().len(), THREADS * PER_THREAD as usize);
 
         // -- remover threads (same partitioning)
         let mut handles = Vec::new();
@@ -320,7 +320,7 @@ mod tests {
         for h in handles {
             h.join().unwrap();
         }
-        assert!(collect_all(&set).is_empty());
+        assert!(set.collect_all().is_empty());
     }
 
     #[test]
