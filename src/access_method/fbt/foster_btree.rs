@@ -10,8 +10,9 @@ use std::{
 use crate::{
     access_method::{AccessMethodError, FilterType, OrderedUniqueKeyIndex, UniqueKeyIndex},
     bp::{prelude::*, EvictionPolicy},
-    log_debug, log_info,
+    log_debug, log_error, log_info,
     page::{Page, PageId, AVAILABLE_PAGE_SIZE},
+    random::gen_truncated_randomized_exponential_backoff,
 };
 
 use super::foster_btree_page::{BTreeKey, FosterBtreePage};
@@ -1453,7 +1454,6 @@ impl<T: MemPool> FosterBtree<T> {
     }
 
     fn read_page(&self, page_key: PageFrameKey) -> FrameReadGuard<T::EP> {
-        let base = 2;
         let mut attempts = 0;
         loop {
             #[cfg(feature = "stat")]
@@ -1472,7 +1472,9 @@ impl<T: MemPool> FosterBtree<T> {
                         page_key,
                         attempts
                     );
-                    std::thread::sleep(Duration::from_nanos(u64::pow(base, attempts)));
+                    std::thread::sleep(Duration::from_nanos(
+                        gen_truncated_randomized_exponential_backoff(attempts),
+                    ));
                     attempts += 1;
                 }
                 Err(MemPoolStatus::CannotEvictPage) => {
@@ -1848,7 +1850,6 @@ impl<T: MemPool> FosterBtree<T> {
         {
             // Use the hint to speculatively find the page that contains the key.
             if let Some(hint) = &hint {
-                let base = 2;
                 let mut attempts = 0;
                 loop {
                     let page = self.read_page(*hint);
@@ -1872,9 +1873,9 @@ impl<T: MemPool> FosterBtree<T> {
                                 }
                                 Err(page) => {
                                     drop(page);
-                                    std::thread::sleep(Duration::from_nanos(u64::pow(
-                                        base, attempts,
-                                    )));
+                                    std::thread::sleep(Duration::from_nanos(
+                                        gen_truncated_randomized_exponential_backoff(attempts),
+                                    ));
                                     attempts += 1;
                                     continue;
                                 }
@@ -1913,9 +1914,9 @@ impl<T: MemPool> FosterBtree<T> {
         key: &[u8],
         start_key: PageFrameKey,
     ) -> FrameWriteGuard<T::EP> {
-        let base = 2;
         let mut attempts = 0;
-        let leaf_page = {
+
+        {
             loop {
                 match self.try_traverse_to_leaf_for_write_from(key, start_key) {
                     Ok(leaf_page) => {
@@ -1924,12 +1925,9 @@ impl<T: MemPool> FosterBtree<T> {
                         break leaf_page;
                     }
                     Err(AccessMethodError::PageWriteLatchFailed) => {
-                        log_info!(
-                            "Failed to acquire write lock (#attempt {}). Sleeping for {:?}",
-                            attempts,
-                            base * attempts as u64
-                        );
-                        std::thread::sleep(Duration::from_nanos(u64::pow(base, attempts)));
+                        std::thread::sleep(Duration::from_nanos(
+                            gen_truncated_randomized_exponential_backoff(attempts),
+                        ));
                         attempts += 1;
                     }
                     Err(e) => {
@@ -1937,8 +1935,7 @@ impl<T: MemPool> FosterBtree<T> {
                     }
                 }
             }
-        };
-        leaf_page
+        }
     }
 
     fn traverse_to_leaf_for_write(&self, key: &[u8]) -> FrameWriteGuard<T::EP> {

@@ -25,7 +25,8 @@ use super::{ContainerOptions, DBOptions, TxnOptions, TxnStorageTrait};
 
 #[allow(unused_imports)]
 use crate::log;
-use crate::log_info;
+#[allow(unused_imports)]
+use crate::{log_error, log_info};
 
 // Each transaction has a read-write set
 

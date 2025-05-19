@@ -3,6 +3,7 @@ use std::cmp;
 use std::ops::{Index, IndexMut};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Barrier};
+use std::time::Duration;
 
 use crate::affinity::{get_current_cpu, get_num_cores, set_affinity};
 use crate::event_tracer::trace_txn;
@@ -11,6 +12,7 @@ use crate::event_tracer::trace_txn;
 use crate::log;
 use crate::log_info;
 use crate::prelude::{TxnStorageStatus, TxnStorageTrait};
+use crate::random::gen_truncated_randomized_exponential_backoff;
 use clap::Parser;
 
 use super::loader::TPCCTableInfo;
@@ -500,8 +502,7 @@ where
     T: TxnStorageTrait,
     P: TPCCTxnProfile,
 {
-    let mut retry_count: u32 = 0;
-    let base: u64 = 2;
+    let mut attempts = 0;
     loop {
         let status = run::<T, P>(thread_id, config, txn_storage, tbl_info, stat, out);
         match status {
@@ -515,10 +516,10 @@ where
             }
             TPCCStatus::SystemAbort => {
                 log_info!("SystemAbort");
-                // Sleep for base^retry_count nanoseconds
-                let sleep_time = base.pow(retry_count);
-                std::thread::sleep(std::time::Duration::from_nanos(sleep_time));
-                retry_count += 1;
+                std::thread::sleep(Duration::from_nanos(
+                    gen_truncated_randomized_exponential_backoff(attempts),
+                ));
+                attempts += 1;
                 // Retry the transaction
             }
             TPCCStatus::Bug(_reason) => {

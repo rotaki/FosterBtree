@@ -161,7 +161,7 @@ impl EvictionScratchSpace {
 
 thread_local! {
     // One slot *per thread*, but initialised lazily
-    static SCRATCH: OnceLock<RefCell<EvictionScratchSpace>> = OnceLock::new();
+    static SCRATCH: OnceLock<RefCell<EvictionScratchSpace>> = const { OnceLock::new() };
 }
 
 pub fn with_eviction_scratch<F, R>(batch: usize, f: F) -> R
@@ -177,7 +177,7 @@ where
         // Already created, but maybe caller asked for a larger batch?
         borrow.clear(); // start fresh each time (optional)
 
-        f(&mut *borrow) // hand it to the caller
+        f(&mut borrow) // hand it to the caller
     })
 }
 
@@ -276,7 +276,7 @@ impl<const EVICTION_BATCH_SIZE: usize> BufferPoolClock<EVICTION_BATCH_SIZE> {
                 self.num_frames,
                 used_percent
             );
-            return Ok(());
+            Ok(())
         }
     }
 
@@ -433,7 +433,7 @@ impl<const EVICTION_BATCH_SIZE: usize> BufferPoolClock<EVICTION_BATCH_SIZE> {
     }
 
     /// Remove pages from the page‑table in c_key order.
-    fn remove_from_page_table(&self, to_evict: &mut Vec<(usize, FWGuard)>) {
+    fn remove_from_page_table(&self, to_evict: &mut [(usize, FWGuard)]) {
         to_evict.sort_unstable_by_key(|(_, g)| g.page_key().unwrap().c_key);
         self.page_to_frame
             .remove_batch_sorted(to_evict.iter().map(|(_, g)| g.page_key().unwrap()));

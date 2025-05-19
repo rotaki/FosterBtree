@@ -1,13 +1,14 @@
 use std::{
     ops::{Index, IndexMut},
     sync::atomic::{AtomicBool, Ordering},
+    time::Duration,
 };
 
 use clap::Parser;
 
 use crate::{
     prelude::{urand_int, TxnStorageStatus, TxnStorageTrait},
-    random::{gen_random_byte_vec, small_thread_rng},
+    random::{gen_random_byte_vec, gen_truncated_randomized_exponential_backoff, small_thread_rng},
     zipfan::FastZipf,
 };
 
@@ -387,8 +388,7 @@ where
     T: TxnStorageTrait,
     P: YCSBTxnProfile,
 {
-    let mut retry_count: u32 = 0;
-    let base: u64 = 2;
+    let mut attempts = 0;
     loop {
         let status = run::<T, P>(thread_id, config, txn_storage, tbl_info, stat, out);
         match status {
@@ -398,10 +398,10 @@ where
             }
             YCSBStatus::SystemAbort => {
                 log_info!("SystemAbort");
-                // Sleep for base^retry_count nanoseconds
-                let sleep_time = base.pow(retry_count);
-                std::thread::sleep(std::time::Duration::from_nanos(sleep_time));
-                retry_count += 1;
+                std::thread::sleep(Duration::from_nanos(
+                    gen_truncated_randomized_exponential_backoff(attempts),
+                ));
+                attempts += 1;
                 // Retry the transaction
             }
             YCSBStatus::Bug(_reason) => {
