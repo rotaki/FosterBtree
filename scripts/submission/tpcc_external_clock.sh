@@ -37,8 +37,8 @@ RESULTS_DIR="./results"
 mkdir -p "$RESULTS_DIR"
 
 declare -A VARIANTS=(
-  # [tpcc_external_vmc]="no_tree_hint no_bp_hint vmcache  event_tracer"
-  # [tpcc_external_vmc_tree_hint]="no_bp_hint vmcache  event_tracer"
+  [tpcc_external_vmc_no_hint]="no_tree_hint vmcache  event_tracer"
+  [tpcc_external_vmc_tree_hint]="vmcache  event_tracer"
   [tpcc_external_bp_clock_no_hint]="bp_clock no_tree_hint no_bp_hint event_tracer"
   [tpcc_external_bp_clock_tree_hint]="bp_clock no_bp_hint event_tracer"
   [tpcc_external_bp_clock_bp_hint]="bp_clock no_tree_hint event_tracer"
