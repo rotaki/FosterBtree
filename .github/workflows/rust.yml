@@ -38,7 +38,7 @@ jobs:
       run: cargo fmt --all -- --check
 
     - name: Run cargo test (sync io)
-      run: cargo test --verbose
+      run: cargo test --verbose --features "preadpwrite_sync"
 
     # - name: Run cargo test (async io)
     #   run: cargo test --verbose --features "async_write"
