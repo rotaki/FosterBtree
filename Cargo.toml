@@ -60,7 +60,7 @@ memchr = "2.7.4"
 dashmap = "6.1"
 criterion = { version = "0.5", features = ["html_reports"]}
 hdrhistogram = "7.5.4"
-mimalloc = "0.1.46"
+# mimalloc = "0.1.46"
 duckdb = { version = "1.2.2", features = ["bundled"], optional = true }
 
 [dev-dependencies]

@@ -37,17 +37,17 @@ RESULTS_DIR="./results"
 mkdir -p "$RESULTS_DIR"
 
 declare -A VARIANTS=(
-  [tpcc_external_vmc]="no_tree_hint no_bp_hint vmcache  event_tracer"
-  [tpcc_external_vmc_tree_hint]="no_bp_hint vmcache  event_tracer"
-  [tpcc_external_no_hint]="no_tree_hint no_bp_hint  event_tracer"
-  [tpcc_external_tree_hint]="no_bp_hint  event_tracer"
-  [tpcc_external_bp_hint]="no_tree_hint  event_tracer"
-  [tpcc_external_all_hint]=" event_tracer"
+  # [tpcc_external_vmc]="no_tree_hint no_bp_hint vmcache  event_tracer"
+  # [tpcc_external_vmc_tree_hint]="no_bp_hint vmcache  event_tracer"
+  [tpcc_external_bp_clock_no_hint]="bp_clock no_tree_hint no_bp_hint event_tracer"
+  [tpcc_external_bp_clock_tree_hint]="bp_clock no_bp_hint event_tracer"
+  [tpcc_external_bp_clock_bp_hint]="bp_clock no_tree_hint event_tracer"
+  [tpcc_external_bp_clock_all_hint]="bp_clock event_tracer"
 )
 
 # ───────────── Build phase  ────────────────────────────────────────────────
 echo "▶ Building tpcc_db_gen…"
-cargo build --release --features "" --bin tpcc_db_gen
+cargo build --release --bin tpcc_db_gen
 
 echo "▶ Building tpcc_external variants…"
 for BIN in "${!VARIANTS[@]}"; do
@@ -68,12 +68,14 @@ for BIN in "${!VARIANTS[@]}"; do
 
     # Fresh DB for each run
     rm -rf "./tpcc_db_w${WAREHOUSES}"
+    rm -rf "./eventdb_${BIN}.db"
+    rm -rf "./eventdb_${BIN}.db.wal"
 
     "${TARGET_DIR}/tpcc_db_gen" -w "${WAREHOUSES}"
 
     DB_PATH="./eventdb_${BIN}.db" \
       "${TARGET_DIR}/${BIN}" \
-        -w "${WAREHOUSES}" -t "${THREADS}" -D "${DURATION}"
+        -w "${WAREHOUSES}" -t "${THREADS}" -D "${DURATION}" -d 0 -b 32
   } |& tee "${LOG_FILE}"
 
   ((SUFFIX++))
