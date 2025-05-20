@@ -12,23 +12,21 @@ PAGE_SIZES=(
 FEATURE_SETS=(
     "vmcache "                       # All optimizations
     "vmcache no_tree_hint"           # Without tree hint
-    # "bp_clock "                      # All optimizations
-    # "bp_clock no_tree_hint"          # Without tree hint
-    # "bp_clock no_bp_hint"            # Without bp hint
-    # "bp_clock no_tree_hint no_bp_hint"  # Without tree hint and bp hint
+    "bp_clock "                      # All optimizations
+    "bp_clock no_tree_hint"          # Without tree hint
+    "bp_clock no_bp_hint"            # Without bp hint
+    "bp_clock no_tree_hint no_bp_hint"  # Without tree hint and bp hint
 )
 FEATURE_SUFFIXES=(
     "vmcache_lipah"
     "vmcache_no_tree_hint"
-    # "bp_clock_lipah"
-    # "bp_clock_no_tree_hint"
-    # "bp_clock_no_bp_hint"
-    # "bp_clock_no_tree_hint_no_bp_hint"
+    "bp_clock_lipah"
+    "bp_clock_no_tree_hint"
+    "bp_clock_no_bp_hint"
+    "bp_clock_no_tree_hint_no_bp_hint"
 )
-# THREAD_COUNTS=(1 2 3 4 5 10 15 20 25 30 35 40)
-THREAD_COUNTS=(10 12)
-ITERATIONS=(1 2 3)
-# ITERATIONS=(1 2 3)  # Number of iterations per benchmark
+THREAD_COUNTS=(1 2 3 4 5 10 15 20 25 30 35 40)
+ITERATIONS=(1 2 3)  # Number of iterations per benchmark
 # NUM_WAREHOUSES=1    # Set the number of warehouses
 
 # Loop through each feature set
