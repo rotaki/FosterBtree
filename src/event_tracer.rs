@@ -16,10 +16,16 @@ pub fn trace_secidx(_c_id: u8, _h: u32, _p: u32, _f: u32) {
     event_tracer::trace_secidx(_c_id, _h, _p, _f);
 }
 
+#[inline(always)]
+pub fn trace_lookup() {
+    #[cfg(feature = "event_tracer")]
+    event_tracer::trace_lookup();
+}
+
 #[cfg(feature = "event_tracer")]
 mod event_tracer {
     use duckdb::{params, Connection};
-    use std::sync::{Arc, Mutex, OnceLock};
+    use std::sync::OnceLock;
 
     use crate::{prelude::urand_int, time::now_ns};
 
@@ -66,34 +72,12 @@ mod event_tracer {
         }
     }
 
-    /* ---------- 1. ONE global connection, created on first use ----------- */
-
-    static EVENT_DB: OnceLock<Arc<Mutex<Connection>>> = OnceLock::new();
-
-    fn event_db() -> &'static Arc<Mutex<Connection>> {
-        EVENT_DB.get_or_init(|| {
-            let path = std::env::var("DB_PATH").unwrap_or_else(|_| "events.db".into());
-            let conn = Connection::open(path).expect("open DuckDB");
-            conn.execute_batch(
-                r#"CREATE TABLE IF NOT EXISTS txns(kind INTEGER, ts BIGINT);
-               CREATE TABLE IF NOT EXISTS diskio(container INTEGER, op VARCHAR, ts BIGINT);
-               CREATE TABLE IF NOT EXISTS sec_index_hit_rate(
-                    container INTEGER, h INTEGER, p INTEGER, f INTEGER, ts BIGINT
-               );"#,
-            )
-            .expect("create tables");
-            Arc::new(Mutex::new(conn))
-        })
+    #[inline(always)]
+    pub fn trace_lookup() {
+        if urand_int(1, 100) <= 1 {
+            EVENT_TRACER.with(|t| t.borrow_mut().lookup.push(EventLookup { ts: now_ns() }));
+        }
     }
-
-    /* ---------- 2. Thread-local buffer that points at the same DB -------- */
-
-    thread_local! {
-        static EVENT_TRACER: std::cell::RefCell<EventTracer> =
-            std::cell::RefCell::new(EventTracer::new());
-    }
-
-    /* ---------- 3.  Event structs, same as before ----------------------- */
 
     #[derive(Clone, Copy)]
     pub struct EventTxn {
@@ -115,54 +99,97 @@ mod event_tracer {
         pub ts: u64,
     }
 
-    /* ---------- 4.  The per-thread buffer object ------------------------ */
+    #[derive(Clone, Copy)]
+    pub struct EventLookup {
+        pub ts: u64,
+    }
+
+    static INIT_SCHEMA: OnceLock<()> = OnceLock::new();
+
+    thread_local! {
+        static EVENT_TRACER: std::cell::RefCell<EventTracer> =
+            std::cell::RefCell::new(EventTracer::new());
+    }
 
     pub struct EventTracer {
         txns: Vec<EventTxn>,
         diskio: Vec<EventDiskio>,
         secidx: Vec<EventSecIndex>,
-        db: Arc<Mutex<Connection>>, // cloned from the global
+        lookup: Vec<EventLookup>,
+        conn: Connection,
     }
 
     impl EventTracer {
         fn new() -> Self {
+            let path = std::env::var("DB_PATH").unwrap_or_else(|_| "events.db".into());
+            INIT_SCHEMA.get_or_init(|| {
+                // this block is executed only once
+                let conn = Connection::open(&path).expect("open DuckDB for schema init");
+                conn.execute_batch(
+                    r#"CREATE TABLE IF NOT EXISTS txns(kind INTEGER, ts BIGINT);
+               CREATE TABLE IF NOT EXISTS diskio(container INTEGER, op VARCHAR, ts BIGINT);
+               CREATE TABLE IF NOT EXISTS sec_index_hit_rate(
+                    container INTEGER, h INTEGER, p INTEGER, f INTEGER, ts BIGINT
+               );
+               CREATE TABLE IF NOT EXISTS lookup(ts BIGINT);"#,
+                )
+                .expect("create tables");
+                // `conn` is dropped here; other threads can open their own connection normally
+            });
+
+            let conn = Connection::open(path).expect("open DuckDB");
+
             Self {
                 txns: Vec::with_capacity(15000),
                 diskio: Vec::with_capacity(10000),
                 secidx: Vec::with_capacity(5000),
-                db: event_db().clone(),
+                lookup: Vec::with_capacity(15000),
+                conn,
             }
         }
 
         fn flush(&mut self) {
-            if self.txns.is_empty() && self.diskio.is_empty() && self.secidx.is_empty() {
+            if self.txns.is_empty()
+                && self.diskio.is_empty()
+                && self.secidx.is_empty()
+                && self.lookup.is_empty()
+            {
                 return;
             }
 
             // Lock only for the actual I/O window
-            let conn = self.db.lock().unwrap();
-
             if !self.txns.is_empty() {
-                let mut app = conn.appender("txns").unwrap();
+                let mut app = self.conn.appender("txns").unwrap();
                 for e in self.txns.drain(..) {
                     app.append_row(params![e.kind, e.ts]).unwrap();
                 }
+                // app.flush().unwrap();
             }
 
             if !self.diskio.is_empty() {
-                let mut app = conn.appender("diskio").unwrap();
+                let mut app = self.conn.appender("diskio").unwrap();
                 for e in self.diskio.drain(..) {
                     app.append_row(params![e.container, e.op.to_string(), e.ts])
                         .unwrap();
                 }
+                // app.flush().unwrap();
             }
 
             if !self.secidx.is_empty() {
-                let mut app = conn.appender("sec_index_hit_rate").unwrap();
+                let mut app = self.conn.appender("sec_index_hit_rate").unwrap();
                 for e in self.secidx.drain(..) {
                     app.append_row(params![e.container, e.h, e.p, e.f, e.ts])
                         .unwrap();
                 }
+                // app.flush().unwrap();
+            }
+
+            if !self.lookup.is_empty() {
+                let mut app = self.conn.appender("lookup").unwrap();
+                for e in self.lookup.drain(..) {
+                    app.append_row(params![e.ts]).unwrap();
+                }
+                // app.flush().unwrap();
             }
         }
     }
@@ -172,10 +199,11 @@ mod event_tracer {
     impl Drop for EventTracer {
         fn drop(&mut self) {
             println!(
-                "Dropping event tracer: txns {}, diskio {}, secidx {}",
+                "Flushing event tracer: txns {}, diskio {}, secidx {}, lookup {}",
                 self.txns.len(),
                 self.diskio.len(),
-                self.secidx.len()
+                self.secidx.len(),
+                self.lookup.len()
             );
             self.flush();
         }

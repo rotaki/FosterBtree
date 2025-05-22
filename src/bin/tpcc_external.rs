@@ -79,7 +79,11 @@ pub fn run_bench(
         }
         // Start timer for config duration
         run_barrier.wait();
-        std::thread::sleep(std::time::Duration::from_secs(config.exec_time));
+        if is_warmup {
+            std::thread::sleep(std::time::Duration::from_secs(config.warmup_time));
+        } else {
+            std::thread::sleep(std::time::Duration::from_secs(config.exec_time));
+        }
         flag.store(false, Ordering::Release);
 
         for handler in handlers {
