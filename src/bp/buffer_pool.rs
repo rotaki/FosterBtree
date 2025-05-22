@@ -30,6 +30,7 @@ type FWGuard = FrameWriteGuard<EvictionPolicyImpl>;
 type FRGuard = FrameReadGuard<EvictionPolicyImpl>;
 
 use concurrent_queue::ConcurrentQueue;
+use rayon::iter::{IntoParallelIterator, ParallelIterator};
 
 const EVICTION_SCAN_TRIALS: usize = 5;
 const EVICTION_SCAN_DEPTH: usize = 10;
@@ -939,7 +940,8 @@ impl MemPool for BufferPool {
 
         let page_to_frame = unsafe { &mut *self.page_to_frame.get() };
 
-        for i in 0..self.num_frames {
+        // Use rayon to clear the frames in parallel
+        (0..self.num_frames).into_par_iter().for_each(|i| {
             let mut frame = loop {
                 if let Some(guard) = self.try_get_write_guard(i, false) {
                     break guard;
@@ -950,9 +952,10 @@ impl MemPool for BufferPool {
             self.write_victim_to_disk_if_dirty_w(&frame)
                 .inspect_err(|_| {
                     self.release_exclusive();
-                })?;
+                })
+                .unwrap();
             frame.clear();
-        }
+        });
 
         self.container_manager.flush_all().inspect_err(|_| {
             self.release_exclusive();
