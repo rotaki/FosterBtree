@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Barrier};
 use std::time::Duration;
 
-use crate::affinity::{get_current_cpu, get_num_cores, set_affinity};
+use crate::affinity::{get_current_cpu, get_total_cpus, with_affinity};
 use crate::event_tracer::trace_txn;
 // do not warn about unused imports
 #[allow(unused_imports)]
@@ -534,7 +534,6 @@ where
 pub fn run_tpcc_for_thread<T>(
     _is_warmup: bool,
     thread_id: usize,
-    cpu_affinity: bool,
     barrier: Arc<Barrier>,
     config: &TPCCConfig,
     txn_storage: &T,
@@ -544,82 +543,228 @@ pub fn run_tpcc_for_thread<T>(
 where
     T: TxnStorageTrait,
 {
-    if cpu_affinity {
-        let num_cores = get_num_cores();
-        if thread_id >= num_cores {
-            panic!(
-                "Thread ID {} exceeds number of cores {}",
-                thread_id, num_cores
-            );
-        }
-        set_affinity(thread_id).unwrap();
+    let num_cores_minus_one = get_total_cpus() - 1; // Reserve one core for the main thread
+    if thread_id >= num_cores_minus_one {
+        panic!(
+            "Thread ID {} exceeds number of cores minus one (for main thread) {}",
+            thread_id, num_cores_minus_one
+        );
+    }
+    with_affinity(thread_id, || {
         let current_cpu = get_current_cpu();
         println!("Thread {} pinned to CPU {}", thread_id, current_cpu);
-    }
 
-    let mut stat = TPCCStat::new();
-    let mut out = TPCCOutput::new();
+        let mut stat = TPCCStat::new();
+        let mut out = TPCCOutput::new();
 
-    barrier.wait(); // Wait for all threads to be ready
+        barrier.wait(); // Wait for all threads to be ready
 
-    while flag.load(Ordering::Acquire) {
-        let x = urand_int(1, 100);
+        while flag.load(Ordering::Acquire) {
+            let x = urand_int(1, 100);
 
-        let _txn_type = if x <= 4 {
-            run_with_retry::<T, StockLevelTxn>(
-                thread_id,
-                config,
-                txn_storage,
-                tbl_info,
-                &mut stat,
-                &mut out,
-            );
-            TPCCTxnProfileID::StockLevelTxn
-        } else if x <= 4 + 4 {
-            run_with_retry::<T, DeliveryTxn>(
-                thread_id,
-                config,
-                txn_storage,
-                tbl_info,
-                &mut stat,
-                &mut out,
-            );
-            TPCCTxnProfileID::DeliveryTxn
-        } else if x <= 4 + 4 + 4 {
-            run_with_retry::<T, OrderStatusTxn>(
-                thread_id,
-                config,
-                txn_storage,
-                tbl_info,
-                &mut stat,
-                &mut out,
-            );
-            TPCCTxnProfileID::OrderStatusTxn
-        } else if x <= 4 + 4 + 4 + 43 {
-            run_with_retry::<T, PaymentTxn>(
-                thread_id,
-                config,
-                txn_storage,
-                tbl_info,
-                &mut stat,
-                &mut out,
-            );
-            TPCCTxnProfileID::PaymentTxn
-        } else {
-            run_with_retry::<T, NewOrderTxn>(
-                thread_id,
-                config,
-                txn_storage,
-                tbl_info,
-                &mut stat,
-                &mut out,
-            );
-            TPCCTxnProfileID::NewOrderTxn
-        };
+            let _txn_type = if x <= 4 {
+                run_with_retry::<T, StockLevelTxn>(
+                    thread_id,
+                    config,
+                    txn_storage,
+                    tbl_info,
+                    &mut stat,
+                    &mut out,
+                );
+                TPCCTxnProfileID::StockLevelTxn
+            } else if x <= 4 + 4 {
+                run_with_retry::<T, DeliveryTxn>(
+                    thread_id,
+                    config,
+                    txn_storage,
+                    tbl_info,
+                    &mut stat,
+                    &mut out,
+                );
+                TPCCTxnProfileID::DeliveryTxn
+            } else if x <= 4 + 4 + 4 {
+                run_with_retry::<T, OrderStatusTxn>(
+                    thread_id,
+                    config,
+                    txn_storage,
+                    tbl_info,
+                    &mut stat,
+                    &mut out,
+                );
+                TPCCTxnProfileID::OrderStatusTxn
+            } else if x <= 4 + 4 + 4 + 43 {
+                run_with_retry::<T, PaymentTxn>(
+                    thread_id,
+                    config,
+                    txn_storage,
+                    tbl_info,
+                    &mut stat,
+                    &mut out,
+                );
+                TPCCTxnProfileID::PaymentTxn
+            } else {
+                run_with_retry::<T, NewOrderTxn>(
+                    thread_id,
+                    config,
+                    txn_storage,
+                    tbl_info,
+                    &mut stat,
+                    &mut out,
+                );
+                TPCCTxnProfileID::NewOrderTxn
+            };
 
-        if !_is_warmup {
-            trace_txn(_txn_type.as_u8());
+            if !_is_warmup {
+                trace_txn(_txn_type.as_u8());
+            }
         }
+        (stat, out)
+    })
+    .unwrap()
+}
+
+pub fn run_tpcc(
+    is_warmup: bool,
+    config: &TPCCConfig,
+    txn_storage: &impl TxnStorageTrait,
+    tbl_info: &TPCCTableInfo,
+) -> Vec<(TPCCStat, TPCCOutput)> {
+    let mut stats_and_outs = Vec::with_capacity(config.num_threads);
+
+    let flag = AtomicBool::new(true); // while flag is true, keep running the benchmark
+                                      // Run the benchmark
+    let run_barrier = Arc::new(Barrier::new(config.num_threads + 1));
+    std::thread::scope(|s| {
+        let mut handlers = Vec::with_capacity(config.num_threads);
+        for i in 0..config.num_threads {
+            let thread_id = i;
+            let run_barrier = run_barrier.clone();
+            let config_ref = &config;
+            let txn_storage_ref = txn_storage;
+            let tbl_info_ref = &tbl_info;
+            let flag_ref = &flag;
+            let handler = s.spawn(move || {
+                run_tpcc_for_thread(
+                    is_warmup,
+                    thread_id,
+                    run_barrier,
+                    config_ref,
+                    txn_storage_ref,
+                    tbl_info_ref,
+                    flag_ref,
+                )
+            });
+            handlers.push(handler);
+        }
+        // Start timer for config duration
+        run_barrier.wait();
+        if is_warmup {
+            std::thread::sleep(std::time::Duration::from_secs(config.warmup_time));
+        } else {
+            std::thread::sleep(std::time::Duration::from_secs(config.exec_time));
+        }
+        flag.store(false, Ordering::Release);
+
+        for handler in handlers {
+            stats_and_outs.push(handler.join().unwrap());
+        }
+    });
+
+    stats_and_outs
+}
+
+pub fn print_tpcc_stats(
+    num_warehouses: u16,
+    num_threads: usize,
+    seconds: u64,
+    stats_and_outs: Vec<(TPCCStat, TPCCOutput)>,
+) {
+    let mut final_stat = TPCCStat::new();
+    for (stat, _) in stats_and_outs {
+        final_stat.add(&stat);
     }
-    (stat, out)
+    let agg_stat = final_stat.aggregate_perf();
+
+    println!(
+        "{} warehouse(s), {} thread(s), {} second(s)",
+        num_warehouses, num_threads, seconds
+    );
+    println!("    commits: {}", agg_stat.num_commits);
+    println!("    usr_aborts: {}", agg_stat.num_usr_aborts);
+    println!("    sys_aborts: {}", agg_stat.num_sys_aborts);
+    println!(
+        "Throughput: {} txns/s",
+        agg_stat.num_commits as f64 / seconds as f64
+    );
+
+    println!("\nDetails:");
+
+    for p in 0..TPCCTxnProfileID::Max as u8 {
+        let p = TPCCTxnProfileID::from(p);
+        let profile = format!("{}", p);
+        let tries =
+            final_stat[p].num_commits + final_stat[p].num_usr_aborts + final_stat[p].num_sys_aborts;
+        println!(
+        "    {:<15} c[{:6.2}%]:{:8}({:6.2}%)   ua:{:8}({:6.2}%)  sa:{:8}({:6.2}%)  avgl:{:8.0}  minl:{:8}  maxl:{:8}",
+        profile,
+        (final_stat[p].num_commits as f64) / (agg_stat.num_commits as f64) * 100.0,
+        final_stat[p].num_commits,
+        (final_stat[p].num_commits as f64) / (tries as f64) * 100.0,
+        final_stat[p].num_usr_aborts,
+        (final_stat[p].num_usr_aborts as f64) / (tries as f64) * 100.0,
+        final_stat[p].num_sys_aborts,
+        (final_stat[p].num_sys_aborts as f64) / (tries as f64) * 100.0,
+        (final_stat[p].total_latency as f64) / (final_stat[p].num_commits as f64),
+        if final_stat[p].min_latency == u64::MAX {
+            0
+        } else {
+            final_stat[p].min_latency
+        },
+        final_stat[p].max_latency
+    );
+    }
+
+    println!("\nSystem Abort Details:");
+
+    NewOrderTxn::print_abort_details(&final_stat[TPCCTxnProfileID::NewOrderTxn].abort_details);
+    PaymentTxn::print_abort_details(&final_stat[TPCCTxnProfileID::PaymentTxn].abort_details);
+    OrderStatusTxn::print_abort_details(
+        &final_stat[TPCCTxnProfileID::OrderStatusTxn].abort_details,
+    );
+    DeliveryTxn::print_abort_details(&final_stat[TPCCTxnProfileID::DeliveryTxn].abort_details);
+    StockLevelTxn::print_abort_details(&final_stat[TPCCTxnProfileID::StockLevelTxn].abort_details);
+}
+
+pub fn test_tpcc_transactions<T: TxnStorageTrait>(
+    config: &TPCCConfig,
+    txn_storage: &T,
+    tbl_info: &TPCCTableInfo,
+    stat: &mut TPCCStat,
+    out: &mut TPCCOutput,
+    w_id: u16,
+) {
+    for _ in 0..10000 {
+        let txn = PaymentTxn::new(config, w_id);
+        txn.run(config, txn_storage, tbl_info, stat, out);
+    }
+
+    for _ in 0..10000 {
+        let txn = NewOrderTxn::new(config, w_id);
+        txn.run(config, txn_storage, tbl_info, stat, out);
+    }
+
+    for _ in 0..10000 {
+        let txn = OrderStatusTxn::new(config, w_id);
+        txn.run(config, txn_storage, tbl_info, stat, out);
+    }
+
+    for _ in 0..10000 {
+        let txn = DeliveryTxn::new(config, w_id);
+        txn.run(config, txn_storage, tbl_info, stat, out);
+    }
+
+    for _ in 0..10000 {
+        let txn = StockLevelTxn::new(config, w_id);
+        txn.run(config, txn_storage, tbl_info, stat, out);
+    }
 }

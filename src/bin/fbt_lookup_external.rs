@@ -6,7 +6,7 @@ use std::sync::{
 use clap::Parser;
 use criterion::black_box;
 use fbtree::{
-    affinity::{get_current_cpu, get_num_cores, set_affinity},
+    affinity::{get_current_cpu, get_total_cpus, with_affinity},
     bp::{ContainerKey, MemPool},
     container::ContainerManager,
     event_tracer::trace_lookup,
@@ -76,40 +76,40 @@ pub fn get_bp(num_frames: usize, cm: Arc<ContainerManager>) -> Arc<impl MemPool>
 pub fn run_bench_for_thread(
     is_warmup: bool,
     thread_id: usize,
-    cpu_affinity: bool,
     barrier: Arc<Barrier>,
     config: &FBTLookupConfig,
     fbt: Arc<FosterBtree<impl MemPool>>,
     flag: &AtomicBool,
 ) {
-    if cpu_affinity {
-        let num_cores = get_num_cores();
-        if thread_id >= num_cores {
-            panic!(
-                "Thread ID {} exceeds number of cores {}",
-                thread_id, num_cores
-            );
-        }
-        set_affinity(thread_id).unwrap();
+    let num_cores_minus_one = get_total_cpus() - 1; // Reserve one core for the main thread
+    if thread_id >= num_cores_minus_one {
+        panic!(
+            "Thread ID {} exceeds number of cores minus one (for main thread): {}",
+            thread_id, num_cores_minus_one
+        );
+    }
+
+    with_affinity(thread_id, || {
         let current_cpu = get_current_cpu();
         println!("Thread {} pinned to CPU {}", thread_id, current_cpu);
-    }
 
-    barrier.wait();
+        barrier.wait();
 
-    while flag.load(Ordering::Acquire) {
-        let key_num = urand_int(0, config.num_entries - 1);
-        let key = get_val(key_num, KEY_SIZE);
-        let (_, val) = fbt.get_kv(&key).expect(&format!(
-            "Failed to get key {} in thread {}",
-            key_num, thread_id
-        ));
-        debug_assert_eq!(val, get_val(key_num, VAL_SIZE));
-        black_box(val);
-        if !is_warmup {
-            trace_lookup();
+        while flag.load(Ordering::Acquire) {
+            let key_num = urand_int(0, config.num_entries - 1);
+            let key = get_val(key_num, KEY_SIZE);
+            let (_, val) = fbt.get_kv(&key).expect(&format!(
+                "Failed to get key {} in thread {}",
+                key_num, thread_id
+            ));
+            debug_assert_eq!(val, get_val(key_num, VAL_SIZE));
+            black_box(val);
+            if !is_warmup {
+                trace_lookup();
+            }
         }
-    }
+    })
+    .unwrap();
 }
 
 pub fn run_bench(is_warmup: bool, config: &FBTLookupConfig, fbt: &Arc<FosterBtree<impl MemPool>>) {
@@ -127,7 +127,6 @@ pub fn run_bench(is_warmup: bool, config: &FBTLookupConfig, fbt: &Arc<FosterBtre
                 run_bench_for_thread(
                     is_warmup,
                     thread_id,
-                    true,
                     run_barrier,
                     config_ref,
                     fbt_ref,
@@ -182,26 +181,28 @@ pub fn main() {
 
     let fbt = Arc::new(FosterBtree::load(ContainerKey::new(0, 0), bp.clone(), 0));
 
-    set_affinity(get_num_cores() - 1).unwrap();
-    let current_cpu = get_current_cpu();
-    println!("Main thread pinned to CPU {}", current_cpu);
+    with_affinity(get_total_cpus() - 1, || {
+        let current_cpu = get_current_cpu();
+        println!("Main thread pinned to CPU {}", current_cpu);
 
-    // Warmup
-    if config.warmup_time > 0 {
-        println!("Running warmup for {} seconds", config.warmup_time);
-        let _ = run_bench(true, &config, &fbt);
-        println!("BP stats after warmup: \n{}", unsafe { bp.stats() });
-    } else {
-        println!("Warm up skipped");
-    }
+        // Warmup
+        if config.warmup_time > 0 {
+            println!("Running warmup for {} seconds", config.warmup_time);
+            let _ = run_bench(true, &config, &fbt);
+            println!("BP stats after warmup: \n{}", unsafe { bp.stats() });
+        } else {
+            println!("Warm up skipped");
+        }
 
-    // Run the benchmark
-    if config.exec_time == 0 {
-        panic!("Execution time is 0. Please specify a non-zero execution time.");
-    } else {
-        println!("Running benchmark for {} seconds", config.exec_time);
-    }
-    run_bench(false, &config, &fbt);
+        // Run the benchmark
+        if config.exec_time == 0 {
+            panic!("Execution time is 0. Please specify a non-zero execution time.");
+        } else {
+            println!("Running benchmark for {} seconds", config.exec_time);
+        }
+        run_bench(false, &config, &fbt);
+    })
+    .unwrap();
 
     println!("BP stats: \n{}", unsafe { bp.stats() });
     bp.clear_dirty_flags().unwrap();

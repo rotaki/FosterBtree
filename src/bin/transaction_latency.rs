@@ -61,7 +61,6 @@ pub fn main() {
                 run_tpcc_for_thread(
                     true,
                     thread_id,
-                    true,
                     warmup_barrier,
                     config_ref,
                     txn_storage_ref,
@@ -96,7 +95,6 @@ pub fn main() {
                 run_tpcc_for_thread(
                     false,
                     thread_id,
-                    true,
                     run_barrier,
                     config_ref,
                     txn_storage_ref,
