@@ -25,7 +25,7 @@ pub fn trace_lookup() {
 #[cfg(feature = "event_tracer")]
 mod event_tracer {
     use duckdb::{params, Connection};
-    use std::sync::OnceLock;
+    use std::sync::{Arc, Mutex, OnceLock};
 
     use crate::{prelude::urand_int, time::now_ns};
 
@@ -104,8 +104,6 @@ mod event_tracer {
         pub ts: u64,
     }
 
-    static INIT_SCHEMA: OnceLock<()> = OnceLock::new();
-
     thread_local! {
         static EVENT_TRACER: std::cell::RefCell<EventTracer> =
             std::cell::RefCell::new(EventTracer::new());
@@ -116,13 +114,15 @@ mod event_tracer {
         diskio: Vec<EventDiskio>,
         secidx: Vec<EventSecIndex>,
         lookup: Vec<EventLookup>,
-        conn: Connection,
+        conn: Arc<Mutex<Connection>>,
     }
+
+    static CONN: OnceLock<Arc<Mutex<Connection>>> = OnceLock::new();
 
     impl EventTracer {
         fn new() -> Self {
             let path = std::env::var("DB_PATH").unwrap_or_else(|_| "events.db".into());
-            INIT_SCHEMA.get_or_init(|| {
+            let conn = CONN.get_or_init(|| {
                 // this block is executed only once
                 let conn = Connection::open(&path).expect("open DuckDB for schema init");
                 conn.execute_batch(
@@ -135,16 +135,15 @@ mod event_tracer {
                 )
                 .expect("create tables");
                 // `conn` is dropped here; other threads can open their own connection normally
+                Arc::new(Mutex::new(conn))
             });
-
-            let conn = Connection::open(path).expect("open DuckDB");
 
             Self {
                 txns: Vec::with_capacity(15000),
                 diskio: Vec::with_capacity(10000),
                 secidx: Vec::with_capacity(5000),
                 lookup: Vec::with_capacity(15000),
-                conn,
+                conn: conn.clone(),
             }
         }
 
@@ -157,39 +156,40 @@ mod event_tracer {
                 return;
             }
 
-            // Lock only for the actual I/O window
+            let conn = self.conn.lock().unwrap();
+
             if !self.txns.is_empty() {
-                let mut app = self.conn.appender("txns").unwrap();
+                let mut app = conn.appender("txns").unwrap();
                 for e in self.txns.drain(..) {
                     app.append_row(params![e.kind, e.ts]).unwrap();
                 }
-                // app.flush().unwrap();
+                app.flush().unwrap();
             }
 
             if !self.diskio.is_empty() {
-                let mut app = self.conn.appender("diskio").unwrap();
+                let mut app = conn.appender("diskio").unwrap();
                 for e in self.diskio.drain(..) {
                     app.append_row(params![e.container, e.op.to_string(), e.ts])
                         .unwrap();
                 }
-                // app.flush().unwrap();
+                app.flush().unwrap();
             }
 
             if !self.secidx.is_empty() {
-                let mut app = self.conn.appender("sec_index_hit_rate").unwrap();
+                let mut app = conn.appender("sec_index_hit_rate").unwrap();
                 for e in self.secidx.drain(..) {
                     app.append_row(params![e.container, e.h, e.p, e.f, e.ts])
                         .unwrap();
                 }
-                // app.flush().unwrap();
+                app.flush().unwrap();
             }
 
             if !self.lookup.is_empty() {
-                let mut app = self.conn.appender("lookup").unwrap();
+                let mut app = conn.appender("lookup").unwrap();
                 for e in self.lookup.drain(..) {
                     app.append_row(params![e.ts]).unwrap();
                 }
-                // app.flush().unwrap();
+                app.flush().unwrap();
             }
         }
     }
