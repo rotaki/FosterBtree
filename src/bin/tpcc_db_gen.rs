@@ -61,4 +61,8 @@ pub fn main() {
     black_box(&tbl_info);
 
     println!("BP stats after load: \n{}", unsafe { bp.stats() });
+    let start = std::time::Instant::now();
+    println!("Flushing all containers");
+    bp.flush_all().unwrap();
+    println!("Flushed all containers in {:?}", start.elapsed());
 }

@@ -94,5 +94,11 @@ pub fn main() {
     );
 
     println!("BP stats after load: \n{}", unsafe { bp.stats() });
+    println!("Flushing all pages to disk...");
+    let start = std::time::Instant::now();
     bp.flush_all().unwrap();
+    println!(
+        "Time taken to flush all pages to disk: {:?}",
+        start.elapsed()
+    );
 }

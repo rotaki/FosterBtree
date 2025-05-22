@@ -30,6 +30,7 @@ type FRGuard = FrameReadGuard<EvictionPolicyImpl>;
 
 use concurrent_queue::ConcurrentQueue;
 use dashmap::{mapref::entry, DashMap};
+use rayon::iter::{IntoParallelIterator, ParallelIterator};
 
 pub struct PageToFrame {
     map: DashMap<ContainerKey, Arc<DashMap<PageId, usize>>>, // (c_key, page_id) -> frame_index
@@ -225,12 +226,14 @@ impl<const EVICTION_BATCH_SIZE: usize> BufferPoolClock<EVICTION_BATCH_SIZE> {
 
         let pages: UnsafeCell<Vec<Box<Page>>> = UnsafeCell::new(
             (0..num_frames)
+                .into_par_iter()
                 .map(|_| Box::new(Page::new_empty()))
                 .collect(),
         );
 
         let metas: UnsafeCell<Vec<Box<FMeta>>> = UnsafeCell::new(
             (0..num_frames)
+                .into_par_iter()
                 .map(|i| Box::new(FMeta::new(i as u32)))
                 .collect(),
         );
@@ -760,7 +763,7 @@ impl<const EVICTION_BATCH_SIZE: usize> MemPool for BufferPoolClock<EVICTION_BATC
     }
 
     fn flush_all(&self) -> Result<(), MemPoolStatus> {
-        for i in 0..self.num_frames {
+        (0..self.num_frames).into_par_iter().for_each(|i| {
             let frame = loop {
                 if let Some(guard) = self.try_get_read_guard(i) {
                     break guard;
@@ -768,8 +771,8 @@ impl<const EVICTION_BATCH_SIZE: usize> MemPool for BufferPoolClock<EVICTION_BATC
                 // spin
                 std::hint::spin_loop();
             };
-            self.write_victim_to_disk_if_dirty_r(&frame)?;
-        }
+            self.write_victim_to_disk_if_dirty_r(&frame).unwrap();
+        });
 
         // Call fsync on all the files
         self.container_manager.flush_all()?;
@@ -832,7 +835,7 @@ impl<const EVICTION_BATCH_SIZE: usize> MemPool for BufferPoolClock<EVICTION_BATC
     /// This will write all the dirty pages to disk and flush the files.
     /// After this operation, the buffer pool will have all the frames cleared.
     fn flush_all_and_reset(&self) -> Result<(), MemPoolStatus> {
-        for i in 0..self.num_frames {
+        (0..self.num_frames).into_par_iter().for_each(|i| {
             let mut frame = loop {
                 if let Some(guard) = self.try_get_write_guard(i, false) {
                     break guard;
@@ -840,12 +843,12 @@ impl<const EVICTION_BATCH_SIZE: usize> MemPool for BufferPoolClock<EVICTION_BATC
                 // spin
                 std::hint::spin_loop();
             };
-            self.write_victim_to_disk_if_dirty_w(&frame)?;
+            self.write_victim_to_disk_if_dirty_w(&frame).unwrap();
             if let Some(key) = frame.page_key() {
                 self.page_to_frame.remove(&key);
             }
             frame.clear();
-        }
+        });
 
         self.container_manager.flush_all()?;
 
@@ -858,10 +861,10 @@ impl<const EVICTION_BATCH_SIZE: usize> MemPool for BufferPoolClock<EVICTION_BATC
     }
 
     fn clear_dirty_flags(&self) -> Result<(), MemPoolStatus> {
-        for i in 0..self.num_frames {
+        (0..self.num_frames).into_par_iter().for_each(|i| {
             let meta = &mut unsafe { &mut *self.metas.get() }[i];
             meta.is_dirty.store(false, Ordering::Release);
-        }
+        });
 
         self.container_manager.flush_all()?;
         Ok(())

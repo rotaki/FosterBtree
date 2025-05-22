@@ -236,12 +236,14 @@ impl BufferPool {
 
         let pages: UnsafeCell<Vec<Box<Page>>> = UnsafeCell::new(
             (0..num_frames)
+                .into_par_iter()
                 .map(|_| Box::new(Page::new_empty()))
                 .collect(),
         );
 
         let metas: UnsafeCell<Vec<Box<FMeta>>> = UnsafeCell::new(
             (0..num_frames)
+                .into_par_iter()
                 .map(|i| Box::new(FMeta::new(i as u32)))
                 .collect(),
         );
@@ -857,7 +859,7 @@ impl MemPool for BufferPool {
     fn flush_all(&self) -> Result<(), MemPoolStatus> {
         self.shared();
 
-        for i in 0..self.num_frames {
+        (0..self.num_frames).into_par_iter().for_each(|i| {
             let frame = loop {
                 if let Some(guard) = self.try_get_read_guard(i) {
                     break guard;
@@ -868,8 +870,9 @@ impl MemPool for BufferPool {
             self.write_victim_to_disk_if_dirty_r(&frame)
                 .inspect_err(|_| {
                     self.release_shared();
-                })?;
-        }
+                })
+                .unwrap();
+        });
 
         // Call fsync on all the files
         self.container_manager.flush_all().inspect_err(|_| {
@@ -975,7 +978,7 @@ impl MemPool for BufferPool {
     fn clear_dirty_flags(&self) -> Result<(), MemPoolStatus> {
         self.exclusive();
 
-        for i in 0..self.num_frames {
+        (0..self.num_frames).into_par_iter().for_each(|i| {
             let frame = loop {
                 if let Some(guard) = self.try_get_write_guard(i, false) {
                     break guard;
@@ -984,7 +987,7 @@ impl MemPool for BufferPool {
                 std::hint::spin_loop();
             };
             frame.dirty().store(false, Ordering::Release);
-        }
+        });
 
         self.container_manager.flush_all().inspect_err(|_| {
             self.release_exclusive();

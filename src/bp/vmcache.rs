@@ -20,6 +20,7 @@ use libc::{
     madvise, mmap, munmap, MADV_DONTNEED, MAP_ANONYMOUS, MAP_FAILED, MAP_NORESERVE, MAP_PRIVATE,
     PROT_READ, PROT_WRITE,
 };
+use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use std::{io, ptr};
 
 use super::{
@@ -200,6 +201,7 @@ impl<const IS_SMALL: bool, const EVICTION_BATCH_SIZE: usize>
         }
         let metas = UnsafeCell::new(
             (0..Self::PAGE_ENTRIES)
+                .into_par_iter()
                 .map(|i| Box::new(FMeta::new(i as u32)))
                 .collect::<Vec<_>>(),
         );

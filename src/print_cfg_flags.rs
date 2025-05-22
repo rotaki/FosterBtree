@@ -17,7 +17,7 @@ pub fn print_cfg_flags() {
     }
     #[cfg(feature = "vmcache")]
     {
-        println!("Using VMCache for TPCC");
+        println!("Using VMCache");
     }
     #[cfg(feature = "bp_clock")]
     {
