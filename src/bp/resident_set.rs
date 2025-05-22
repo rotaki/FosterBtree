@@ -14,9 +14,8 @@ use libc::{
     PROT_WRITE,
 };
 
-#[allow(dead_code)]
-use crate::log;
-use crate::log_warn;
+#[allow(unused_imports)]
+use crate::{log, log_warn};
 
 const EMPTY: u64 = u64::MAX; // 0xFFFF‥‥FFFF
 const TOMBSTONE: u64 = u64::MAX - 1; // 0xFFFF‥‥FFFE
@@ -100,6 +99,7 @@ impl ResidentPageSet {
         &(*self.ht.add(idx as usize)).pid
     }
 
+    #[allow(dead_code)]
     pub fn contains(&self, pid: u64) -> bool {
         let start = hash(pid) & self.mask;
         let mut pos = start;
@@ -199,6 +199,7 @@ impl ResidentPageSet {
         })
     }
 
+    #[allow(dead_code)]
     pub fn collect_all(&self) -> Vec<u64> {
         let mut result = Vec::new();
         for idx in 0..self.cnt {
@@ -230,7 +231,6 @@ impl Drop for ResidentPageSet {
 mod tests {
     use super::*;
     use std::{
-        collections::HashSet,
         hint::black_box,
         sync::{Arc, Barrier},
         thread,

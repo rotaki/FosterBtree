@@ -1,5 +1,5 @@
 #[allow(unused_imports)]
-use crate::log;
+use crate::{log, log_debug, log_error, log_info};
 
 use std::{
     collections::BTreeMap,
@@ -10,7 +10,6 @@ use std::{
 use crate::{
     access_method::{AccessMethodError, FilterType, OrderedUniqueKeyIndex, UniqueKeyIndex},
     bp::{prelude::*, EvictionPolicy},
-    log_debug, log_error, log_info,
     page::{Page, PageId, AVAILABLE_PAGE_SIZE},
     random::gen_truncated_randomized_exponential_backoff,
 };
@@ -648,8 +647,8 @@ fn should_root_descend(this: &Page, child: &Page) -> bool {
 #[inline]
 fn fix_frame_id<T: EvictionPolicy>(
     this: FrameReadGuard<T>,
-    slot_id: u32,
-    new_frame_key: &PageFrameKey,
+    _slot_id: u32,
+    _new_frame_key: &PageFrameKey,
 ) -> FrameReadGuard<T> {
     #[cfg(feature = "no_bp_hint")]
     {
@@ -660,10 +659,10 @@ fn fix_frame_id<T: EvictionPolicy>(
         match this.try_upgrade(false) {
             Ok(mut write_guard) => {
                 let val = InnerVal::new_with_frame_id(
-                    new_frame_key.p_key().page_id,
-                    new_frame_key.frame_id(),
+                    _new_frame_key.p_key().page_id,
+                    _new_frame_key.frame_id(),
                 );
-                let res = write_guard.update_at(slot_id, None, &val.to_bytes());
+                let res = write_guard.update_at(_slot_id, None, &val.to_bytes());
                 assert!(res);
                 log_debug!("Fixed frame id of the child page");
                 write_guard.downgrade()

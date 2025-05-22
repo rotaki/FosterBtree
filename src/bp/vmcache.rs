@@ -17,8 +17,8 @@ use crate::{
     page::{Page, PageId, PAGE_SIZE},
 };
 use libc::{
-    c_int, c_uchar, c_void, madvise, mincore, mmap, munmap, size_t, sysconf, MADV_DONTNEED,
-    MAP_ANONYMOUS, MAP_FAILED, MAP_NORESERVE, MAP_PRIVATE, PROT_READ, PROT_WRITE, _SC_PAGESIZE,
+    madvise, mmap, munmap, MADV_DONTNEED, MAP_ANONYMOUS, MAP_FAILED, MAP_NORESERVE, MAP_PRIVATE,
+    PROT_READ, PROT_WRITE,
 };
 use std::{io, ptr};
 
@@ -35,21 +35,21 @@ type FMeta = FrameMeta<ClockEvictionPolicy>;
 type FWGuard = FrameWriteGuard<ClockEvictionPolicy>;
 type FRGuard = FrameReadGuard<ClockEvictionPolicy>;
 
-pub const VMCACHE_LARGE_PAGE_ENTRIES: usize = 1 << 26; // 2^26 pages = 1 TiB with 16 KiB page size
+pub const VMCACHE_LARGE_PAGE_ENTRIES: usize = 1 << 27; // 2^27 pages = 2 TiB with 16 KiB page size
 const fn page_key_to_offset_large(page_key: &PageKey) -> usize {
     // Layout (LSB→MSB):
-    // bits  0-21 : page_id   (22 bits, 2^22 * 2^14 = 2^36 B = 64 GiB)
-    // bits 22-25 : container (4 bits,  up to 15)
-    // total      : 26 bits   ⇒ 2^26 pages
+    // bits  0-22 : page_id   (23 bits, 2^23 * 2^14 = 2^37 B = 128 GiB)
+    // bits 23-26 : container (4 bits,  up to 15)
+    // total      : 27 bits   ⇒ 2^27 pages
     //
-    // With a 16 KiB page, addressable memory = 2^26 × 2^14 B = 2^40 B = 1 TiB.
+    // With a 16 KiB page, addressable memory = 2^27 × 2^14 B = 2^41 B = 2 TiB.
 
     assert!(page_key.c_key.db_id() == 0);
     assert!(page_key.c_key.c_id() < (1 << 4)); // fits in 4 bits
-    assert!(page_key.page_id < (1 << 22)); // fits in 22 bits
+    assert!(page_key.page_id < (1 << 23)); // fits in 23 bits
 
-    let container_part = (page_key.c_key.c_id() as usize) << 22;
-    let page_part = page_key.page_id as usize; // already < 2^22
+    let container_part = (page_key.c_key.c_id() as usize) << 23;
+    let page_part = page_key.page_id as usize; // already < 2^23
 
     container_part | page_part
 }
@@ -793,6 +793,7 @@ impl<const IS_SMALL: bool, const EVICTION_BATCH_SIZE: usize>
     ///
     /// This is a direct Rust translation of the C helper that uses `mincore(2)`.
     unsafe fn page_resident(&self, page_key: &PageKey) -> bool {
+        use libc::{c_int, c_uchar, c_void, mincore, size_t, sysconf, _SC_PAGESIZE};
         // 1. Get the page address.
         let i = self.page_key_to_offset(page_key);
         let addr = self.pages.ptr.add(i) as *mut c_void;

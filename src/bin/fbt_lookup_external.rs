@@ -10,7 +10,7 @@ use fbtree::{
     bp::{ContainerKey, MemPool},
     container::ContainerManager,
     event_tracer::trace_lookup,
-    prelude::{urand_int, FosterBtree, OrderedUniqueKeyIndex, UniqueKeyIndex, PAGE_SIZE},
+    prelude::{urand_int, FosterBtree, PAGE_SIZE},
     print_cfg_flags,
 };
 

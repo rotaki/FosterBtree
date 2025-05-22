@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use clap::Parser;
 use fbtree::{
-    bp::{BufferPool, BufferPoolClock, ContainerKey, MemPool},
+    bp::{BufferPool, ContainerKey, MemPool},
     container::ContainerManager,
     prelude::{FosterBtree, PAGE_SIZE},
 };
