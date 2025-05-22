@@ -42,6 +42,7 @@ mkdir -p "$RESULTS_DIR"
 declare -A VARIANTS=(
   [fbt_lookup_external_bp_clock]="bp_clock event_tracer"
   [fbt_lookup_external_vmcache]="vmcache event_tracer"
+  [fbt_lookup_external_no_bp_hint]="bp_clock no_bp_hint event_tracer"
 )
 
 # ───────────── Build phase  ────────────────────────────────────────────────

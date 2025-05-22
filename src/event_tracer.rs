@@ -134,7 +134,6 @@ mod event_tracer {
                CREATE TABLE IF NOT EXISTS lookup(ts BIGINT);"#,
                 )
                 .expect("create tables");
-                // `conn` is dropped here; other threads can open their own connection normally
                 Arc::new(Mutex::new(conn))
             });
 
