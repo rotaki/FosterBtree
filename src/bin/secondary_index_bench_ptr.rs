@@ -19,15 +19,14 @@ use criterion::black_box;
 use fbtree::{
     access_method::fbt::{BTreeKey, FosterBtreeCursor},
     bp::{ContainerId, ContainerKey, MemPool, PageFrameKey},
-    prelude::FosterBtreePage,
-    prelude::{FosterBtree, PageId},
+    prelude::{FosterBtree, FosterBtreePage, PageId},
+    print_cfg_flags,
     utils::Permutation,
 };
 
 use clap::Parser;
 use fbtree::{
     access_method::{AccessMethodError, UniqueKeyIndex},
-    bp::{get_test_bp, BufferPool},
     random::gen_random_byte_vec,
 };
 use std::{process::Command, sync::Arc};
@@ -635,7 +634,7 @@ impl Iterator for KeyValueGenerator {
     }
 }
 
-pub fn load_table(params: &SecBenchParams, table: &Arc<FosterBtree<BufferPool>>) {
+pub fn load_table(params: &SecBenchParams, table: &Arc<FosterBtree<impl MemPool>>) {
     let num_insertion_threads = 6;
 
     let mut gen = KeyValueGenerator::new(
@@ -662,7 +661,7 @@ pub fn load_table(params: &SecBenchParams, table: &Arc<FosterBtree<BufferPool>>)
 fn bench_secondary<M: MemPool, T: SecondaryIndex<M>>(
     params: &SecBenchParams,
     secondary: &T,
-    bp: &Arc<M>,
+    _bp: &Arc<M>,
 ) -> u128 {
     println!("{}", secondary.stats());
 
@@ -672,7 +671,7 @@ fn bench_secondary<M: MemPool, T: SecondaryIndex<M>>(
 
     let mut avg = 0;
     for i in 0..warmup + exec {
-        let bp_stats_pre = unsafe { bp.stats() };
+        // let bp_stats_pre = unsafe { bp.stats() };
         let perm = Permutation::new(0, params.num_keys - 1);
         let start = std::time::Instant::now();
         for key in perm {
@@ -687,13 +686,14 @@ fn bench_secondary<M: MemPool, T: SecondaryIndex<M>>(
         //     black_box(result);
         // }
         let elapsed = start.elapsed();
-        let bp_stats_post = unsafe { bp.stats() };
-        let diff = bp_stats_post.diff(&bp_stats_pre);
-        let name = if i < warmup { "Warmup" } else { "Execution" };
-        println!(
-            "Iteration({}) {}: time: {:?}, bp_stats: {}",
-            name, i, elapsed, diff
-        );
+        // let bp_stats_post = unsafe { bp.stats() };
+        // let diff = bp_stats_post.diff(&bp_stats_pre);
+        // let name = if i < warmup { "Warmup" } else { "Execution" };
+        // println!(
+        //     "Iteration({}) {}: time: {:?}, bp_stats: {}",
+        //     name, i, elapsed, diff
+        // );
+        println!("Iteration({}): time: {:?}", i, elapsed);
         if i >= warmup {
             avg += elapsed.as_millis();
         }
@@ -718,114 +718,158 @@ fn sync_filesystem() -> Result<(), std::io::Error> {
     Ok(())
 }
 
+pub fn get_bp(num_frames: usize) -> Arc<impl MemPool> {
+    #[cfg(feature = "vmcache")]
+    {
+        use fbtree::bp::get_test_vmcache;
+        get_test_vmcache::<false, 64>(num_frames)
+    }
+    #[cfg(feature = "bp_clock")]
+    {
+        use fbtree::bp::get_test_bp_clock;
+        get_test_bp_clock::<64>(num_frames)
+    }
+    #[cfg(not(any(feature = "vmcache", feature = "bp_clock")))]
+    {
+        use fbtree::bp::get_test_bp;
+        get_test_bp(num_frames)
+    }
+}
+
 fn main() {
     let params = SecBenchParams::parse();
     println!("Params: {:?}", params);
+    print_cfg_flags::print_cfg_flags();
 
     // if sec_bench_normal is specified, or nothing is specified
     {
+        let c_id = 10;
         flush_internal_cache_and_everything();
         println!("=========================================================================================");
-        let bp = get_test_bp(params.bp_size);
-        let primary = Arc::new(FosterBtree::new(ContainerKey::new(0, 0), Arc::clone(&bp)));
+        let bp = get_bp(params.bp_size);
+        let primary = Arc::new(FosterBtree::new(
+            ContainerKey::new(0, c_id),
+            Arc::clone(&bp),
+        ));
         load_table(&params, &primary);
         // Print the page stats
         println!("BP stats: \n{}", unsafe { bp.stats() });
         println!("Tree stats: \n{}", primary.page_stats(false));
         println!("++++++++++++++++++++++++++++++++++++++++++++");
         println!("No hint");
-        let normal = SecondaryNoHint::new(&primary, 10);
-        bp.flush_all_and_reset().unwrap();
-        println!("BP stats: \n{}", unsafe { bp.stats() });
+        let normal = SecondaryNoHint::new(&primary, c_id + 1);
+        // bp.flush_all_and_reset().unwrap();
+        // println!("BP stats: \n{}", unsafe { bp.stats() });
         let normal_time = bench_secondary(&params, &normal, &bp);
         println!("BP stats: \n{}", unsafe { bp.stats() });
         println!("Summary");
         println!("Without hint: {} ms", normal_time);
         println!("=========================================================================================");
+        bp.clear_dirty_flags().unwrap();
     }
 
     {
+        let c_id = 20;
         flush_internal_cache_and_everything();
         println!("=========================================================================================");
-        let bp = get_test_bp(params.bp_size);
-        let primary = Arc::new(FosterBtree::new(ContainerKey::new(0, 0), Arc::clone(&bp)));
+        let bp = get_bp(params.bp_size);
+        let primary = Arc::new(FosterBtree::new(
+            ContainerKey::new(0, c_id),
+            Arc::clone(&bp),
+        ));
         load_table(&params, &primary);
         // Print the page stats
         println!("BP stats: \n{}", unsafe { bp.stats() });
         println!("Tree stats: \n{}", primary.page_stats(false));
         println!("++++++++++++++++++++++++++++++++++++++++++++");
         println!("[Page] hint");
-        let with_page_hint = SecondaryLeafPageHint::new(&primary, 20);
-        bp.flush_all_and_reset().unwrap();
-        println!("BP stats: \n{}", unsafe { bp.stats() });
+        let with_page_hint = SecondaryLeafPageHint::new(&primary, c_id + 1);
+        // bp.flush_all_and_reset().unwrap();
+        // println!("BP stats: \n{}", unsafe { bp.stats() });
         let with_page_hint_time = bench_secondary(&params, &with_page_hint, &bp);
         println!("BP stats: \n{}", unsafe { bp.stats() });
         println!("Summary");
         println!("With leaf hint: {} ms", with_page_hint_time);
         println!("=========================================================================================");
+        bp.clear_dirty_flags().unwrap();
     }
 
     {
+        let c_id = 30;
         flush_internal_cache_and_everything();
         println!("=========================================================================================");
-        let bp = get_test_bp(params.bp_size);
-        let primary = Arc::new(FosterBtree::new(ContainerKey::new(0, 0), Arc::clone(&bp)));
+        let bp = get_bp(params.bp_size);
+        let primary = Arc::new(FosterBtree::new(
+            ContainerKey::new(0, c_id),
+            Arc::clone(&bp),
+        ));
         load_table(&params, &primary);
         // Print the page stats
         println!("BP stats: \n{}", unsafe { bp.stats() });
         println!("Tree stats: \n{}", primary.page_stats(false));
         println!("++++++++++++++++++++++++++++++++++++++++++++");
         println!("[Page, Frame] hint");
-        let with_frame_hint = SecondaryLeafPageFrameHint::new(&primary, 30);
-        bp.flush_all_and_reset().unwrap();
-        println!("BP stats: \n{}", unsafe { bp.stats() });
+        let with_frame_hint = SecondaryLeafPageFrameHint::new(&primary, c_id + 1);
+        // bp.flush_all_and_reset().unwrap();
+        // println!("BP stats: \n{}", unsafe { bp.stats() });
         let with_frame_hint_time = bench_secondary(&params, &with_frame_hint, &bp);
         println!("BP stats: \n{}", unsafe { bp.stats() });
         println!("Summary");
         println!("With leaf hint: {} ms", with_frame_hint_time);
         println!("=========================================================================================");
+        bp.clear_dirty_flags().unwrap();
     }
 
     {
+        let c_id = 40;
         println!("=========================================================================================");
-        let bp = get_test_bp(params.bp_size);
-        let primary = Arc::new(FosterBtree::new(ContainerKey::new(0, 0), Arc::clone(&bp)));
+        let bp = get_bp(params.bp_size);
+        let primary = Arc::new(FosterBtree::new(
+            ContainerKey::new(0, c_id),
+            Arc::clone(&bp),
+        ));
         load_table(&params, &primary);
         // Print the page stats
         println!("BP stats: \n{}", unsafe { bp.stats() });
         println!("Tree stats: \n{}", primary.page_stats(false));
         println!("++++++++++++++++++++++++++++++++++++++++++++");
         println!("[Page, Slot] hint");
-        let with_slot_hint = SecondaryPageSlotHint::new(&primary, 40);
-        bp.flush_all_and_reset().unwrap();
-        println!("BP stats: \n{}", unsafe { bp.stats() });
+        let with_slot_hint = SecondaryPageSlotHint::new(&primary, c_id + 1);
+        // bp.flush_all_and_reset().unwrap();
+        // println!("BP stats: \n{}", unsafe { bp.stats() });
         let with_slot_hint_time = bench_secondary(&params, &with_slot_hint, &bp);
         println!("BP stats: \n{}", unsafe { bp.stats() });
         println!("++++++++++++++++++++++++++++++++++++++++++++");
         println!("Summary");
         println!("With slot hint: {} ms", with_slot_hint_time);
         println!("=========================================================================================");
+        bp.clear_dirty_flags().unwrap();
     }
 
     {
+        let c_id = 50;
         flush_internal_cache_and_everything();
         println!("=========================================================================================");
-        let bp = get_test_bp(params.bp_size);
-        let primary = Arc::new(FosterBtree::new(ContainerKey::new(0, 0), Arc::clone(&bp)));
+        let bp = get_bp(params.bp_size);
+        let primary = Arc::new(FosterBtree::new(
+            ContainerKey::new(0, c_id),
+            Arc::clone(&bp),
+        ));
         load_table(&params, &primary);
         // Print the page stats
         println!("BP stats: \n{}", unsafe { bp.stats() });
         println!("Tree stats: \n{}", primary.page_stats(false));
         println!("++++++++++++++++++++++++++++++++++++++++++++");
         println!("[Page, Frame, Slot] hint");
-        let with_slot_hint = SecondaryPageFrameSlotHint::new(&primary, 50);
-        bp.flush_all_and_reset().unwrap();
-        println!("BP stats: \n{}", unsafe { bp.stats() });
+        let with_slot_hint = SecondaryPageFrameSlotHint::new(&primary, c_id + 1);
+        // bp.flush_all_and_reset().unwrap();
+        // println!("BP stats: \n{}", unsafe { bp.stats() });
         let with_slot_hint_time = bench_secondary(&params, &with_slot_hint, &bp);
         println!("BP stats: \n{}", unsafe { bp.stats() });
         println!("++++++++++++++++++++++++++++++++++++++++++++");
         println!("Summary");
         println!("With slot hint: {} ms", with_slot_hint_time);
         println!("=========================================================================================");
+        bp.clear_dirty_flags().unwrap();
     }
 }
