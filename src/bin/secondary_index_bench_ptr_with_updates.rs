@@ -17,11 +17,7 @@
 
 use criterion::black_box;
 use fbtree::{
-    access_method::fbt::{BTreeKey, FosterBtreeCursor},
-    bp::{ContainerId, ContainerKey, MemPool, PageFrameKey},
-    prelude::{FosterBtree, FosterBtreePage, PageId},
-    random::gen_random_int,
-    utils::Permutation,
+    access_method::fbt::{BTreeKey, FosterBtreeCursor}, bp::{ContainerId, ContainerKey, MemPool, PageFrameKey}, prelude::{FosterBtree, FosterBtreePage, PageId}, print_cfg_flags, random::gen_random_int, utils::Permutation
 };
 
 use clap::Parser;
@@ -551,6 +547,8 @@ pub fn get_bp(num_frames: usize) -> Arc<impl MemPool> {
 fn main() {
     let params = SecBenchParams::parse();
     println!("Params: {:?}", params);
+    print_cfg_flags::print_cfg_flags();
+
     let hint_correctness = if let Some(all) = params.all_hint_correctness {
         HintCorrectness::new_all(all)
     } else {
