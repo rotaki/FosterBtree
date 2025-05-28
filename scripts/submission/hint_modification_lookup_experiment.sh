@@ -2,7 +2,7 @@ set -euxo
 
 # Figure 5. Secondary Index Lookup Latency Under Varying Number of Stale Hints
 
-cargo build --release --bin secondary_index_bench_ptr_with_updates
+cargo build --release --bin secondary_index_bench_ptr_with_updates --features "bp_clock"
 
 ./target/release/secondary_index_bench_ptr_with_updates -b 600000 -n 1000000 -k 10 -r 100 --all-hint-correctness 0    > ptr_t1_n1000000_k10_r100_b600000_a0.txt
 ./target/release/secondary_index_bench_ptr_with_updates -b 600000 -n 1000000 -k 10 -r 100 --all-hint-correctness 10    > ptr_t1_n1000000_k10_r100_b600000_a10.txt

@@ -688,12 +688,12 @@ fn bench_secondary<M: MemPool, T: SecondaryIndex<M>>(
         let elapsed = start.elapsed();
         // let bp_stats_post = unsafe { bp.stats() };
         // let diff = bp_stats_post.diff(&bp_stats_pre);
-        // let name = if i < warmup { "Warmup" } else { "Execution" };
+        let name = if i < warmup { "Warmup" } else { "Execution" };
         // println!(
         //     "Iteration({}) {}: time: {:?}, bp_stats: {}",
         //     name, i, elapsed, diff
         // );
-        println!("Iteration({}): time: {:?}", i, elapsed);
+        println!("Iteration({}) {}: time: {:?}", name, i, elapsed);
         if i >= warmup {
             avg += elapsed.as_millis();
         }

@@ -447,7 +447,7 @@ impl Iterator for KeyValueGenerator {
     }
 }
 
-pub fn load_table(params: &SecBenchParams, table: &Arc<FosterBtree<BufferPool>>) {
+pub fn load_table(params: &SecBenchParams, table: &Arc<FosterBtree<impl MemPool>>) {
     let num_insertion_threads = 6;
 
     let mut gen = KeyValueGenerator::new(
@@ -530,6 +530,23 @@ fn sync_filesystem() -> Result<(), std::io::Error> {
     }
     Ok(())
 }
+pub fn get_bp(num_frames: usize) -> Arc<impl MemPool> {
+    #[cfg(feature = "vmcache")]
+    {
+        use fbtree::bp::get_test_vmcache;
+        get_test_vmcache::<false, 64>(num_frames)
+    }
+    #[cfg(feature = "bp_clock")]
+    {
+        use fbtree::bp::get_test_bp_clock;
+        get_test_bp_clock::<64>(num_frames)
+    }
+    #[cfg(not(any(feature = "vmcache", feature = "bp_clock")))]
+    {
+        use fbtree::bp::get_test_bp;
+        get_test_bp(num_frames)
+    }
+}
 
 fn main() {
     let params = SecBenchParams::parse();
@@ -547,7 +564,7 @@ fn main() {
     {
         flush_internal_cache_and_everything();
         println!("=========================================================================================");
-        let bp = get_test_bp(params.bp_size);
+        let bp = get_bp(params.bp_size);
         let primary = Arc::new(FosterBtree::new(ContainerKey::new(0, 0), Arc::clone(&bp)));
         load_table(&params, &primary);
         // Print the page stats
