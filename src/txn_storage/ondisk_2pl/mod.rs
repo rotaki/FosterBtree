@@ -744,19 +744,19 @@ impl NoWaitTxn {
             let ps = &si.ss.ps;
             let (p_key, p_hint) = s_value.split_at(s_value.len() - 8);
             let p_hint = PhysicalAddress::from_bytes(p_hint);
-            let (p_value, p_addr) = self.read(ps, p_key, Some(p_hint.clone()))?;
+            let (p_value, _p_addr) = self.read(ps, p_key, Some(p_hint.clone()))?;
             // println!("Hint: {}, Actual: {}", p_hint, p_addr);
             // Rewrite the physical address in the secondary index. The last 8 bytes should be updated with the new physical address.
             #[cfg(not(feature = "no_tree_hint"))]
-            if p_hint != p_addr {
+            if p_hint != _p_addr {
                 // Update the physical address in the secondary index
                 // println!("Sec Update From: {}, To: {}", p_hint, p_addr);
-                let new_p_addr = p_addr.to_bytes();
+                let new_p_addr = _p_addr.to_bytes();
                 let new_s_val = [p_key, &new_p_addr].concat();
-                if p_hint.page_id != p_addr.page_id {
+                if p_hint.page_id != _p_addr.page_id {
                     si.cursor.opportunistic_update(&new_s_val, true);
                     si.page_hint_failed += 1;
-                } else if p_hint.frame_id != p_addr.frame_id {
+                } else if p_hint.frame_id != _p_addr.frame_id {
                     si.cursor.opportunistic_update(&new_s_val, false);
                     si.frame_hint_failed += 1;
                 }

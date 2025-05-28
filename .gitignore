@@ -5,3 +5,7 @@
 *.db.wal
 
 /results
+/results*
+
+/fbt_*
+/tpcc_*

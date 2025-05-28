@@ -1690,7 +1690,7 @@ impl<T: MemPool> FosterBtree<T> {
     pub fn traverse_to_leaf_for_read_with_hint(
         &self,
         key: &[u8],
-        hint: Option<PageFrameKey>,
+        _hint: Option<PageFrameKey>,
     ) -> FrameReadGuard<T::EP> {
         #[cfg(feature = "no_tree_hint")]
         {
@@ -1699,7 +1699,7 @@ impl<T: MemPool> FosterBtree<T> {
         #[cfg(not(feature = "no_tree_hint"))]
         {
             // Use the hint to speculatively find the page that contains the key.
-            if let Some(hint) = &hint {
+            if let Some(hint) = &_hint {
                 if !self.mem_pool.is_in_mem(*hint) {
                     // If the hinted page is not in the buffer pool, we fall back to the normal traversal
                     // to avoid reading unnecessary pages from the disk.
@@ -1721,7 +1721,7 @@ impl<T: MemPool> FosterBtree<T> {
                 }
             }
             // println!("Hint did not work: {:?}", hint);
-            self.traverse_to_leaf_for_read_from(key, hint.unwrap_or(self.root_key))
+            self.traverse_to_leaf_for_read_from(key, _hint.unwrap_or(self.root_key))
         }
     }
 
@@ -1839,7 +1839,7 @@ impl<T: MemPool> FosterBtree<T> {
     pub fn traverse_to_leaf_for_write_with_hint(
         &self,
         key: &[u8],
-        hint: Option<PageFrameKey>,
+        _hint: Option<PageFrameKey>,
     ) -> FrameWriteGuard<T::EP> {
         #[cfg(feature = "no_tree_hint")]
         {
@@ -1848,7 +1848,7 @@ impl<T: MemPool> FosterBtree<T> {
         #[cfg(not(feature = "no_tree_hint"))]
         {
             // Use the hint to speculatively find the page that contains the key.
-            if let Some(hint) = &hint {
+            if let Some(hint) = &_hint {
                 let mut attempts = 0;
                 loop {
                     let page = self.read_page(*hint);
@@ -1885,7 +1885,7 @@ impl<T: MemPool> FosterBtree<T> {
                     break;
                 }
             }
-            self.traverse_to_leaf_for_write_from(key, hint.unwrap_or(self.root_key))
+            self.traverse_to_leaf_for_write_from(key, _hint.unwrap_or(self.root_key))
         }
     }
 
@@ -2339,23 +2339,23 @@ impl<T: MemPool> FosterBtreeCursor<T> {
     }
 
     #[inline]
-    pub fn opportunistic_update(&mut self, val: &[u8], make_dirty: bool) {
+    pub fn opportunistic_update(&mut self, _val: &[u8], _make_dirty: bool) {
         #[cfg(feature = "no_tree_hint")]
         {}
         #[cfg(not(feature = "no_tree_hint"))]
         {
             let frame_read_guard = self.current_leaf_page.take().unwrap();
 
-            let read_guard = match frame_read_guard.try_upgrade(make_dirty) {
+            let read_guard = match frame_read_guard.try_upgrade(_make_dirty) {
                 Ok(mut write_guard) => {
                     let current_val = write_guard.get_val(self.current_slot_id);
-                    if val == current_val {
+                    if _val == current_val {
                         // No need to update
-                    } else if val.len() != write_guard.get_val(self.current_slot_id).len() {
+                    } else if _val.len() != write_guard.get_val(self.current_slot_id).len() {
                         panic!("Value length mismatch");
                     } else {
                         // Step 4: Perform the update
-                        write_guard.update_at(self.current_slot_id, None, val);
+                        write_guard.update_at(self.current_slot_id, None, _val);
                     }
                     write_guard.downgrade()
                 }
