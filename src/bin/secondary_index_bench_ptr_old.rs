@@ -17,7 +17,11 @@
 
 use criterion::black_box;
 use fbtree::{
-    access_method::fbt::{BTreeKey, FosterBtreeCursor}, bp::{ContainerId, ContainerKey, MemPool, PageFrameKey}, prelude::{FosterBtree, FosterBtreePage, PageId}, print_cfg_flags, utils::Permutation
+    access_method::fbt::{BTreeKey, FosterBtreeCursor},
+    bp::{ContainerId, ContainerKey, MemPool, PageFrameKey},
+    prelude::{FosterBtree, FosterBtreePage, PageId},
+    print_cfg_flags,
+    utils::Permutation,
 };
 
 use clap::Parser;

@@ -58,6 +58,9 @@ pub struct SecBenchParams {
     /// With hint. 0: no hint, 1: with hint
     #[clap(short = 'h', long, default_value = "1")]
     pub with_hint: usize,
+    /// Number of threads
+    #[clap(short, long, default_value = "1")]
+    pub threads: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -591,7 +594,7 @@ pub fn load_table(
 }
 
 pub fn do_work(
-    done: Arc<AtomicBool>,
+    count: usize,
     secondary: &SecondaryIndex<BufferPool>,
     params: &SecBenchParams,
     repair_type: &RepairType,
@@ -602,7 +605,7 @@ pub fn do_work(
     let mut read_count = 0;
     let mut modify_hint_count = 0;
     let mut zipf = FastZipf::new(SmallRng::from_os_rng(), params.skew_factor, params.num_keys);
-    while !done.load(std::sync::atomic::Ordering::Relaxed) {
+    while read_count < count {
         let key = get_key_bytes(zipf.sample(), params.key_size);
         match read_write_ratio.which_to_do() {
             0 => {
@@ -677,13 +680,7 @@ pub fn main() {
     std::thread::scope(|s| {
         for _ in 0..1 {
             s.spawn(|| {
-                do_work(
-                    Arc::clone(&done),
-                    &secondary,
-                    &params,
-                    &repair_type,
-                    &rwratio,
-                );
+                do_work(params.num_keys, &secondary, &params, &repair_type, &rwratio);
             });
         }
 
@@ -702,16 +699,21 @@ pub fn main() {
         &hint, params.exec_time, rwratio, repair_type
     );
     done.store(false, std::sync::atomic::Ordering::Relaxed);
-    let num_threads = 1;
+    let num_threads = params.threads;
     let mut threads = Vec::with_capacity(num_threads);
     for _ in 0..num_threads {
-        let done = Arc::clone(&done);
         let secondary = secondary.clone();
         let params = params.clone();
         let repair_type = repair_type.clone();
         let rwratio_exec = rwratio.clone();
         threads.push(std::thread::spawn(move || {
-            do_work(done, &secondary, &params, &repair_type, &rwratio_exec)
+            do_work(
+                params.num_keys * 10,
+                &secondary,
+                &params,
+                &repair_type,
+                &rwratio_exec,
+            )
         }));
     }
 
