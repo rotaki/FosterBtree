@@ -29,7 +29,6 @@ cargo build --release --bin secondary_index_point_read_with_slot_hint_modificati
 # ./target/release/secondary_index_point_read_with_slot_hint_modification -b 60000 -n 1000000 -k 10 -r 100 -w 20 -e 60 -s 0 -h 0 -m 99 > slot_modification_read_no_hint_t1_n1000000_k10_r100_b60000_s0_m99.txt
 
 
-
 ./target/release/secondary_index_point_read_with_slot_hint_modification -t 10 -b 60000 -n 1000000 -k 10 -r 100 -w 20 -e 60 -s 0 -m 0  > t10_slot_modification_read_t1_n1000000_k10_r100_b60000_s0_m0.txt
 ./target/release/secondary_index_point_read_with_slot_hint_modification -t 10 -b 60000 -n 1000000 -k 10 -r 100 -w 20 -e 60 -s 0 -m 20 > t10_slot_modification_read_t1_n1000000_k10_r100_b60000_s0_m20.txt
 ./target/release/secondary_index_point_read_with_slot_hint_modification -t 10 -b 60000 -n 1000000 -k 10 -r 100 -w 20 -e 60 -s 0 -m 40 > t10_slot_modification_read_t1_n1000000_k10_r100_b60000_s0_m40.txt

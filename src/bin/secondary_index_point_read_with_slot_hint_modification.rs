@@ -11,7 +11,8 @@
 use criterion::black_box;
 use fbtree::{
     access_method::fbt::{BTreeKey, FosterBtreeCursor},
-    bp::{ContainerId, ContainerKey, MemPool, PageFrameKey},
+    bp::{get_test_bp_clock, ContainerId, ContainerKey, MemPool, PageFrameKey},
+    container::ContainerManager,
     prelude::{FosterBtree, FosterBtreePage, PageId},
     random::{gen_random_int, FastZipf},
 };
@@ -583,7 +584,7 @@ fn get_new_value(value_size: usize) -> Vec<u8> {
 // Insert num_keys keys into the table
 pub fn load_table(
     params: &SecBenchParams,
-    table: &Arc<FosterBtree<BufferPool>>,
+    table: &Arc<FosterBtree<impl MemPool>>,
     iter: impl Iterator<Item = usize>,
 ) {
     for key in iter {
@@ -595,13 +596,13 @@ pub fn load_table(
 
 pub fn do_work(
     count: usize,
-    secondary: &SecondaryIndex<BufferPool>,
+    secondary: &SecondaryIndex<impl MemPool>,
     params: &SecBenchParams,
     repair_type: &RepairType,
     read_write_ratio: &ReadWriteRatio,
 ) -> Histogram<u64> {
     let mut histogram = Histogram::<u64>::new_with_bounds(1, 1_000_000_000, 3).unwrap();
-    let hmr = HintModificationRatio::new(50, 10, 40);
+    let hmr = HintModificationRatio::new(10, 10, 80);
     let mut read_count = 0;
     let mut modify_hint_count = 0;
     let mut zipf = FastZipf::new(SmallRng::from_os_rng(), params.skew_factor, params.num_keys);
@@ -644,10 +645,28 @@ pub fn do_work(
     histogram
 }
 
+pub fn get_bp(num_frames: usize, cm: Arc<ContainerManager>) -> Arc<impl MemPool> {
+    #[cfg(feature = "vmcache")]
+    {
+        use fbtree::bp::VMCachePool;
+        Arc::new(VMCachePool::<false, 64>::new(num_frames, cm).unwrap())
+    }
+    #[cfg(feature = "bp_clock")]
+    {
+        use fbtree::bp::BufferPoolClock;
+        Arc::new(BufferPoolClock::<64>::new(num_frames, cm).unwrap())
+    }
+    #[cfg(not(any(feature = "vmcache", feature = "bp_clock")))]
+    {
+        use fbtree::bp::BufferPool;
+        Arc::new(BufferPool::new(num_frames, cm).unwrap())
+    }
+}
+
 pub fn main() {
     let params = SecBenchParams::parse();
     println!("{:?}", params);
-    let bp = get_test_bp(params.bp_size);
+    let bp = get_test_bp_clock::<64>(params.bp_size);
     let primary = Arc::new(FosterBtree::new(ContainerKey::new(0, 0), Arc::clone(&bp)));
     let total_num_keys = params.num_keys;
     println!("Loading the table with {} keys", total_num_keys);
