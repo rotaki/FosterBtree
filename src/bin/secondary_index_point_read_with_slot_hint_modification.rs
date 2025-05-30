@@ -727,7 +727,7 @@ pub fn main() {
         let rwratio_exec = rwratio.clone();
         threads.push(std::thread::spawn(move || {
             do_work(
-                params.num_keys * 10,
+                params.num_keys * 10 / num_threads,
                 &secondary,
                 &params,
                 &repair_type,
