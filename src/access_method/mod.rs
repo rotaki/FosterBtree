@@ -5,6 +5,7 @@ use crate::bp::MemPoolStatus;
 pub mod append_only_store;
 pub mod chain;
 pub mod fbt;
+pub mod field_level_index_trait;
 pub mod hash_fbt;
 pub mod hashindex;
 
@@ -38,6 +39,7 @@ pub mod prelude {
     pub use super::append_only_store::prelude::*;
     pub use super::chain::prelude::*;
     pub use super::fbt::prelude::*;
+    pub use super::field_level_index_trait::*;
     pub use super::hash_fbt::prelude::*;
     pub use super::hashindex::prelude::*;
     pub use super::AccessMethodError;
