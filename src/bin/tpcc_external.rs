@@ -1,7 +1,7 @@
 use clap::Parser;
 use fbtree::{
     affinity::{get_current_cpu, get_total_cpus, with_affinity},
-    bp::MemPool,
+    bp::{get_bp, MemPool},
     container::ContainerManager,
     prelude::{print_tpcc_stats, run_tpcc, tpcc_load_schema, TPCCConfig, PAGE_SIZE},
     print_cfg_flags,
@@ -16,24 +16,6 @@ use std::sync::Arc;
 //
 // #[global_allocator]
 // static GLOBAL: MiMalloc = MiMalloc;
-
-pub fn get_bp(num_frames: usize, cm: Arc<ContainerManager>) -> Arc<impl MemPool> {
-    #[cfg(feature = "vmcache")]
-    {
-        use fbtree::bp::VMCachePool;
-        Arc::new(VMCachePool::<false, 64>::new(num_frames, cm).unwrap())
-    }
-    #[cfg(feature = "bp_clock")]
-    {
-        use fbtree::bp::BufferPoolClock;
-        Arc::new(BufferPoolClock::<64>::new(num_frames, cm).unwrap())
-    }
-    #[cfg(not(any(feature = "vmcache", feature = "bp_clock")))]
-    {
-        use fbtree::bp::BufferPool;
-        Arc::new(BufferPool::new(num_frames, cm).unwrap())
-    }
-}
 
 pub fn main() {
     println!("Page size: {}", PAGE_SIZE);

@@ -31,7 +31,7 @@ mod tests {
     use super::*;
     use crate::{
         bp::{
-            get_test_bp,
+            get_test_bp_lru,
             prelude::{ContainerId, DatabaseId},
             BufferPool, MemPool,
         },
@@ -45,7 +45,7 @@ mod tests {
     }
 
     fn get_on_disk_storage() -> Arc<impl TxnStorageTrait> {
-        let bp = get_test_bp(1024);
+        let bp = get_test_bp_lru(1024);
         Arc::new(OnDiskStorage::new(&bp))
     }
 

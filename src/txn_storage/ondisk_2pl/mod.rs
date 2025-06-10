@@ -1328,7 +1328,7 @@ impl<M: MemPool> TxnStorageTrait for NoWaitTxnStorage<M> {
 #[cfg(test)]
 mod tests {
     use crate::{
-        bp::get_test_bp,
+        bp::get_test_bp_lru,
         prelude::{ContainerDS, ContainerOptions, DBOptions, TxnOptions},
     };
 
@@ -1337,7 +1337,7 @@ mod tests {
     #[test]
     fn test_insert_and_read_back() {
         // Create a NoWaitTxnStorage
-        let bp = get_test_bp(10);
+        let bp = get_test_bp_lru(10);
         let storage = NoWaitTxnStorage::new(&bp);
 
         // Open a database
@@ -1380,7 +1380,7 @@ mod tests {
     #[test]
     fn test_insert_and_update_in_same_txn() {
         // Create a NoWaitTxnStorage
-        let bp = get_test_bp(10);
+        let bp = get_test_bp_lru(10);
         let storage = NoWaitTxnStorage::new(&bp);
 
         // Open a database
@@ -1431,7 +1431,7 @@ mod tests {
     #[test]
     fn test_insert_and_delete_in_same_txn() {
         // Create a NoWaitTxnStorage
-        let bp = get_test_bp(10);
+        let bp = get_test_bp_lru(10);
         let storage = NoWaitTxnStorage::new(&bp);
 
         // Open a database
@@ -1479,7 +1479,7 @@ mod tests {
     #[test]
     fn test_conflicting_transactions() {
         // Create a NoWaitTxnStorage
-        let bp = get_test_bp(10);
+        let bp = get_test_bp_lru(10);
         let storage = NoWaitTxnStorage::new(&bp);
 
         // Open a database
@@ -1523,7 +1523,7 @@ mod tests {
     #[test]
     fn test_transaction_abort() {
         // Create a NoWaitTxnStorage
-        let bp = get_test_bp(10);
+        let bp = get_test_bp_lru(10);
         let storage = NoWaitTxnStorage::new(&bp);
 
         // Open a database
@@ -1560,7 +1560,7 @@ mod tests {
     #[test]
     fn test_container_durability() {
         // Create a NoWaitTxnStorage
-        let bp = get_test_bp(10);
+        let bp = get_test_bp_lru(10);
         let storage = NoWaitTxnStorage::new(&bp);
 
         // Open a database

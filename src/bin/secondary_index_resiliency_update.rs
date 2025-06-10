@@ -17,7 +17,7 @@
 use criterion::black_box;
 use fbtree::{
     access_method::fbt::{BTreeKey, FosterBtreeCursor},
-    bp::{get_test_bp, ContainerId, ContainerKey, MemPool, PageFrameKey},
+    bp::{get_test_bp_lru, ContainerId, ContainerKey, MemPool, PageFrameKey},
     prelude::{FosterBtree, FosterBtreePage, PageId},
     random::small_thread_rng,
     utils::Permutation,
@@ -425,7 +425,7 @@ fn main() {
 
     {
         println!("=========================================================================================");
-        let bp = get_test_bp(params.bp_size);
+        let bp = get_test_bp_lru(params.bp_size);
         let primary = Arc::new(FosterBtree::new(ContainerKey::new(0, 0), Arc::clone(&bp)));
         let perm = Permutation::new(0, params.num_keys - 1);
         load_table(&params, &primary, perm.clone());

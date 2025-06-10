@@ -1060,7 +1060,7 @@ unsafe impl Sync for BufferPool {}
 mod tests {
     #[allow(unused_imports)]
     use crate::log;
-    use crate::{bp::get_test_bp, log_info};
+    use crate::{bp::get_test_bp_lru, log_info};
 
     use super::*;
     use std::thread::{self};
@@ -1070,7 +1070,7 @@ mod tests {
     fn test_bp_and_frame_latch() {
         let db_id = 0;
         let num_frames = 10;
-        let bp = get_test_bp(num_frames);
+        let bp = get_test_bp_lru(num_frames);
         let c_key = ContainerKey::new(db_id, 0);
         let frame = bp.create_new_page_for_write(c_key).unwrap();
         let key = frame.page_frame_key().unwrap();
@@ -1113,7 +1113,7 @@ mod tests {
     fn test_bp_write_back_simple() {
         let db_id = 0;
         let num_frames = 1;
-        let bp = get_test_bp(num_frames);
+        let bp = get_test_bp_lru(num_frames);
         let c_key = ContainerKey::new(db_id, 0);
 
         let key1 = {
@@ -1151,7 +1151,7 @@ mod tests {
         let db_id = 0;
         let mut keys = Vec::new();
         let num_frames = 1;
-        let bp = get_test_bp(num_frames);
+        let bp = get_test_bp_lru(num_frames);
         let c_key = ContainerKey::new(db_id, 0);
 
         for i in 0..100 {
@@ -1176,7 +1176,7 @@ mod tests {
         let db_id = 0;
 
         let num_frames = 2;
-        let bp = get_test_bp(num_frames);
+        let bp = get_test_bp_lru(num_frames);
         let c_key = ContainerKey::new(db_id, 0);
 
         let num_traversal = 100;
@@ -1218,7 +1218,7 @@ mod tests {
         let db_id = 0;
 
         let num_frames = 1;
-        let bp = get_test_bp(num_frames);
+        let bp = get_test_bp_lru(num_frames);
         let c_key = ContainerKey::new(db_id, 0);
 
         let mut guard1 = bp.create_new_page_for_write(c_key).unwrap();
@@ -1240,7 +1240,7 @@ mod tests {
         let db_id = 0;
 
         let num_frames = 10;
-        let bp = get_test_bp(num_frames);
+        let bp = get_test_bp_lru(num_frames);
         let c_key = ContainerKey::new(db_id, 0);
 
         let mut keys = Vec::new();
@@ -1323,7 +1323,7 @@ mod tests {
         let db_id = 0;
 
         let num_frames = 1;
-        let bp = get_test_bp(num_frames);
+        let bp = get_test_bp_lru(num_frames);
         let c_key = ContainerKey::new(db_id, 0);
 
         let key_1 = {

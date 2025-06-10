@@ -1,6 +1,6 @@
 use clap::{Parser, ValueEnum};
 use fbtree::{
-    bp::{get_test_bp, get_test_bp_clock, get_test_vmcache, ContainerKey, MemPool},
+    bp::{get_test_bp_clock, get_test_bp_lru, get_test_vmcache, ContainerKey, MemPool},
     prelude::{FosterBtree, UniqueKeyIndex},
     random::RandomKVs,
 };
@@ -67,7 +67,7 @@ fn main() {
     let bp_size = 100000;
     match params.bp_type {
         BPType::BPLRU => {
-            let bp = get_test_bp(bp_size);
+            let bp = get_test_bp_lru(bp_size);
             let btree = Arc::new(FosterBtree::new(c_key, bp.clone()));
 
             let start = std::time::Instant::now();

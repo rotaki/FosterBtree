@@ -7,7 +7,7 @@ use std::sync::{
 use clap::Parser;
 use fbtree::{
     affinity::{get_current_cpu, get_total_cpus, with_affinity},
-    bp::MemPool,
+    bp::{get_test_bp, MemPool},
     prelude::{
         print_tpcc_stats, run_tpcc, tpcc_gen_all_tables, tpcc_show_table_stats, TPCCConfig,
         PAGE_SIZE,
@@ -15,32 +15,6 @@ use fbtree::{
     print_cfg_flags,
     txn_storage::NoWaitTxnStorage,
 };
-
-// #[global_allocator]
-// static ALLOC: rpmalloc::RpMalloc = rpmalloc::RpMalloc;
-
-// use mimalloc::MiMalloc;
-//
-// #[global_allocator]
-// static GLOBAL: MiMalloc = MiMalloc;
-
-pub fn get_bp(num_frames: usize) -> Arc<impl MemPool> {
-    #[cfg(feature = "vmcache")]
-    {
-        use fbtree::bp::get_test_vmcache;
-        get_test_vmcache::<false, 64>(num_frames)
-    }
-    #[cfg(feature = "bp_clock")]
-    {
-        use fbtree::bp::get_test_bp_clock;
-        get_test_bp_clock::<64>(num_frames)
-    }
-    #[cfg(not(any(feature = "vmcache", feature = "bp_clock")))]
-    {
-        use fbtree::bp::get_test_bp;
-        get_test_bp(num_frames)
-    }
-}
 
 pub fn main() {
     println!("Page size: {}", PAGE_SIZE);
@@ -64,7 +38,7 @@ pub fn main() {
         num_frames * PAGE_SIZE / (1024 * 1024 * 1024)
     );
 
-    let bp = get_bp(num_frames);
+    let bp = get_test_bp(num_frames);
 
     let txn_storage = NoWaitTxnStorage::new(&bp);
     let tbl_info = tpcc_gen_all_tables(&txn_storage, config.num_warehouses);
@@ -85,8 +59,8 @@ pub fn main() {
         if config.exec_time == 0 {
             panic!("Execution time is 0. Please specify a non-zero execution time.");
         }
-        let stats_and_outs = run_tpcc(false, &config, &txn_storage, &tbl_info);
-        stats_and_outs
+        
+        run_tpcc(false, &config, &txn_storage, &tbl_info)
     })
     .unwrap();
 

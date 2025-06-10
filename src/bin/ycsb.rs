@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use clap::Parser;
 use fbtree::{
-    bp::{get_test_bp, MemPool},
+    bp::{get_test_bp_lru, MemPool},
     prelude::{
         run_ycsb_for_thread, ycsb_load_all_tables, ycsb_show_table_stats, ReadTxn, TxnStorageTrait,
         UpdateTxn, YCSBConfig, YCSBOutput, YCSBStat, YCSBTableInfo, YCSBTxnProfile,
@@ -46,7 +46,7 @@ pub fn main() {
         "expected size in gigabytes: {}",
         size as f64 / 1024.0 / 1024.0 / 1024.0
     );
-    let bp = get_test_bp(num_frames);
+    let bp = get_test_bp_lru(num_frames);
     let txn_storage = NoWaitTxnStorage::new(&bp);
     let tbl_info = ycsb_load_all_tables(&txn_storage, &config);
     ycsb_show_table_stats(&txn_storage, &tbl_info);

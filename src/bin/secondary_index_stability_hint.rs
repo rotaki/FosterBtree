@@ -8,7 +8,7 @@ use fbtree::{
 use clap::Parser;
 use fbtree::{
     access_method::UniqueKeyIndex,
-    bp::{get_test_bp, BufferPool},
+    bp::{get_test_bp_lru, BufferPool},
     random::gen_random_byte_vec,
 };
 use std::{process::Command, sync::Arc};
@@ -454,7 +454,7 @@ pub fn delete_from_tables<M: MemPool>(
 }
 
 pub fn insert_experiment(params: SecBenchParams) {
-    let bp = get_test_bp(params.bp_size);
+    let bp = get_test_bp_lru(params.bp_size);
     let primary = Arc::new(FosterBtree::new(ContainerKey::new(0, 0), Arc::clone(&bp)));
     let total_num_keys = (params.num_keys as f64 * 2.0) as usize;
     let perm = Permutation::new(0, total_num_keys - 1);
@@ -508,7 +508,7 @@ pub fn insert_experiment(params: SecBenchParams) {
 }
 
 pub fn delete_experiment(params: SecBenchParams) {
-    let bp = get_test_bp(params.bp_size);
+    let bp = get_test_bp_lru(params.bp_size);
     let primary = Arc::new(FosterBtree::new(ContainerKey::new(0, 0), Arc::clone(&bp)));
     let total_num_keys = params.num_keys;
     let perm = Permutation::new(0, total_num_keys - 1);

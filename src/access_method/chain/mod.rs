@@ -218,7 +218,7 @@ mod tests {
     use std::{collections::HashSet, fs::File, sync::Arc};
 
     use crate::{
-        bp::{get_in_mem_pool, get_test_bp, BufferPool},
+        bp::{get_in_mem_pool, get_test_bp_lru, BufferPool},
         container::ContainerManager,
         prelude::UniqueKeyIndex,
         random::RandomKVs,
@@ -244,7 +244,7 @@ mod tests {
     }
 
     #[rstest]
-    #[case::bp(get_test_bp(20))]
+    #[case::bp(get_test_bp_lru(20))]
     #[case::in_mem(get_in_mem_pool())]
     fn test_random_insertion<T: MemPool>(#[case] bp: Arc<T>) {
         let chain = setup_hashchain_empty(bp.clone());
@@ -271,7 +271,7 @@ mod tests {
     }
 
     #[rstest]
-    #[case::bp(get_test_bp(20))]
+    #[case::bp(get_test_bp_lru(20))]
     #[case::in_mem(get_in_mem_pool())]
     fn test_random_updates<T: MemPool>(#[case] bp: Arc<T>) {
         let chain = setup_hashchain_empty(bp.clone());
@@ -360,7 +360,7 @@ mod tests {
     // }
 
     #[rstest]
-    #[case::bp(get_test_bp(20))]
+    #[case::bp(get_test_bp_lru(20))]
     #[case::in_mem(get_in_mem_pool())]
     fn test_random_upserts<T: MemPool>(#[case] bp: Arc<T>) {
         let chain = setup_hashchain_empty(bp.clone());
@@ -451,7 +451,7 @@ mod tests {
     // }
 
     #[rstest]
-    #[case::bp(get_test_bp(20))]
+    #[case::bp(get_test_bp_lru(20))]
     #[case::in_mem(get_in_mem_pool())]
     fn test_scan<T: MemPool>(#[case] bp: Arc<T>) {
         let chain = Arc::new(setup_hashchain_empty(bp.clone()));
@@ -482,7 +482,7 @@ mod tests {
     }
 
     #[rstest]
-    #[case::bp(get_test_bp(100))]
+    #[case::bp(get_test_bp_lru(100))]
     #[case::in_mem(get_in_mem_pool())]
     fn test_insertion_stress<T: MemPool>(#[case] bp: Arc<T>) {
         let num_keys = 10000;
@@ -560,7 +560,7 @@ mod tests {
 
     // skip default
     #[rstest]
-    #[case::bp(get_test_bp(100))]
+    #[case::bp(get_test_bp_lru(100))]
     #[case::in_mem(get_in_mem_pool())]
     #[ignore]
     fn replay_stress<T: MemPool>(#[case] bp: Arc<T>) {
@@ -610,7 +610,7 @@ mod tests {
     }
 
     #[rstest]
-    #[case::bp(get_test_bp(100))]
+    #[case::bp(get_test_bp_lru(100))]
     #[case::in_mem(get_in_mem_pool())]
     fn test_parallel_insertion<T: MemPool>(#[case] bp: Arc<T>) {
         // init_test_logger();

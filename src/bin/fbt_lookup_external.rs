@@ -7,7 +7,7 @@ use clap::Parser;
 use criterion::black_box;
 use fbtree::{
     affinity::{get_current_cpu, get_total_cpus, with_affinity},
-    bp::{ContainerKey, MemPool},
+    bp::{get_bp, ContainerKey, MemPool},
     container::ContainerManager,
     event_tracer::trace_lookup,
     prelude::{urand_int, FosterBtree, PAGE_SIZE},
@@ -55,24 +55,6 @@ pub fn get_val(num: usize, size: usize) -> Vec<u8> {
     val
 }
 
-pub fn get_bp(num_frames: usize, cm: Arc<ContainerManager>) -> Arc<impl MemPool> {
-    #[cfg(feature = "vmcache")]
-    {
-        use fbtree::bp::VMCachePool;
-        Arc::new(VMCachePool::<false, 64>::new(num_frames, cm).unwrap())
-    }
-    #[cfg(feature = "bp_clock")]
-    {
-        use fbtree::bp::BufferPoolClock;
-        Arc::new(BufferPoolClock::<64>::new(num_frames, cm).unwrap())
-    }
-    #[cfg(not(any(feature = "vmcache", feature = "bp_clock")))]
-    {
-        use fbtree::bp::BufferPool;
-        Arc::new(BufferPool::new(num_frames, cm).unwrap())
-    }
-}
-
 pub fn run_bench_for_thread(
     is_warmup: bool,
     thread_id: usize,
@@ -98,10 +80,8 @@ pub fn run_bench_for_thread(
         while flag.load(Ordering::Acquire) {
             let key_num = urand_int(0, config.num_entries - 1);
             let key = get_val(key_num, KEY_SIZE);
-            let (_, val) = fbt.get_kv(&key).expect(&format!(
-                "Failed to get key {} in thread {}",
-                key_num, thread_id
-            ));
+            let (_, val) = fbt.get_kv(&key).unwrap_or_else(|_| panic!("Failed to get key {} in thread {}",
+                key_num, thread_id));
             debug_assert_eq!(val, get_val(key_num, VAL_SIZE));
             black_box(val);
             if !is_warmup {
@@ -188,7 +168,7 @@ pub fn main() {
         // Warmup
         if config.warmup_time > 0 {
             println!("Running warmup for {} seconds", config.warmup_time);
-            let _ = run_bench(true, &config, &fbt);
+            run_bench(true, &config, &fbt);
             println!("BP stats after warmup: \n{}", unsafe { bp.stats() });
         } else {
             println!("Warm up skipped");

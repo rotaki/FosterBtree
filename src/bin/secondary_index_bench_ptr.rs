@@ -731,8 +731,8 @@ pub fn get_bp(num_frames: usize) -> Arc<impl MemPool> {
     }
     #[cfg(not(any(feature = "vmcache", feature = "bp_clock")))]
     {
-        use fbtree::bp::get_test_bp;
-        get_test_bp(num_frames)
+        use fbtree::bp::get_test_bp_lru;
+        get_test_bp_lru(num_frames)
     }
 }
 

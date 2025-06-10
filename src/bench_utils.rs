@@ -6,7 +6,7 @@ use crate::{
     access_method::UniqueKeyIndex,
     access_method::{fbt::FosterBtree, hashindex::prelude::*},
     bp::{
-        get_in_mem_pool, get_test_bp,
+        get_in_mem_pool, get_test_bp_lru,
         prelude::{ContainerKey, InMemPool, MemPool},
         BufferPool,
     },
@@ -121,7 +121,7 @@ pub fn gen_foster_btree_in_mem() -> Arc<FosterBtree<InMemPool>> {
 pub fn gen_foster_btree_on_disk(bp_size: usize) -> Arc<FosterBtree<BufferPool>> {
     let (db_id, c_id) = (0, 0);
     let c_key = ContainerKey::new(db_id, c_id);
-    let btree = FosterBtree::new(c_key, get_test_bp(bp_size));
+    let btree = FosterBtree::new(c_key, get_test_bp_lru(bp_size));
     Arc::new(btree)
 }
 
@@ -280,7 +280,7 @@ pub fn gen_paged_hash_map_on_disk(bp_size: usize) -> Arc<PagedHashMap<BufferPool
     // let func = Box::new(|old: &[u8], new: &[u8]| new.to_vec());
     let c_key = ContainerKey::new(0, 0);
     // let map = PagedHashMap::new(func, get_test_bp(bp_size), c_key, false);
-    let map = PagedHashMap::new(get_test_bp(bp_size), c_key, false);
+    let map = PagedHashMap::new(get_test_bp_lru(bp_size), c_key, false);
     Arc::new(map)
 }
 

@@ -25,7 +25,7 @@ use fbtree::{
 use clap::Parser;
 use fbtree::{
     access_method::{AccessMethodError, UniqueKeyIndex},
-    bp::{get_test_bp, BufferPool},
+    bp::{get_test_bp_lru, BufferPool},
     random::gen_random_byte_vec,
 };
 use std::{process::Command, sync::Arc};
@@ -489,7 +489,7 @@ pub fn one_experiment(params: SecBenchParams) {
         _ => panic!("Invalid repair type"),
     };
     println!("Repair type: {:?}", repair_type);
-    let bp = get_test_bp(params.bp_size);
+    let bp = get_test_bp_lru(params.bp_size);
     let primary = Arc::new(FosterBtree::new(ContainerKey::new(0, 0), Arc::clone(&bp)));
     let total_num_keys = params.num_keys * 2;
     let perm = Permutation::new(0, total_num_keys - 1);

@@ -20,7 +20,6 @@ use fbtree::{
 use clap::Parser;
 use fbtree::{
     access_method::{AccessMethodError, UniqueKeyIndex},
-    bp::{get_test_bp, BufferPool},
     random::gen_random_byte_vec,
 };
 use hdrhistogram::Histogram;

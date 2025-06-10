@@ -2,7 +2,7 @@ use clap::Parser;
 use core::panic;
 use fbtree::{
     access_method::prelude::*,
-    bp::{get_test_bp, BufferPool},
+    bp::{get_test_bp_lru, BufferPool},
     prelude::PAGE_SIZE,
     random::gen_random_byte_vec,
 };
@@ -141,7 +141,7 @@ fn main() {
     println!("Page size: {}", PAGE_SIZE);
     println!("{:?}", params);
 
-    let bp = get_test_bp(params.bp_size);
+    let bp = get_test_bp_lru(params.bp_size);
     let table = get_index(bp.clone(), &params);
 
     println!("Loading table...");

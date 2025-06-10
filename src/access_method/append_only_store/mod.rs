@@ -335,7 +335,7 @@ impl<T: MemPool> Iterator for AppendOnlyStoreScanner<T> {
 
 #[cfg(test)]
 mod tests {
-    use crate::bp::{get_test_bp, BufferPool};
+    use crate::bp::{get_test_bp_lru, BufferPool};
     use crate::container::ContainerManager;
     use crate::random::{gen_random_byte_vec, RandomKVs};
 
@@ -351,7 +351,7 @@ mod tests {
 
     #[test]
     fn test_small_append() {
-        let mem_pool = get_test_bp(10);
+        let mem_pool = get_test_bp_lru(10);
         let container_key = get_c_key();
         let store = AppendOnlyStore::new(container_key, mem_pool);
 
@@ -362,7 +362,7 @@ mod tests {
 
     #[test]
     fn test_large_append() {
-        let mem_pool = get_test_bp(10);
+        let mem_pool = get_test_bp_lru(10);
         let container_key = get_c_key();
         let store = Arc::new(AppendOnlyStore::new(container_key, mem_pool));
 
@@ -380,7 +380,7 @@ mod tests {
 
     #[test]
     fn test_page_overflow() {
-        let mem_pool = get_test_bp(10);
+        let mem_pool = get_test_bp_lru(10);
         let container_key = get_c_key();
         let store = AppendOnlyStore::new(container_key, mem_pool);
 
@@ -395,7 +395,7 @@ mod tests {
 
     #[test]
     fn test_basic_scan() {
-        let mem_pool = get_test_bp(10);
+        let mem_pool = get_test_bp_lru(10);
         let container_key = get_c_key();
         let store = Arc::new(AppendOnlyStore::new(container_key, mem_pool.clone()));
 
@@ -433,7 +433,7 @@ mod tests {
         .pop()
         .unwrap();
 
-        let store = Arc::new(AppendOnlyStore::new(get_c_key(), get_test_bp(10)));
+        let store = Arc::new(AppendOnlyStore::new(get_c_key(), get_test_bp_lru(10)));
 
         for (i, val) in vals.iter().enumerate() {
             println!(
@@ -472,7 +472,7 @@ mod tests {
             val_max_size,
         );
 
-        let store = Arc::new(AppendOnlyStore::new(get_c_key(), get_test_bp(10)));
+        let store = Arc::new(AppendOnlyStore::new(get_c_key(), get_test_bp_lru(10)));
 
         let mut verify_vals = HashSet::new();
         for val_i in vals.iter() {
@@ -504,7 +504,7 @@ mod tests {
 
     #[test]
     fn test_scan_finish_condition() {
-        let mem_pool = get_test_bp(10);
+        let mem_pool = get_test_bp_lru(10);
         let container_key = get_c_key();
         let store = Arc::new(AppendOnlyStore::new(container_key, mem_pool.clone()));
 
@@ -532,7 +532,7 @@ mod tests {
 
         let store = Arc::new(AppendOnlyStore::bulk_insert_create(
             get_c_key(),
-            get_test_bp(10),
+            get_test_bp_lru(10),
             vals.iter(),
         ));
 

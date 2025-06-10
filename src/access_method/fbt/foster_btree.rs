@@ -2930,7 +2930,7 @@ mod tests {
             should_root_descend, AccessMethodError, OrderedUniqueKeyIndex, UniqueKeyIndex,
             MIN_BYTES_USED,
         },
-        bp::{get_in_mem_pool, get_test_bp},
+        bp::{get_in_mem_pool, get_test_bp_lru},
         random::RandomKVs,
     };
 
@@ -2950,7 +2950,7 @@ mod tests {
     use rstest::rstest;
 
     #[rstest]
-    #[case::bp(get_test_bp(1))]
+    #[case::bp(get_test_bp_lru(1))]
     #[case::bp_clock(get_test_bp_clock::<1>(1))]
     #[case::in_mem(get_in_mem_pool())]
     #[case::vmc(get_test_vmcache::<true, 1>(1))]
@@ -3053,7 +3053,7 @@ mod tests {
     }
 
     #[rstest]
-    #[case::bp(get_test_bp(2))]
+    #[case::bp(get_test_bp_lru(2))]
     #[case::bp_clock(get_test_bp_clock::<1>(2))]
     #[case::in_mem(get_in_mem_pool())]
     #[case::vmc(get_test_vmcache::<true, 1>(2))]
@@ -3163,7 +3163,7 @@ mod tests {
     }
 
     #[rstest]
-    #[case::bp(get_test_bp(2))]
+    #[case::bp(get_test_bp_lru(2))]
     #[case::bp_clock(get_test_bp_clock::<1>(2))]
     #[case::in_mem(get_in_mem_pool())]
     #[case::vmc(get_test_vmcache::<true, 1>(2))]
@@ -3298,7 +3298,7 @@ mod tests {
     }
 
     #[rstest]
-    #[case::bp(get_test_bp(3))]
+    #[case::bp(get_test_bp_lru(3))]
     #[case::bp_clock(get_test_bp_clock::<1>(3))]
     #[case::in_mem(get_in_mem_pool())]
     #[case::vmc(get_test_vmcache::<true, 1>(3))]
@@ -3422,7 +3422,7 @@ mod tests {
     }
 
     #[rstest]
-    #[case::bp(get_test_bp(3))]
+    #[case::bp(get_test_bp_lru(3))]
     #[case::bp_clock(get_test_bp_clock::<1>(3))]
     #[case::in_mem(get_in_mem_pool())]
     #[case::vmc(get_test_vmcache::<true, 1>(3))]
@@ -3434,7 +3434,7 @@ mod tests {
     }
 
     #[rstest]
-    #[case::bp(get_test_bp(3))]
+    #[case::bp(get_test_bp_lru(3))]
     #[case::bp_clock(get_test_bp_clock::<1>(3))]
     #[case::in_mem(get_in_mem_pool())]
     #[case::vmc(get_test_vmcache::<true, 1>(3))]
@@ -3521,7 +3521,7 @@ mod tests {
     }
 
     #[rstest]
-    #[case::bp(get_test_bp(3))]
+    #[case::bp(get_test_bp_lru(3))]
     #[case::bp_clock(get_test_bp_clock::<1>(3))]
     #[case::in_mem(get_in_mem_pool())]
     #[case::vmc(get_test_vmcache::<true, 1>(3))]
@@ -3654,7 +3654,7 @@ mod tests {
     // NN, LN, NL, LL: Do nothing
     // Root ascend is allowed only when the foster page is the root page.
     #[rstest]
-    #[case::bp(get_test_bp(3))]
+    #[case::bp(get_test_bp_lru(3))]
     #[case::bp_clock(get_test_bp_clock::<1>(3))]
     #[case::in_mem(get_in_mem_pool())]
     #[case::vmc(get_test_vmcache::<true, 1>(3))]
@@ -3943,7 +3943,7 @@ mod tests {
     // SN, SL, NN, NL: Adopt if child has foster child.
     // LN, LL: Nothing
     #[rstest]
-    #[case::bp(get_test_bp(3))]
+    #[case::bp(get_test_bp_lru(3))]
     #[case::bp_clock(get_test_bp_clock::<1>(3))]
     #[case::in_mem(get_in_mem_pool())]
     #[case::vmc(get_test_vmcache::<true, 1>(3))]
@@ -4034,7 +4034,7 @@ mod tests {
     }
 
     #[rstest]
-    #[case::bp(get_test_bp(3))]
+    #[case::bp(get_test_bp_lru(3))]
     #[case::bp_clock(get_test_bp_clock::<1>(3))]
     #[case::in_mem(get_in_mem_pool())]
     #[case::vmc(get_test_vmcache::<true, 1>(3))]
@@ -4062,7 +4062,7 @@ mod tests {
     }
 
     #[rstest]
-    #[case::bp(get_test_bp(3))]
+    #[case::bp(get_test_bp_lru(3))]
     #[case::bp_clock(get_test_bp_clock::<1>(3))]
     #[case::in_mem(get_in_mem_pool())]
     #[case::vmc(get_test_vmcache::<true, 1>(3))]
@@ -4091,7 +4091,7 @@ mod tests {
     }
 
     #[rstest]
-    #[case::bp(get_test_bp(3))]
+    #[case::bp(get_test_bp_lru(3))]
     #[case::bp_clock(get_test_bp_clock::<1>(3))]
     #[case::in_mem(get_in_mem_pool())]
     #[case::vmc(get_test_vmcache::<true, 1>(3))]
@@ -4187,7 +4187,7 @@ mod tests {
     }
 
     #[rstest]
-    #[case::bp(get_test_bp(3))]
+    #[case::bp(get_test_bp_lru(3))]
     #[case::bp_clock(get_test_bp_clock::<1>(3))]
     #[case::in_mem(get_in_mem_pool())]
     #[case::vmc(get_test_vmcache::<true, 1>(3))]
@@ -4243,7 +4243,7 @@ mod tests {
     }
 
     #[rstest]
-    #[case::bp(get_test_bp(3))]
+    #[case::bp(get_test_bp_lru(3))]
     #[case::bp_clock(get_test_bp_clock::<1>(3))]
     #[case::in_mem(get_in_mem_pool())]
     #[case::vmc(get_test_vmcache::<true, 1>(3))]
@@ -4280,7 +4280,7 @@ mod tests {
     }
 
     #[rstest]
-    #[case::bp(get_test_bp(3))]
+    #[case::bp(get_test_bp_lru(3))]
     #[case::bp_clock(get_test_bp_clock::<1>(3))]
     #[case::in_mem(get_in_mem_pool())]
     #[case::vmc(get_test_vmcache::<true, 1>(3))]
@@ -4345,7 +4345,7 @@ mod tests {
     }
 
     #[rstest]
-    #[case::bp(get_test_bp(3))]
+    #[case::bp(get_test_bp_lru(3))]
     #[case::bp_clock(get_test_bp_clock::<1>(3))]
     #[case::in_mem(get_in_mem_pool())]
     #[case::vmc(get_test_vmcache::<true, 1>(3))]
@@ -4375,7 +4375,7 @@ mod tests {
     }
 
     #[rstest]
-    #[case::bp(get_test_bp(5))]
+    #[case::bp(get_test_bp_lru(5))]
     #[case::bp_clock(get_test_bp_clock::<2>(5))]
     #[case::in_mem(get_in_mem_pool())]
     #[case::vmc(get_test_vmcache::<true, 2>(5))]
@@ -4452,7 +4452,7 @@ mod tests {
     }
 
     #[rstest]
-    #[case::bp(get_test_bp(5))]
+    #[case::bp(get_test_bp_lru(5))]
     #[case::bp_clock(get_test_bp_clock::<2>(5))]
     #[case::in_mem(get_in_mem_pool())]
     #[case::vmc(get_test_vmcache::<true, 2>(5))]
@@ -4621,7 +4621,7 @@ mod tests {
     }
 
     #[rstest]
-    #[case::bp(get_test_bp(5))]
+    #[case::bp(get_test_bp_lru(5))]
     #[case::bp_clock(get_test_bp_clock::<2>(5))]
     #[case::in_mem(get_in_mem_pool())]
     #[case::vmc(get_test_vmcache::<true, 2>(5))]
@@ -4678,7 +4678,7 @@ mod tests {
     }
 
     #[rstest]
-    #[case::bp(get_test_bp(100))]
+    #[case::bp(get_test_bp_lru(100))]
     #[case::bp_clock(get_test_bp_clock::<10>(100))]
     #[case::in_mem(get_in_mem_pool())]
     #[case::vmc(get_test_vmcache::<true, 10>(100))]
@@ -4758,7 +4758,7 @@ mod tests {
 
     // skip default
     #[rstest]
-    #[case::bp(get_test_bp(100))]
+    #[case::bp(get_test_bp_lru(100))]
     #[case::bp_clock(get_test_bp_clock::<10>(100))]
     #[case::in_mem(get_in_mem_pool())]
     #[case::vmc(get_test_vmcache::<true, 10>(100))]
@@ -4855,7 +4855,7 @@ mod tests {
     }
 
     #[rstest]
-    #[case::bp(get_test_bp(100))]
+    #[case::bp(get_test_bp_lru(100))]
     #[case::bp_clock(get_test_bp_clock::<10>(100))]
     #[case::in_mem(get_in_mem_pool())]
     // #[case::vmc(get_test_vmcache::<false, 10>(100))]
@@ -4894,7 +4894,7 @@ mod tests {
     }
 
     #[rstest]
-    #[case::bp(get_test_bp(100))]
+    #[case::bp(get_test_bp_lru(100))]
     #[case::bp_clock(get_test_bp_clock::<10>(100))]
     #[case::in_mem(get_in_mem_pool())]
     // #[case::vmc(get_test_vmcache::<false, 10>(100))]
@@ -4947,7 +4947,7 @@ mod tests {
     }
 
     #[rstest]
-    #[case::bp(get_test_bp(100))]
+    #[case::bp(get_test_bp_lru(100))]
     #[case::bp_clock(get_test_bp_clock::<10>(100))]
     #[case::in_mem(get_in_mem_pool())]
     #[case::vmc(get_test_vmcache::<false, 10>(100))]
@@ -4989,7 +4989,7 @@ mod tests {
     }
 
     #[rstest]
-    #[case::bp(get_test_bp(5))]
+    #[case::bp(get_test_bp_lru(5))]
     #[case::bp_clock(get_test_bp_clock::<2>(5))]
     #[case::in_mem(get_in_mem_pool())]
     #[case::vmc(get_test_vmcache::<true, 2>(5))]
@@ -5018,7 +5018,7 @@ mod tests {
     }
 
     #[rstest]
-    #[case::bp(get_test_bp(5))]
+    #[case::bp(get_test_bp_lru(5))]
     #[case::bp_clock(get_test_bp_clock::<2>(5))]
     #[case::in_mem(get_in_mem_pool())]
     #[case::vmc(get_test_vmcache::<true, 2>(5))]
@@ -5048,7 +5048,7 @@ mod tests {
     }
 
     #[rstest]
-    #[case::bp(get_test_bp(5))]
+    #[case::bp(get_test_bp_lru(5))]
     #[case::bp_clock(get_test_bp_clock::<2>(5))]
     #[case::in_mem(get_in_mem_pool())]
     #[case::vmc(get_test_vmcache::<true, 2>(5))]

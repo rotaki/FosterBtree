@@ -5,7 +5,7 @@ use std::sync::{
 
 use clap::Parser;
 use fbtree::{
-    bp::{get_test_bp, MemPool},
+    bp::{get_test_bp_lru, MemPool},
     prelude::{
         run_tpcc_for_thread, tpcc_gen_all_tables, DeliveryTxn, NewOrderTxn, OrderStatusTxn,
         PaymentTxn, StockLevelTxn, TPCCConfig, TPCCOutput, TPCCStat, TPCCTableInfo, TPCCTxnProfile,
@@ -37,7 +37,7 @@ pub fn main() {
 
     // Set frames for 1GB memory per warehouses
     let num_frames = config.num_warehouses as usize * 1024 * 1024 * 1024 / PAGE_SIZE;
-    let bp = get_test_bp(num_frames);
+    let bp = get_test_bp_lru(num_frames);
     let txn_storage = NoWaitTxnStorage::new(&bp);
     let tbl_info = tpcc_gen_all_tables(&txn_storage, config.num_warehouses);
     // show_table_stats(&txn_storage, &tbl_info);

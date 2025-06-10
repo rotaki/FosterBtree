@@ -27,7 +27,7 @@ use fbtree::{
 use clap::Parser;
 use fbtree::{
     access_method::{AccessMethodError, UniqueKeyIndex},
-    bp::{get_test_bp, BufferPool},
+    bp::{get_test_bp_lru, BufferPool},
     random::gen_random_byte_vec,
 };
 use std::{process::Command, sync::Arc};
@@ -762,7 +762,7 @@ fn main() {
     {
         flush_internal_cache_and_everything();
         println!("=========================================================================================");
-        let bp = get_test_bp(params.bp_size);
+        let bp = get_test_bp_lru(params.bp_size);
         let primary = Arc::new(FosterBtree::new(ContainerKey::new(0, 0), Arc::clone(&bp)));
         load_table(&params, &primary);
         // Print the page stats
@@ -783,7 +783,7 @@ fn main() {
     {
         flush_internal_cache_and_everything();
         println!("=========================================================================================");
-        let bp = get_test_bp(params.bp_size);
+        let bp = get_test_bp_lru(params.bp_size);
         let primary = Arc::new(FosterBtree::new(ContainerKey::new(0, 0), Arc::clone(&bp)));
         load_table(&params, &primary);
         // Print the page stats
@@ -804,7 +804,7 @@ fn main() {
     {
         flush_internal_cache_and_everything();
         println!("=========================================================================================");
-        let bp = get_test_bp(params.bp_size);
+        let bp = get_test_bp_lru(params.bp_size);
         let primary = Arc::new(FosterBtree::new(ContainerKey::new(0, 0), Arc::clone(&bp)));
         load_table(&params, &primary);
         // Print the page stats
@@ -824,7 +824,7 @@ fn main() {
 
     {
         println!("=========================================================================================");
-        let bp = get_test_bp(params.bp_size);
+        let bp = get_test_bp_lru(params.bp_size);
         let primary = Arc::new(FosterBtree::new(ContainerKey::new(0, 0), Arc::clone(&bp)));
         load_table(&params, &primary);
         // Print the page stats
@@ -846,7 +846,7 @@ fn main() {
     {
         flush_internal_cache_and_everything();
         println!("=========================================================================================");
-        let bp = get_test_bp(params.bp_size);
+        let bp = get_test_bp_lru(params.bp_size);
         let primary = Arc::new(FosterBtree::new(ContainerKey::new(0, 0), Arc::clone(&bp)));
         load_table(&params, &primary);
         // Print the page stats

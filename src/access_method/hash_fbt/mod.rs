@@ -485,7 +485,7 @@ mod tests {
 
     use crate::{
         access_method::AccessMethodError,
-        bp::{get_in_mem_pool, get_test_bp, BufferPool},
+        bp::{get_in_mem_pool, get_test_bp_lru, BufferPool},
         container::ContainerManager,
         log_info,
         random::{gen_random_permutation, RandomKVs},
@@ -511,7 +511,7 @@ mod tests {
     }
 
     #[rstest]
-    #[case::bp(get_test_bp(20))]
+    #[case::bp(get_test_bp_lru(20))]
     #[case::in_mem(get_in_mem_pool())]
     fn test_random_insertion<T: MemPool>(#[case] bp: Arc<T>) {
         let btree = setup_hashbtree_empty(bp.clone());
@@ -538,7 +538,7 @@ mod tests {
     }
 
     #[rstest]
-    #[case::bp(get_test_bp(20))]
+    #[case::bp(get_test_bp_lru(20))]
     #[case::in_mem(get_in_mem_pool())]
     fn test_random_updates<T: MemPool>(#[case] bp: Arc<T>) {
         let btree = setup_hashbtree_empty(bp.clone());
@@ -592,7 +592,7 @@ mod tests {
     }
 
     #[rstest]
-    #[case::bp(get_test_bp(20))]
+    #[case::bp(get_test_bp_lru(20))]
     #[case::in_mem(get_in_mem_pool())]
     fn test_random_deletion<T: MemPool>(#[case] bp: Arc<T>) {
         let btree = setup_hashbtree_empty(bp.clone());
@@ -627,7 +627,7 @@ mod tests {
     }
 
     #[rstest]
-    #[case::bp(get_test_bp(20))]
+    #[case::bp(get_test_bp_lru(20))]
     #[case::in_mem(get_in_mem_pool())]
     fn test_random_upserts<T: MemPool>(#[case] bp: Arc<T>) {
         let btree = setup_hashbtree_empty(bp.clone());
@@ -690,7 +690,7 @@ mod tests {
     }
 
     #[rstest]
-    #[case::bp(get_test_bp(3))]
+    #[case::bp(get_test_bp_lru(3))]
     #[case::in_mem(get_in_mem_pool())]
     fn test_upsert_with_merge<T: MemPool>(#[case] bp: Arc<T>) {
         let btree = setup_hashbtree_empty(bp.clone());
@@ -718,7 +718,7 @@ mod tests {
     }
 
     #[rstest]
-    #[case::bp(get_test_bp(20))]
+    #[case::bp(get_test_bp_lru(20))]
     #[case::in_mem(get_in_mem_pool())]
     fn test_scan<T: MemPool>(#[case] bp: Arc<T>) {
         let btree = Arc::new(setup_hashbtree_empty(bp.clone()));
@@ -749,7 +749,7 @@ mod tests {
     }
 
     #[rstest]
-    #[case::bp(get_test_bp(20))]
+    #[case::bp(get_test_bp_lru(20))]
     #[case::in_mem(get_in_mem_pool())]
     #[ignore]
     fn test_scan_ordered<T: MemPool>(#[case] bp: Arc<T>) {
@@ -782,7 +782,7 @@ mod tests {
     }
 
     #[rstest]
-    #[case::bp(get_test_bp(100))]
+    #[case::bp(get_test_bp_lru(100))]
     #[case::in_mem(get_in_mem_pool())]
     #[ignore]
     fn test_insert_multiple_and_scan_ordered<T: MemPool>(#[case] bp: Arc<T>) {
@@ -817,7 +817,7 @@ mod tests {
     }
 
     #[rstest]
-    #[case::bp(get_test_bp(100))]
+    #[case::bp(get_test_bp_lru(100))]
     #[case::in_mem(get_in_mem_pool())]
     fn test_insertion_stress<T: MemPool>(#[case] bp: Arc<T>) {
         let num_keys = 10000;
@@ -895,7 +895,7 @@ mod tests {
 
     // skip default
     #[rstest]
-    #[case::bp(get_test_bp(100))]
+    #[case::bp(get_test_bp_lru(100))]
     #[case::in_mem(get_in_mem_pool())]
     #[ignore]
     fn replay_stress<T: MemPool>(#[case] bp: Arc<T>) {
@@ -945,7 +945,7 @@ mod tests {
     }
 
     #[rstest]
-    #[case::bp(get_test_bp(100))]
+    #[case::bp(get_test_bp_lru(100))]
     #[case::in_mem(get_in_mem_pool())]
     fn test_parallel_insertion<T: MemPool>(#[case] bp: Arc<T>) {
         // init_test_logger();
