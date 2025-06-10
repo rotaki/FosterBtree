@@ -1,4 +1,8 @@
+use crate::page::PAGE_SIZE;
+
 pub fn print_cfg_flags() {
+    println!("Page size: {}", PAGE_SIZE);
+
     #[cfg(feature = "no_tree_hint")]
     {
         println!("Tree hint disabled");

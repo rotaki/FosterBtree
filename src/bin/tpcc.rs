@@ -59,7 +59,7 @@ pub fn main() {
         if config.exec_time == 0 {
             panic!("Execution time is 0. Please specify a non-zero execution time.");
         }
-        
+
         run_tpcc(false, &config, &txn_storage, &tbl_info)
     })
     .unwrap();

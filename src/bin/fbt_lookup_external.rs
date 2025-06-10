@@ -80,8 +80,9 @@ pub fn run_bench_for_thread(
         while flag.load(Ordering::Acquire) {
             let key_num = urand_int(0, config.num_entries - 1);
             let key = get_val(key_num, KEY_SIZE);
-            let (_, val) = fbt.get_kv(&key).unwrap_or_else(|_| panic!("Failed to get key {} in thread {}",
-                key_num, thread_id));
+            let (_, val) = fbt.get_kv(&key).unwrap_or_else(|_| {
+                panic!("Failed to get key {} in thread {}", key_num, thread_id)
+            });
             debug_assert_eq!(val, get_val(key_num, VAL_SIZE));
             black_box(val);
             if !is_warmup {
