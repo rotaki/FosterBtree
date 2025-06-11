@@ -41,6 +41,7 @@ pub trait AppendOnlyPage {
 
     fn get_at(&self, offset: u32) -> Option<(&[u8], &[u8])>;
 
+    #[cfg(test)]
     fn iter(&self) -> impl Iterator<Item = (&[u8], &[u8])> + '_;
 }
 
@@ -131,15 +132,16 @@ impl AppendOnlyPage for Page {
             offset >= APS_PAGE_HEADER_SIZE as u32,
             "Offset must be at least the size of the page header"
         );
+        let total_bytes_used = self.total_bytes_used() as usize;
         let mut offset = offset as usize;
-        if offset + APS_RECORD_METADATA_SIZE > self.total_bytes_used() as usize {
+        if offset + APS_RECORD_METADATA_SIZE > total_bytes_used {
             return None; // Offset is beyond the used space of the page
         }
         let key_size = u32::from_be_bytes(self[offset..offset + 4].try_into().unwrap()) as usize;
         offset += 4;
         let value_size = u32::from_be_bytes(self[offset..offset + 4].try_into().unwrap()) as usize;
         offset += 4;
-        if offset + key_size + value_size > self.total_bytes_used() as usize {
+        if offset + key_size + value_size > total_bytes_used {
             return None; // Not enough space for key or value
         }
         let key = &self[offset..offset + key_size];
@@ -148,6 +150,7 @@ impl AppendOnlyPage for Page {
         Some((key, value))
     }
 
+    #[cfg(test)]
     fn iter(&self) -> impl Iterator<Item = (&[u8], &[u8])> + '_ {
         let mut offset = APS_PAGE_HEADER_SIZE as u32;
         let slot_count = self.slot_count();

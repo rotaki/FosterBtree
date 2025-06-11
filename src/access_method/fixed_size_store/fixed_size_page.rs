@@ -68,7 +68,10 @@ pub trait FixedSizePage {
     fn get_slot(&self, slot_idx: u32) -> Option<(&[u8], &[u8])>;
 
     /// Iterator over every key–value pair in slot order.
-    fn iter(&self) -> impl Iterator<Item = (&[u8], &[u8])> + '_;
+    #[cfg(test)]
+    fn iter(&self) -> impl Iterator<Item = (&[u8], &[u8])> + '_ {
+        (0..self.slot_count()).filter_map(move |slot_idx| self.get_slot(slot_idx))
+    }
 }
 
 // Implement FixedSizePage directly on Page to avoid complex wrapper issues
@@ -173,10 +176,6 @@ impl FixedSizePage for Page {
         let key = &self[offset..offset + self.key_size() as usize];
         let value = &self[offset + self.key_size() as usize..offset + self.record_size()];
         Some((key, value))
-    }
-
-    fn iter(&self) -> impl Iterator<Item = (&[u8], &[u8])> + '_ {
-        (0..self.slot_count()).filter_map(move |slot_idx| self.get_slot(slot_idx))
     }
 }
 
