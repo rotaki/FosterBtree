@@ -94,6 +94,11 @@ fn main() {
 
     println!("--- Page stats ---\n{}", table.page_stats(false));
 
+    println!("--- Warmup ---");
+    for i in 0..5 {
+        let dur = execute_workload(&params, table.clone());
+        println!("Warmup scan {} took {:?}", i, dur);
+    }
     println!("Executing workload...");
     let num_scans = 10;
     let mut total_time = Duration::new(0, 0);
