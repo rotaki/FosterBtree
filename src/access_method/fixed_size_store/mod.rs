@@ -1,6 +1,6 @@
-mod append_only_page;
+mod fixed_size_page;
 
-use append_only_page::AppendOnlyPage;
+use fixed_size_page::FixedSizePage;
 use std::{
     collections::BTreeMap,
     sync::{atomic::AtomicUsize, Arc, Mutex},
@@ -8,10 +8,7 @@ use std::{
 };
 
 use crate::{
-    access_method::{
-        append_only_store::append_only_page::{APS_PAGE_HEADER_SIZE, APS_RECORD_METADATA_SIZE},
-        FilterType,
-    },
+    access_method::{fixed_size_store::fixed_size_page::FPS_PAGE_HEADER_SIZE, FilterType},
     bp::{FrameReadGuard, FrameWriteGuard, MemPoolStatus},
     page::{Page, PageId, PageVisitor, AVAILABLE_PAGE_SIZE},
     prelude::{ContainerKey, MemPool, NonUniqueKeyIndex, PageFrameKey},
@@ -62,16 +59,18 @@ impl RuntimeStats {
 ///      |                                                        |
 ///      ----------------------------------------------------------
 ///
-pub struct AppendOnlyStore<T: MemPool> {
+pub struct FixedSizeStore<T: MemPool> {
     pub c_key: ContainerKey,
     pub root_key: PageFrameKey,        // Fixed.
     pub last_key: Mutex<PageFrameKey>, // Variable
     pub mem_pool: Arc<T>,
+    pub key_size: usize,
+    pub value_size: usize,
     stats: RuntimeStats, // Stats are not durable
 }
 
-impl<T: MemPool> NonUniqueKeyIndex for AppendOnlyStore<T> {
-    type RangeIter = AppendOnlyStoreScanner<T>;
+impl<T: MemPool> NonUniqueKeyIndex for FixedSizeStore<T> {
+    type RangeIter = FixedSizeStoreScanner<T>;
 
     fn append(&self, key: &[u8], value: &[u8]) -> Result<(), AccessMethodError> {
         self.append(key, value)
@@ -88,11 +87,13 @@ impl<T: MemPool> NonUniqueKeyIndex for AppendOnlyStore<T> {
     }
 }
 
-impl<T: MemPool> AppendOnlyStore<T> {
-    pub fn new(c_key: ContainerKey, mem_pool: Arc<T>) -> Self {
+impl<T: MemPool> FixedSizeStore<T> {
+    pub fn new(c_key: ContainerKey, mem_pool: Arc<T>, key_size: usize, value_size: usize) -> Self {
         // Root page contains the page id and frame id of the last page in the chain.
         let mut root_page = mem_pool.create_new_page_for_write(c_key).unwrap();
-        root_page.init();
+        root_page.init(key_size, value_size);
+        assert_eq!(root_page.key_size() as usize, key_size);
+        assert_eq!(root_page.val_size() as usize, value_size);
         let root_key = {
             let page_id = root_page.get_id();
             let frame_id = root_page.frame_id();
@@ -100,7 +101,9 @@ impl<T: MemPool> AppendOnlyStore<T> {
         };
 
         let mut data_page = mem_pool.create_new_page_for_write(c_key).unwrap();
-        data_page.init();
+        data_page.init(key_size, value_size);
+        assert_eq!(data_page.key_size() as usize, key_size);
+        assert_eq!(data_page.val_size() as usize, value_size);
         let data_key = {
             let page_id = data_page.get_id();
             let frame_id = data_page.frame_id();
@@ -117,33 +120,43 @@ impl<T: MemPool> AppendOnlyStore<T> {
             bytes.extend_from_slice(&data_page.frame_id().to_be_bytes());
             bytes
         };
-        root_page[APS_PAGE_HEADER_SIZE..APS_PAGE_HEADER_SIZE + 8].copy_from_slice(&data_key_bytes);
+        root_page[FPS_PAGE_HEADER_SIZE..FPS_PAGE_HEADER_SIZE + 8].copy_from_slice(&data_key_bytes);
 
-        AppendOnlyStore {
+        FixedSizeStore {
             c_key,
             root_key,
             last_key: Mutex::new(data_key),
             mem_pool: mem_pool.clone(),
+            key_size,
+            value_size,
             stats: RuntimeStats::new(),
         }
     }
 
-    pub fn load(c_key: ContainerKey, mem_pool: Arc<T>, root_id: PageId) -> Self {
+    pub fn load(
+        c_key: ContainerKey,
+        mem_pool: Arc<T>,
+        root_id: PageId,
+        key_size: usize,
+        value_size: usize,
+    ) -> Self {
         // Assumes that root page's page_id is 0.
         let root_key = PageFrameKey::new(c_key, root_id);
         let last_key = {
             let root_page = mem_pool.get_page_for_read(root_key).unwrap();
-            let val = &root_page[APS_PAGE_HEADER_SIZE..APS_PAGE_HEADER_SIZE + 8];
+            let val = &root_page[FPS_PAGE_HEADER_SIZE..FPS_PAGE_HEADER_SIZE + 8];
             let page_id = u32::from_be_bytes(val[0..4].try_into().unwrap());
             let frame_id = u32::from_be_bytes(val[4..8].try_into().unwrap());
             PageFrameKey::new_with_frame_id(c_key, page_id, frame_id)
         };
 
-        AppendOnlyStore {
+        FixedSizeStore {
             c_key,
             root_key,
             last_key: Mutex::new(last_key),
             mem_pool: mem_pool.clone(),
+            key_size,
+            value_size,
             stats: RuntimeStats::new(),
         }
     }
@@ -151,9 +164,11 @@ impl<T: MemPool> AppendOnlyStore<T> {
     pub fn bulk_insert_create<K: AsRef<[u8]>, V: AsRef<[u8]>>(
         c_key: ContainerKey,
         mem_pool: Arc<T>,
+        key_size: usize,
+        value_size: usize,
         iter: impl Iterator<Item = (K, V)>,
     ) -> Self {
-        let storage = Self::new(c_key, mem_pool);
+        let storage = Self::new(c_key, mem_pool, key_size, value_size);
         for (k, v) in iter {
             storage.append(k.as_ref(), v.as_ref()).unwrap();
         }
@@ -201,9 +216,19 @@ impl<T: MemPool> AppendOnlyStore<T> {
     }
 
     pub fn append(&self, key: &[u8], value: &[u8]) -> Result<(), AccessMethodError> {
-        let data_len = key.len() + value.len();
-        if data_len > <Page as AppendOnlyPage>::max_record_size() {
-            return Err(AccessMethodError::RecordTooLarge);
+        if key.len() != self.key_size {
+            panic!(
+                "Key size mismatch: expected {}, got {}",
+                self.key_size,
+                key.len()
+            );
+        }
+        if value.len() != self.value_size {
+            panic!(
+                "Value size mismatch: expected {}, got {}",
+                self.value_size,
+                value.len()
+            );
         }
         self.stats.inc_num_recs();
 
@@ -217,7 +242,7 @@ impl<T: MemPool> AppendOnlyStore<T> {
             // New page is created.
             // The new page's page_id and frame_id are written to last page and the root page.
             let mut new_page = self.mem_pool.create_new_page_for_write(self.c_key).unwrap();
-            new_page.init();
+            new_page.init(self.key_size, self.value_size);
 
             let page_id = new_page.get_id();
             let frame_id = new_page.frame_id();
@@ -234,7 +259,7 @@ impl<T: MemPool> AppendOnlyStore<T> {
                 bytes
             };
             let mut root_page = self.write_page(&self.root_key);
-            root_page[APS_PAGE_HEADER_SIZE..APS_PAGE_HEADER_SIZE + 8]
+            root_page[FPS_PAGE_HEADER_SIZE..FPS_PAGE_HEADER_SIZE + 8]
                 .copy_from_slice(&new_key_bytes);
             drop(root_page);
 
@@ -249,32 +274,30 @@ impl<T: MemPool> AppendOnlyStore<T> {
         }
     }
 
-    pub fn scan(self: &Arc<Self>) -> AppendOnlyStoreScanner<T> {
-        AppendOnlyStoreScanner {
+    pub fn scan(self: &Arc<Self>) -> FixedSizeStoreScanner<T> {
+        FixedSizeStoreScanner {
             storage: self.clone(),
             initialized: false,
             finished: false,
             current_page: None,
             current_slot_id: 0,
-            current_offset: 0,
             filter: None,
         }
     }
 
-    pub fn scan_with_filter(self: &Arc<Self>, filter: FilterType) -> AppendOnlyStoreScanner<T> {
-        AppendOnlyStoreScanner {
+    pub fn scan_with_filter(self: &Arc<Self>, filter: FilterType) -> FixedSizeStoreScanner<T> {
+        FixedSizeStoreScanner {
             storage: self.clone(),
             initialized: false,
             finished: false,
             current_page: None,
             current_slot_id: 0,
-            current_offset: APS_PAGE_HEADER_SIZE,
             filter: Some(filter),
         }
     }
 
-    pub fn page_traverser(&self) -> AppendOnlyStorePageTraversal<T> {
-        AppendOnlyStorePageTraversal::new(self)
+    pub fn page_traverser(&self) -> FixedSizeStorePageTraversal<T> {
+        FixedSizeStorePageTraversal::new(self)
     }
 
     pub fn page_stats(&self, verbose: bool) -> String {
@@ -285,19 +308,18 @@ impl<T: MemPool> AppendOnlyStore<T> {
     }
 }
 
-pub struct AppendOnlyStoreScanner<T: MemPool> {
-    storage: Arc<AppendOnlyStore<T>>,
+pub struct FixedSizeStoreScanner<T: MemPool> {
+    storage: Arc<FixedSizeStore<T>>,
 
     initialized: bool,
     finished: bool,
     current_page: Option<FrameReadGuard<T::EP>>,
     current_slot_id: u32, // Current slot id in the current page
-    current_offset: usize,
 
     filter: Option<FilterType>,
 }
 
-impl<T: MemPool> AppendOnlyStoreScanner<T> {
+impl<T: MemPool> FixedSizeStoreScanner<T> {
     fn initialize(&mut self) {
         let root_key = self.storage.root_key;
         let root_page = self.storage.read_page(root_key);
@@ -308,7 +330,6 @@ impl<T: MemPool> AppendOnlyStoreScanner<T> {
         let data_page = self.storage.read_page(data_key);
         self.current_page = Some(data_page);
         self.current_slot_id = 0;
-        self.current_offset = APS_PAGE_HEADER_SIZE;
     }
 
     fn prefetch_next_page(&self) {
@@ -322,7 +343,7 @@ impl<T: MemPool> AppendOnlyStoreScanner<T> {
     }
 }
 
-impl<T: MemPool> Iterator for AppendOnlyStoreScanner<T> {
+impl<T: MemPool> Iterator for FixedSizeStoreScanner<T> {
     type Item = (Vec<u8>, Vec<u8>);
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -342,20 +363,29 @@ impl<T: MemPool> Iterator for AppendOnlyStoreScanner<T> {
         // If there are no more records in the current page, move to the next page
         // and try to read from it.
         if self.current_slot_id < self.current_page.as_ref().unwrap().slot_count() {
-            let record = self
-                .current_page
-                .as_ref()
-                .unwrap()
-                .get_at(self.current_offset as u32)
-                .unwrap();
+            // For fixed-size pages, we use slot-based access instead of offset-based
+            let current_page = self.current_page.as_ref().unwrap();
+            let key = &current_page[FPS_PAGE_HEADER_SIZE
+                + self.current_slot_id as usize * (self.storage.key_size + self.storage.value_size)
+                ..FPS_PAGE_HEADER_SIZE
+                    + self.current_slot_id as usize
+                        * (self.storage.key_size + self.storage.value_size)
+                    + self.storage.key_size];
+            let value = &current_page[FPS_PAGE_HEADER_SIZE
+                + self.current_slot_id as usize * (self.storage.key_size + self.storage.value_size)
+                + self.storage.key_size
+                ..FPS_PAGE_HEADER_SIZE
+                    + self.current_slot_id as usize
+                        * (self.storage.key_size + self.storage.value_size)
+                    + self.storage.key_size
+                    + self.storage.value_size];
             self.current_slot_id += 1;
-            self.current_offset += record.0.len() + record.1.len() + APS_RECORD_METADATA_SIZE; // 8 bytes for key and value size
             if let Some(filter) = &self.filter {
-                if !filter(&record.0, &record.1) {
+                if !filter(&key, &value) {
                     return self.next(); // Skip this record
                 }
             }
-            Some((record.0.to_vec(), record.1.to_vec()))
+            Some((key.to_vec(), value.to_vec()))
         } else {
             let current_page = self.current_page.take().unwrap();
             let next_page = current_page.next_page();
@@ -368,7 +398,6 @@ impl<T: MemPool> Iterator for AppendOnlyStoreScanner<T> {
 
                     self.current_page = Some(next_page);
                     self.current_slot_id = 0;
-                    self.current_offset = APS_PAGE_HEADER_SIZE; // Reset offset to the start of the new page
                     self.prefetch_next_page();
                     self.next()
                 }
@@ -383,14 +412,14 @@ impl<T: MemPool> Iterator for AppendOnlyStoreScanner<T> {
     }
 }
 
-pub struct AppendOnlyStorePageTraversal<T: MemPool> {
+pub struct FixedSizeStorePageTraversal<T: MemPool> {
     c_key: ContainerKey,
     root_key: PageFrameKey,
     mem_pool: Arc<T>,
 }
 
-impl<T: MemPool> AppendOnlyStorePageTraversal<T> {
-    pub fn new(aps: &AppendOnlyStore<T>) -> Self {
+impl<T: MemPool> FixedSizeStorePageTraversal<T> {
+    pub fn new(aps: &FixedSizeStore<T>) -> Self {
         Self {
             c_key: aps.c_key,
             mem_pool: aps.mem_pool.clone(),
@@ -538,7 +567,7 @@ mod tests {
     fn test_small_append() {
         let mem_pool = get_test_bp_lru(10);
         let container_key = get_c_key();
-        let store = AppendOnlyStore::new(container_key, mem_pool);
+        let store = FixedSizeStore::new(container_key, mem_pool, 9, 11);
 
         let key = b"small key";
         let value = b"small value";
@@ -546,32 +575,15 @@ mod tests {
     }
 
     #[test]
-    fn test_large_append() {
-        let mem_pool = get_test_bp_lru(10);
-        let container_key = get_c_key();
-        let store = Arc::new(AppendOnlyStore::new(container_key, mem_pool));
-
-        let key = gen_random_byte_vec(Page::max_record_size() + 1, Page::max_record_size() + 1);
-        let value = gen_random_byte_vec(Page::max_record_size() + 1, Page::max_record_size() + 1);
-        assert_eq!(
-            store.append(&key, &value),
-            Err(AccessMethodError::RecordTooLarge)
-        );
-
-        // Scan should return nothing
-        let mut scanner = store.scan();
-        assert!(scanner.next().is_none());
-    }
-
-    #[test]
     fn test_page_overflow() {
         let mem_pool = get_test_bp_lru(10);
         let container_key = get_c_key();
-        let store = AppendOnlyStore::new(container_key, mem_pool);
+        let store = FixedSizeStore::new(container_key, mem_pool, 100, 100);
 
-        let key = gen_random_byte_vec(1000, 1000);
-        let value = gen_random_byte_vec(1000, 1000);
-        let num_appends = 100;
+        let key = gen_random_byte_vec(100, 100);
+        let value = gen_random_byte_vec(100, 100);
+
+        let num_appends = 1000;
 
         for _ in 0..num_appends {
             assert_eq!(store.append(&key, &value), Ok(()));
@@ -582,7 +594,7 @@ mod tests {
     fn test_basic_scan() {
         let mem_pool = get_test_bp_lru(10);
         let container_key = get_c_key();
-        let store = Arc::new(AppendOnlyStore::new(container_key, mem_pool.clone()));
+        let store = Arc::new(FixedSizeStore::new(container_key, mem_pool.clone(), 11, 13));
 
         let key = b"scanned key";
         let value = b"scanned value";
@@ -604,21 +616,17 @@ mod tests {
     fn test_stress() {
         let num_keys = 10000;
         let key_size = 50;
-        let val_min_size = 50;
-        let val_max_size = 100;
-        let vals = RandomKVs::new(
-            false,
-            false,
-            1,
-            num_keys,
-            key_size,
-            val_min_size,
-            val_max_size,
-        )
-        .pop()
-        .unwrap();
+        let val_size = 100;
+        let vals = RandomKVs::new(false, false, 1, num_keys, key_size, val_size, val_size)
+            .pop()
+            .unwrap();
 
-        let store = Arc::new(AppendOnlyStore::new(get_c_key(), get_test_bp_lru(10)));
+        let store = Arc::new(FixedSizeStore::new(
+            get_c_key(),
+            get_test_bp_lru(10),
+            key_size,
+            val_size,
+        ));
 
         for (i, val) in vals.iter().enumerate() {
             println!(
@@ -645,8 +653,7 @@ mod tests {
     fn test_concurrent_append() {
         let num_keys = 10000;
         let key_size = 50;
-        let val_min_size = 50;
-        let val_max_size = 100;
+        let val_size = 100;
         let num_threads = 3;
         let vals = RandomKVs::new(
             false,
@@ -654,11 +661,16 @@ mod tests {
             num_threads,
             num_keys,
             key_size,
-            val_min_size,
-            val_max_size,
+            val_size,
+            val_size,
         );
 
-        let store = Arc::new(AppendOnlyStore::new(get_c_key(), get_test_bp_lru(10)));
+        let store = Arc::new(FixedSizeStore::new(
+            get_c_key(),
+            get_test_bp_lru(10),
+            key_size,
+            val_size,
+        ));
 
         let mut verify_vals = HashSet::new();
         for val_i in vals.iter() {
@@ -692,7 +704,7 @@ mod tests {
     fn test_scan_finish_condition() {
         let mem_pool = get_test_bp_lru(10);
         let container_key = get_c_key();
-        let store = Arc::new(AppendOnlyStore::new(container_key, mem_pool.clone()));
+        let store = Arc::new(FixedSizeStore::new(container_key, mem_pool.clone(), 10, 10));
 
         let mut scanner = store.scan();
         assert!(scanner.next().is_none());
@@ -702,23 +714,16 @@ mod tests {
     fn test_bulk_insert_create() {
         let num_keys = 10000;
         let key_size = 50;
-        let val_min_size = 50;
-        let val_max_size = 100;
-        let vals = RandomKVs::new(
-            false,
-            false,
-            1,
-            num_keys,
-            key_size,
-            val_min_size,
-            val_max_size,
-        )
-        .pop()
-        .unwrap();
+        let val_size = 100;
+        let vals = RandomKVs::new(false, false, 1, num_keys, key_size, val_size, val_size)
+            .pop()
+            .unwrap();
 
-        let store = Arc::new(AppendOnlyStore::bulk_insert_create(
+        let store = Arc::new(FixedSizeStore::bulk_insert_create(
             get_c_key(),
             get_test_bp_lru(10),
+            key_size,
+            val_size,
             vals.iter(),
         ));
 
@@ -736,19 +741,10 @@ mod tests {
 
         let num_keys = 10000;
         let key_size = 50;
-        let val_min_size = 50;
-        let val_max_size = 100;
-        let vals = RandomKVs::new(
-            false,
-            false,
-            1,
-            num_keys,
-            key_size,
-            val_min_size,
-            val_max_size,
-        )
-        .pop()
-        .unwrap();
+        let val_size = 100;
+        let vals = RandomKVs::new(false, false, 1, num_keys, key_size, val_size, val_size)
+            .pop()
+            .unwrap();
 
         // Create a store and insert some values.
         // Drop the store and buffer pool
@@ -756,9 +752,11 @@ mod tests {
             let cm = Arc::new(ContainerManager::new(temp_dir.path(), false, false).unwrap());
             let bp = Arc::new(BufferPool::new(10, cm).unwrap());
 
-            let store = Arc::new(AppendOnlyStore::bulk_insert_create(
+            let store = Arc::new(FixedSizeStore::bulk_insert_create(
                 get_c_key(),
                 bp.clone(),
+                key_size,
+                val_size,
                 vals.iter(),
             ));
 
@@ -769,7 +767,13 @@ mod tests {
         {
             let cm = Arc::new(ContainerManager::new(temp_dir.path(), false, false).unwrap());
             let bp = Arc::new(BufferPool::new(10, cm).unwrap());
-            let store = Arc::new(AppendOnlyStore::load(get_c_key(), bp.clone(), 0));
+            let store = Arc::new(FixedSizeStore::load(
+                get_c_key(),
+                bp.clone(),
+                0,
+                key_size,
+                val_size,
+            ));
 
             let mut scanner = store.scan();
             for val in vals.iter() {

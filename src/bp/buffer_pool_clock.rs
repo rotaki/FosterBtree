@@ -779,11 +779,6 @@ impl<const EVICTION_BATCH_SIZE: usize> MemPool for BufferPoolClock<EVICTION_BATC
         Ok(())
     }
 
-    fn fast_evict(&self, _frame_id: u32) -> Result<(), MemPoolStatus> {
-        // do nothing for now.
-        Ok(())
-    }
-
     // Just return the runtime stats
     unsafe fn stats(&self) -> MemoryStats {
         let new_page = self.stats.new_page();

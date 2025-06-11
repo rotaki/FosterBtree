@@ -21,6 +21,7 @@ pub use vmcache::VMCachePool;
 
 use crate::{container::ContainerManager, random::gen_random_pathname};
 
+/// Buffer pool with persistent storage.
 pub fn get_bp(num_frames: usize, cm: Arc<ContainerManager>) -> Arc<impl MemPool> {
     #[cfg(feature = "vmcache")]
     {
@@ -36,6 +37,7 @@ pub fn get_bp(num_frames: usize, cm: Arc<ContainerManager>) -> Arc<impl MemPool>
     }
 }
 
+/// Buffer pool without persistent storage, used for testing.
 pub fn get_test_bp(num_frames: usize) -> Arc<impl MemPool> {
     #[cfg(feature = "vmcache")]
     {

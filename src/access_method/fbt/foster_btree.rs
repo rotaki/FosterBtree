@@ -10,7 +10,7 @@ use std::{
 use crate::{
     access_method::{AccessMethodError, FilterType, OrderedUniqueKeyIndex, UniqueKeyIndex},
     bp::{prelude::*, EvictionPolicy},
-    page::{Page, PageId, AVAILABLE_PAGE_SIZE},
+    page::{Page, PageId, PageVisitor, AVAILABLE_PAGE_SIZE},
     random::gen_truncated_randomized_exponential_backoff,
 };
 
@@ -1366,8 +1366,6 @@ impl<T: MemPool> FosterBtree<T> {
                 assert!(foster_key.as_slice() < key.as_ref());
                 // Insert it into new page. If it fails, panic.
                 assert!(new_page.insert(key.as_ref(), value.as_ref(), false));
-
-                mem_pool.fast_evict(current_page.frame_id()).unwrap();
                 drop(current_page);
 
                 current_page = new_page;
@@ -1402,7 +1400,7 @@ impl<T: MemPool> FosterBtree<T> {
     /// Accumulate the statistics of the pages in the BTree
     /// This is a thread-unsafe operation
     pub fn page_stats(&self, verbose: bool) -> String {
-        let mut stats = PageStatsGenerator::new();
+        let mut stats = FosterBtreePageStats::new();
         let traverser = self.page_traverser();
         traverser.visit(&mut stats);
         stats.to_string(verbose)
@@ -2403,11 +2401,6 @@ impl<T: MemPool> FosterBtreeCursor<T> {
                 let foster_page_key =
                     PageFrameKey::new_with_frame_id(self.btree.c_key, val.page_id, val.frame_id);
                 let foster_page = self.btree.read_page(foster_page_key);
-                // Evict the current page as soon as possible
-                // self.btree
-                //     .mem_pool
-                //     .fast_evict(current_page.frame_id())
-                //     .unwrap();
                 drop(leaf_page);
 
                 self.current_slot_id = 1;
@@ -2709,9 +2702,7 @@ impl<T: MemPool> FosterBTreePageTraversal<T> {
             mem_pool: tree.mem_pool.clone(),
         }
     }
-}
 
-impl<T: MemPool> FosterBTreePageTraversal<T> {
     // Return the children to visit in the order of the traversal
     fn get_children_page_ids(&self, page: &Page) -> Vec<InnerVal> {
         let mut children = Vec::new();
@@ -2758,11 +2749,6 @@ impl<T: MemPool> FosterBTreePageTraversal<T> {
             }
         }
     }
-}
-
-pub trait PageVisitor {
-    fn visit_pre(&mut self, page: &Page);
-    fn visit_post(&mut self, page: &Page);
 }
 
 pub struct ConsistencyChecker {}
@@ -2820,11 +2806,11 @@ impl PerLevelPageStats {
     }
 }
 
-struct PageStatsGenerator {
+struct FosterBtreePageStats {
     stats: BTreeMap<u8, PerLevelPageStats>, // level -> stats
 }
 
-impl PageStatsGenerator {
+impl FosterBtreePageStats {
     fn new() -> Self {
         Self {
             stats: BTreeMap::new(),
@@ -2892,7 +2878,7 @@ impl PageStatsGenerator {
     }
 }
 
-impl PageVisitor for PageStatsGenerator {
+impl PageVisitor for FosterBtreePageStats {
     fn visit_pre(&mut self, page: &Page) {
         let stats = PerPageStats {
             level: page.level(),

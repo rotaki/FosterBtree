@@ -1,7 +1,7 @@
 use clap::Parser;
 use core::panic;
 use fbtree::{
-    access_method::{append_only_store::AppendOnlyStore, prelude::*},
+    access_method::prelude::*,
     bp::{get_test_bp_clock, ContainerKey, MemPool},
     prelude::PAGE_SIZE,
     random::gen_random_byte_vec,
@@ -57,8 +57,8 @@ pub fn execute_workload(
     elapsed
 }
 
-fn get_index<M: MemPool>(bp: Arc<M>, _params: &Params) -> Arc<AppendOnlyStore<M>> {
-    Arc::new(AppendOnlyStore::new(ContainerKey::new(0, 0), bp))
+fn get_index<M: MemPool>(bp: Arc<M>, _params: &Params) -> Arc<HeapStore<M>> {
+    Arc::new(HeapStore::new(ContainerKey::new(0, 0), bp))
 }
 
 fn main() {

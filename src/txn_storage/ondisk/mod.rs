@@ -13,14 +13,14 @@ use crate::{
     prelude::{ContainerKey, FosterBtree},
 };
 use crate::{
-    access_method::prelude::{AppendOnlyStore, AppendOnlyStoreScanner},
+    access_method::prelude::{HeapStore, HeapStoreScanner},
     access_method::UniqueKeyIndex,
     bp::MemPool,
 };
 
 pub enum Storage<M: MemPool> {
     BTreeMap(Arc<FosterBtree<M>>),
-    AppendOnly(Arc<AppendOnlyStore<M>>),
+    AppendOnly(Arc<HeapStore<M>>),
 }
 
 unsafe impl<M: MemPool> Sync for Storage<M> {}
@@ -35,7 +35,7 @@ impl<M: MemPool> Storage<M> {
                 ContainerKey::new(db_id, c_id),
                 bp,
             ))),
-            ContainerDS::AppendOnly => Storage::AppendOnly(Arc::new(AppendOnlyStore::<M>::new(
+            ContainerDS::AppendOnly => Storage::AppendOnly(Arc::new(HeapStore::<M>::new(
                 ContainerKey::new(db_id, c_id),
                 bp,
             ))),
@@ -52,7 +52,7 @@ impl<M: MemPool> Storage<M> {
                 bp,
                 0,
             ))),
-            ContainerDS::AppendOnly => Storage::AppendOnly(Arc::new(AppendOnlyStore::<M>::load(
+            ContainerDS::AppendOnly => Storage::AppendOnly(Arc::new(HeapStore::<M>::load(
                 ContainerKey::new(db_id, c_id),
                 bp,
                 0,
@@ -121,7 +121,7 @@ pub enum OnDiskIterator<M: MemPool> {
     // Storage and the iterator
     Hash(),
     BTree(Mutex<FosterBtreeRangeScanner<M>>),
-    Vec(Mutex<AppendOnlyStoreScanner<M>>),
+    Vec(Mutex<HeapStoreScanner<M>>),
 }
 
 impl<M: MemPool> OnDiskIterator<M> {
@@ -129,7 +129,7 @@ impl<M: MemPool> OnDiskIterator<M> {
         OnDiskIterator::BTree(Mutex::new(iter))
     }
 
-    fn vec(iter: AppendOnlyStoreScanner<M>) -> Self {
+    fn vec(iter: HeapStoreScanner<M>) -> Self {
         OnDiskIterator::Vec(Mutex::new(iter))
     }
 

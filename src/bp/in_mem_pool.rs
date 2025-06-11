@@ -296,10 +296,6 @@ impl MemPool for InMemPool {
     fn clear_dirty_flags(&self) -> Result<(), MemPoolStatus> {
         Ok(())
     }
-
-    fn fast_evict(&self, _frame_id: u32) -> Result<(), MemPoolStatus> {
-        Ok(())
-    }
 }
 
 #[cfg(test)]

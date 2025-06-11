@@ -6,8 +6,10 @@ pub mod append_only_store;
 pub mod chain;
 pub mod fbt;
 pub mod field_level_index_trait;
+pub mod fixed_size_store;
 pub mod hash_fbt;
 pub mod hashindex;
+pub mod heapstore;
 
 #[derive(Debug, PartialEq)]
 pub enum AccessMethodError {
@@ -36,12 +38,12 @@ impl From<MemPoolStatus> for AccessMethodError {
 }
 
 pub mod prelude {
-    pub use super::append_only_store::prelude::*;
     pub use super::chain::prelude::*;
     pub use super::fbt::prelude::*;
     pub use super::field_level_index_trait::*;
     pub use super::hash_fbt::prelude::*;
     pub use super::hashindex::prelude::*;
+    pub use super::heapstore::prelude::*;
     pub use super::AccessMethodError;
     pub use super::{NonUniqueKeyIndex, OrderedUniqueKeyIndex, UniqueKeyIndex};
 }
@@ -77,8 +79,8 @@ pub trait OrderedUniqueKeyIndex: UniqueKeyIndex {
 }
 
 pub trait NonUniqueKeyIndex {
-    type Iter: Iterator<Item = (Vec<u8>, Vec<u8>)>;
-    fn append(&mut self, key: &[u8], value: &[u8]) -> Result<(), AccessMethodError>;
-    fn scan(self: &Arc<Self>) -> impl Iterator<Item = (Vec<u8>, Vec<u8>)>;
-    fn scan_key(self: &Arc<Self>, key: &[u8]) -> Self::Iter;
+    type RangeIter: Iterator<Item = (Vec<u8>, Vec<u8>)>;
+    fn append(&self, key: &[u8], value: &[u8]) -> Result<(), AccessMethodError>;
+    fn scan(self: &Arc<Self>) -> Self::RangeIter;
+    fn scan_key(self: &Arc<Self>, key: &[u8]) -> Self::RangeIter;
 }

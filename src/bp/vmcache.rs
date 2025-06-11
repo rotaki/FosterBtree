@@ -650,11 +650,6 @@ impl<const IS_SMALL: bool, const EVICTION_BATCH_SIZE: usize> MemPool
         Ok(())
     }
 
-    fn fast_evict(&self, _frame_id: u32) -> Result<(), MemPoolStatus> {
-        // do nothing for now.
-        Ok(())
-    }
-
     unsafe fn stats(&self) -> MemoryStats {
         let new_page = self.stats.new_page();
         let read_count = self.stats.read_count();

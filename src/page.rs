@@ -143,3 +143,8 @@ impl DerefMut for Page {
         &mut self.0[BASE_PAGE_HEADER_SIZE..]
     }
 }
+
+pub trait PageVisitor {
+    fn visit_pre(&mut self, page: &Page);
+    fn visit_post(&mut self, page: &Page);
+}

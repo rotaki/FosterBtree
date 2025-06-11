@@ -452,10 +452,10 @@ pub trait MemPool: Sync + Send {
     /// This function is used for experiments to avoid writing pages to disk.
     fn clear_dirty_flags(&self) -> Result<(), MemPoolStatus>;
 
-    /// Tell the memory pool that a page in the frame should be evicted as soon as possible.
-    /// This function will not evict the page immediately.
-    /// This function is used as a hint to the memory pool to evict the page when possible.
-    fn fast_evict(&self, frame_id: u32) -> Result<(), MemPoolStatus>;
+    // /// Tell the memory pool that a page in the frame should be evicted as soon as possible.
+    // /// This function will not evict the page immediately.
+    // /// This function is used as a hint to the memory pool to evict the page when possible.
+    // fn fast_evict(&self, frame_id: u32) -> Result<(), MemPoolStatus>;
 
     /// Return the runtime statistics of the memory pool.
     ///
