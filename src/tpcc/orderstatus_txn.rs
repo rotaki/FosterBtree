@@ -49,14 +49,16 @@ impl TPCCTxnProfile for OrderStatusTxn {
             debug_assert!(c_id == Customer::UNUSED_ID);
             // Fetch customers with matching last name
             let mut customer_recs = Vec::new();
-            let sec_key = CustomerSecondaryKey::create_key(c_w_id, c_d_id, c_last);
-            let sec_key_bytes = sec_key.into_bytes();
+            let sec_key_start = CustomerSecondaryKey::create_key(c_w_id, c_d_id, c_last, 1);
+            let sec_key_start_bytes = sec_key_start.into_bytes();
+            let sec_key_end = CustomerSecondaryKey::create_key(c_w_id, c_d_id, c_last, u32::MAX);
+            let sec_key_end_bytes = sec_key_end.into_bytes();
             let res = txn_storage.scan_range(
                 &txn,
                 tbl_info[TPCCTable::CustomerSecondary],
                 ScanOptions {
-                    lower: sec_key_bytes.to_vec(),
-                    upper: vec![],
+                    lower_inc: sec_key_start_bytes.to_vec(),
+                    upper_exc: sec_key_end_bytes.to_vec(),
                 },
             );
             if not_successful(config, &res) {
@@ -65,12 +67,8 @@ impl TPCCTxnProfile for OrderStatusTxn {
             let iter = res.unwrap();
             loop {
                 match txn_storage.iter_next(&txn, &iter) {
-                    Ok(Some((s_key, p_value))) => {
-                        if s_key != sec_key_bytes {
-                            break;
-                        } else {
-                            customer_recs.push(p_value);
-                        }
+                    Ok(Some((_, p_value))) => {
+                        customer_recs.push(p_value);
                     }
                     Ok(None) => break,
                     Err(e) => {
@@ -127,8 +125,8 @@ impl TPCCTxnProfile for OrderStatusTxn {
             &txn,
             tbl_info[TPCCTable::OrderSecondary],
             ScanOptions {
-                lower: o_sec_low_key.into_bytes().to_vec(),
-                upper: o_sec_high_key.into_bytes().to_vec(),
+                lower_inc: o_sec_low_key.into_bytes().to_vec(),
+                upper_exc: o_sec_high_key.into_bytes().to_vec(),
             },
         );
         if not_successful(config, &res) {
@@ -170,8 +168,8 @@ impl TPCCTxnProfile for OrderStatusTxn {
             &txn,
             tbl_info[TPCCTable::OrderLine],
             ScanOptions {
-                lower: low_key.into_bytes().to_vec(),
-                upper: up_key.into_bytes().to_vec(),
+                lower_inc: low_key.into_bytes().to_vec(),
+                upper_exc: up_key.into_bytes().to_vec(),
             },
         );
         if not_successful(config, &res) {

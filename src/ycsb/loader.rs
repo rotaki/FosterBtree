@@ -183,8 +183,8 @@ pub fn ycsb_preliminary_secondary_scan(
             &txn,
             table_info[YCSBTable::Secondary],
             ScanOptions {
-                lower: vec![],
-                upper: vec![],
+                lower_inc: vec![],
+                upper_exc: vec![],
             },
         )
         .unwrap();

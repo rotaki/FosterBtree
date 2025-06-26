@@ -64,8 +64,8 @@ impl TPCCTxnProfile for StockLevelTxn {
         let mut s_i_ids = HashSet::new();
 
         let scan_options = ScanOptions {
-            lower: low_key.into_bytes().to_vec(),
-            upper: up_key.into_bytes().to_vec(),
+            lower_inc: low_key.into_bytes().to_vec(),
+            upper_exc: up_key.into_bytes().to_vec(),
         };
 
         let res = txn_storage.scan_range(&txn, tbl_info[TPCCTable::OrderLine], scan_options);

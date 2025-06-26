@@ -7,7 +7,6 @@ use crate::log;
 use crate::log_info;
 use crate::prelude::TxnOptions;
 use crate::prelude::TxnStorageTrait;
-use crate::prelude::DB_ID;
 use crate::tpcc::loader::TPCCTable;
 use crate::write_fields;
 use memchr::memmem;
@@ -132,8 +131,8 @@ impl TPCCTxnProfile for NewOrderTxn {
 
         // Insert Order record into the secondary index
         let o_idx_key = OrderSecondaryKey::create_key(w_id, d_id, c_id, o_id);
-        let res = txn_storage.raw_insert_value(
-            DB_ID,
+        let res = txn_storage.insert_value(
+            &txn,
             tbl_info[TPCCTable::OrderSecondary],
             o_idx_key.into_bytes().to_vec(),
             o_key.into_bytes().to_vec(),

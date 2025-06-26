@@ -2191,6 +2191,10 @@ impl<T: MemPool> FosterBtreeCursor<T> {
         cursor
     }
 
+    pub fn c_key(&self) -> ContainerKey {
+        self.btree.c_key
+    }
+
     fn initialize(&mut self) {
         // Push the root page to the stack
         self.visited.push(self.btree.root_key);

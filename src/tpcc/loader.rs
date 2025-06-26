@@ -608,8 +608,8 @@ pub fn tpcc_gen_all_tables(
         &txn,
         table_info[TPCCTable::CustomerSecondary],
         ScanOptions {
-            lower: vec![],
-            upper: vec![],
+            lower_inc: vec![],
+            upper_exc: vec![],
         },
     );
     let iter = res.unwrap();
@@ -633,8 +633,8 @@ pub fn tpcc_gen_all_tables(
         &txn,
         table_info[TPCCTable::OrderSecondary],
         ScanOptions {
-            lower: vec![],
-            upper: vec![],
+            lower_inc: vec![],
+            upper_exc: vec![],
         },
     );
     let iter = res.unwrap();
