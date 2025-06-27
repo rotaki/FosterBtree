@@ -345,7 +345,7 @@ impl<T: MemPool> Iterator for HeapStoreScanner<T> {
                 .get(self.current_slot_id);
             self.current_slot_id += 1;
             if let Some(filter) = &self.filter {
-                if !filter(&record.0, &record.1) {
+                if !filter(record.0, record.1) {
                     return self.next(); // Skip this record
                 }
             }

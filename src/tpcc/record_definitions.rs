@@ -213,55 +213,64 @@ impl CustomerKey {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(C)]
 pub struct CustomerSecondaryKey {
-    pub num: u32,
+    pub w_and_d_id: u32,
     pub c_last: [u8; Customer::MAX_LAST],
+    pub c_id: u32,
 }
 
 impl CustomerSecondaryKey {
     fn new() -> Self {
         CustomerSecondaryKey {
-            num: 0,
+            w_and_d_id: 0,
             c_last: [0; Customer::MAX_LAST],
-        }
-    }
-
-    #[allow(dead_code)]
-    fn from_num(num: u32) -> Self {
-        CustomerSecondaryKey {
-            num,
-            c_last: [0; Customer::MAX_LAST],
+            c_id: 0,
         }
     }
 
     #[allow(dead_code)]
     fn copy_from(other: &Self) -> Self {
-        let num = other.num & 0x00FFFFFF; // Zero out the 'not_used' bits
+        let num = other.w_and_d_id & 0x00FFFFFF; // Zero out the 'not_used' bits
         let c_last = other.c_last;
-        CustomerSecondaryKey { num, c_last }
+        let c_id = other.c_id;
+        CustomerSecondaryKey {
+            w_and_d_id: num,
+            c_last,
+            c_id,
+        }
     }
 
     #[allow(dead_code)]
     fn get_d_id(&self) -> u8 {
-        (self.num & 0x000000FF) as u8
+        (self.w_and_d_id & 0x000000FF) as u8
     }
 
     fn set_d_id(&mut self, value: u8) {
-        self.num = (self.num & 0xFFFFFF00) | value as u32;
+        self.w_and_d_id = (self.w_and_d_id & 0xFFFFFF00) | value as u32;
     }
 
     #[allow(dead_code)]
     fn get_w_id(&self) -> u16 {
-        ((self.num & 0x00FFFF00) >> 8) as u16
+        ((self.w_and_d_id & 0x00FFFF00) >> 8) as u16
     }
 
     fn set_w_id(&mut self, value: u16) {
-        self.num = (self.num & 0xFF0000FF) | ((value as u32) << 8);
+        self.w_and_d_id = (self.w_and_d_id & 0xFF0000FF) | ((value as u32) << 8);
     }
 
-    pub fn into_bytes(&self) -> [u8; 4 + Customer::MAX_LAST] {
-        let mut bytes = [0; 4 + Customer::MAX_LAST];
-        bytes[..4].copy_from_slice(&self.num.to_be_bytes());
-        bytes[4..].copy_from_slice(&self.c_last);
+    #[allow(dead_code)]
+    fn get_c_id(&self) -> u32 {
+        self.c_id
+    }
+
+    fn set_c_id(&mut self, value: u32) {
+        self.c_id = value;
+    }
+
+    pub fn into_bytes(&self) -> [u8; 8 + Customer::MAX_LAST] {
+        let mut bytes = [0; 8 + Customer::MAX_LAST];
+        bytes[..4].copy_from_slice(&self.w_and_d_id.to_be_bytes());
+        bytes[4..4 + Customer::MAX_LAST].copy_from_slice(&self.c_last);
+        bytes[4 + Customer::MAX_LAST..].copy_from_slice(&self.c_id.to_be_bytes());
         bytes
     }
 
@@ -282,12 +291,13 @@ impl CustomerSecondaryKey {
         &mut *(bytes.as_mut_ptr() as *mut CustomerSecondaryKey)
     }
 
-    pub fn create_key(w_id: u16, d_id: u8, c_last_in: &[u8]) -> Self {
+    pub fn create_key(w_id: u16, d_id: u8, c_last_in: &[u8], c_id: u32) -> Self {
         let mut k = Self::new();
         k.set_w_id(w_id);
         k.set_d_id(d_id);
         let len = c_last_in.len().min(Customer::MAX_LAST);
         k.c_last[..len].copy_from_slice(&c_last_in[..len]);
+        k.set_c_id(c_id);
         k
     }
 
@@ -297,6 +307,7 @@ impl CustomerSecondaryKey {
         k.set_d_id(c.c_d_id);
         let len = c.c_last.len().min(Customer::MAX_LAST);
         k.c_last[..len].copy_from_slice(&c.c_last[..len]);
+        k.set_c_id(c.c_id);
         k
     }
 }

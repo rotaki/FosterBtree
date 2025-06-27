@@ -1,6 +1,10 @@
 use crate::{
     access_method::AccessMethodError,
     bp::prelude::{ContainerId, DatabaseId},
+    txn_storage2::{
+        field::{Field, Record, RecordPointer},
+        schema::Schema,
+    },
 };
 
 #[derive(Debug, PartialEq, Clone, Copy)]
@@ -99,64 +103,19 @@ impl ContainerDS {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ContainerType {
-    Primary,
-    Secondary(ContainerId), // Secondary container with primary container id
-}
-
-impl ContainerType {
-    pub fn byte_length() -> usize {
-        3
-    }
-
-    pub fn to_bytes(&self) -> [u8; 3] {
-        match self {
-            ContainerType::Primary => [0, 0, 0],
-            ContainerType::Secondary(c_id) => {
-                let mut bytes = [0; 3];
-                bytes[0] = 1;
-                bytes[1..].copy_from_slice(&c_id.to_be_bytes()[..2]);
-                bytes
-            }
-        }
-    }
-
-    pub fn from_bytes(bytes: &[u8]) -> Self {
-        match bytes[0] {
-            0 => ContainerType::Primary,
-            1 => {
-                let c_id = ContainerId::from_be_bytes(
-                    bytes[1..].try_into().expect("Invalid container id length"),
-                );
-                ContainerType::Secondary(c_id)
-            }
-            _ => panic!("Invalid container type"),
-        }
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ContainerOptions {
     name: String,
     c_ds: ContainerDS,
-    c_type: ContainerType,
+    schema: Schema,
 }
 
 impl ContainerOptions {
-    pub fn primary(name: &str, c_ds: ContainerDS) -> Self {
+    pub fn new(name: &str, c_ds: ContainerDS, schema: Schema) -> Self {
         ContainerOptions {
             name: String::from(name),
             c_ds,
-            c_type: ContainerType::Primary,
-        }
-    }
-
-    pub fn secondary(name: &str, c_ds: ContainerDS, primary_c_id: ContainerId) -> Self {
-        ContainerOptions {
-            name: String::from(name),
-            c_ds,
-            c_type: ContainerType::Secondary(primary_c_id),
+            schema,
         }
     }
 
@@ -168,41 +127,64 @@ impl ContainerOptions {
         self.c_ds
     }
 
-    pub fn container_type(&self) -> ContainerType {
-        self.c_type
+    pub fn schema(&self) -> &Schema {
+        &self.schema
     }
 
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut bytes = self.c_ds.to_bytes();
-        bytes.extend_from_slice(&self.c_type.to_bytes());
         bytes.extend_from_slice(self.name.as_bytes());
+        bytes.extend_from_slice(&self.schema.to_bytes());
         bytes
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Self {
         let c_ds = ContainerDS::from_bytes(&bytes[0..1]); // 1 byte
-        let c_type = ContainerType::from_bytes(&bytes[1..4]); // 3 byte
-        let name = String::from_utf8(bytes[4..].to_vec()).expect("Invalid container name");
-        ContainerOptions { name, c_ds, c_type }
+        let name = String::from_utf8(bytes[1..].to_vec()).expect("Invalid container name");
+        let schema_bytes = &bytes[1 + name.len()..];
+        let schema = Schema::from_bytes(schema_bytes);
+        ContainerOptions { name, c_ds, schema }
     }
 }
 
 #[derive(Default)]
 pub struct TxnOptions {}
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct ScanOptions {
-    pub lower_inc: Vec<u8>,
-    pub upper_exc: Vec<u8>,
+    pub lower: Vec<u8>,
+    pub upper: Vec<u8>,
 }
 
 impl ScanOptions {
     pub fn new() -> Self {
         ScanOptions::default()
     }
+
+    // lower: inclusive, upper: exclusive
+    // [lower, upper)
+    pub fn with_bounds(lower: Vec<Field>, upper: Vec<Field>) -> Self {
+        use crate::txn_storage2::to_normalized_key;
+
+        let lower_indices: Vec<_> = lower
+            .iter()
+            .enumerate()
+            .map(|(i, _)| (i, true, false))
+            .collect();
+        let upper_indices: Vec<_> = upper
+            .iter()
+            .enumerate()
+            .map(|(i, _)| (i, true, false))
+            .collect();
+
+        ScanOptions {
+            lower: to_normalized_key(&lower, &lower_indices),
+            upper: to_normalized_key(&upper, &upper_indices),
+        }
+    }
 }
 
-pub trait TxnStorageTrait: Send + Sync {
+pub trait FieldLeveLStorageTrait: Send + Sync {
     type TxnHandle;
     type IteratorHandle;
 
@@ -243,14 +225,16 @@ pub trait TxnStorageTrait: Send + Sync {
         db_id: DatabaseId,
     ) -> Result<Vec<(ContainerId, ContainerOptions)>, TxnStorageStatus>;
 
-    // Insert value without transaction support
-    fn raw_insert_value(
+    // Insert records without transaction support
+    // Raw insert without transaction support
+    // This method bypasses all transaction mechanisms and directly inserts the record
+    // Use with caution as it provides no ACID guarantees
+    fn raw_insert_record(
         &self,
         db_id: DatabaseId,
         c_id: ContainerId,
-        key: Vec<u8>,
-        value: Vec<u8>,
-    ) -> Result<(), TxnStorageStatus>;
+        record: Record,
+    ) -> Result<RecordPointer, TxnStorageStatus>;
 
     // Transactional operations
 
@@ -277,72 +261,85 @@ pub trait TxnStorageTrait: Send + Sync {
     // Drop a transaction handle
     fn drop_txn(&self, txn: Self::TxnHandle) -> Result<(), TxnStorageStatus>;
 
-    fn num_values(
+    fn num_records(
         &self,
         txn: &Self::TxnHandle,
         c_id: ContainerId,
     ) -> Result<usize, TxnStorageStatus>;
 
-    // Check if value exists
-    fn check_value<K: AsRef<[u8]>>(
+    // Get field
+    fn get_field(
         &self,
         txn: &Self::TxnHandle,
         c_id: ContainerId,
-        key: K,
-    ) -> Result<bool, TxnStorageStatus>;
+        key: Vec<Field>,
+        col_idx: usize,
+        hint: Option<RecordPointer>,
+    ) -> Result<(Field, RecordPointer), TxnStorageStatus>;
 
-    // Get value
-    fn get_value<K: AsRef<[u8]>>(
+    fn get_fields(
         &self,
         txn: &Self::TxnHandle,
         c_id: ContainerId,
-        key: K,
-    ) -> Result<Vec<u8>, TxnStorageStatus>;
+        key: Vec<Field>,
+        col_idxs: &[usize],
+        hint: Option<RecordPointer>,
+    ) -> Result<(Vec<Field>, RecordPointer), TxnStorageStatus>;
 
-    // Insert value
-    fn insert_value(
+    // Update field
+    fn update_field(
         &self,
         txn: &Self::TxnHandle,
         c_id: ContainerId,
-        key: Vec<u8>,
-        value: Vec<u8>,
-    ) -> Result<(), TxnStorageStatus>;
+        key: Vec<Field>,
+        col_idx: usize,
+        field: Field,
+        hint: Option<RecordPointer>,
+    ) -> Result<RecordPointer, TxnStorageStatus>;
 
-    // Insert values
-    fn insert_values(
+    fn update_fields(
         &self,
         txn: &Self::TxnHandle,
         c_id: ContainerId,
-        kvs: Vec<(Vec<u8>, Vec<u8>)>,
-    ) -> Result<(), TxnStorageStatus>;
+        key: Vec<Field>,
+        fields: Vec<(usize, Field)>,
+        hint: Option<RecordPointer>,
+    ) -> Result<RecordPointer, TxnStorageStatus>;
 
-    // Update value
-    fn update_value<K: AsRef<[u8]>>(
+    fn update_field_with_func<F: FnOnce(&mut Field)>(
         &self,
         txn: &Self::TxnHandle,
         c_id: ContainerId,
-        key: K,
-        value: Vec<u8>,
-    ) -> Result<(), TxnStorageStatus>;
-
-    // Update value based on a function
-    // On in-memory systems, &mut [u8] can point to the actual value in memory or the entry in the read-write set.
-    // On on-disk systems with immediate modifications, the original value is copied and modified with this function and then written back.
-    // On on-disk systems with deferred modifications, the original value is copied into the read-write set and modified there.
-    fn update_value_with_func<K: AsRef<[u8]>, F: FnOnce(&mut [u8])>(
-        &self,
-        txn: &Self::TxnHandle,
-        c_id: ContainerId,
-        key: K,
+        key: Vec<Field>,
+        col_idx: usize,
         func: F,
-    ) -> Result<(), TxnStorageStatus>;
+        hint: Option<RecordPointer>,
+    ) -> Result<RecordPointer, TxnStorageStatus>;
 
-    // Delete value
-    fn delete_value<K: AsRef<[u8]>>(
+    // Insert a record
+    fn insert_record(
         &self,
         txn: &Self::TxnHandle,
         c_id: ContainerId,
-        key: K,
+        record: Record,
+        hint: Option<RecordPointer>,
+    ) -> Result<RecordPointer, TxnStorageStatus>;
+
+    // Insert records
+    fn insert_records(
+        &self,
+        txn: &Self::TxnHandle,
+        c_id: ContainerId,
+        records: Vec<(Record, Option<RecordPointer>)>,
+    ) -> Result<Vec<RecordPointer>, TxnStorageStatus>;
+
+    // Delete a record
+    fn delete_record(
+        &self,
+        txn: &Self::TxnHandle,
+        c_id: ContainerId,
+        key: Vec<Field>,
+        hint: Option<RecordPointer>,
     ) -> Result<(), TxnStorageStatus>;
 
     // Scan range. While iterating, the container should be alive.
@@ -359,7 +356,7 @@ pub trait TxnStorageTrait: Send + Sync {
         &self,
         txn: &Self::TxnHandle,
         iter: &Self::IteratorHandle,
-    ) -> Result<Option<(Vec<u8>, Vec<u8>)>, TxnStorageStatus>;
+    ) -> Result<Option<(Vec<Field>, Vec<Field>, RecordPointer)>, TxnStorageStatus>;
 
     // Drop an iterator handle.
     fn drop_iterator_handle(&self, iter: Self::IteratorHandle) -> Result<(), TxnStorageStatus>;

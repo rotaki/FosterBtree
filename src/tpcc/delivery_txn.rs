@@ -52,13 +52,14 @@ impl TPCCTxnProfile for DeliveryTxn {
         'per_district_loop: for d_id in 1..=District::DISTS_PER_WARE as u8 {
             // Get the oldest NewOrder for this district
             let no_low_key = NewOrderKey::create_key(w_id, d_id, 1); // Starting from order id 1
+            let no_high_key = NewOrderKey::create_key(w_id, d_id, u32::MAX);
 
             let res = txn_storage.scan_range(
                 &txn,
                 tbl_info[TPCCTable::NewOrder],
                 ScanOptions {
-                    lower: no_low_key.into_bytes().to_vec(),
-                    upper: vec![],
+                    lower_inc: no_low_key.into_bytes().to_vec(),
+                    upper_exc: no_high_key.into_bytes().to_vec(),
                 },
             );
 
@@ -67,26 +68,28 @@ impl TPCCTxnProfile for DeliveryTxn {
             }
             let iter = res.unwrap();
 
-            let (no_key, _) = match txn_storage.iter_next(&txn, &iter) {
-                Ok(Some((key_bytes, value))) => {
-                    let no_key = *unsafe { NewOrderKey::from_bytes(&key_bytes) };
-                    if no_key.w_id() == w_id && no_key.d_id() == d_id {
+            let (no_key, _) = {
+                let first_result = txn_storage.iter_next(&txn, &iter);
+                match first_result {
+                    Ok(Some((key_bytes, value))) => {
+                        // Iterate again to ensure phantom protection. TODO fix iter_next to lock not only
+                        // the current key but also the next one.
+                        let _ = txn_storage.iter_next(&txn, &iter);
+                        let no_key = *unsafe { NewOrderKey::from_bytes(&key_bytes) };
                         (no_key, value)
-                    } else {
+                    }
+                    Ok(None) => {
+                        // No NewOrder found, so skip to next district
                         continue 'per_district_loop;
                     }
-                }
-                Ok(None) => {
-                    // Nothing more in iterator, so go to next district
-                    continue 'per_district_loop;
-                }
-                Err(e) => {
-                    // Handle error
-                    return helper.kill::<()>(
-                        &txn,
-                        &Err(e),
-                        AbortID::GetNewOrderWithSmallestKey as u8,
-                    );
+                    Err(e) => {
+                        // Handle error
+                        return helper.kill::<()>(
+                            &txn,
+                            &Err(e),
+                            AbortID::GetNewOrderWithSmallestKey as u8,
+                        );
+                    }
                 }
             };
             drop(iter);
@@ -122,8 +125,8 @@ impl TPCCTxnProfile for DeliveryTxn {
                 &txn,
                 tbl_info[TPCCTable::OrderLine],
                 ScanOptions {
-                    lower: low_key.into_bytes().to_vec(),
-                    upper: up_key.into_bytes().to_vec(),
+                    lower_inc: low_key.into_bytes().to_vec(),
+                    upper_exc: up_key.into_bytes().to_vec(),
                 },
             );
             if not_successful(config, &res) {

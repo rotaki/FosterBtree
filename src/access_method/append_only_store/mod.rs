@@ -351,7 +351,7 @@ impl<T: MemPool> Iterator for AppendOnlyStoreScanner<T> {
             self.current_slot_id += 1;
             self.current_offset += record.0.len() + record.1.len() + APS_RECORD_METADATA_SIZE; // 8 bytes for key and value size
             if let Some(filter) = &self.filter {
-                if !filter(&record.0, &record.1) {
+                if !filter(record.0, record.1) {
                     return self.next(); // Skip this record
                 }
             }

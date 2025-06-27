@@ -65,6 +65,7 @@ pub trait FixedSizePage {
     fn append(&mut self, key: &[u8], value: &[u8]) -> bool;
 
     /// Gets the record at the specified slot index.
+    #[allow(dead_code)]
     fn get_slot(&self, slot_idx: u32) -> Option<(&[u8], &[u8])>;
 
     /// Iterator over every key–value pair in slot order.
@@ -292,7 +293,7 @@ mod tests {
         let success = page.append(&key, &value);
 
         assert!(!success);
-        assert_eq!(page.slot_count(), max_records as u32);
+        assert_eq!(page.slot_count(), { max_records });
     }
 
     #[test]

@@ -38,7 +38,7 @@ pub fn load_table(params: &Params, table: &mut Vec<(Vec<u8>, Vec<u8>)>) {
     })
 }
 
-pub fn execute_workload(params: &Params, table: &Vec<(Vec<u8>, Vec<u8>)>) -> Duration {
+pub fn execute_workload(params: &Params, table: &[(Vec<u8>, Vec<u8>)]) -> Duration {
     let start = std::time::Instant::now();
     let mut count = 0;
     for (key, value) in table.iter() {

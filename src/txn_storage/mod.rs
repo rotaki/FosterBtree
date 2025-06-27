@@ -1,5 +1,5 @@
 mod inmem;
-mod locktable;
+pub mod locktable;
 mod ondisk;
 mod ondisk_2pl;
 mod txn_storage_trait;
