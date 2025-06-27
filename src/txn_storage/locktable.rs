@@ -15,13 +15,8 @@ pub struct ConcurrentLockTable {
 
 impl Display for ConcurrentLockTable {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut keys = vec![];
         for key in self.hashmap.iter() {
-            // Stringify the key
-            let key_str = String::from_utf8_lossy(key.key());
-            keys.push(key_str.to_string());
-            let latch = key.value();
-            writeln!(f, "Key: {}, Latch: {}", key_str, latch)?;
+            writeln!(f, "Key: {:?}, Latch: {}", key.key(), key.value())?;
         }
         Ok(())
     }
@@ -119,6 +114,14 @@ impl ConcurrentLockTable {
         self.hashmap.is_empty()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.hashmap.is_empty()
+    }
+
+    pub fn lock_count(&self) -> usize {
+        self.hashmap.len()
+    }
+
     pub fn check_state(&self, key: &[u8]) {
         if let Some(lock) = self.hashmap.get(key) {
             let latch = &*lock;
@@ -149,6 +152,12 @@ impl Display for SingleThreadLockTable {
 }
 
 #[allow(dead_code)]
+impl Default for SingleThreadLockTable {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SingleThreadLockTable {
     pub fn new() -> Self {
         SingleThreadLockTable {
@@ -236,6 +245,14 @@ impl SingleThreadLockTable {
 
     pub fn check_all_released(&self) -> bool {
         self.hashmap.lock().unwrap().is_empty()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.hashmap.lock().unwrap().is_empty()
+    }
+
+    pub fn lock_count(&self) -> usize {
+        self.hashmap.lock().unwrap().len()
     }
 
     pub fn check_state(&self, key: &[u8]) {

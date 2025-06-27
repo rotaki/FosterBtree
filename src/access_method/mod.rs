@@ -5,7 +5,6 @@ use crate::bp::MemPoolStatus;
 pub mod append_only_store;
 pub mod chain;
 pub mod fbt;
-pub mod field_level_index_trait;
 pub mod fixed_size_store;
 pub mod hash_fbt;
 pub mod hashindex;
@@ -40,7 +39,6 @@ impl From<MemPoolStatus> for AccessMethodError {
 pub mod prelude {
     pub use super::chain::prelude::*;
     pub use super::fbt::prelude::*;
-    pub use super::field_level_index_trait::*;
     pub use super::hash_fbt::prelude::*;
     pub use super::hashindex::prelude::*;
     pub use super::heapstore::prelude::*;

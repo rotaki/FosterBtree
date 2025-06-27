@@ -646,7 +646,7 @@ impl NoWaitTxn {
             match e {
                 RWEntry::Read(inserted_as_ghost, pa) => {
                     // Upgrade lock
-                    let locktable = &ps.locktable;
+                    let locktable: &Arc<LockTable> = &ps.locktable;
                     if !locktable.try_upgrade(key.as_ref().to_vec()) {
                         return Err(TxnStorageStatus::TxnConflict);
                     }

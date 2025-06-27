@@ -1587,7 +1587,7 @@ impl<T: MemPool> FosterBtree<T> {
         op_byte: &mut OpByte,
     ) -> (Option<OpType>, FrameReadGuard<T::EP>, FrameReadGuard<T::EP>) {
         if should_split_this(&this, op_byte) {
-            log_info!("Should split this page: {}", this.get_id());
+            log_debug!("Should split this page: {}", this.get_id());
             #[cfg(feature = "stat")]
             inc_local_stat_trigger(OpType::Split);
             let mut this = match this.try_upgrade(true) {
@@ -1606,7 +1606,7 @@ impl<T: MemPool> FosterBtree<T> {
             should_modify_parent_child_relationship(&this, &child, op_byte)
         };
         if let Some(op) = op {
-            log_info!(
+            log_debug!(
                 "Should modify structure: {:?}, This: {}, Child: {}",
                 op,
                 this.get_id(),
@@ -1628,7 +1628,7 @@ impl<T: MemPool> FosterBtree<T> {
                     return (None, this, child);
                 }
             };
-            log_info!(
+            log_debug!(
                 "Ready to modify structure: {:?}, This: {}, Child: {}",
                 op,
                 this.get_id(),
@@ -2044,7 +2044,6 @@ impl<T: MemPool> UniqueKeyIndex for FosterBtree<T> {
 
     fn upsert(&self, key: &[u8], value: &[u8]) -> Result<(), AccessMethodError> {
         let mut leaf_page = self.traverse_to_leaf_for_write(key);
-        log_info!("Acquired write lock for page {}", leaf_page.get_id());
         let slot_id = leaf_page.upper_bound_slot_id(&BTreeKey::new(key)) - 1;
         if slot_id == 0 {
             // Lower fence so insert is ok. We insert the key-value at the next position of the lower fence.
@@ -2069,7 +2068,6 @@ impl<T: MemPool> UniqueKeyIndex for FosterBtree<T> {
         merge_func: impl Fn(&[u8], &[u8]) -> Vec<u8>,
     ) -> Result<(), AccessMethodError> {
         let mut leaf_page = self.traverse_to_leaf_for_write(key);
-        log_info!("Acquired write lock for page {}", leaf_page.get_id());
         let slot_id = leaf_page.upper_bound_slot_id(&BTreeKey::new(key)) - 1;
         if slot_id == 0 {
             // Lower fence so insert is ok. We insert the key-value at the next position of the lower fence.
@@ -2174,6 +2172,7 @@ pub struct FosterBtreeCursor<T: MemPool> {
 }
 
 impl<T: MemPool> FosterBtreeCursor<T> {
+    // l_key and r_key are inclusive and exclusive respectively.
     pub fn new(btree: &Arc<FosterBtree<T>>, l_key: &[u8], r_key: &[u8]) -> Self {
         let mut cursor = Self {
             btree: btree.clone(),
@@ -2441,7 +2440,6 @@ impl<T: MemPool> FosterBtreeCursor<T> {
                 // Once we reach this loop, we never go back to the outer loop.
                 loop {
                     let this_page = current_page;
-                    log_info!("Traversal for read, page: {}", this_page.get_id());
                     if this_page.is_leaf() {
                         if this_page.has_foster_child() && *this_page.get_foster_key() <= **key {
                             // Check whether the foster child should be traversed.

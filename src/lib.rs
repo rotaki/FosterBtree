@@ -8,7 +8,9 @@ pub mod print_cfg_flags;
 pub mod random;
 pub mod time;
 pub mod tpcc;
+pub mod tpcc2;
 pub mod txn_storage;
+pub mod txn_storage2;
 pub mod utils;
 pub mod write_ahead_log;
 pub mod ycsb;
@@ -19,7 +21,7 @@ mod logger;
 mod page;
 mod rwlatch;
 
-use logger::log;
+pub use logger::log;
 
 pub mod prelude {
     pub use crate::access_method::prelude::*;

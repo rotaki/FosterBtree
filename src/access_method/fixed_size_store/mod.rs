@@ -381,7 +381,7 @@ impl<T: MemPool> Iterator for FixedSizeStoreScanner<T> {
                     + self.storage.value_size];
             self.current_slot_id += 1;
             if let Some(filter) = &self.filter {
-                if !filter(&key, &value) {
+                if !filter(key, value) {
                     return self.next(); // Skip this record
                 }
             }
