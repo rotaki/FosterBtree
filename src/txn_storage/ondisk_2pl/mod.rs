@@ -1857,7 +1857,7 @@ mod tests {
 
     #[test]
     fn test_phantom_protection_insert() {
-        let bp = get_test_bp(10);
+        let bp = get_test_bp_lru(10);
         let storage = NoWaitTxnStorage::new(&bp);
         let db_id = storage.open_db(DBOptions::new("testdb")).unwrap();
         let c_id = storage
@@ -1910,7 +1910,7 @@ mod tests {
 
     #[test]
     fn test_range_scan_with_updates() {
-        let bp = get_test_bp(10);
+        let bp = get_test_bp_lru(10);
         let storage = NoWaitTxnStorage::new(&bp);
         let db_id = storage.open_db(DBOptions::new("testdb")).unwrap();
         let c_id = storage
@@ -1978,7 +1978,7 @@ mod tests {
 
     #[test]
     fn test_scan_with_deletes() {
-        let bp = get_test_bp(10);
+        let bp = get_test_bp_lru(10);
         let storage = NoWaitTxnStorage::new(&bp);
         let db_id = storage.open_db(DBOptions::new("testdb")).unwrap();
         let c_id = storage
@@ -2035,7 +2035,7 @@ mod tests {
 
     #[test]
     fn test_empty_scan_phantom_protection() {
-        let bp = get_test_bp(10);
+        let bp = get_test_bp_lru(10);
         let storage = NoWaitTxnStorage::new(&bp);
         let db_id = storage.open_db(DBOptions::new("testdb")).unwrap();
         let c_id = storage
@@ -2072,7 +2072,7 @@ mod tests {
 
     #[test]
     fn test_secondary_index_basic() {
-        let bp = get_test_bp(10);
+        let bp = get_test_bp_lru(10);
         let storage = NoWaitTxnStorage::new(&bp);
         let db_id = storage.open_db(DBOptions::new("testdb")).unwrap();
 
@@ -2163,7 +2163,7 @@ mod tests {
 
     #[test]
     fn test_secondary_index_with_updates() {
-        let bp = get_test_bp(10);
+        let bp = get_test_bp_lru(10);
         let storage = NoWaitTxnStorage::new(&bp);
         let db_id = storage.open_db(DBOptions::new("testdb")).unwrap();
 
@@ -2218,7 +2218,7 @@ mod tests {
 
     #[test]
     fn test_secondary_index_conflict() {
-        let bp = get_test_bp(10);
+        let bp = get_test_bp_lru(10);
         let storage = NoWaitTxnStorage::new(&bp);
         let db_id = storage.open_db(DBOptions::new("testdb")).unwrap();
 
@@ -2272,7 +2272,7 @@ mod tests {
 
     #[test]
     fn test_update_value_with_func() {
-        let bp = get_test_bp(10);
+        let bp = get_test_bp_lru(10);
         let storage = NoWaitTxnStorage::new(&bp);
         let db_id = storage.open_db(DBOptions::new("testdb")).unwrap();
         let c_id = storage
@@ -2309,7 +2309,7 @@ mod tests {
 
     #[test]
     fn test_concurrent_read_write() {
-        let bp = get_test_bp(10);
+        let bp = get_test_bp_lru(10);
         let storage = NoWaitTxnStorage::new(&bp);
         let db_id = storage.open_db(DBOptions::new("testdb")).unwrap();
         let c_id = storage
@@ -2347,7 +2347,7 @@ mod tests {
 
     #[test]
     fn test_write_write_conflict() {
-        let bp = get_test_bp(10);
+        let bp = get_test_bp_lru(10);
         let storage = NoWaitTxnStorage::new(&bp);
         let db_id = storage.open_db(DBOptions::new("testdb")).unwrap();
         let c_id = storage
@@ -2384,7 +2384,7 @@ mod tests {
 
     #[test]
     fn test_read_then_upgrade_conflict() {
-        let bp = get_test_bp(10);
+        let bp = get_test_bp_lru(10);
         let storage = NoWaitTxnStorage::new(&bp);
         let db_id = storage.open_db(DBOptions::new("testdb")).unwrap();
         let c_id = storage
@@ -2420,7 +2420,7 @@ mod tests {
 
     #[test]
     fn test_multiple_keys_transaction() {
-        let bp = get_test_bp(10);
+        let bp = get_test_bp_lru(10);
         let storage = NoWaitTxnStorage::new(&bp);
         let db_id = storage.open_db(DBOptions::new("testdb")).unwrap();
         let c_id = storage
@@ -2488,7 +2488,7 @@ mod tests {
 
     #[test]
     fn test_deadlock_avoidance() {
-        let bp = get_test_bp(10);
+        let bp = get_test_bp_lru(10);
         let storage = NoWaitTxnStorage::new(&bp);
         let db_id = storage.open_db(DBOptions::new("testdb")).unwrap();
         let c_id = storage
@@ -2535,7 +2535,7 @@ mod tests {
 
     #[test]
     fn test_ghost_record_insert_abort() {
-        let bp = get_test_bp(10);
+        let bp = get_test_bp_lru(10);
         let storage = NoWaitTxnStorage::new(&bp);
         let db_id = storage.open_db(DBOptions::new("testdb")).unwrap();
         let c_id = storage
@@ -2567,7 +2567,7 @@ mod tests {
 
     #[test]
     fn test_ghost_record_visibility() {
-        let bp = get_test_bp(10);
+        let bp = get_test_bp_lru(10);
         let storage = NoWaitTxnStorage::new(&bp);
         let db_id = storage.open_db(DBOptions::new("testdb")).unwrap();
         let c_id = storage
@@ -2615,7 +2615,7 @@ mod tests {
 
     #[test]
     fn test_delete_then_insert_same_key() {
-        let bp = get_test_bp(10);
+        let bp = get_test_bp_lru(10);
         let storage = NoWaitTxnStorage::new(&bp);
         let db_id = storage.open_db(DBOptions::new("testdb")).unwrap();
         let c_id = storage
@@ -2657,7 +2657,7 @@ mod tests {
 
     #[test]
     fn test_lock_upgrade_in_rwset() {
-        let bp = get_test_bp(10);
+        let bp = get_test_bp_lru(10);
         let storage = NoWaitTxnStorage::new(&bp);
         let db_id = storage.open_db(DBOptions::new("testdb")).unwrap();
         let c_id = storage
@@ -2695,7 +2695,7 @@ mod tests {
 
     #[test]
     fn test_next_key_locking() {
-        let bp = get_test_bp(10);
+        let bp = get_test_bp_lru(10);
         let storage = NoWaitTxnStorage::new(&bp);
         let db_id = storage.open_db(DBOptions::new("testdb")).unwrap();
         let c_id = storage
@@ -2731,7 +2731,7 @@ mod tests {
 
     #[test]
     fn test_insert_values_batch() {
-        let bp = get_test_bp(10);
+        let bp = get_test_bp_lru(10);
         let storage = NoWaitTxnStorage::new(&bp);
         let db_id = storage.open_db(DBOptions::new("testdb")).unwrap();
         let c_id = storage
@@ -2762,7 +2762,7 @@ mod tests {
 
     #[test]
     fn test_empty_key_operations() {
-        let bp = get_test_bp(10);
+        let bp = get_test_bp_lru(10);
         let storage = NoWaitTxnStorage::new(&bp);
         let db_id = storage.open_db(DBOptions::new("testdb")).unwrap();
         let c_id = storage
@@ -2804,7 +2804,7 @@ mod tests {
 
     #[test]
     fn test_container_not_found() {
-        let bp = get_test_bp(10);
+        let bp = get_test_bp_lru(10);
         let storage = NoWaitTxnStorage::new(&bp);
         let db_id = storage.open_db(DBOptions::new("testdb")).unwrap();
 
@@ -2838,7 +2838,7 @@ mod tests {
 
     #[test]
     fn test_large_key_value() {
-        let bp = get_test_bp(10);
+        let bp = get_test_bp_lru(10);
         let storage = NoWaitTxnStorage::new(&bp);
         let db_id = storage.open_db(DBOptions::new("testdb")).unwrap();
         let c_id = storage
@@ -2868,7 +2868,7 @@ mod tests {
 
     #[test]
     fn test_raw_insert_value() {
-        let bp = get_test_bp(10);
+        let bp = get_test_bp_lru(10);
         let storage = NoWaitTxnStorage::new(&bp);
         let db_id = storage.open_db(DBOptions::new("testdb")).unwrap();
 
@@ -2920,7 +2920,7 @@ mod tests {
 
     #[test]
     fn test_container_stats() {
-        let bp = get_test_bp(10);
+        let bp = get_test_bp_lru(10);
         let storage = NoWaitTxnStorage::new(&bp);
         let db_id = storage.open_db(DBOptions::new("testdb")).unwrap();
 
@@ -2953,7 +2953,7 @@ mod tests {
 
     #[test]
     fn test_scan_boundary_conditions() {
-        let bp = get_test_bp(10);
+        let bp = get_test_bp_lru(10);
         let storage = NoWaitTxnStorage::new(&bp);
         let db_id = storage.open_db(DBOptions::new("testdb")).unwrap();
         let c_id = storage
@@ -3017,7 +3017,7 @@ mod tests {
 
     #[test]
     fn test_rwset_display() {
-        let bp = get_test_bp(10);
+        let bp = get_test_bp_lru(10);
         let storage = NoWaitTxnStorage::new(&bp);
         let db_id = storage.open_db(DBOptions::new("testdb")).unwrap();
         let c_id = storage

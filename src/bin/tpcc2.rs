@@ -7,7 +7,7 @@ use std::sync::{
 use clap::Parser;
 use fbtree::{
     affinity::{get_total_cpus, with_affinity},
-    bp::{get_test_bp_lru, MemPool},
+    bp::{get_test_bp_clock, MemPool},
     prelude::PAGE_SIZE,
     print_cfg_flags,
     tpcc2::TpccBenchmark,
@@ -64,7 +64,7 @@ pub fn main() {
         num_frames * PAGE_SIZE / (1024 * 1024 * 1024)
     );
 
-    let bp = get_test_bp_lru(num_frames);
+    let bp = get_test_bp_clock::<64>(num_frames);
 
     // Create the TPC-C2 benchmark
     println!(
