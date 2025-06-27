@@ -67,7 +67,7 @@ impl TPCCTxnProfile for PaymentTxn {
             },
         );
         if not_successful(config, &res) {
-            return helper.kill(&txn, &res, AbortID::FinishUpdateWarehouse as u8);
+            return helper.kill(&txn, &res, AbortID::UpdateWarehouse as u8);
         }
 
         // Fetch and update District
@@ -83,7 +83,7 @@ impl TPCCTxnProfile for PaymentTxn {
             },
         );
         if not_successful(config, &res) {
-            return helper.kill(&txn, &res, AbortID::FinishUpdateDistrict as u8);
+            return helper.kill(&txn, &res, AbortID::UpdateDistrict as u8);
         }
 
         // Fetch and update Customer
@@ -91,36 +91,34 @@ impl TPCCTxnProfile for PaymentTxn {
             debug_assert!(c_id == Customer::UNUSED_ID);
 
             let mut customer_recs = Vec::new();
-            let sec_key = CustomerSecondaryKey::create_key(c_w_id, c_d_id, c_last);
-            let sec_key_bytes = sec_key.into_bytes();
+            let sec_key_start = CustomerSecondaryKey::create_key(c_w_id, c_d_id, c_last, 1);
+            let sec_key_start_bytes = sec_key_start.into_bytes();
+            let sec_key_end = CustomerSecondaryKey::create_key(c_w_id, c_d_id, c_last, u32::MAX);
+            let sec_key_end_bytes = sec_key_end.into_bytes();
             let res = txn_storage.scan_range(
                 &txn,
                 tbl_info[TPCCTable::CustomerSecondary],
                 ScanOptions {
-                    lower: sec_key_bytes.to_vec(),
-                    upper: vec![],
+                    lower_inc: sec_key_start_bytes.to_vec(),
+                    upper_exc: sec_key_end_bytes.to_vec(),
                 },
             );
             if not_successful(config, &res) {
-                return helper.kill(&txn, &res, AbortID::PrepareUpdateCustomerByLastName as u8);
+                return helper.kill(&txn, &res, AbortID::ScanCustomerByLastName as u8);
             }
             let iter = res.unwrap();
 
             loop {
                 match txn_storage.iter_next(&txn, &iter) {
-                    Ok(Some((s_key, p_value))) => {
-                        if s_key != sec_key_bytes {
-                            break;
-                        } else {
-                            customer_recs.push(p_value);
-                        }
+                    Ok(Some((_, p_value))) => {
+                        customer_recs.push(p_value);
                     }
                     Ok(None) => break,
                     Err(e) => {
                         return helper.kill::<()>(
                             &txn,
                             &Err(e),
-                            AbortID::PrepareUpdateCustomerByLastName as u8,
+                            AbortID::ScanCustomerByLastName as u8,
                         )
                     }
                 }
@@ -133,7 +131,7 @@ impl TPCCTxnProfile for PaymentTxn {
                 return helper.kill::<()>(
                     &txn,
                     &Err(TxnStorageStatus::KeyNotFound),
-                    AbortID::PrepareUpdateCustomerByLastName as u8,
+                    AbortID::ScanCustomerByLastName as u8,
                 );
             }
 
@@ -183,7 +181,7 @@ impl TPCCTxnProfile for PaymentTxn {
             },
         );
         if not_successful(config, &res) {
-            return helper.kill(&txn, &res, AbortID::FinishUpdateCustomer as u8);
+            return helper.kill(&txn, &res, AbortID::UpdateCustomer as u8);
         }
 
         // Insert History
@@ -320,32 +318,22 @@ impl PaymentTxnInput {
 #[derive(Debug, Clone, Copy)]
 #[repr(u8)]
 enum AbortID {
-    PrepareUpdateWarehouse = 0,
-    FinishUpdateWarehouse = 1,
-    PrepareUpdateDistrict = 2,
-    FinishUpdateDistrict = 3,
-    PrepareUpdateCustomerByLastName = 4,
-    PrepareUpdateCustomer = 5,
-    FinishUpdateCustomer = 6,
-    PrepareInsertHistory = 7,
-    FinishInsertHistory = 8,
-    Precommit = 9,
-    Max = 10,
+    UpdateWarehouse = 0,
+    UpdateDistrict = 1,
+    ScanCustomerByLastName = 2,
+    UpdateCustomer = 3,
+    Precommit = 4,
+    Max = 5,
 }
 
 impl From<u8> for AbortID {
     fn from(val: u8) -> Self {
         match val {
-            0 => AbortID::PrepareUpdateWarehouse,
-            1 => AbortID::FinishUpdateWarehouse,
-            2 => AbortID::PrepareUpdateDistrict,
-            3 => AbortID::FinishUpdateDistrict,
-            4 => AbortID::PrepareUpdateCustomerByLastName,
-            5 => AbortID::PrepareUpdateCustomer,
-            6 => AbortID::FinishUpdateCustomer,
-            7 => AbortID::PrepareInsertHistory,
-            8 => AbortID::FinishInsertHistory,
-            9 => AbortID::Precommit,
+            0 => AbortID::UpdateWarehouse,
+            1 => AbortID::UpdateDistrict,
+            2 => AbortID::ScanCustomerByLastName,
+            3 => AbortID::UpdateCustomer,
+            4 => AbortID::Precommit,
             _ => panic!("Invalid AbortID"),
         }
     }
@@ -355,15 +343,10 @@ impl From<u8> for AbortID {
 impl AbortID {
     pub fn as_str(&self) -> &'static str {
         match self {
-            AbortID::PrepareUpdateWarehouse => "PREPARE_UPDATE_WAREHOUSE",
-            AbortID::FinishUpdateWarehouse => "FINISH_UPDATE_WAREHOUSE",
-            AbortID::PrepareUpdateDistrict => "PREPARE_UPDATE_DISTRICT",
-            AbortID::FinishUpdateDistrict => "FINISH_UPDATE_DISTRICT",
-            AbortID::PrepareUpdateCustomerByLastName => "PREPARE_UPDATE_CUSTOMER_BY_LAST_NAME",
-            AbortID::PrepareUpdateCustomer => "PREPARE_UPDATE_CUSTOMER",
-            AbortID::FinishUpdateCustomer => "FINISH_UPDATE_CUSTOMER",
-            AbortID::PrepareInsertHistory => "PREPARE_INSERT_HISTORY",
-            AbortID::FinishInsertHistory => "FINISH_INSERT_HISTORY",
+            AbortID::UpdateWarehouse => "UPDATE_WAREHOUSE",
+            AbortID::UpdateDistrict => "UPDATE_DISTRICT",
+            AbortID::ScanCustomerByLastName => "SCAN_CUSTOMER_BY_LAST_NAME",
+            AbortID::UpdateCustomer => "UPDATE_CUSTOMER",
             AbortID::Precommit => "PRECOMMIT",
             _ => panic!("Invalid AbortID"),
         }

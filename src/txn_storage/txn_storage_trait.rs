@@ -192,8 +192,8 @@ pub struct TxnOptions {}
 
 #[derive(Default)]
 pub struct ScanOptions {
-    pub lower: Vec<u8>,
-    pub upper: Vec<u8>,
+    pub lower_inc: Vec<u8>,
+    pub upper_exc: Vec<u8>,
 }
 
 impl ScanOptions {

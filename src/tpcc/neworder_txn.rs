@@ -79,7 +79,7 @@ impl TPCCTxnProfile for NewOrderTxn {
             },
         );
         if not_successful(config, &res) {
-            return helper.kill(&txn, &res, AbortID::FinishUpdateDistrict as u8);
+            return helper.kill(&txn, &res, AbortID::UpdateDistrict as u8);
         }
 
         // Fetch customer record
@@ -112,7 +112,7 @@ impl TPCCTxnProfile for NewOrderTxn {
             no.as_bytes().to_vec(),
         );
         if not_successful(config, &res) {
-            return helper.kill(&txn, &res, AbortID::FinishInsertNewOrder as u8);
+            return helper.kill(&txn, &res, AbortID::InsertNewOrder as u8);
         }
 
         // Insert Order record
@@ -126,7 +126,19 @@ impl TPCCTxnProfile for NewOrderTxn {
             o_rec.as_bytes().to_vec(),
         );
         if not_successful(config, &res) {
-            return helper.kill(&txn, &res, AbortID::FinishInsertOrder as u8);
+            return helper.kill(&txn, &res, AbortID::InsertOrder as u8);
+        }
+
+        // Insert Order record into the secondary index
+        let o_idx_key = OrderSecondaryKey::create_key(w_id, d_id, c_id, o_id);
+        let res = txn_storage.insert_value(
+            &txn,
+            tbl_info[TPCCTable::OrderSecondary],
+            o_idx_key.into_bytes().to_vec(),
+            o_key.into_bytes().to_vec(),
+        );
+        if not_successful(config, &res) {
+            return helper.kill(&txn, &res, AbortID::InsertOrderSecondary as u8);
         }
 
         let mut total = 0.0;
@@ -185,7 +197,7 @@ impl TPCCTxnProfile for NewOrderTxn {
                 },
             );
             if not_successful(config, &res) {
-                return helper.kill(&txn, &res, AbortID::FinishUpdateStock as u8);
+                return helper.kill(&txn, &res, AbortID::UpdateStock as u8);
             }
 
             // Insert OrderLine record
@@ -197,7 +209,7 @@ impl TPCCTxnProfile for NewOrderTxn {
                 ol.as_bytes().to_vec(),
             );
             if not_successful(config, &res) {
-                return helper.kill(&txn, &res, AbortID::FinishInsertOrderLine as u8);
+                return helper.kill(&txn, &res, AbortID::InsertOrderLine as u8);
             }
 
             write_fields!(
@@ -367,7 +379,7 @@ impl NewOrderTxnInput {
             if self.is_remote { "t" } else { "f" },
             self.ol_cnt
         );
-        for _item in self.items.iter() {
+        for (_i, _item) in self.items.iter().enumerate() {
             log_info!(
                 " ({}): ol_i_id={} ol_supply_w_id={} c_quantity={}",
                 _i + 1,
@@ -384,39 +396,31 @@ impl NewOrderTxnInput {
 #[repr(u8)]
 enum AbortID {
     GetWarehouse = 0,
-    PrepareUpdateDistrict = 1,
-    FinishUpdateDistrict = 2,
-    GetCustomer = 3,
-    PrepareInsertNewOrder = 4,
-    FinishInsertNewOrder = 5,
-    PrepareInsertOrder = 6,
-    FinishInsertOrder = 7,
-    GetItem = 8,
-    PrepareUpdateStock = 9,
-    FinishUpdateStock = 10,
-    PrepareInsertOrderLine = 11,
-    FinishInsertOrderLine = 12,
-    Precommit = 13,
-    Max = 14,
+    UpdateDistrict = 1,
+    GetCustomer = 2,
+    InsertNewOrder = 3,
+    InsertOrder = 4,
+    InsertOrderSecondary = 5,
+    GetItem = 6,
+    UpdateStock = 7,
+    InsertOrderLine = 8,
+    Precommit = 9,
+    Max = 10,
 }
 
 impl From<u8> for AbortID {
     fn from(val: u8) -> Self {
         match val {
             0 => AbortID::GetWarehouse,
-            1 => AbortID::PrepareUpdateDistrict,
-            2 => AbortID::FinishUpdateDistrict,
-            3 => AbortID::GetCustomer,
-            4 => AbortID::PrepareInsertNewOrder,
-            5 => AbortID::FinishInsertNewOrder,
-            6 => AbortID::PrepareInsertOrder,
-            7 => AbortID::FinishInsertOrder,
-            8 => AbortID::GetItem,
-            9 => AbortID::PrepareUpdateStock,
-            10 => AbortID::FinishUpdateStock,
-            11 => AbortID::PrepareInsertOrderLine,
-            12 => AbortID::FinishInsertOrderLine,
-            13 => AbortID::Precommit,
+            1 => AbortID::UpdateDistrict,
+            2 => AbortID::GetCustomer,
+            3 => AbortID::InsertNewOrder,
+            4 => AbortID::InsertOrder,
+            5 => AbortID::InsertOrderSecondary,
+            6 => AbortID::GetItem,
+            7 => AbortID::UpdateStock,
+            8 => AbortID::InsertOrderLine,
+            9 => AbortID::Precommit,
             _ => panic!("Invalid AbortID"),
         }
     }
@@ -427,18 +431,14 @@ impl AbortID {
     pub fn as_str(&self) -> &'static str {
         match self {
             AbortID::GetWarehouse => "GET_WAREHOUSE",
-            AbortID::PrepareUpdateDistrict => "PREPARE_UPDATE_DISTRICT",
-            AbortID::FinishUpdateDistrict => "FINISH_UPDATE_DISTRICT",
+            AbortID::UpdateDistrict => "UPDATE_DISTRICT",
             AbortID::GetCustomer => "GET_CUSTOMER",
-            AbortID::PrepareInsertNewOrder => "PREPARE_INSERT_NEWORDER",
-            AbortID::FinishInsertNewOrder => "FINISH_INSERT_NEWORDER",
-            AbortID::PrepareInsertOrder => "PREPARE_INSERT_ORDER",
-            AbortID::FinishInsertOrder => "FINISH_INSERT_ORDER",
+            AbortID::InsertNewOrder => "INSERT_NEWORDER",
+            AbortID::InsertOrder => "INSERT_ORDER",
+            AbortID::InsertOrderSecondary => "INSERT_ORDER_SECONDARY",
             AbortID::GetItem => "GET_ITEM",
-            AbortID::PrepareUpdateStock => "PREPARE_UPDATE_STOCK",
-            AbortID::FinishUpdateStock => "FINISH_UPDATE_STOCK",
-            AbortID::PrepareInsertOrderLine => "PREPARE_INSERT_ORDERLINE",
-            AbortID::FinishInsertOrderLine => "FINISH_INSERT_ORDERLINE",
+            AbortID::UpdateStock => "UPDATE_STOCK",
+            AbortID::InsertOrderLine => "INSERT_ORDERLINE",
             AbortID::Precommit => "PRECOMMIT",
             _ => panic!("Invalid AbortID"),
         }

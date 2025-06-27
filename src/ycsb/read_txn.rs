@@ -48,8 +48,8 @@ impl YCSBTxnProfile for ReadTxn {
             &txn,
             tbl_info[YCSBTable::Secondary],
             ScanOptions {
-                lower: get_key_bytes(lower, config.key_size),
-                upper: get_key_bytes(upper, config.key_size),
+                lower_inc: get_key_bytes(lower, config.key_size),
+                upper_exc: get_key_bytes(upper, config.key_size),
             },
         );
         if res.is_err() {
