@@ -5,9 +5,6 @@
 *.db.wal
 
 /results
-/results*
 
 /fbt_*
 /tpcc_*
-
-*.txt

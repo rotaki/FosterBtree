@@ -1093,11 +1093,19 @@ impl NoWaitTxn {
         Ok(())
     }
 
-    pub fn abort<M: MemPool>(&self, pss: &PrimaryStorages<M>) -> Result<(), TxnStorageStatus> {
+    pub fn abort<M: MemPool>(
+        &self,
+        pss: &PrimaryStorages<M>,
+        sss: &SecondaryStorages<M>,
+    ) -> Result<(), TxnStorageStatus> {
         for (c_id, rwset) in unsafe { &*self.rwset.get() } {
-            let ps = pss.get(*c_id).unwrap();
-            let storage = &ps.btree;
-            let locktable = &ps.locktable;
+            let (storage, locktable) = match pss.get(*c_id) {
+                Some(ps) => (&ps.btree, &ps.locktable),
+                None => {
+                    let ss = sss.get(*c_id).unwrap();
+                    (&ss.btree, &ss.locktable)
+                }
+            };
             // Revert failed inserts
             for (key, e) in rwset.iter() {
                 if e.ghost_inserted() {
@@ -1385,7 +1393,7 @@ impl<M: MemPool> TxnStorageTrait for NoWaitTxnStorage<M> {
         if txn.commit(&self.pss, &self.sss).is_ok() {
             return Ok(());
         }
-        if txn.abort(&self.pss).is_ok() {
+        if txn.abort(&self.pss, &self.sss).is_ok() {
             Err(TxnStorageStatus::Aborted)
         } else {
             Err(TxnStorageStatus::AbortFailed)
@@ -1393,7 +1401,7 @@ impl<M: MemPool> TxnStorageTrait for NoWaitTxnStorage<M> {
     }
 
     fn abort_txn(&self, txn: &Self::TxnHandle) -> Result<(), TxnStorageStatus> {
-        if txn.abort(&self.pss).is_ok() {
+        if txn.abort(&self.pss, &self.sss).is_ok() {
             Ok(())
         } else {
             Err(TxnStorageStatus::AbortFailed)
