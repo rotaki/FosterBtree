@@ -31,6 +31,7 @@ pub enum TPCCTable {
     History,
 }
 
+#[derive(Clone)]
 pub struct TPCCTableInfo {
     map: HashMap<TPCCTable, ContainerId>,
 }

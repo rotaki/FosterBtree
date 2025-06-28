@@ -459,20 +459,6 @@ impl<M: MemPool> TransactionalStorage<M> {
     /// - All locks are properly released after commit/abort
     /// - No lock leaks occur in the system
     /// - Transaction isolation is properly maintained
-    ///
-    /// # Example
-    /// ```ignore
-    /// // After running transactions
-    /// assert!(storage.are_lock_tables_empty(), "Lock leak detected!");
-    ///
-    /// // For debugging lock issues
-    /// if !storage.are_lock_tables_empty() {
-    ///     let lock_counts = storage.get_lock_counts();
-    ///     for (container_id, count) in lock_counts {
-    ///         println!("Container {} has {} locks", container_id, count);
-    ///     }
-    /// }
-    /// ```
     pub fn are_lock_tables_empty(&self) -> bool {
         unsafe {
             for container in (*self.containers.get()).values() {

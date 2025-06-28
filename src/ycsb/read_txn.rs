@@ -6,7 +6,6 @@ use crate::prelude::get_key_bytes;
 
 use crate::{
     prelude::{ScanOptions, TxnOptions, TxnStorageTrait, DB_ID},
-    write_fields,
 };
 
 use super::{
@@ -60,7 +59,8 @@ impl YCSBTxnProfile for ReadTxn {
         match txn_storage.iter_next(&txn, &iter) {
             Ok(Some((key, value))) => {
                 let len = key.len() + value.len();
-                write_fields!(out, &len);
+                // write_fields!(out, &len);
+                out.write(&len);
             }
             Ok(None) => {
                 panic!("Key should exist if we are able to scan it unless there is a deletion");

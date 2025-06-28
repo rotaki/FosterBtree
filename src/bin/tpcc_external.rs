@@ -3,8 +3,9 @@ use fbtree::{
     affinity::{get_current_cpu, get_total_cpus, with_affinity},
     bp::{get_bp, MemPool},
     container::ContainerManager,
-    prelude::{print_tpcc_stats, run_tpcc, tpcc_load_schema, TPCCConfig, PAGE_SIZE},
+    prelude::{TPCCConfig, PAGE_SIZE},
     print_cfg_flags,
+    tpcc::TpccBenchmark,
     txn_storage::NoWaitTxnStorage,
 };
 use std::sync::Arc;
@@ -65,15 +66,19 @@ pub fn main() {
 
     // Load the database from the directory.
     let txn_storage = NoWaitTxnStorage::load(&bp);
-    let tbl_info = tpcc_load_schema(&txn_storage);
+    let tpcc_bench = TpccBenchmark::load(txn_storage, config.num_warehouses);
 
-    let stats_and_outs = with_affinity(get_total_cpus() - 1, || {
+    let result = with_affinity(get_total_cpus() - 1, || {
         let current_cpu = get_current_cpu();
         println!("Main thread pinned to CPU {}", current_cpu);
 
         // Warmup
         if config.warmup_time > 0 {
-            let _ = run_tpcc(true, &config, &txn_storage, &tbl_info);
+            let _ = tpcc_bench.run_benchmark(
+                config.num_threads,
+                config.warmup_time,
+                !config.fixed_warehouse_per_thread,
+            );
             println!("BP stats after warmup: \n{}", unsafe { bp.stats() });
         } else {
             println!("Warm up skipped");
@@ -83,16 +88,15 @@ pub fn main() {
         if config.exec_time == 0 {
             panic!("Execution time is 0. Please specify a non-zero execution time.");
         }
-        run_tpcc(false, &config, &txn_storage, &tbl_info)
+        tpcc_bench.run_benchmark(
+            config.num_threads,
+            config.exec_time,
+            !config.fixed_warehouse_per_thread,
+        )
     })
     .unwrap();
 
-    print_tpcc_stats(
-        config.num_warehouses,
-        config.num_threads,
-        config.exec_time,
-        stats_and_outs,
-    );
+    result.print(true);
 
     println!("BP stats: \n{}", unsafe { bp.stats() });
     bp.clear_dirty_flags().unwrap();

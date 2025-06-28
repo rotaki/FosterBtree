@@ -274,23 +274,6 @@ impl CustomerSecondaryKey {
         bytes
     }
 
-    /// # Safety
-    ///
-    /// The caller must ensure that the bytes are of the correct length
-    /// and that the lifetime of the returned reference is valid.
-    pub unsafe fn from_bytes(bytes: &[u8]) -> &CustomerSecondaryKey {
-        &*(bytes.as_ptr() as *const CustomerSecondaryKey)
-    }
-
-    /// # Safety
-    ///
-    /// The caller must ensure that the bytes are of the correct length
-    /// and that the lifetime of the returned reference is valid.
-    /// Also, the caller must ensure that the bytes are mutable.
-    pub unsafe fn from_bytes_mut(bytes: &mut [u8]) -> &mut CustomerSecondaryKey {
-        &mut *(bytes.as_mut_ptr() as *mut CustomerSecondaryKey)
-    }
-
     pub fn create_key(w_id: u16, d_id: u8, c_last_in: &[u8], c_id: u32) -> Self {
         let mut k = Self::new();
         k.set_w_id(w_id);
@@ -372,7 +355,7 @@ impl OrderKey {
     }
 
     #[allow(dead_code)]
-    fn create_key_from_order(o: &Order) -> Self {
+    pub fn create_key_from_order(o: &Order) -> Self {
         OrderKey::create_key(o.o_w_id, o.o_d_id, o.o_id)
     }
 }
@@ -390,6 +373,7 @@ impl Ord for OrderKey {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(C)]
 pub struct OrderSecondaryKey {
     o_sec_key: u64,
 }
@@ -434,9 +418,15 @@ impl OrderSecondaryKey {
         self.o_sec_key.to_be_bytes()
     }
 
+    pub fn from_bytes(bytes: &[u8]) -> OrderSecondaryKey {
+        OrderSecondaryKey {
+            o_sec_key: u64::from_be_bytes(bytes.try_into().expect("Slice with incorrect length")),
+        }
+    }
+
     // Extract fields from the raw key
     pub fn w_id(&self) -> u16 {
-        ((self.o_sec_key >> 52) & 0xFFF) as u16
+        ((self.o_sec_key >> 52) & !0) as u16
     }
 
     pub fn d_id(&self) -> u8 {
@@ -534,21 +524,10 @@ impl NewOrderKey {
         self.no_key.to_be_bytes()
     }
 
-    /// # Safety
-    ///
-    /// The caller must ensure that the bytes are of the correct length
-    /// and that the lifetime of the returned reference is valid.
-    pub unsafe fn from_bytes(bytes: &[u8]) -> &NewOrderKey {
-        &*(bytes.as_ptr() as *const NewOrderKey)
-    }
-
-    /// # Safety
-    ///
-    /// The caller must ensure that the bytes are of the correct length
-    /// and that the lifetime of the returned reference is valid.
-    /// Also, the caller must ensure that the bytes are mutable.
-    pub unsafe fn from_bytes_mut(bytes: &mut [u8]) -> &mut NewOrderKey {
-        &mut *(bytes.as_mut_ptr() as *mut NewOrderKey)
+    pub fn from_bytes(bytes: &[u8]) -> NewOrderKey {
+        NewOrderKey {
+            no_key: u64::from_be_bytes(bytes.try_into().expect("Slice with incorrect length")),
+        }
     }
 
     pub fn create_key(w_id: u16, d_id: u8, o_id: u32) -> Self {
@@ -1108,7 +1087,7 @@ impl Customer {
     /// The caller must ensure that the input bytes are valid and
     /// represent a valid Customer struct.
     pub unsafe fn from_bytes(bytes: &[u8]) -> &Customer {
-        unsafe { &*(bytes.as_ptr() as *const Customer) }
+        &*(bytes.as_ptr() as *const Customer)
     }
 
     /// # Safety
@@ -1116,8 +1095,8 @@ impl Customer {
     /// The caller must ensure that the input bytes are valid and
     /// represent a valid Customer struct. The caller must also ensure that
     /// the input bytes are mutable.
-    pub fn from_bytes_mut(bytes: &mut [u8]) -> &mut Customer {
-        unsafe { &mut *(bytes.as_mut_ptr() as *mut Customer) }
+    pub unsafe fn from_bytes_mut(bytes: &mut [u8]) -> &mut Customer {
+        &mut *(bytes.as_mut_ptr() as *mut Customer)
     }
 
     // Method to print the Customer
