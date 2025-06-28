@@ -138,7 +138,7 @@ pub fn run_orderstatus_txn<T: TxnStorageTrait>(
     if by_last_name {
         debug_assert!(c_id == Customer::UNUSED_ID);
         // Fetch customers with matching last name
-        let mut customer_recs = Vec::new();
+        let mut customer_recs = Vec::with_capacity(3);
         let sec_key_start = CustomerSecondaryKey::create_key(c_w_id, c_d_id, c_last, 1);
         let sec_key_start_bytes = sec_key_start.into_bytes();
         let sec_key_end = CustomerSecondaryKey::create_key(c_w_id, c_d_id, c_last, u32::MAX);
@@ -174,7 +174,10 @@ pub fn run_orderstatus_txn<T: TxnStorageTrait>(
         drop(iter);
 
         if customer_recs.is_empty() {
-            return Err(helper.usr_abort(&txn));
+            panic!(
+                "No customers found with last name: {}",
+                String::from_utf8_lossy(c_last)
+            );
         }
 
         // Sort the customer records by c_first
@@ -254,7 +257,7 @@ pub fn run_orderstatus_txn<T: TxnStorageTrait>(
     let o = unsafe { Order::from_bytes(&o_bytes) };
 
     // Fetch order lines using range scan
-    let mut order_lines = Vec::new();
+    let mut order_lines = Vec::with_capacity(15); // Assuming max 15 order lines per order
     let ol_key_start = OrderLineKey::create_key(c_w_id, c_d_id, o_id, 1);
     let ol_key_end = OrderLineKey::create_key(c_w_id, c_d_id, o_id, u8::MAX);
 

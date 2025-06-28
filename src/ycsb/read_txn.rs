@@ -4,9 +4,7 @@ use std::time::SystemTime;
 use crate::log;
 use crate::prelude::get_key_bytes;
 
-use crate::{
-    prelude::{ScanOptions, TxnOptions, TxnStorageTrait, DB_ID},
-};
+use crate::prelude::{ScanOptions, TxnOptions, TxnStorageTrait, DB_ID};
 
 use super::{
     loader::{YCSBTable, YCSBTableInfo},

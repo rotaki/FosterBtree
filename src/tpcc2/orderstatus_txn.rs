@@ -329,46 +329,67 @@ pub fn run_orderstatus_txn_with_stats<M: MemPool>(
     let o_carrier_id = get_optional_u8_field(&o_fields, 1);
     let o_ol_cnt = get_u8_field(&o_fields, 2);
 
-    // Get order lines
-    let mut order_lines = Vec::new();
+    // Get order lines using range scan
+    let mut order_lines = Vec::with_capacity(o_ol_cnt as usize);
 
-    for ol_number in 1..=o_ol_cnt {
-        let ol_key = vec![
-            Field::Uint16(Some(input.w_id)),
-            Field::Uint8(Some(input.d_id)),
-            Field::Uint32(Some(latest_o_id)),
-            Field::Uint8(Some(ol_number)),
-        ];
+    // Scan for all order lines of this order
+    let ol_scan_start = vec![
+        Field::Uint16(Some(input.w_id)),
+        Field::Uint8(Some(input.d_id)),
+        Field::Uint32(Some(latest_o_id)),
+        Field::Uint8(Some(1)),
+    ];
+    let ol_scan_end = vec![
+        Field::Uint16(Some(input.w_id)),
+        Field::Uint8(Some(input.d_id)),
+        Field::Uint32(Some(latest_o_id)),
+        Field::Uint8(Some(u8::MAX)),
+    ];
 
-        let res = storage.get_fields(
-            &txn,
-            containers.order_line_cid,
-            ol_key,
-            &[
-                order_line_fields::OL_I_ID,
-                order_line_fields::OL_SUPPLY_W_ID,
-                order_line_fields::OL_QUANTITY,
-                order_line_fields::OL_AMOUNT,
-                order_line_fields::OL_DELIVERY_D,
-            ],
+    let res = storage.scan_range(
+        &txn,
+        containers.order_line_cid,
+        ScanOptions::with_bounds(ol_scan_start, ol_scan_end),
+    );
+    if not_successful(&res) {
+        return (
+            helper.kill(&txn, &res, AbortID::OrderStatusGetOrderLine),
             None,
         );
-        if not_successful(&res) {
-            return (
-                helper.kill(&txn, &res, AbortID::OrderStatusGetOrderLine),
-                None,
-            );
-        }
-        let (ol_fields, _ol_hint) = res.unwrap();
-
-        order_lines.push(OrderLineInfo {
-            ol_i_id: get_u32_field(&ol_fields, 0),
-            ol_supply_w_id: get_u16_field(&ol_fields, 1),
-            ol_quantity: get_u8_field(&ol_fields, 2),
-            ol_amount: get_f64_field(&ol_fields, 3),
-            ol_delivery_d: get_optional_u64_field(&ol_fields, 4),
-        });
     }
+    let iter = res.unwrap();
+
+    loop {
+        match storage.iter_next(&txn, &iter) {
+            Ok(Some((_, value_fields, _))) => {
+                // Extract fields from the order line
+                let ol_i_id = get_u32_field(&value_fields, order_line_fields::OL_I_ID);
+                let ol_supply_w_id =
+                    get_u16_field(&value_fields, order_line_fields::OL_SUPPLY_W_ID);
+                let ol_quantity = get_u8_field(&value_fields, order_line_fields::OL_QUANTITY);
+                let ol_amount = get_f64_field(&value_fields, order_line_fields::OL_AMOUNT);
+                let ol_delivery_d =
+                    get_optional_u64_field(&value_fields, order_line_fields::OL_DELIVERY_D);
+
+                order_lines.push(OrderLineInfo {
+                    ol_i_id,
+                    ol_supply_w_id,
+                    ol_quantity,
+                    ol_amount,
+                    ol_delivery_d,
+                });
+            }
+            Ok(None) => break,
+            Err(e) => {
+                let _ = storage.drop_iterator_handle(iter);
+                return (
+                    helper.kill::<()>(&txn, &Err(e), AbortID::OrderStatusGetOrderLine),
+                    None,
+                );
+            }
+        }
+    }
+    let _ = storage.drop_iterator_handle(iter);
 
     // Commit transaction (read-only)
     let status = helper.commit(&txn, AbortID::OrderStatusCommit);

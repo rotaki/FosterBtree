@@ -138,7 +138,7 @@ pub fn run_delivery_txn_with_stats<M: MemPool>(
             &txn,
             containers.order_cid,
             o_key.clone(),
-            &[order_fields::O_C_ID, order_fields::O_OL_CNT],
+            &[order_fields::O_C_ID],
             None,
         );
         if not_successful(&res) {
@@ -147,7 +147,6 @@ pub fn run_delivery_txn_with_stats<M: MemPool>(
         let (o_fields, o_hint) = res.unwrap();
 
         let o_c_id = get_u32_field(&o_fields, 0);
-        let o_ol_cnt = get_u8_field(&o_fields, 1);
 
         // Update order with carrier ID
         let res = storage.update_field(
@@ -162,33 +161,56 @@ pub fn run_delivery_txn_with_stats<M: MemPool>(
             return (helper.kill(&txn, &res, AbortID::DeliveryUpdateOrder), None);
         }
 
-        // Update order lines and calculate total amount
+        // Update order lines and calculate total amount using range scan
         let mut total_amount = 0.0;
 
-        for ol_number in 1..=o_ol_cnt {
-            let ol_key = vec![
-                Field::Uint16(Some(input.w_id)),
-                Field::Uint8(Some(d_id)),
-                Field::Uint32(Some(o_id)),
-                Field::Uint8(Some(ol_number)),
-            ];
+        // Scan for all order lines of this order
+        let ol_scan_start = vec![
+            Field::Uint16(Some(input.w_id)),
+            Field::Uint8(Some(d_id)),
+            Field::Uint32(Some(o_id)),
+            Field::Uint8(Some(1)),
+        ];
+        let ol_scan_end = vec![
+            Field::Uint16(Some(input.w_id)),
+            Field::Uint8(Some(d_id)),
+            Field::Uint32(Some(o_id)),
+            Field::Uint8(Some(u8::MAX)),
+        ];
 
-            // Get amount
-            let res = storage.get_fields(
-                &txn,
-                containers.order_line_cid,
-                ol_key.clone(),
-                &[order_line_fields::OL_AMOUNT],
-                None,
-            );
-            if not_successful(&res) {
-                return (helper.kill(&txn, &res, AbortID::DeliveryGetOrderLine), None);
+        let res = storage.scan_range(
+            &txn,
+            containers.order_line_cid,
+            ScanOptions::with_bounds(ol_scan_start, ol_scan_end),
+        );
+        if not_successful(&res) {
+            return (helper.kill(&txn, &res, AbortID::DeliveryGetOrderLine), None);
+        }
+        let iter = res.unwrap();
+
+        // First pass: collect order line keys, amounts, and hints
+        let mut order_line_updates = Vec::new();
+        loop {
+            match storage.iter_next(&txn, &iter) {
+                Ok(Some((key_fields, value_fields, hint))) => {
+                    let ol_amount = get_f64_field(&value_fields, order_line_fields::OL_AMOUNT);
+                    total_amount += ol_amount;
+                    order_line_updates.push((key_fields, hint));
+                }
+                Ok(None) => break,
+                Err(e) => {
+                    let _ = storage.drop_iterator_handle(iter);
+                    return (
+                        helper.kill::<()>(&txn, &Err(e), AbortID::DeliveryGetOrderLine),
+                        None,
+                    );
+                }
             }
-            let (ol_fields, ol_hint) = res.unwrap();
-            let ol_amount = get_f64_field(&ol_fields, 0);
-            total_amount += ol_amount;
+        }
+        let _ = storage.drop_iterator_handle(iter);
 
-            // Update delivery date
+        // Second pass: update delivery dates
+        for (ol_key, ol_hint) in order_line_updates {
             let res = storage.update_field(
                 &txn,
                 containers.order_line_cid,

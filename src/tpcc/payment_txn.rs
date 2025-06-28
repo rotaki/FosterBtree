@@ -298,6 +298,7 @@ pub fn run_payment_txn<T: TxnStorageTrait>(
                 }
             }
         }
+        drop(iter);
 
         if customer_recs.is_empty() {
             panic!(

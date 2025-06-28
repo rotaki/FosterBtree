@@ -423,7 +423,10 @@ where
     let mut attempts = 0;
     loop {
         match run_fn() {
-            Ok(()) | Err(TPCCStatus::UserAbort) => return Ok(()),
+            Ok(()) => return Ok(()),
+            Err(TPCCStatus::UserAbort) => {
+                return Err(TPCCStatus::UserAbort); // User abort - do not retry
+            }
             Err(TPCCStatus::SystemAbort) => {
                 // System abort - retry with exponential backoff
                 thread::sleep(Duration::from_nanos(
