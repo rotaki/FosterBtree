@@ -26,6 +26,7 @@ pub use record_definitions::{
 
 use crate::{
     affinity::{get_current_cpu, get_total_cpus, with_affinity},
+    event_tracer::trace_txn,
     prelude::{tpcc_gen_all_tables, tpcc_load_schema, TxnStorageTrait},
     random::gen_truncated_randomized_exponential_backoff,
 };
@@ -52,6 +53,22 @@ pub mod prelude {
     pub use super::record_definitions::*;
     pub use super::stocklevel_txn::*;
     pub use super::txn_utils::*;
+}
+
+#[repr(u8)]
+#[derive(Debug, Clone, Copy)]
+enum TPCCTxnType {
+    NewOrder = 0,
+    Payment = 1,
+    OrderStatus = 2,
+    Delivery = 3,
+    StockLevel = 4,
+}
+
+impl TPCCTxnType {
+    fn as_u8(&self) -> u8 {
+        *self as u8
+    }
 }
 
 pub struct TpccBenchmark<T: TxnStorageTrait + Send + Sync + 'static> {
@@ -167,6 +184,7 @@ impl<T: TxnStorageTrait + Send + Sync + 'static> TpccBenchmark<T> {
                                         &mut neworder_stats,
                                     )
                                 })
+                                .map(|_| TPCCTxnType::NewOrder)
                             } else if txn_type <= 88 {
                                 /* Payment 43 % */
                                 run_transaction_with_retry(|| {
@@ -179,6 +197,7 @@ impl<T: TxnStorageTrait + Send + Sync + 'static> TpccBenchmark<T> {
                                         &mut payment_stats,
                                     )
                                 })
+                                .map(|_| TPCCTxnType::Payment)
                             } else if txn_type <= 92 {
                                 /* OrderStatus 4 % */
                                 run_transaction_with_retry(|| {
@@ -191,6 +210,7 @@ impl<T: TxnStorageTrait + Send + Sync + 'static> TpccBenchmark<T> {
                                         &mut orderstatus_stats,
                                     )
                                 })
+                                .map(|_| TPCCTxnType::OrderStatus)
                             } else if txn_type <= 96 {
                                 /* Delivery 4 % */
                                 run_transaction_with_retry(|| {
@@ -203,6 +223,7 @@ impl<T: TxnStorageTrait + Send + Sync + 'static> TpccBenchmark<T> {
                                         &mut delivery_stats,
                                     )
                                 })
+                                .map(|_| TPCCTxnType::Delivery)
                             } else {
                                 /* StockLevel 4 % */
                                 run_transaction_with_retry(|| {
@@ -215,10 +236,14 @@ impl<T: TxnStorageTrait + Send + Sync + 'static> TpccBenchmark<T> {
                                         &mut stocklevel_stats,
                                     )
                                 })
+                                .map(|_| TPCCTxnType::StockLevel)
                             };
 
                             match res {
-                                Ok(_) => local_committed += 1,
+                                Ok(kind) => {
+                                    local_committed += 1;
+                                    trace_txn(kind.as_u8());
+                                }
                                 Err(_) => local_aborted += 1,
                             }
                         }
