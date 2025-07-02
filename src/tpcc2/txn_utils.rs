@@ -174,6 +174,14 @@ pub mod customer_fields {
     pub const C_ADDRESS: usize = 16;
 }
 
+pub mod customer_secondary_fields {
+    pub const C_W_ID: usize = 0;
+    pub const C_D_ID: usize = 1;
+    pub const C_LAST: usize = 2; // Secondary index on last name
+    pub const C_ID: usize = 3; // Customer ID
+    pub const C_POINTER: usize = 4; // Pointer to the customer record
+}
+
 pub mod item_fields {
     pub const I_ID: usize = 0;
     pub const I_IM_ID: usize = 1;
@@ -202,6 +210,14 @@ pub mod order_fields {
     pub const O_OL_CNT: usize = 5;
     pub const O_ALL_LOCAL: usize = 6;
     pub const O_ENTRY_D: usize = 7;
+}
+
+pub mod order_secondary_fields {
+    pub const O_W_ID: usize = 0;
+    pub const O_D_ID: usize = 1;
+    pub const O_C_ID: usize = 2; // Secondary index on customer ID
+    pub const O_ID: usize = 3; // Order ID
+    pub const O_POINTER: usize = 4; // Pointer to the order record
 }
 
 pub mod order_line_fields {

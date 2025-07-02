@@ -80,7 +80,7 @@ pub fn run_delivery_txn_with_stats<M: MemPool>(
         let res = storage.scan_range(
             &txn,
             containers.new_order_cid,
-            ScanOptions::with_bounds(scan_start, scan_end),
+            ScanOptions::with_bounds(scan_start, scan_end, &[]),
         );
         if not_successful(&res) {
             return (helper.kill(&txn, &res, AbortID::DeliveryScanNewOrder), None);
@@ -181,7 +181,7 @@ pub fn run_delivery_txn_with_stats<M: MemPool>(
         let res = storage.scan_range(
             &txn,
             containers.order_line_cid,
-            ScanOptions::with_bounds(ol_scan_start, ol_scan_end),
+            ScanOptions::with_bounds(ol_scan_start, ol_scan_end, &[order_line_fields::OL_AMOUNT]),
         );
         if not_successful(&res) {
             return (helper.kill(&txn, &res, AbortID::DeliveryGetOrderLine), None);
@@ -193,7 +193,7 @@ pub fn run_delivery_txn_with_stats<M: MemPool>(
         loop {
             match storage.iter_next(&txn, &iter) {
                 Ok(Some((key_fields, value_fields, hint))) => {
-                    let ol_amount = get_f64_field(&value_fields, order_line_fields::OL_AMOUNT);
+                    let ol_amount = get_f64_field(&value_fields, 0);
                     total_amount += ol_amount;
                     order_line_updates.push((key_fields, hint));
                 }

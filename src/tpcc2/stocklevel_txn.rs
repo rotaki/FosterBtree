@@ -102,7 +102,7 @@ pub fn run_stocklevel_txn_with_stats<M: MemPool>(
     let res = storage.scan_range(
         &txn,
         containers.order_line_cid,
-        ScanOptions::with_bounds(scan_start, scan_end),
+        ScanOptions::with_bounds(scan_start, scan_end, &[order_line_fields::OL_I_ID]),
     );
     if not_successful(&res) {
         return (
@@ -116,7 +116,7 @@ pub fn run_stocklevel_txn_with_stats<M: MemPool>(
         match storage.iter_next(&txn, &iter) {
             Ok(Some((_, value_fields, _))) => {
                 // Extract item ID from value fields
-                let ol_i_id = get_u32_field(&value_fields, order_line_fields::OL_I_ID);
+                let ol_i_id = get_u32_field(&value_fields, 0);
                 unique_items.insert(ol_i_id);
             }
             Ok(None) => break,

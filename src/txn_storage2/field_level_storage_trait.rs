@@ -154,6 +154,7 @@ pub struct TxnOptions {}
 pub struct ScanOptions {
     pub lower: Vec<u8>,
     pub upper: Vec<u8>,
+    pub cols: Vec<usize>, // Columns to scan
 }
 
 impl ScanOptions {
@@ -163,7 +164,7 @@ impl ScanOptions {
 
     // lower: inclusive, upper: exclusive
     // [lower, upper)
-    pub fn with_bounds(lower: Vec<Field>, upper: Vec<Field>) -> Self {
+    pub fn with_bounds(lower: Vec<Field>, upper: Vec<Field>, cols: &[usize]) -> Self {
         use crate::txn_storage2::to_normalized_key;
 
         let lower_indices: Vec<_> = lower
@@ -180,6 +181,7 @@ impl ScanOptions {
         ScanOptions {
             lower: to_normalized_key(&lower, &lower_indices),
             upper: to_normalized_key(&upper, &upper_indices),
+            cols: cols.to_vec(),
         }
     }
 }

@@ -180,7 +180,11 @@ pub fn run_payment_txn_with_stats<M: MemPool>(
         let res = storage.scan_range(
             &txn,
             containers.customer_secondary_cid,
-            ScanOptions::with_bounds(scan_key_start, scan_key_end),
+            ScanOptions::with_bounds(
+                scan_key_start,
+                scan_key_end,
+                &[customer_secondary_fields::C_POINTER],
+            ),
         );
         if not_successful(&res) {
             return (
@@ -197,7 +201,7 @@ pub fn run_payment_txn_with_stats<M: MemPool>(
                     matching_customers.push((
                         c_id,
                         key_fields,
-                        get_pointer_field(&value_fields, 4),
+                        get_pointer_field(&value_fields, 0),
                         c_secondary_hint,
                     ));
                 }

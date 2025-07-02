@@ -98,7 +98,11 @@ pub fn run_orderstatus_txn_with_stats<M: MemPool>(
         let res = storage.scan_range(
             &txn,
             containers.customer_secondary_cid,
-            ScanOptions::with_bounds(scan_key_start, scan_key_end),
+            ScanOptions::with_bounds(
+                scan_key_start,
+                scan_key_end,
+                &[customer_secondary_fields::C_POINTER],
+            ),
         );
         if not_successful(&res) {
             return (
@@ -115,7 +119,7 @@ pub fn run_orderstatus_txn_with_stats<M: MemPool>(
                     matching_customers.push((
                         c_id,
                         key_fields,
-                        get_pointer_field(&value_fields, 4),
+                        get_pointer_field(&value_fields, 0),
                         c_secondary_hint,
                     ));
                 }
@@ -236,7 +240,7 @@ pub fn run_orderstatus_txn_with_stats<M: MemPool>(
     let res = storage.scan_range(
         &txn,
         containers.order_secondary_cid,
-        ScanOptions::with_bounds(scan_start, scan_end),
+        ScanOptions::with_bounds(scan_start, scan_end, &[order_secondary_fields::O_POINTER]),
     );
     if not_successful(&res) {
         return (
@@ -256,7 +260,7 @@ pub fn run_orderstatus_txn_with_stats<M: MemPool>(
                 if o_id > latest_o_id {
                     latest_o_id = o_id;
                     latest_order_secondary_key = Some(key_fields);
-                    latest_order_hint = Some(get_pointer_field(&value_fields, 4));
+                    latest_order_hint = Some(get_pointer_field(&value_fields, 0));
                 }
             }
             Ok(None) => break,
@@ -349,7 +353,17 @@ pub fn run_orderstatus_txn_with_stats<M: MemPool>(
     let res = storage.scan_range(
         &txn,
         containers.order_line_cid,
-        ScanOptions::with_bounds(ol_scan_start, ol_scan_end),
+        ScanOptions::with_bounds(
+            ol_scan_start,
+            ol_scan_end,
+            &[
+                order_line_fields::OL_I_ID,
+                order_line_fields::OL_SUPPLY_W_ID,
+                order_line_fields::OL_QUANTITY,
+                order_line_fields::OL_AMOUNT,
+                order_line_fields::OL_DELIVERY_D,
+            ],
+        ),
     );
     if not_successful(&res) {
         return (
@@ -363,13 +377,11 @@ pub fn run_orderstatus_txn_with_stats<M: MemPool>(
         match storage.iter_next(&txn, &iter) {
             Ok(Some((_, value_fields, _))) => {
                 // Extract fields from the order line
-                let ol_i_id = get_u32_field(&value_fields, order_line_fields::OL_I_ID);
-                let ol_supply_w_id =
-                    get_u16_field(&value_fields, order_line_fields::OL_SUPPLY_W_ID);
-                let ol_quantity = get_u8_field(&value_fields, order_line_fields::OL_QUANTITY);
-                let ol_amount = get_f64_field(&value_fields, order_line_fields::OL_AMOUNT);
-                let ol_delivery_d =
-                    get_optional_u64_field(&value_fields, order_line_fields::OL_DELIVERY_D);
+                let ol_i_id = get_u32_field(&value_fields, 0);
+                let ol_supply_w_id = get_u16_field(&value_fields, 1);
+                let ol_quantity = get_u8_field(&value_fields, 2);
+                let ol_amount = get_f64_field(&value_fields, 3);
+                let ol_delivery_d = get_optional_u64_field(&value_fields, 4);
 
                 order_lines.push(OrderLineInfo {
                     ol_i_id,

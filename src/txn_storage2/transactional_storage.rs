@@ -1235,7 +1235,13 @@ impl<M: MemPool> FieldLeveLStorageTrait for TransactionalStorage<M> {
                     .iter()
                     .map(|&i| record[i].clone())
                     .collect();
-                return Ok(Some((key, record, ptr)));
+                let fields = iter
+                    .options
+                    .cols
+                    .iter()
+                    .map(|&i| record[i].clone())
+                    .collect();
+                return Ok(Some((key, fields, ptr)));
             } else {
                 // Last entry reached. Lock the &[] key to ensure no new entries are added
                 if rwset.get(&[]).is_none() {
@@ -2395,7 +2401,8 @@ mod tests {
 
         // Txn1: Start a scan
         let txn1 = storage.begin_txn(db_id, TxnOptions::default()).unwrap();
-        let scan_options = ScanOptions::with_bounds(vec![field!(Int32 1)], vec![field!(Int32 5)]);
+        let scan_options =
+            ScanOptions::with_bounds(vec![field!(Int32 1)], vec![field!(Int32 5)], &[0, 1]);
         let iter = storage
             .scan_range(&txn1, container_id, scan_options.clone())
             .unwrap();
@@ -2912,7 +2919,7 @@ mod tests {
             .scan_range(
                 &txn,
                 container_id,
-                ScanOptions::with_bounds(vec![field!(Int32 5)], vec![field!(Int32 15)]),
+                ScanOptions::with_bounds(vec![field!(Int32 5)], vec![field!(Int32 15)], &[0, 1]),
             )
             .unwrap();
 
