@@ -95,7 +95,7 @@ impl<T: MemPool> FixedSizeStore<T> {
         assert_eq!(root_page.key_size() as usize, key_size);
         assert_eq!(root_page.val_size() as usize, value_size);
         let root_key = {
-            let page_id = root_page.get_id();
+            let page_id = root_page.page_id();
             let frame_id = root_page.frame_id();
             PageFrameKey::new_with_frame_id(c_key, page_id, frame_id)
         };
@@ -105,18 +105,18 @@ impl<T: MemPool> FixedSizeStore<T> {
         assert_eq!(data_page.key_size() as usize, key_size);
         assert_eq!(data_page.val_size() as usize, value_size);
         let data_key = {
-            let page_id = data_page.get_id();
+            let page_id = data_page.page_id();
             let frame_id = data_page.frame_id();
             PageFrameKey::new_with_frame_id(c_key, page_id, frame_id)
         };
 
         // Set the next page of the root page to the data page.
-        root_page.set_next_page(data_page.get_id(), data_page.frame_id());
+        root_page.set_next_page(data_page.page_id(), data_page.frame_id());
 
         // Set the last page id and frame id to the root page.
         let data_key_bytes = {
             let mut bytes = Vec::new();
-            bytes.extend_from_slice(&data_page.get_id().to_be_bytes());
+            bytes.extend_from_slice(&data_page.page_id().to_be_bytes());
             bytes.extend_from_slice(&data_page.frame_id().to_be_bytes());
             bytes
         };
@@ -244,7 +244,7 @@ impl<T: MemPool> FixedSizeStore<T> {
             let mut new_page = self.mem_pool.create_new_page_for_write(self.c_key).unwrap();
             new_page.init(self.key_size, self.value_size);
 
-            let page_id = new_page.get_id();
+            let page_id = new_page.page_id();
             let frame_id = new_page.frame_id();
 
             // Set the next page of the last page to the new page.
@@ -541,7 +541,7 @@ impl PageVisitor for HeapStoreStats {
             total_bytes_used: page.total_bytes_used() as usize,
             total_free_space: page.total_free_space() as usize,
         };
-        self.update(page.get_id(), stats);
+        self.update(page.page_id(), stats);
     }
 
     fn visit_post(&mut self, _page: &Page) {}

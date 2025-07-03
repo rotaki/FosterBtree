@@ -288,7 +288,7 @@ impl<T: MemPool> SecondaryIndex<T> {
                     expected_frame_id,
                 )),
             );
-            if pri_page.get_id() == expected_page_id {
+            if pri_page.page_id() == expected_page_id {
                 correct_page_hints += 1;
             }
 

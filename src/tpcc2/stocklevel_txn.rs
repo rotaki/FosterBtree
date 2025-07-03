@@ -102,7 +102,7 @@ pub fn run_stocklevel_txn_with_stats<M: MemPool>(
     let res = storage.scan_range(
         &txn,
         containers.order_line_cid,
-        ScanOptions::with_bounds(scan_start, scan_end, &[order_line_fields::OL_I_ID]),
+        ScanOptions::new(&[order_line_fields::OL_I_ID]).with_bounds(scan_start, scan_end),
     );
     if not_successful(&res) {
         return (

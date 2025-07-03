@@ -62,7 +62,7 @@ impl<T: MemPool> HashReadOptimize<T> {
             buckets.push(chain);
         }
 
-        let meta_page_id = meta_page.get_id();
+        let meta_page_id = meta_page.page_id();
 
         Self {
             mem_pool: mem_pool.clone(),

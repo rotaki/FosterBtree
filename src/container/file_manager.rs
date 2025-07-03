@@ -234,7 +234,7 @@ pub mod preadpwrite_sync {
                     return Err(std::io::Error::last_os_error());
                 }
             }
-            debug_assert!(page.get_id() == page_id, "Page id mismatch");
+            debug_assert!(page.page_id() == page_id, "Page id mismatch");
             Ok(())
         }
 
@@ -242,7 +242,7 @@ pub mod preadpwrite_sync {
             self.stats.inc_write_count(self.direct);
             log_trace!("Writing page: {} to file: {:?}", page_id, self.path);
             trace_diskio(self._c_id as u8, 'W');
-            debug_assert!(page.get_id() == page_id, "Page id mismatch");
+            debug_assert!(page.page_id() == page_id, "Page id mismatch");
             unsafe {
                 let ret = pwrite(
                     self.file_no,
@@ -740,7 +740,7 @@ pub mod iouring_async {
                         UserData::Read(comp_c_id, comp_page_id) => {
                             assert_eq!(comp_c_id, c_id);
                             assert_eq!(comp_page_id, page_id);
-                            assert_eq!(comp_page_id, page.get_id());
+                            assert_eq!(comp_page_id, page.page_id());
                             break;
                         }
                         UserData::Write(_fileno, _completion_page_id) => {

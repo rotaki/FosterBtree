@@ -461,14 +461,14 @@ fn is_parent_and_child(parent: &Page, child: &Page) -> bool {
     // Find the slot id of the child page in the parent page.
     let slot_id = parent.upper_bound_slot_id(&low_key) - 1;
     // Check if the value of the slot id is the same as the child page id.
-    deserialize_page_id(parent.get_val(slot_id)) == Some(child.get_id())
+    deserialize_page_id(parent.get_val(slot_id)) == Some(child.page_id())
 }
 
 /// Check if the parent page is the foster parent of the child page.
 fn is_foster_relationship(parent: &Page, child: &Page) -> bool {
     parent.level() == child.level()
         && parent.has_foster_child()
-        && deserialize_page_id(parent.get_foster_val()) == Some(child.get_id())
+        && deserialize_page_id(parent.get_foster_val()) == Some(child.page_id())
 }
 
 fn should_split_this(this: &Page, op_byte: &mut OpByte) -> bool {
@@ -728,7 +728,7 @@ fn split_even<T: EvictionPolicy>(
     let high_fence_slot_id = this.high_fence_slot_id();
     this.remove_range(moving_slot_ids[0], high_fence_slot_id);
     let foster_child_id =
-        InnerVal::new_with_frame_id(foster_child.get_id(), foster_child.frame_id());
+        InnerVal::new_with_frame_id(foster_child.page_id(), foster_child.frame_id());
     let res = this.insert(&foster_key, &foster_child_id.to_bytes(), false);
     assert!(res);
     this.set_has_foster_child(true);
@@ -769,7 +769,7 @@ fn split_min_move<T: EvictionPolicy>(
     this.remove_at(moving_slot_id);
 
     let foster_child_id =
-        InnerVal::new_with_frame_id(foster_child.get_id(), foster_child.frame_id());
+        InnerVal::new_with_frame_id(foster_child.page_id(), foster_child.frame_id());
     let res = this.insert(&foster_key, &foster_child_id.to_bytes(), false);
     assert!(res);
     this.set_has_foster_child(true);
@@ -1018,7 +1018,7 @@ fn balance<T: EvictionPolicy>(
             this.remove_range(moving_slot_ids[0], high_fence_slot_id);
             let res = this.insert(
                 foster_child.get_raw_key(0),
-                &InnerVal::new_with_frame_id(foster_child.get_id(), foster_child.frame_id())
+                &InnerVal::new_with_frame_id(foster_child.page_id(), foster_child.frame_id())
                     .to_bytes(),
                 false,
             );
@@ -1070,7 +1070,7 @@ fn balance<T: EvictionPolicy>(
             let foster_key = foster_child.get_raw_key(1).to_vec();
             foster_child.set_low_fence(&foster_key);
             let foster_child_id =
-                InnerVal::new_with_frame_id(foster_child.get_id(), foster_child.frame_id());
+                InnerVal::new_with_frame_id(foster_child.page_id(), foster_child.frame_id());
             let res = this.insert(&foster_key, &foster_child_id.to_bytes(), false);
             assert!(res);
         }
@@ -1192,7 +1192,7 @@ fn descend_root<T: EvictionPolicy>(root: &mut FrameWriteGuard<T>, child: &mut Fr
     // then we can push the child's content to the root and
     // descend the root level to the child level.
     assert_eq!(root.active_slot_count(), 1);
-    assert_eq!(deserialize_page_id(root.get_val(1)), Some(child.get_id()));
+    assert_eq!(deserialize_page_id(root.get_val(1)), Some(child.page_id()));
     assert_eq!(child.get_low_fence(), BTreeKey::MinusInfty);
     assert_eq!(child.get_high_fence(), BTreeKey::PlusInfty);
 
@@ -1262,7 +1262,7 @@ fn ascend_root<T: EvictionPolicy>(root: &mut FrameWriteGuard<T>, child: &mut Fra
     // Remove the moved slots from the root
     let foster_child_slot_id = root.foster_child_slot_id();
     root.remove_range(1, foster_child_slot_id);
-    let child_id = InnerVal::new_with_frame_id(child.get_id(), child.frame_id());
+    let child_id = InnerVal::new_with_frame_id(child.page_id(), child.frame_id());
     root.insert(&[], &child_id.to_bytes(), false);
 
     #[cfg(debug_assertions)]
@@ -1276,7 +1276,7 @@ fn ascend_root<T: EvictionPolicy>(root: &mut FrameWriteGuard<T>, child: &mut Fra
 fn print_page(p: &Page) {
     println!(
         "----------------- Page ID: {} -----------------",
-        p.get_id()
+        p.page_id()
     );
     println!("Level: {}", p.level());
     println!("Size: {}", p.total_bytes_used());
@@ -1654,7 +1654,7 @@ impl<T: MemPool> FosterBtree<T> {
             OpType::Merge => {
                 // Merge the foster child into this page
                 merge(this, child);
-                self.unused_pages.push(child.get_id()).unwrap();
+                self.unused_pages.push(child.page_id()).unwrap();
             }
             OpType::LoadBalance => {
                 // Load balance between this and the foster child
@@ -1677,7 +1677,7 @@ impl<T: MemPool> FosterBtree<T> {
             OpType::DescendRoot => {
                 // Descend the root page to the child page
                 descend_root(this, child);
-                self.unused_pages.push(child.get_id()).unwrap();
+                self.unused_pages.push(child.page_id()).unwrap();
             }
             _ => {
                 panic!("Unexpected operation");
@@ -2333,7 +2333,7 @@ impl<T: MemPool> FosterBtreeCursor<T> {
     pub fn get_physical_address(&self) -> (PageId, u32, u32) {
         let leaf_page = self.current_leaf_page.as_ref().unwrap();
         (
-            leaf_page.get_id(),
+            leaf_page.page_id(),
             leaf_page.frame_id(),
             self.current_slot_id,
         )
@@ -2890,7 +2890,7 @@ impl PageVisitor for FosterBtreePageStats {
             total_bytes_used: page.total_bytes_used() as usize,
             total_free_space: page.total_free_space() as usize,
         };
-        self.update(page.get_id(), stats);
+        self.update(page.page_id(), stats);
     }
 
     fn visit_post(&mut self, _page: &Page) {}
@@ -2995,7 +2995,7 @@ mod tests {
                 .map(|&x| (false, to_bytes(x), to_bytes(x)))
                 .collect::<Vec<_>>(),
         );
-        let foster_val = InnerVal::new_with_frame_id(p1.get_id(), p1.frame_id());
+        let foster_val = InnerVal::new_with_frame_id(p1.page_id(), p1.frame_id());
         p0.insert(&k1, &foster_val.to_bytes(), false);
 
         p1.init();
@@ -3093,7 +3093,7 @@ mod tests {
                 .map(|&x| (false, to_bytes(x), to_bytes(x)))
                 .collect::<Vec<_>>(),
         );
-        let foster_val = InnerVal::new_with_frame_id(p1.get_id(), p1.frame_id());
+        let foster_val = InnerVal::new_with_frame_id(p1.page_id(), p1.frame_id());
         p0.insert(&k1, &foster_val.to_bytes(), false);
 
         p1.init();
@@ -3141,7 +3141,7 @@ mod tests {
         assert!(p0.has_foster_child());
         assert_eq!(
             deserialize_page_id(p0.get_foster_val()).unwrap(),
-            p1.get_id()
+            p1.page_id()
         );
         assert_eq!(p0.get_foster_key(), p1.get_raw_key(0));
         assert_eq!(p1.get_high_fence().as_ref(), k2);
@@ -3204,7 +3204,7 @@ mod tests {
         parent.set_low_fence(&k0);
         parent.set_high_fence(&k2);
         parent.set_level(1);
-        let val = InnerVal::new_with_frame_id(child0.get_id(), child0.frame_id());
+        let val = InnerVal::new_with_frame_id(child0.page_id(), child0.frame_id());
         parent.insert(&k0, &val.to_bytes(), false);
 
         child0.init();
@@ -3218,7 +3218,7 @@ mod tests {
                 .collect::<Vec<_>>(),
         );
         child0.set_has_foster_child(true);
-        let foster_val = InnerVal::new_with_frame_id(child1.get_id(), child1.frame_id());
+        let foster_val = InnerVal::new_with_frame_id(child1.page_id(), child1.frame_id());
         child0.insert(&k1, &foster_val.to_bytes(), false);
 
         child1.init();
@@ -3241,13 +3241,13 @@ mod tests {
         assert_eq!(child1.active_slot_count() as usize, right.len());
         assert_eq!(
             deserialize_page_id(parent.get_val(1)),
-            Some(child0.get_id())
+            Some(child0.page_id())
         );
         assert!(child0.has_foster_child());
         assert_eq!(child0.get_foster_key(), child1.get_raw_key(0));
         assert_eq!(
             deserialize_page_id(child0.get_foster_val()).unwrap(),
-            child1.get_id()
+            child1.page_id()
         );
 
         // Adopt
@@ -3262,11 +3262,11 @@ mod tests {
         assert_eq!(parent.active_slot_count(), 2);
         assert_eq!(
             deserialize_page_id(parent.get_val(1)),
-            Some(child0.get_id())
+            Some(child0.page_id())
         );
         assert_eq!(
             deserialize_page_id(parent.get_val(2)),
-            Some(child1.get_id())
+            Some(child1.page_id())
         );
         assert_eq!(child0.active_slot_count() as usize, left.len());
         assert!(!child0.has_foster_child());
@@ -3332,9 +3332,9 @@ mod tests {
         parent.set_low_fence(&k0);
         parent.set_high_fence(&k2);
         parent.set_level(1);
-        let val = InnerVal::new_with_frame_id(child0.get_id(), child0.frame_id());
+        let val = InnerVal::new_with_frame_id(child0.page_id(), child0.frame_id());
         parent.insert(&k0, &val.to_bytes(), false);
-        let val = InnerVal::new_with_frame_id(child1.get_id(), child1.frame_id());
+        let val = InnerVal::new_with_frame_id(child1.page_id(), child1.frame_id());
         parent.insert(&k1, &val.to_bytes(), false);
 
         child0.init();
@@ -3379,7 +3379,7 @@ mod tests {
         assert_eq!(parent.active_slot_count(), 1);
         assert_eq!(
             deserialize_page_id(parent.get_val(1)),
-            Some(child0.get_id())
+            Some(child0.page_id())
         );
 
         assert_eq!(child0.active_slot_count() as usize, left.len() + 1);
@@ -3389,7 +3389,7 @@ mod tests {
         assert_eq!(child0.get_foster_key(), child1.get_raw_key(0));
         assert_eq!(
             deserialize_page_id(child0.get_foster_val()).unwrap(),
-            child1.get_id()
+            child1.page_id()
         );
         for (i, &item) in left.iter().enumerate() {
             let key = child0.get_raw_key((i + 1) as u32);
@@ -3450,7 +3450,7 @@ mod tests {
             root.insert(&key, &key, false);
         }
         let foster_key = to_bytes(11);
-        let val = InnerVal::new_with_frame_id(foster_child.get_id(), foster_child.frame_id());
+        let val = InnerVal::new_with_frame_id(foster_child.page_id(), foster_child.frame_id());
         root.insert(&foster_key, &val.to_bytes(), false);
         root.set_has_foster_child(true);
 
@@ -3481,11 +3481,11 @@ mod tests {
         assert_eq!(root.level(), 1);
         assert!(!root.has_foster_child());
         assert!(root.get_raw_key(1).is_empty());
-        assert_eq!(deserialize_page_id(root.get_val(1)), Some(child.get_id()));
+        assert_eq!(deserialize_page_id(root.get_val(1)), Some(child.page_id()));
         assert_eq!(root.get_raw_key(2), &foster_key);
         assert_eq!(
             deserialize_page_id(root.get_val(2)),
-            Some(foster_child.get_id())
+            Some(foster_child.page_id())
         );
         assert_eq!(child.active_slot_count(), 10);
         assert_eq!(child.level(), 0);
@@ -3531,7 +3531,7 @@ mod tests {
 
         root.init_as_root();
         root.increment_level();
-        let val = InnerVal::new_with_frame_id(child.get_id(), child.frame_id());
+        let val = InnerVal::new_with_frame_id(child.page_id(), child.frame_id());
         root.insert(&[], &val.to_bytes(), false);
 
         child.init();
@@ -3597,7 +3597,7 @@ mod tests {
         this.set_low_fence(&k0);
         this.set_high_fence(&k2);
         this.set_has_foster_child(true);
-        let val = InnerVal::new_with_frame_id(foster.get_id(), foster.frame_id());
+        let val = InnerVal::new_with_frame_id(foster.page_id(), foster.frame_id());
         this.insert(&k1, &val.to_bytes(), false);
         {
             // Insert a slot into this page so that the total size of the page is this_size
@@ -3776,9 +3776,9 @@ mod tests {
         parent.set_low_fence(&k0);
         parent.set_high_fence(&k2);
         parent.set_level(1);
-        let val = InnerVal::new_with_frame_id(child0.get_id(), child0.frame_id());
+        let val = InnerVal::new_with_frame_id(child0.page_id(), child0.frame_id());
         parent.insert(&k0, &val.to_bytes(), false);
-        let val = InnerVal::new_with_frame_id(child1.get_id(), child1.frame_id());
+        let val = InnerVal::new_with_frame_id(child1.page_id(), child1.frame_id());
         parent.insert(&k1, &val.to_bytes(), false);
 
         child0.init();
@@ -3835,7 +3835,7 @@ mod tests {
         parent.set_low_fence(&k0);
         parent.set_high_fence(&k2);
         parent.set_level(1);
-        let val = InnerVal::new_with_frame_id(child0.get_id(), child0.frame_id());
+        let val = InnerVal::new_with_frame_id(child0.page_id(), child0.frame_id());
         parent.insert(&k0, &val.to_bytes(), false);
 
         child0.init();
@@ -3843,7 +3843,7 @@ mod tests {
         child0.set_high_fence(&k2);
         child0.set_level(0);
         child0.set_has_foster_child(true);
-        let val = InnerVal::new_with_frame_id(child1.get_id(), child1.frame_id());
+        let val = InnerVal::new_with_frame_id(child1.page_id(), child1.frame_id());
         child0.insert(&k1, &val.to_bytes(), false);
         {
             // Insert a slot into child0 page so that the total size of the page is child0_size
@@ -3894,7 +3894,7 @@ mod tests {
         parent.set_low_fence(&k0);
         parent.set_high_fence(&k2);
         parent.set_level(1);
-        let val = InnerVal::new_with_frame_id(child0.get_id(), child0.frame_id());
+        let val = InnerVal::new_with_frame_id(child0.page_id(), child0.frame_id());
         parent.insert(&k0, &val.to_bytes(), false);
 
         child0.init();

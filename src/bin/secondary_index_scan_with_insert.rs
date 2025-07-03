@@ -209,7 +209,7 @@ impl<T: MemPool> SecondaryIndex<T> {
                 .traverse_to_leaf_for_read_with_hint(p_key, Some(expected_page_frame_key));
 
             // Check if expected slot_id is the same as the slot id
-            let (result, actual_slot_id) = if pri_page.get_id() == expected_page_id
+            let (result, actual_slot_id) = if pri_page.page_id() == expected_page_id
                 && pri_page.low_fence_slot_id() < expected_slot_id
                 && expected_slot_id < pri_page.high_fence_slot_id()
                 && pri_page.get_raw_key(expected_slot_id) == p_key
@@ -231,7 +231,7 @@ impl<T: MemPool> SecondaryIndex<T> {
                 }
             };
 
-            let (actual_page_id, actual_frame_id) = (pri_page.get_id(), pri_page.frame_id());
+            let (actual_page_id, actual_frame_id) = (pri_page.page_id(), pri_page.frame_id());
             if actual_page_id == expected_page_id
                 && actual_frame_id == expected_frame_id
                 && actual_slot_id == expected_slot_id
@@ -314,7 +314,7 @@ impl<T: MemPool> SecondaryIndex<T> {
                     expected_frame_id,
                 )),
             );
-            if pri_page.get_id() == expected_page_id {
+            if pri_page.page_id() == expected_page_id {
                 correct_page_hints += 1;
             }
 

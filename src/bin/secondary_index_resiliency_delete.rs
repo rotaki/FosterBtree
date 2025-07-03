@@ -199,7 +199,7 @@ impl<T: MemPool> SecondaryPageFrameSlotHint<T> {
                 }
             };
 
-            let (actual_page_id, actual_frame_id) = (pri_page.get_id(), pri_page.frame_id());
+            let (actual_page_id, actual_frame_id) = (pri_page.page_id(), pri_page.frame_id());
             if actual_page_id == expected_page_id {
                 HINT_HINT_STATS.page_hit.fetch_add(1, Ordering::Relaxed);
             } else {

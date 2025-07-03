@@ -483,7 +483,7 @@ impl FosterBtreePage for Page {
     }
 
     fn get_id(&self) -> u32 {
-        self.get_id()
+        self.page_id()
     }
 
     fn slot_offset(&self, slot_id: u32) -> usize {

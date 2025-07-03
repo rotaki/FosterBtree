@@ -12,80 +12,16 @@ use crate::{
     bp::{ContainerId, ContainerKey, DatabaseId, MemPool, PageFrameKey},
     txn_storage::locktable::ConcurrentLockTable as LockTable,
     txn_storage2::{
-        field::{Field, Record, RecordPointer},
+        field::{
+            bytes_to_record, key_to_bytes, record_to_bytes, record_to_key_bytes, Field, Record,
+            RecordPointer,
+        },
         field_level_storage_trait::{
             ContainerDS, ContainerOptions, DBOptions, FieldLeveLStorageTrait, ScanOptions,
             TxnOptions, TxnStorageStatus,
         },
-        schema::Schema,
-        to_normalized_key,
     },
 };
-
-// ========================================================================
-// Internal Helper Methods
-// ========================================================================
-
-#[inline(always)]
-fn key_to_bytes(key: &[Field]) -> Vec<u8> {
-    to_normalized_key(
-        key,
-        &key.iter()
-            .enumerate()
-            .map(|(i, _)| (i, true, false))
-            .collect::<Vec<_>>(),
-    )
-}
-
-#[inline(always)]
-fn record_to_key_bytes(record: &Record, schema: &Schema) -> Vec<u8> {
-    to_normalized_key(
-        &record.fields,
-        &schema
-            .key_indices()
-            .iter()
-            .map(|&i| (i, true, false))
-            .collect::<Vec<_>>(),
-    )
-}
-
-#[inline(always)]
-fn record_to_bytes(record: &[Field], schema: &Schema) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(record.len() * 8); // Estimate size
-    for (i, field) in record.iter().enumerate() {
-        let (is_nullable, _) = &schema.cols()[i];
-        let field_bytes = field.to_bytes(*is_nullable);
-        bytes.extend_from_slice(&field_bytes);
-    }
-    bytes
-}
-
-#[inline(always)]
-fn bytes_to_record(bytes: &[u8], schema: &Schema) -> Vec<Field> {
-    let mut all_fields = Vec::with_capacity(schema.cols().len());
-    let mut offset = 0;
-
-    for (is_nullable, data_type) in schema.cols().iter() {
-        if offset >= bytes.len() {
-            panic!(
-                "Not enough bytes to read all fields. Expected {} fields, got {} bytes total, at offset {}. Schema: {:?}",
-                schema.cols().len(),
-                bytes.len(),
-                offset,
-                schema
-            );
-        }
-
-        let remaining_bytes = &bytes[offset..];
-        let field = Field::from_bytes(remaining_bytes, *is_nullable, *data_type);
-        let consumed_bytes = field.size(*is_nullable);
-
-        offset += consumed_bytes;
-        all_fields.push(field);
-    }
-
-    all_fields
-}
 
 // ============================================================================
 // Read-Write Set Entry
@@ -281,7 +217,7 @@ impl<M: MemPool> ContainerInfo<M> {
         } else {
             self.btree
                 .insert_at_slot_or_split(&mut page, slot_id + 1, key, value, false);
-            let pointer = RecordPointer::new(page.get_id(), page.frame_id());
+            let pointer = RecordPointer::new(page.page_id(), page.frame_id());
             Ok(pointer)
         }
     }
@@ -297,7 +233,7 @@ impl<M: MemPool> ContainerInfo<M> {
         let slot_id = page.upper_bound_slot_id(&BTreeKey::new(key)) - 1;
 
         if slot_id > 0 && page.get_raw_key(slot_id) == key {
-            let pointer = RecordPointer::new(page.get_id(), page.frame_id());
+            let pointer = RecordPointer::new(page.page_id(), page.frame_id());
             page.remove_at(slot_id);
             Ok(pointer)
         } else {
@@ -586,7 +522,7 @@ impl<M: MemPool> FieldLeveLStorageTrait for TransactionalStorage<M> {
         let container = self.get_container(c_id)?;
 
         // Extract primary key from record
-        let key_bytes = record_to_key_bytes(&record, container.options.schema());
+        let key_bytes = record_to_key_bytes(&record.fields, container.options.schema());
 
         // Serialize the record's fields
         let value_bytes = record_to_bytes(&record.fields, container.options.schema());
@@ -747,7 +683,7 @@ impl<M: MemPool> FieldLeveLStorageTrait for TransactionalStorage<M> {
                     if slot_id == 0 || page.get_raw_key(slot_id) != key_bytes {
                         panic!("Key should exist in storage if in rwset");
                     }
-                    *ptr = RecordPointer::new(page.get_id(), page.frame_id());
+                    *ptr = RecordPointer::new(page.page_id(), page.frame_id());
                     let record = bytes_to_record(page.get_val(slot_id), container.options.schema());
                     let fields = col_indices.iter().map(|&idx| record[idx].clone()).collect();
                     Ok((fields, *ptr))
@@ -775,7 +711,7 @@ impl<M: MemPool> FieldLeveLStorageTrait for TransactionalStorage<M> {
                     return Err(TxnStorageStatus::TxnConflict);
                 }
                 // Insert into rwset as a read entry
-                let ptr = RecordPointer::new(page.get_id(), page.frame_id());
+                let ptr = RecordPointer::new(page.page_id(), page.frame_id());
                 let record = bytes_to_record(page.get_val(slot_id), container.options.schema());
                 rwset.insert(key_bytes.clone(), RWEntry::Read(ptr, false));
                 let fields = col_indices.iter().map(|&idx| record[idx].clone()).collect();
@@ -872,7 +808,7 @@ impl<M: MemPool> FieldLeveLStorageTrait for TransactionalStorage<M> {
                     return Err(TxnStorageStatus::TxnConflict);
                 }
                 // Insert into rwset
-                let ptr = RecordPointer::new(page.get_id(), page.frame_id());
+                let ptr = RecordPointer::new(page.page_id(), page.frame_id());
                 let mut record = bytes_to_record(page.get_val(slot_id), container.options.schema());
                 // Update fields
                 fields.into_iter().for_each(|(idx, new_field)| {
@@ -952,7 +888,7 @@ impl<M: MemPool> FieldLeveLStorageTrait for TransactionalStorage<M> {
                     return Err(TxnStorageStatus::TxnConflict);
                 }
                 // Insert into rwset
-                let ptr = RecordPointer::new(page.get_id(), page.frame_id());
+                let ptr = RecordPointer::new(page.page_id(), page.frame_id());
                 let mut record = bytes_to_record(page.get_val(slot_id), container.options.schema());
                 // Update fields
                 func(&mut record[col_idx]);
@@ -978,7 +914,7 @@ impl<M: MemPool> FieldLeveLStorageTrait for TransactionalStorage<M> {
     ) -> Result<RecordPointer, TxnStorageStatus> {
         let rwset = txn.get_or_create_rwset(c_id);
         let container = self.get_container(c_id)?;
-        let key_bytes = record_to_key_bytes(&record, container.options.schema());
+        let key_bytes = record_to_key_bytes(&record.fields, container.options.schema());
 
         // Check if key already exists in rwset
         if let Some(entry) = rwset.get_mut(&key_bytes) {
@@ -1078,7 +1014,7 @@ impl<M: MemPool> FieldLeveLStorageTrait for TransactionalStorage<M> {
                     }
                 }
 
-                let ptr = RecordPointer::new(page.get_id(), page.frame_id());
+                let ptr = RecordPointer::new(page.page_id(), page.frame_id());
                 rwset.insert(
                     key_bytes.clone(),
                     RWEntry::Insert(record.fields, ptr, true), // Mark as ghost
@@ -1149,7 +1085,7 @@ impl<M: MemPool> FieldLeveLStorageTrait for TransactionalStorage<M> {
                     return Err(TxnStorageStatus::TxnConflict);
                 }
                 // Insert into rwset as a delete entry
-                let ptr = RecordPointer::new(page.get_id(), page.frame_id());
+                let ptr = RecordPointer::new(page.page_id(), page.frame_id());
                 rwset.insert(
                     key_bytes.clone(),
                     RWEntry::Delete(ptr, false), // Not ghost since read from storage
@@ -1171,7 +1107,7 @@ impl<M: MemPool> FieldLeveLStorageTrait for TransactionalStorage<M> {
     ) -> Result<Self::IteratorHandle, TxnStorageStatus> {
         let container = self.get_container(c_id)?;
 
-        let scanner = container.scan_range(&options.lower, &[]);
+        let scanner = container.scan_range(&options.lower_inc, &[]);
 
         Ok(TxnIterator::new(options, scanner, c_id))
     }
@@ -1190,7 +1126,7 @@ impl<M: MemPool> FieldLeveLStorageTrait for TransactionalStorage<M> {
 
         loop {
             if let Some((key_bytes, value_bytes, ptr)) = iter.scanner.next() {
-                if !iter.options.upper.is_empty() && key_bytes >= iter.options.upper {
+                if !iter.options.upper_exc.is_empty() && key_bytes >= iter.options.upper_exc {
                     // For phantom protection, we need to lock the upper bound key
                     if rwset.get(&key_bytes).is_none() {
                         let locktable = &container.locktable;
@@ -1758,7 +1694,7 @@ mod tests {
         // Start transaction and verify scan sees all records
         let txn2 = storage.begin_txn(db_id, TxnOptions::default()).unwrap();
         let iter = storage
-            .scan_range(&txn2, container_id, ScanOptions::new())
+            .scan_range(&txn2, container_id, ScanOptions::new(&[]))
             .unwrap();
         let mut count = 0;
         let mut keys = Vec::new();
@@ -2402,7 +2338,7 @@ mod tests {
         // Txn1: Start a scan
         let txn1 = storage.begin_txn(db_id, TxnOptions::default()).unwrap();
         let scan_options =
-            ScanOptions::with_bounds(vec![field!(Int32 1)], vec![field!(Int32 5)], &[0, 1]);
+            ScanOptions::new(&[]).with_bounds(vec![field!(Int32 1)], vec![field!(Int32 5)]);
         let iter = storage
             .scan_range(&txn1, container_id, scan_options.clone())
             .unwrap();
@@ -2919,7 +2855,8 @@ mod tests {
             .scan_range(
                 &txn,
                 container_id,
-                ScanOptions::with_bounds(vec![field!(Int32 5)], vec![field!(Int32 15)], &[0, 1]),
+                ScanOptions::new(&[0, 1])
+                    .with_bounds(vec![field!(Int32 5)], vec![field!(Int32 15)]),
             )
             .unwrap();
 

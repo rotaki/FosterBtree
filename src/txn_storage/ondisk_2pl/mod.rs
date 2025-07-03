@@ -431,7 +431,7 @@ impl NoWaitTxn {
                         panic!("Key should exist in storage if it is in rwset")
                     } else {
                         // Update the physical address
-                        let new_pa = PhysicalAddress::new(page.get_id(), page.frame_id());
+                        let new_pa = PhysicalAddress::new(page.page_id(), page.frame_id());
                         e.update_physical_address(new_pa.clone());
                         Ok((page.get_val(slot_id).to_vec(), new_pa))
                     }
@@ -457,7 +457,7 @@ impl NoWaitTxn {
                     return Err(TxnStorageStatus::TxnConflict);
                 }
                 // Insert into rwset
-                let new_pa = PhysicalAddress::new(page.get_id(), page.frame_id());
+                let new_pa = PhysicalAddress::new(page.page_id(), page.frame_id());
                 rwset.insert(key.as_ref().to_vec(), RWEntry::Read(false, new_pa.clone()));
                 Ok((page.get_val(slot_id).to_vec(), new_pa))
             }
@@ -572,7 +572,7 @@ impl NoWaitTxn {
                     }
                 }
                 // Insert this key into rwset
-                let new_pa = PhysicalAddress::new(page.get_id(), page.frame_id());
+                let new_pa = PhysicalAddress::new(page.page_id(), page.frame_id());
                 rwset.insert(
                     key.as_ref().to_vec(),
                     RWEntry::Insert(true, new_pa.clone(), value.as_ref().to_vec()),
@@ -692,7 +692,7 @@ impl NoWaitTxn {
                     }
                 }
                 // Insert this key into rwset
-                let new_pa = PhysicalAddress::new(page.get_id(), page.frame_id());
+                let new_pa = PhysicalAddress::new(page.page_id(), page.frame_id());
                 rwset.insert(
                     key.as_ref().to_vec(),
                     RWEntry::Insert(true, new_pa.clone(), value.as_ref().to_vec()),
@@ -755,7 +755,7 @@ impl NoWaitTxn {
                     return Err(TxnStorageStatus::TxnConflict);
                 }
                 // Insert into rwset
-                let new_pa = PhysicalAddress::new(page.get_id(), page.frame_id());
+                let new_pa = PhysicalAddress::new(page.page_id(), page.frame_id());
                 rwset.insert(
                     key.as_ref().to_vec(),
                     RWEntry::Update(false, new_pa.clone(), value.as_ref().to_vec()),
@@ -812,7 +812,7 @@ impl NoWaitTxn {
                     return Err(TxnStorageStatus::TxnConflict);
                 }
                 // Insert into rwset
-                let new_pa = PhysicalAddress::new(page.get_id(), page.frame_id());
+                let new_pa = PhysicalAddress::new(page.page_id(), page.frame_id());
                 rwset.insert(
                     key.as_ref().to_vec(),
                     RWEntry::Delete(false, new_pa.clone()),

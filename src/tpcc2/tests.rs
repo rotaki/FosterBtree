@@ -183,7 +183,7 @@ fn test_customer_loading_and_secondary_index() {
         .scan_range(
             &txn,
             containers.customer_secondary_cid,
-            ScanOptions::with_bounds(scan_start, scan_end, &[]),
+            ScanOptions::new(&[]).with_bounds(scan_start, scan_end),
         )
         .unwrap();
 

@@ -79,7 +79,7 @@ impl Page {
         BasePageHeader::from_bytes(&self.0[0..BASE_PAGE_HEADER_SIZE].try_into().unwrap())
     }
 
-    pub fn get_id(&self) -> PageId {
+    pub fn page_id(&self) -> PageId {
         self.base_header().id
     }
 

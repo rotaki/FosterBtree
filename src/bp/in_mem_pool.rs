@@ -328,7 +328,7 @@ impl InMemPool {
         for i in 0..(*self.pages.get()).len() {
             let frame = self.get_read_guard(i);
             let key = frame.page_key().unwrap();
-            let page_id = frame.get_id();
+            let page_id = frame.page_id();
             assert_eq!(key.page_id, page_id);
         }
     }

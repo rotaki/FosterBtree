@@ -86,7 +86,7 @@ impl<T: MemPool> PagedHashMap<T> {
                 "Root page id: {}, Need to set root page",
                 root_page.get_id()
             );
-            assert_eq!(root_page.get_id(), 0, "root page id should be 0");
+            assert_eq!(root_page.page_id(), 0, "root page id should be 0");
             frame_buckets[0].store(root_page.frame_id(), std::sync::atomic::Ordering::Release);
             //root_page.frame_id();
 
@@ -103,7 +103,7 @@ impl<T: MemPool> PagedHashMap<T> {
                 frame_bucket.store(new_page.frame_id(), std::sync::atomic::Ordering::Release);
                 new_page.init();
                 assert_eq!(
-                    new_page.get_id() as usize,
+                    new_page.page_id() as usize,
                     i,
                     "Initial new page id should be {}",
                     i
@@ -158,7 +158,7 @@ impl<T: MemPool> PagedHashMap<T> {
                 }
 
                 new_page.init();
-                last_page.set_next_page_id(new_page.get_id());
+                last_page.set_next_page_id(new_page.page_id());
                 last_page.set_next_frame_id(new_page.frame_id());
                 match new_page.insert(key.as_ref(), val.as_ref()) {
                     Ok(_) => Ok(()),
@@ -311,7 +311,7 @@ impl<T: MemPool> PagedHashMap<T> {
                         #[cfg(feature = "stat")]
                         inc_local_stat_total_page_count();
                         new_page.init();
-                        updating_page.set_next_page_id(new_page.get_id());
+                        updating_page.set_next_page_id(new_page.page_id());
                         updating_page.set_next_frame_id(new_page.frame_id());
                         match new_page.insert(key.as_ref(), val.as_ref()) {
                             Ok(_) => return Ok(()),
@@ -464,7 +464,7 @@ impl<T: MemPool> PagedHashMap<T> {
             inc_local_stat_total_page_count();
         }
         new_page.init();
-        current_page.set_next_page_id(new_page.get_id());
+        current_page.set_next_page_id(new_page.page_id());
         current_page.set_next_frame_id(new_page.frame_id());
 
         match new_page.upsert(key.as_ref(), value.as_ref()) {
@@ -572,7 +572,7 @@ impl<T: MemPool> PagedHashMap<T> {
         }
 
         new_page.init();
-        current_page.set_next_page_id(new_page.get_id());
+        current_page.set_next_page_id(new_page.page_id());
         current_page.set_next_frame_id(new_page.frame_id());
 
         new_page.upsert(key.as_ref(), &new_value);

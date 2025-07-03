@@ -2,6 +2,8 @@ use chrono::{Datelike, NaiveDate};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+use crate::txn_storage2::Schema;
+
 // ============================================================================
 // Macros for Field Creation and Testing
 // ============================================================================
@@ -1306,6 +1308,71 @@ impl std::fmt::Display for Record {
         }
         write!(f, "]")
     }
+}
+
+// ========================================================================
+// Internal Helper Methods
+// ========================================================================
+
+#[inline(always)]
+pub fn key_to_bytes(key: &[Field]) -> Vec<u8> {
+    to_normalized_key(
+        key,
+        &key.iter()
+            .enumerate()
+            .map(|(i, _)| (i, true, false))
+            .collect::<Vec<_>>(),
+    )
+}
+
+#[inline(always)]
+pub fn record_to_key_bytes(record: &[Field], schema: &Schema) -> Vec<u8> {
+    to_normalized_key(
+        &record,
+        &schema
+            .key_indices()
+            .iter()
+            .map(|&i| (i, true, false))
+            .collect::<Vec<_>>(),
+    )
+}
+
+#[inline(always)]
+pub fn record_to_bytes(record: &[Field], schema: &Schema) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(record.len() * 8); // Estimate size
+    for (i, field) in record.iter().enumerate() {
+        let (is_nullable, _) = &schema.cols()[i];
+        let field_bytes = field.to_bytes(*is_nullable);
+        bytes.extend_from_slice(&field_bytes);
+    }
+    bytes
+}
+
+#[inline(always)]
+pub fn bytes_to_record(bytes: &[u8], schema: &Schema) -> Vec<Field> {
+    let mut all_fields = Vec::with_capacity(schema.cols().len());
+    let mut offset = 0;
+
+    for (is_nullable, data_type) in schema.cols().iter() {
+        if offset >= bytes.len() {
+            panic!(
+                "Not enough bytes to read all fields. Expected {} fields, got {} bytes total, at offset {}. Schema: {:?}",
+                schema.cols().len(),
+                bytes.len(),
+                offset,
+                schema
+            );
+        }
+
+        let remaining_bytes = &bytes[offset..];
+        let field = Field::from_bytes(remaining_bytes, *is_nullable, *data_type);
+        let consumed_bytes = field.size(*is_nullable);
+
+        offset += consumed_bytes;
+        all_fields.push(field);
+    }
+
+    all_fields
 }
 
 #[cfg(test)]

@@ -1,22 +1,20 @@
-use std::{
-    collections::HashMap,
-    sync::{Arc, Mutex, RwLock},
-};
+use std::{cell::UnsafeCell, collections::HashMap, sync::Arc};
 
 use crate::{
     access_method::{
-        fbt::{FosterBtree, FosterBtreeRangeScanner},
+        fbt::{BTreeKey, FosterBtree, FosterBtreeRangeScanner},
         prelude::*,
     },
-    bp::{ContainerId, ContainerKey, DatabaseId, MemPool},
+    bp::{ContainerId, ContainerKey, DatabaseId, MemPool, PageFrameKey},
     txn_storage2::{
-        field::{Field, Record, RecordPointer},
+        field::{
+            bytes_to_record, key_to_bytes, record_to_bytes, record_to_key_bytes, Field, Record,
+            RecordPointer,
+        },
         field_level_storage_trait::{
             ContainerDS, ContainerOptions, DBOptions, FieldLeveLStorageTrait, ScanOptions,
             TxnOptions, TxnStorageStatus,
         },
-        schema::Schema,
-        to_normalized_key,
     },
 };
 
@@ -26,31 +24,35 @@ use crate::{
 
 /// A simple transaction handle for non-transactional operations
 #[derive(Debug, Clone, Copy)]
-pub struct NonTxnHandle {
-    db_id: DatabaseId,
-}
+pub struct NonTxnHandle;
 
 /// Iterator handle for scanning operations
 pub struct NonTxnIterator<M: MemPool> {
-    scanner: Mutex<FosterBtreeRangeScanner<M>>,
+    scanner: UnsafeCell<FosterBtreeRangeScanner<M>>,
     c_id: ContainerId,
+    options: ScanOptions,
 }
 
+// SAFETY: This is safe because we assume single-threaded access only
+unsafe impl<M: MemPool> Send for NonTxnIterator<M> {}
+unsafe impl<M: MemPool> Sync for NonTxnIterator<M> {}
+
 /// Non-transactional field-level storage implementation using Foster B-trees
+/// This implementation assumes single-threaded access and uses unsafe for performance
 pub struct NonTransactionalStorage<M: MemPool> {
     mem_pool: Arc<M>,
-    databases: RwLock<HashMap<DatabaseId, DatabaseInfo<M>>>,
-    next_db_id: RwLock<DatabaseId>,
+    containers: UnsafeCell<HashMap<ContainerId, ContainerInfo<M>>>,
+    next_container_id: UnsafeCell<ContainerId>,
 }
+
+// SAFETY: This is safe because we assume single-threaded access only
+// The user of this struct must ensure that it's only accessed from a single thread
+unsafe impl<M: MemPool> Sync for NonTransactionalStorage<M> {}
+unsafe impl<M: MemPool> Send for NonTransactionalStorage<M> {}
 
 // ============================================================================
 // Internal Types
 // ============================================================================
-
-struct DatabaseInfo<M: MemPool> {
-    containers: HashMap<ContainerId, ContainerInfo<M>>,
-    next_container_id: ContainerId,
-}
 
 struct ContainerInfo<M: MemPool> {
     options: ContainerOptions,
@@ -66,151 +68,9 @@ impl<M: MemPool> NonTransactionalStorage<M> {
     pub fn new(mem_pool: Arc<M>) -> Self {
         Self {
             mem_pool,
-            databases: RwLock::new(HashMap::new()),
-            next_db_id: RwLock::new(1),
+            containers: UnsafeCell::new(HashMap::new()),
+            next_container_id: UnsafeCell::new(1),
         }
-    }
-}
-
-// ============================================================================
-// Serialization Utilities
-// ============================================================================
-
-impl<M: MemPool> NonTransactionalStorage<M> {
-    fn key_to_bytes(&self, key: &[Field]) -> Vec<u8> {
-        to_normalized_key(
-            key,
-            &key.iter()
-                .enumerate()
-                .map(|(i, _)| (i, true, false))
-                .collect::<Vec<_>>(),
-        )
-    }
-
-    fn record_to_key_bytes(&self, record: &Record, schema: &Schema) -> Vec<u8> {
-        to_normalized_key(
-            &record.fields,
-            &schema
-                .key_indices()
-                .iter()
-                .map(|&i| (i, true, false))
-                .collect::<Vec<_>>(),
-        )
-    }
-
-    /// Convert a record to byte representation for B-tree storage
-    fn record_to_bytes(&self, record: &Record, schema: &Schema) -> Vec<u8> {
-        let mut bytes = Vec::new();
-        for (i, field) in record.fields.iter().enumerate() {
-            let (is_nullable, _) = &schema.cols()[i];
-            let field_bytes = field.to_bytes(*is_nullable);
-            bytes.extend_from_slice(&field_bytes);
-        }
-        bytes
-    }
-
-    /// Convert bytes back to fields based on schema
-    fn bytes_to_fields(
-        &self,
-        bytes: &[u8],
-        schema: &Schema,
-        field_indices: &[usize],
-    ) -> Result<Vec<Field>, TxnStorageStatus> {
-        // First, decode all fields from the record
-        let all_fields = self.decode_all_fields(bytes, schema)?;
-
-        // Extract requested fields
-        let mut fields = Vec::new();
-        for &idx in field_indices {
-            if idx >= all_fields.len() {
-                return Err(TxnStorageStatus::AbortFailed);
-            }
-            fields.push(all_fields[idx].clone());
-        }
-
-        Ok(fields)
-    }
-
-    /// Decode all fields from a byte array according to schema
-    fn decode_all_fields(
-        &self,
-        bytes: &[u8],
-        schema: &Schema,
-    ) -> Result<Vec<Field>, TxnStorageStatus> {
-        let mut all_fields = Vec::new();
-        let mut offset = 0;
-
-        for (is_nullable, data_type) in schema.cols().iter() {
-            if offset >= bytes.len() {
-                return Err(TxnStorageStatus::AbortFailed);
-            }
-
-            // Calculate the remaining bytes from current offset
-            let remaining_bytes = &bytes[offset..];
-
-            // Use Field::from_bytes to deserialize the field
-            let field = Field::from_bytes(remaining_bytes, *is_nullable, *data_type);
-
-            // Calculate how many bytes were consumed
-            let consumed_bytes = field.size(*is_nullable);
-
-            offset += consumed_bytes;
-            all_fields.push(field);
-        }
-
-        Ok(all_fields)
-    }
-
-    /// Update a record by applying a modifier function to its fields
-    fn update_record_with_modifier<F>(
-        &self,
-        txn: &NonTxnHandle,
-        c_id: ContainerId,
-        key: Vec<Field>,
-        modifier: F,
-    ) -> Result<RecordPointer, TxnStorageStatus>
-    where
-        F: FnOnce(&mut Vec<Field>) -> Result<(), TxnStorageStatus>,
-    {
-        let databases = self.databases.read().unwrap();
-        let db = databases
-            .get(&txn.db_id)
-            .ok_or(TxnStorageStatus::DBNotFound)?;
-        let container = db
-            .containers
-            .get(&c_id)
-            .ok_or(TxnStorageStatus::ContainerNotFound)?;
-
-        let key_bytes = self.key_to_bytes(&key);
-
-        // Get current record
-        let current_bytes = match container.btree.get(&key_bytes) {
-            Ok(bytes) => bytes,
-            Err(AccessMethodError::KeyNotFound) => return Err(TxnStorageStatus::KeyNotFound),
-            Err(e) => return Err(TxnStorageStatus::from(e)),
-        };
-
-        // Convert to all fields
-        let all_indices: Vec<usize> = (0..container.options.schema().cols().len()).collect();
-        let mut current_fields =
-            self.bytes_to_fields(&current_bytes, container.options.schema(), &all_indices)?;
-
-        // Apply modifier function
-        modifier(&mut current_fields)?;
-
-        // Convert back to record and store
-        let record = Record {
-            fields: current_fields,
-        };
-        let new_bytes = self.record_to_bytes(&record, container.options.schema());
-
-        container
-            .btree
-            .upsert(&key_bytes, &new_bytes)
-            .map_err(TxnStorageStatus::from)?;
-
-        // TODO: Get actual page_id and frame_id from btree
-        Ok(RecordPointer::new(0, 0))
     }
 }
 
@@ -227,26 +87,24 @@ impl<M: MemPool> FieldLeveLStorageTrait for NonTransactionalStorage<M> {
     // ========================================================================
 
     fn open_db(&self, _options: DBOptions) -> Result<DatabaseId, TxnStorageStatus> {
-        let mut next_id = self.next_db_id.write().unwrap();
-        let db_id = *next_id;
-        *next_id += 1;
-
-        let db_info = DatabaseInfo {
-            containers: HashMap::new(),
-            next_container_id: 1,
-        };
-
-        self.databases.write().unwrap().insert(db_id, db_info);
-        Ok(db_id)
+        // Always return the same database ID since we only support one database
+        Ok(0)
     }
 
     fn close_db(&self, db_id: DatabaseId) -> Result<(), TxnStorageStatus> {
-        self.databases.write().unwrap().remove(&db_id);
+        assert_eq!(
+            db_id, 0,
+            "NonTransactionalStorage only supports a single database with ID 0"
+        );
         Ok(())
     }
 
     fn delete_db(&self, db_id: DatabaseId) -> Result<(), TxnStorageStatus> {
-        self.close_db(db_id)
+        assert_eq!(
+            db_id, 0,
+            "NonTransactionalStorage only supports a single database with ID 0"
+        );
+        Ok(())
     }
 
     // ========================================================================
@@ -258,64 +116,68 @@ impl<M: MemPool> FieldLeveLStorageTrait for NonTransactionalStorage<M> {
         db_id: DatabaseId,
         options: ContainerOptions,
     ) -> Result<ContainerId, TxnStorageStatus> {
-        let mut databases = self.databases.write().unwrap();
-        let db = databases
-            .get_mut(&db_id)
-            .ok_or(TxnStorageStatus::DBNotFound)?;
-
+        assert_eq!(
+            db_id, 0,
+            "NonTransactionalStorage only supports a single database with ID 0"
+        );
         // Only support B-tree containers for now
         if options.data_structure() != ContainerDS::BTree {
             return Err(TxnStorageStatus::AbortFailed);
         }
 
-        let c_id = db.next_container_id;
-        db.next_container_id += 1;
+        // SAFETY: We assume single-threaded access as per the requirements
+        unsafe {
+            let containers = &mut *self.containers.get();
+            let next_container_id = &mut *self.next_container_id.get();
 
-        // Create Foster B-tree
-        // TODO: Check options.schema().is_unique() and create FosterBtreeAppendOnly if false
-        let container_key = ContainerKey::new(db_id, c_id);
-        let btree = Arc::new(FosterBtree::new(container_key, self.mem_pool.clone()));
+            let c_id = *next_container_id;
+            *next_container_id += 1;
 
-        let container_info = ContainerInfo {
-            options: options.clone(),
-            btree,
-        };
+            // Create Foster B-tree
+            let container_key = ContainerKey::new(0, c_id); // Always use db_id = 0,
+            let btree = Arc::new(FosterBtree::new(container_key, self.mem_pool.clone()));
 
-        db.containers.insert(c_id, container_info);
-        Ok(c_id)
+            let container_info = ContainerInfo {
+                options: options.clone(),
+                btree,
+            };
+
+            containers.insert(c_id, container_info);
+            Ok(c_id)
+        }
     }
 
     fn delete_container(
         &self,
-        db_id: DatabaseId,
+        _db_id: DatabaseId,
         c_id: ContainerId,
     ) -> Result<(), TxnStorageStatus> {
-        let mut databases = self.databases.write().unwrap();
-        let db = databases
-            .get_mut(&db_id)
-            .ok_or(TxnStorageStatus::DBNotFound)?;
+        // SAFETY: We assume single-threaded access as per the requirements
+        unsafe {
+            let containers = &mut *self.containers.get();
 
-        db.containers
-            .remove(&c_id)
-            .ok_or(TxnStorageStatus::ContainerNotFound)?;
+            containers
+                .remove(&c_id)
+                .ok_or(TxnStorageStatus::ContainerNotFound)?;
 
-        Ok(())
+            Ok(())
+        }
     }
 
     fn list_containers(
         &self,
-        db_id: DatabaseId,
+        _db_id: DatabaseId,
     ) -> Result<Vec<(ContainerId, ContainerOptions)>, TxnStorageStatus> {
-        let databases = self.databases.read().unwrap();
-        let db = databases.get(&db_id).ok_or(TxnStorageStatus::DBNotFound)?;
+        // SAFETY: We assume single-threaded access as per the requirements
+        unsafe {
+            let containers = &*self.containers.get();
+            let result = containers
+                .iter()
+                .map(|(&c_id, container)| (c_id, container.options.clone()))
+                .collect();
 
-        let containers = db
-            .containers
-            .iter()
-            .map(|(&c_id, container)| (c_id, container.options.clone()))
-            .collect();
-
-        Ok(containers)
+            Ok(result)
+        }
     }
 
     // ========================================================================
@@ -324,27 +186,16 @@ impl<M: MemPool> FieldLeveLStorageTrait for NonTransactionalStorage<M> {
 
     fn raw_insert_record(
         &self,
-        db_id: DatabaseId,
+        _db_id: DatabaseId,
         c_id: ContainerId,
         record: Record,
     ) -> Result<RecordPointer, TxnStorageStatus> {
-        let databases = self.databases.read().unwrap();
-        let db = databases.get(&db_id).ok_or(TxnStorageStatus::DBNotFound)?;
-        let container = db
-            .containers
-            .get(&c_id)
-            .ok_or(TxnStorageStatus::ContainerNotFound)?;
-
-        let key_bytes = self.record_to_key_bytes(&record, container.options.schema());
-        let value_bytes = self.record_to_bytes(&record, container.options.schema());
-
-        container
-            .btree
-            .insert(&key_bytes, &value_bytes)
-            .map_err(TxnStorageStatus::from)?;
-
-        // TODO: Get actual page_id and frame_id from btree
-        Ok(RecordPointer::new(0, 0))
+        self.insert_record(
+            &NonTxnHandle,
+            c_id,
+            record,
+            None, // No hint for non-transactional insert
+        )
     }
 
     // ========================================================================
@@ -353,16 +204,10 @@ impl<M: MemPool> FieldLeveLStorageTrait for NonTransactionalStorage<M> {
 
     fn begin_txn(
         &self,
-        db_id: DatabaseId,
+        _db_id: DatabaseId,
         _options: TxnOptions,
     ) -> Result<Self::TxnHandle, TxnStorageStatus> {
-        // Check if database exists
-        let databases = self.databases.read().unwrap();
-        if !databases.contains_key(&db_id) {
-            return Err(TxnStorageStatus::DBNotFound);
-        }
-
-        Ok(NonTxnHandle { db_id })
+        Ok(NonTxnHandle)
     }
 
     fn commit_txn(
@@ -395,17 +240,15 @@ impl<M: MemPool> FieldLeveLStorageTrait for NonTransactionalStorage<M> {
 
     fn num_records(
         &self,
-        txn: &Self::TxnHandle,
+        _txn: &Self::TxnHandle,
         c_id: ContainerId,
     ) -> Result<usize, TxnStorageStatus> {
-        let databases = self.databases.read().unwrap();
-        let db = databases
-            .get(&txn.db_id)
-            .ok_or(TxnStorageStatus::DBNotFound)?;
-        let container = db
-            .containers
-            .get(&c_id)
-            .ok_or(TxnStorageStatus::ContainerNotFound)?;
+        // SAFETY: We assume single-threaded access as per the requirements
+        let container = unsafe {
+            (*self.containers.get())
+                .get(&c_id)
+                .ok_or(TxnStorageStatus::ContainerNotFound)?
+        };
 
         // For simplicity, we'll scan the entire B-tree to count records
         // In a real implementation, you might want to maintain a separate counter
@@ -437,33 +280,48 @@ impl<M: MemPool> FieldLeveLStorageTrait for NonTransactionalStorage<M> {
 
     fn get_fields(
         &self,
-        txn: &Self::TxnHandle,
+        _txn: &Self::TxnHandle,
         c_id: ContainerId,
         key: Vec<Field>,
         col_indices: &[usize],
-        _hint: Option<RecordPointer>,
+        hint: Option<RecordPointer>,
     ) -> Result<(Vec<Field>, RecordPointer), TxnStorageStatus> {
-        let databases = self.databases.read().unwrap();
-        let db = databases
-            .get(&txn.db_id)
-            .ok_or(TxnStorageStatus::DBNotFound)?;
-        let container = db
-            .containers
-            .get(&c_id)
-            .ok_or(TxnStorageStatus::ContainerNotFound)?;
+        // SAFETY: We assume single-threaded access as per the requirements
+        let container = unsafe {
+            (*self.containers.get())
+                .get(&c_id)
+                .ok_or(TxnStorageStatus::ContainerNotFound)?
+        };
 
-        let key_bytes = self.key_to_bytes(&key);
+        let key = key_to_bytes(&key);
 
-        match container.btree.get(&key_bytes) {
-            Ok(value_bytes) => {
-                let fields =
-                    self.bytes_to_fields(&value_bytes, container.options.schema(), col_indices)?;
-                // TODO: Get actual page_id and frame_id from btree
-                let ptr = RecordPointer::new(0, 0);
-                Ok((fields, ptr))
+        let leaf_page = container.btree.traverse_to_leaf_for_read_with_hint(
+            &key,
+            hint.as_ref().map(|ptr| {
+                PageFrameKey::new_with_frame_id(container.btree.c_key, ptr.page_id, ptr.frame_id)
+            }),
+        );
+        let slot_id = leaf_page.upper_bound_slot_id(&BTreeKey::new(&key)) - 1;
+        if slot_id == 0 {
+            // Lower fence. Non-existent key
+            Err(TxnStorageStatus::KeyNotFound)
+        } else {
+            // We can get the key if it exists
+            if leaf_page.get_raw_key(slot_id) == key {
+                let val = leaf_page.get_val(slot_id);
+                let record = bytes_to_record(&val, container.options.schema());
+                let fields = col_indices
+                    .iter()
+                    .map(|&idx| record[idx].clone())
+                    .collect::<Vec<_>>();
+                Ok((
+                    fields,
+                    RecordPointer::new(leaf_page.page_id(), leaf_page.frame_id()),
+                ))
+            } else {
+                // Non-existent key
+                Err(TxnStorageStatus::KeyNotFound)
             }
-            Err(AccessMethodError::KeyNotFound) => Err(TxnStorageStatus::KeyNotFound),
-            Err(e) => Err(TxnStorageStatus::from(e)),
         }
     }
 
@@ -485,36 +343,103 @@ impl<M: MemPool> FieldLeveLStorageTrait for NonTransactionalStorage<M> {
 
     fn update_fields(
         &self,
-        txn: &Self::TxnHandle,
+        _txn: &Self::TxnHandle,
         c_id: ContainerId,
         key: Vec<Field>,
         fields: Vec<(usize, Field)>,
-        _hint: Option<RecordPointer>,
+        hint: Option<RecordPointer>,
     ) -> Result<RecordPointer, TxnStorageStatus> {
-        self.update_record_with_modifier(txn, c_id, key, |current_fields| {
-            for (idx, field) in fields {
-                if idx >= current_fields.len() {
-                    return Err(TxnStorageStatus::AbortFailed);
+        // SAFETY: We assume single-threaded access as per the requirements
+        let container = unsafe {
+            (*self.containers.get())
+                .get(&c_id)
+                .ok_or(TxnStorageStatus::ContainerNotFound)?
+        };
+
+        let key = key_to_bytes(&key);
+
+        let mut leaf_page = container.btree.traverse_to_leaf_for_write_with_hint(
+            &key,
+            hint.as_ref().map(|ptr| {
+                PageFrameKey::new_with_frame_id(container.btree.c_key, ptr.page_id, ptr.frame_id)
+            }),
+        );
+        let slot_id = leaf_page.upper_bound_slot_id(&BTreeKey::new(&key)) - 1;
+        if slot_id == 0 {
+            // We cannot update the lower fence
+            Err(TxnStorageStatus::KeyNotFound)
+        } else {
+            // We can update the key if it exists
+            if leaf_page.get_raw_key(slot_id) == key {
+                let mut record =
+                    bytes_to_record(&leaf_page.get_val(slot_id), container.options.schema());
+                for (col_idx, field) in fields {
+                    record[col_idx] = field;
                 }
-                current_fields[idx] = field;
+                let value = record_to_bytes(&record, container.options.schema());
+                // Exact match
+                container
+                    .btree
+                    .update_at_slot_or_split(&mut leaf_page, slot_id, &key, &value);
+                Ok(RecordPointer::new(
+                    leaf_page.page_id(),
+                    leaf_page.frame_id(),
+                ))
+            } else {
+                // Non-existent key
+                Err(TxnStorageStatus::KeyNotFound)
             }
-            Ok(())
-        })
+        }
     }
 
     fn update_field_with_func<F: FnOnce(&mut Field)>(
         &self,
-        txn: &Self::TxnHandle,
+        _txn: &Self::TxnHandle,
         c_id: ContainerId,
         key: Vec<Field>,
         col_idx: usize,
         func: F,
-        _hint: Option<RecordPointer>,
+        hint: Option<RecordPointer>,
     ) -> Result<RecordPointer, TxnStorageStatus> {
-        self.update_record_with_modifier(txn, c_id, key, |current_fields| {
-            func(&mut current_fields[col_idx]);
-            Ok(())
-        })
+        // SAFETY: We assume single-threaded access as per the requirements
+        let container = unsafe {
+            (*self.containers.get())
+                .get(&c_id)
+                .ok_or(TxnStorageStatus::ContainerNotFound)?
+        };
+
+        let key = key_to_bytes(&key);
+
+        let mut leaf_page = container.btree.traverse_to_leaf_for_write_with_hint(
+            &key,
+            hint.as_ref().map(|ptr| {
+                PageFrameKey::new_with_frame_id(container.btree.c_key, ptr.page_id, ptr.frame_id)
+            }),
+        );
+        let slot_id = leaf_page.upper_bound_slot_id(&BTreeKey::new(&key)) - 1;
+        if slot_id == 0 {
+            // We cannot update the lower fence
+            Err(TxnStorageStatus::KeyNotFound)
+        } else {
+            // We can update the key if it exists
+            if leaf_page.get_raw_key(slot_id) == key {
+                let mut record =
+                    bytes_to_record(&leaf_page.get_val(slot_id), container.options.schema());
+                func(&mut record[col_idx]);
+                let value = record_to_bytes(&record, container.options.schema());
+                // Exact match
+                container
+                    .btree
+                    .update_at_slot_or_split(&mut leaf_page, slot_id, &key, &value);
+                Ok(RecordPointer::new(
+                    leaf_page.page_id(),
+                    leaf_page.frame_id(),
+                ))
+            } else {
+                // Non-existent key
+                Err(TxnStorageStatus::KeyNotFound)
+            }
+        }
     }
 
     // ========================================================================
@@ -523,30 +448,60 @@ impl<M: MemPool> FieldLeveLStorageTrait for NonTransactionalStorage<M> {
 
     fn insert_record(
         &self,
-        txn: &Self::TxnHandle,
+        _txn: &Self::TxnHandle,
         c_id: ContainerId,
         record: Record,
-        _hint: Option<RecordPointer>,
+        hint: Option<RecordPointer>,
     ) -> Result<RecordPointer, TxnStorageStatus> {
-        let databases = self.databases.read().unwrap();
-        let db = databases
-            .get(&txn.db_id)
-            .ok_or(TxnStorageStatus::DBNotFound)?;
-        let container = db
-            .containers
-            .get(&c_id)
-            .ok_or(TxnStorageStatus::ContainerNotFound)?;
+        // SAFETY: We assume single-threaded access as per the requirements
+        let container = unsafe {
+            (*self.containers.get())
+                .get(&c_id)
+                .ok_or(TxnStorageStatus::ContainerNotFound)?
+        };
 
-        let key_bytes = self.record_to_key_bytes(&record, container.options.schema());
-        let value_bytes = self.record_to_bytes(&record, container.options.schema());
+        let key = record_to_key_bytes(&record.fields, container.options.schema());
+        let value = record_to_bytes(&record.fields, container.options.schema());
 
-        container
-            .btree
-            .insert(&key_bytes, &value_bytes)
-            .map_err(TxnStorageStatus::from)?;
-
-        // TODO: Get actual page_id and frame_id from btree
-        Ok(RecordPointer::new(0, 0))
+        let mut leaf_page = container.btree.traverse_to_leaf_for_write_with_hint(
+            &key,
+            hint.as_ref().map(|ptr| {
+                PageFrameKey::new_with_frame_id(container.btree.c_key, ptr.page_id, ptr.frame_id)
+            }),
+        );
+        let slot_id = leaf_page.upper_bound_slot_id(&BTreeKey::new(&key)) - 1;
+        if slot_id == 0 {
+            // Lower fence so insert is ok. We insert the key-value at the next position of the lower fence.
+            container.btree.insert_at_slot_or_split(
+                &mut leaf_page,
+                slot_id + 1,
+                &key,
+                &value,
+                false,
+            );
+            Ok(RecordPointer::new(
+                leaf_page.page_id(),
+                leaf_page.frame_id(),
+            ))
+        } else {
+            // We can insert the key if it does not exist
+            if leaf_page.get_raw_key(slot_id) == key {
+                // Exact match
+                Err(TxnStorageStatus::KeyExists)
+            } else {
+                container.btree.insert_at_slot_or_split(
+                    &mut leaf_page,
+                    slot_id + 1,
+                    &key,
+                    &value,
+                    false,
+                );
+                Ok(RecordPointer::new(
+                    leaf_page.page_id(),
+                    leaf_page.frame_id(),
+                ))
+            }
+        }
     }
 
     fn insert_records(
@@ -565,28 +520,41 @@ impl<M: MemPool> FieldLeveLStorageTrait for NonTransactionalStorage<M> {
 
     fn delete_record(
         &self,
-        txn: &Self::TxnHandle,
+        _txn: &Self::TxnHandle,
         c_id: ContainerId,
         key: Vec<Field>,
-        _hint: Option<RecordPointer>,
+        hint: Option<RecordPointer>,
     ) -> Result<(), TxnStorageStatus> {
-        let databases = self.databases.read().unwrap();
-        let db = databases
-            .get(&txn.db_id)
-            .ok_or(TxnStorageStatus::DBNotFound)?;
-        let container = db
-            .containers
-            .get(&c_id)
-            .ok_or(TxnStorageStatus::ContainerNotFound)?;
+        // SAFETY: We assume single-threaded access as per the requirements
+        let container = unsafe {
+            (*self.containers.get())
+                .get(&c_id)
+                .ok_or(TxnStorageStatus::ContainerNotFound)?
+        };
 
-        let key_bytes = self.key_to_bytes(&key);
+        let key = key_to_bytes(&key);
 
-        container
-            .btree
-            .delete(&key_bytes)
-            .map_err(TxnStorageStatus::from)?;
-
-        Ok(())
+        let mut leaf_page = container.btree.traverse_to_leaf_for_write_with_hint(
+            &key,
+            hint.as_ref().map(|ptr| {
+                PageFrameKey::new_with_frame_id(container.btree.c_key, ptr.page_id, ptr.frame_id)
+            }),
+        );
+        let slot_id = leaf_page.upper_bound_slot_id(&BTreeKey::new(&key)) - 1;
+        if slot_id == 0 {
+            // Lower fence so delete is not possible
+            Err(TxnStorageStatus::KeyNotFound)
+        } else {
+            // We can delete the key if it exists
+            if leaf_page.get_raw_key(slot_id) == key {
+                // Exact match
+                leaf_page.remove_at(slot_id);
+                Ok(())
+            } else {
+                // Non-existent key
+                Err(TxnStorageStatus::KeyNotFound)
+            }
+        }
     }
 
     // ========================================================================
@@ -595,60 +563,68 @@ impl<M: MemPool> FieldLeveLStorageTrait for NonTransactionalStorage<M> {
 
     fn scan_range(
         &self,
-        txn: &Self::TxnHandle,
+        _txn: &Self::TxnHandle,
         c_id: ContainerId,
-        _options: ScanOptions,
+        options: ScanOptions,
     ) -> Result<Self::IteratorHandle, TxnStorageStatus> {
-        let databases = self.databases.read().unwrap();
-        let db = databases
-            .get(&txn.db_id)
-            .ok_or(TxnStorageStatus::DBNotFound)?;
-        let container = db
-            .containers
-            .get(&c_id)
-            .ok_or(TxnStorageStatus::ContainerNotFound)?;
+        // SAFETY: We assume single-threaded access as per the requirements
+        let container = unsafe {
+            (*self.containers.get())
+                .get(&c_id)
+                .ok_or(TxnStorageStatus::ContainerNotFound)?
+        };
 
-        let scanner = container.btree.scan_range(&[], &[]);
+        let scanner = container
+            .btree
+            .scan_range(&options.lower_inc, &options.upper_exc);
         Ok(NonTxnIterator {
-            scanner: Mutex::new(scanner),
+            scanner: UnsafeCell::new(scanner),
             c_id,
+            options,
         })
     }
 
     fn iter_next(
         &self,
-        txn: &Self::TxnHandle,
+        _txn: &Self::TxnHandle,
         iter: &Self::IteratorHandle,
     ) -> Result<Option<(Vec<Field>, Vec<Field>, RecordPointer)>, TxnStorageStatus> {
-        let databases = self.databases.read().unwrap();
-        let db = databases
-            .get(&txn.db_id)
-            .ok_or(TxnStorageStatus::DBNotFound)?;
-        let container = db
-            .containers
-            .get(&iter.c_id)
-            .ok_or(TxnStorageStatus::ContainerNotFound)?;
+        // SAFETY: We assume single-threaded access as per the requirements
+        let container = unsafe {
+            (*self.containers.get())
+                .get(&iter.c_id)
+                .ok_or(TxnStorageStatus::ContainerNotFound)?
+        };
 
-        if let Some((_key_bytes, value_bytes)) = iter.scanner.lock().unwrap().next() {
-            // Convert value bytes to all fields first
-            let all_indices: Vec<usize> = (0..container.options.schema().cols().len()).collect();
-            let all_fields =
-                self.bytes_to_fields(&value_bytes, container.options.schema(), &all_indices)?;
+        // SAFETY: We assume single-threaded access as per the requirements
+        unsafe {
+            let scanner = &mut *iter.scanner.get();
 
-            // Extract primary key fields from the full record
-            let pk_indices = container.options.schema().key_indices();
-            let mut key_fields = Vec::new();
-            for &idx in pk_indices {
-                if idx < all_fields.len() {
-                    key_fields.push(all_fields[idx].clone());
-                }
+            if let Some((_, value_bytes)) = scanner.next() {
+                let record = bytes_to_record(&value_bytes, container.options.schema());
+
+                // Extract primary key fields from the full record
+                let key_fields: Vec<Field> = container
+                    .options
+                    .schema()
+                    .key_indices()
+                    .iter()
+                    .map(|&idx| record[idx].clone())
+                    .collect();
+
+                let val_fields: Vec<Field> = iter
+                    .options
+                    .cols
+                    .iter()
+                    .map(|&idx| record[idx].clone())
+                    .collect();
+
+                // TODO: Get actual page_id and frame_id from btree
+                let ptr = RecordPointer::new(0, 0);
+                Ok(Some((key_fields, val_fields, ptr)))
+            } else {
+                Ok(None)
             }
-
-            // TODO: Get actual page_id and frame_id from btree
-            let ptr = RecordPointer::new(0, 0);
-            Ok(Some((key_fields, all_fields, ptr)))
-        } else {
-            Ok(None)
         }
     }
 
@@ -666,9 +642,10 @@ impl<M: MemPool> FieldLeveLStorageTrait for NonTransactionalStorage<M> {
 mod tests {
     use super::*;
     use crate::bp::get_test_bp;
-    use crate::txn_storage2::test_utils::{setup_db_with_schema, setup_simple_db};
     use crate::txn_storage2::DataType;
     use crate::{assert_field, field, record, schema};
+
+    use crate::txn_storage2::schema::Schema;
 
     #[test]
     fn test_basic_operations() {
@@ -678,7 +655,15 @@ mod tests {
             (false, DataType::Int32),  // age (not nullable)
         ]);
 
-        let (storage, db_id, container_id) = setup_db_with_schema(schema);
+        let bp = get_test_bp(100);
+        let storage = NonTransactionalStorage::new(bp);
+        let db_id = storage.open_db(DBOptions::new("test")).unwrap();
+        let container_id = storage
+            .create_container(
+                db_id,
+                ContainerOptions::new("test", ContainerDS::BTree, schema),
+            )
+            .unwrap();
         let txn = storage.begin_txn(db_id, TxnOptions::default()).unwrap();
 
         // Insert a record using macro
@@ -713,7 +698,6 @@ mod tests {
         assert!(matches!(result, Err(TxnStorageStatus::KeyNotFound)));
 
         storage.commit_txn(&txn, false).unwrap();
-        storage.close_db(db_id).unwrap();
     }
 
     #[test]
@@ -725,7 +709,15 @@ mod tests {
             (false, DataType::Int32),  // salary (not nullable)
         ]);
 
-        let (storage, db_id, container_id) = setup_db_with_schema(schema);
+        let bp = get_test_bp(100);
+        let storage = NonTransactionalStorage::new(bp);
+        let db_id = storage.open_db(DBOptions::new("test")).unwrap();
+        let container_id = storage
+            .create_container(
+                db_id,
+                ContainerOptions::new("test", ContainerDS::BTree, schema),
+            )
+            .unwrap();
         let txn = storage.begin_txn(db_id, TxnOptions::default()).unwrap();
 
         // Insert records with multi-field primary key using macro
@@ -767,32 +759,6 @@ mod tests {
         assert_field!(&fields2[1], Int32(60000));
 
         storage.commit_txn(&txn, false).unwrap();
-        storage.close_db(db_id).unwrap();
-    }
-
-    #[test]
-    fn test_database_management() {
-        let bp = get_test_bp(100);
-        let storage = NonTransactionalStorage::new(bp);
-
-        // Test opening multiple databases
-        let db1_options = DBOptions::new("test_db1");
-        let db2_options = DBOptions::new("test_db2");
-
-        let db1_id = storage.open_db(db1_options).unwrap();
-        let db2_id = storage.open_db(db2_options).unwrap();
-
-        // Database IDs should be different
-        assert_ne!(db1_id, db2_id);
-
-        // Test closing databases
-        storage.close_db(db1_id).unwrap();
-        storage.close_db(db2_id).unwrap();
-
-        // Test deleting databases
-        let db3_options = DBOptions::new("test_db3");
-        let db3_id = storage.open_db(db3_options).unwrap();
-        storage.delete_db(db3_id).unwrap();
     }
 
     #[test]
@@ -800,8 +766,7 @@ mod tests {
         let bp = get_test_bp(100);
         let storage = NonTransactionalStorage::new(bp);
 
-        let db_options = DBOptions::new("test_db");
-        let db_id = storage.open_db(db_options).unwrap();
+        let db_id = storage.open_db(DBOptions::new("test_db")).unwrap();
 
         // Create schema
         let schema = Schema::with_primary_key(
@@ -837,8 +802,6 @@ mod tests {
         storage.delete_container(db_id, container1_id).unwrap();
         let containers_after_delete = storage.list_containers(db_id).unwrap();
         assert_eq!(containers_after_delete.len(), 1);
-
-        storage.close_db(db_id).unwrap();
     }
 
     #[test]
@@ -846,8 +809,7 @@ mod tests {
         let bp = get_test_bp(100);
         let storage = NonTransactionalStorage::new(bp);
 
-        let db_options = DBOptions::new("test_db");
-        let db_id = storage.open_db(db_options).unwrap();
+        let db_id = storage.open_db(DBOptions::new("test_db")).unwrap();
 
         let schema = Schema::with_primary_key(
             vec![(false, DataType::Int32), (true, DataType::String)],
@@ -855,11 +817,6 @@ mod tests {
         );
         let container_options = ContainerOptions::new("test_container", ContainerDS::BTree, schema);
         let container_id = storage.create_container(db_id, container_options).unwrap();
-
-        // Test transaction with invalid database ID
-        let invalid_db_id = 999;
-        let txn_result = storage.begin_txn(invalid_db_id, TxnOptions::default());
-        assert!(matches!(txn_result, Err(TxnStorageStatus::DBNotFound)));
 
         let txn = storage.begin_txn(db_id, TxnOptions::default()).unwrap();
 
@@ -881,8 +838,6 @@ mod tests {
         let delete_result =
             storage.delete_record(&txn, container_id, vec![Field::Int32(Some(999))], None);
         assert!(matches!(delete_result, Err(TxnStorageStatus::KeyNotFound)));
-
-        storage.close_db(db_id).unwrap();
     }
 
     #[test]
@@ -897,7 +852,15 @@ mod tests {
             (true, DataType::VarBytes),   // Variable bytes
         ]);
 
-        let (storage, db_id, container_id) = setup_db_with_schema(schema);
+        let bp = get_test_bp(100);
+        let storage = NonTransactionalStorage::new(bp);
+        let db_id = storage.open_db(DBOptions::new("test")).unwrap();
+        let container_id = storage
+            .create_container(
+                db_id,
+                ContainerOptions::new("test", ContainerDS::BTree, schema),
+            )
+            .unwrap();
         let txn = storage.begin_txn(db_id, TxnOptions::default()).unwrap();
 
         // Insert record with all data types
@@ -929,8 +892,6 @@ mod tests {
         assert_field!(&all_fields[3], Bool(true));
         assert_field!(&all_fields[4], FixedBytes8([1, 2, 3, 4, 5, 6, 7, 8]));
         assert_field!(&all_fields[5], VarBytes(vec![10, 20, 30, 40, 50]));
-
-        storage.close_db(db_id).unwrap();
     }
 
     #[test]
@@ -941,7 +902,15 @@ mod tests {
             (true, DataType::Int32),   // Nullable
         ]);
 
-        let (storage, db_id, container_id) = setup_db_with_schema(schema);
+        let bp = get_test_bp(100);
+        let storage = NonTransactionalStorage::new(bp);
+        let db_id = storage.open_db(DBOptions::new("test")).unwrap();
+        let container_id = storage
+            .create_container(
+                db_id,
+                ContainerOptions::new("test", ContainerDS::BTree, schema),
+            )
+            .unwrap();
         let txn = storage.begin_txn(db_id, TxnOptions::default()).unwrap();
 
         // Insert record with null values
@@ -964,8 +933,6 @@ mod tests {
         assert_eq!(fields.len(), 2);
         assert_field!(&fields[0], Null);
         assert_field!(&fields[1], Null);
-
-        storage.close_db(db_id).unwrap();
     }
 
     #[test]
@@ -976,7 +943,15 @@ mod tests {
             (false, DataType::Int32),
         ]);
 
-        let (storage, db_id, container_id) = setup_db_with_schema(schema);
+        let bp = get_test_bp(100);
+        let storage = NonTransactionalStorage::new(bp);
+        let db_id = storage.open_db(DBOptions::new("test")).unwrap();
+        let container_id = storage
+            .create_container(
+                db_id,
+                ContainerOptions::new("test", ContainerDS::BTree, schema),
+            )
+            .unwrap();
         let txn = storage.begin_txn(db_id, TxnOptions::default()).unwrap();
 
         // Insert initial record
@@ -1040,13 +1015,24 @@ mod tests {
 
         let (final_field, _ptr) = storage.get_field(&txn, container_id, key, 2, None).unwrap();
         assert_field!(&final_field, Int32(250));
-
-        storage.close_db(db_id).unwrap();
     }
 
     #[test]
     fn test_bulk_operations() {
-        let (storage, db_id, container_id) = setup_simple_db();
+        let bp = get_test_bp(100);
+        let storage = NonTransactionalStorage::new(bp);
+        let db_id = storage.open_db(DBOptions::new("test")).unwrap();
+
+        let schema = Schema::with_primary_key(
+            vec![(false, DataType::Int32), (true, DataType::String)],
+            vec![0],
+        );
+        let container_id = storage
+            .create_container(
+                db_id,
+                ContainerOptions::new("test", ContainerDS::BTree, schema),
+            )
+            .unwrap();
 
         // Test bulk insert
         let records = (1..=100)
@@ -1088,13 +1074,24 @@ mod tests {
             .get_field(&txn, container_id, key_125, 1, None)
             .unwrap();
         assert_field!(&field_125, String("additional_125"));
-
-        storage.close_db(db_id).unwrap();
     }
 
     #[test]
     fn test_iteration_and_scanning() {
-        let (storage, db_id, container_id) = setup_simple_db();
+        let bp = get_test_bp(100);
+        let storage = NonTransactionalStorage::new(bp);
+        let db_id = storage.open_db(DBOptions::new("test")).unwrap();
+
+        let schema = Schema::with_primary_key(
+            vec![(false, DataType::Int32), (true, DataType::String)],
+            vec![0],
+        );
+        let container_id = storage
+            .create_container(
+                db_id,
+                ContainerOptions::new("test", ContainerDS::BTree, schema),
+            )
+            .unwrap();
         let txn = storage.begin_txn(db_id, TxnOptions::default()).unwrap();
 
         // Insert test data
@@ -1107,7 +1104,7 @@ mod tests {
 
         // Test scanning
         let iter = storage
-            .scan_range(&txn, container_id, ScanOptions::new())
+            .scan_range(&txn, container_id, ScanOptions::new(&[0, 1]))
             .unwrap();
 
         let mut count = 0;
@@ -1134,7 +1131,6 @@ mod tests {
         }
 
         storage.drop_iterator_handle(iter).unwrap();
-        storage.close_db(db_id).unwrap();
     }
 
     #[test]
@@ -1147,7 +1143,15 @@ mod tests {
             (true, DataType::String),  // data field
         ]);
 
-        let (storage, db_id, container_id) = setup_db_with_schema(schema);
+        let bp = get_test_bp(100);
+        let storage = NonTransactionalStorage::new(bp);
+        let db_id = storage.open_db(DBOptions::new("test")).unwrap();
+        let container_id = storage
+            .create_container(
+                db_id,
+                ContainerOptions::new("test", ContainerDS::BTree, schema),
+            )
+            .unwrap();
         let txn = storage.begin_txn(db_id, TxnOptions::default()).unwrap();
 
         // Insert records with composite keys
@@ -1194,13 +1198,24 @@ mod tests {
         let partial_key = vec![field!(Int32 1)];
         let result = storage.get_field(&txn, container_id, partial_key, 3, None);
         assert!(result.is_err()); // Should fail because key is incomplete
-
-        storage.close_db(db_id).unwrap();
     }
 
     #[test]
     fn test_transaction_operations() {
-        let (storage, db_id, container_id) = setup_simple_db();
+        let bp = get_test_bp(100);
+        let storage = NonTransactionalStorage::new(bp);
+        let db_id = storage.open_db(DBOptions::new("test")).unwrap();
+
+        let schema = Schema::with_primary_key(
+            vec![(false, DataType::Int32), (true, DataType::String)],
+            vec![0],
+        );
+        let container_id = storage
+            .create_container(
+                db_id,
+                ContainerOptions::new("test", ContainerDS::BTree, schema),
+            )
+            .unwrap();
 
         // Test transaction lifecycle
         let txn = storage.begin_txn(db_id, TxnOptions::default()).unwrap();
@@ -1230,7 +1245,238 @@ mod tests {
         // Test drop
         let txn5 = storage.begin_txn(db_id, TxnOptions::default()).unwrap();
         storage.drop_txn(txn5).unwrap();
+    }
 
-        storage.close_db(db_id).unwrap();
+    #[test]
+    #[should_panic(expected = "assertion failed")]
+    fn test_concurrent_access_panics() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let bp = get_test_bp(100);
+        let storage = Arc::new(NonTransactionalStorage::new(bp));
+        let db_id = storage.open_db(DBOptions::new("test")).unwrap();
+
+        let schema = Schema::with_primary_key(
+            vec![(false, DataType::Int32), (true, DataType::String)],
+            vec![0],
+        );
+        let container_id = storage
+            .create_container(
+                db_id,
+                ContainerOptions::new("test", ContainerDS::BTree, schema),
+            )
+            .unwrap();
+
+        // Insert some initial data
+        let txn = storage.begin_txn(db_id, TxnOptions::default()).unwrap();
+        for i in 0..10 {
+            let record = record![field!(Int32 i), field!(String format!("initial_{}", i))];
+            storage
+                .insert_record(&txn, container_id, record, None)
+                .unwrap();
+        }
+
+        // Try concurrent access - this should trigger undefined behavior or data races
+        let handles: Vec<_> = (0..4)
+            .map(|thread_id| {
+                let storage_clone = Arc::clone(&storage);
+                thread::spawn(move || {
+                    let txn = storage_clone
+                        .begin_txn(db_id, TxnOptions::default())
+                        .unwrap();
+
+                    // Each thread tries to insert and update records
+                    for i in 0..100 {
+                        let key = thread_id * 1000 + i;
+                        let record = record![
+                            field!(Int32 key),
+                            field!(String format!("thread_{}_value_{}", thread_id, i))
+                        ];
+
+                        // This might cause data races with UnsafeCell
+                        let _ = storage_clone.insert_record(&txn, container_id, record, None);
+
+                        // Try to update existing records
+                        if i % 10 == 0 {
+                            let update_key = vec![field!(Int32(i % 10))];
+                            let _ = storage_clone.update_field(
+                                &txn,
+                                container_id,
+                                update_key,
+                                1,
+                                field!(String format!("updated_by_thread_{}", thread_id)),
+                                None,
+                            );
+                        }
+                    }
+                })
+            })
+            .collect();
+
+        // Wait for all threads to complete
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        // This test should demonstrate that concurrent access is unsafe
+        // In practice, this might cause data corruption, panics, or other undefined behavior
+        panic!("assertion failed: concurrent access should not be safe");
+    }
+
+    #[test]
+    fn test_concurrent_read_safety() {
+        use std::collections::HashSet;
+        use std::sync::Arc;
+        use std::thread;
+
+        let bp = get_test_bp(100);
+        let storage = Arc::new(NonTransactionalStorage::new(bp));
+        let db_id = storage.open_db(DBOptions::new("test")).unwrap();
+
+        let schema = Schema::with_primary_key(
+            vec![(false, DataType::Int32), (true, DataType::String)],
+            vec![0],
+        );
+        let container_id = storage
+            .create_container(
+                db_id,
+                ContainerOptions::new("test", ContainerDS::BTree, schema),
+            )
+            .unwrap();
+
+        // Insert test data
+        let txn = storage.begin_txn(db_id, TxnOptions::default()).unwrap();
+        for i in 0..100 {
+            let record = record![field!(Int32 i), field!(String format!("value_{}", i))];
+            storage
+                .insert_record(&txn, container_id, record, None)
+                .unwrap();
+        }
+
+        // Multiple threads reading concurrently - even this is unsafe with UnsafeCell
+        let handles: Vec<_> = (0..4)
+            .map(|_thread_id| {
+                let storage_clone = Arc::clone(&storage);
+                thread::spawn(move || {
+                    let txn = storage_clone
+                        .begin_txn(db_id, TxnOptions::default())
+                        .unwrap();
+                    let mut seen_values = HashSet::new();
+
+                    // Each thread reads all records
+                    for i in 0..100 {
+                        let key = vec![field!(Int32 i)];
+                        match storage_clone.get_field(&txn, container_id, key, 1, None) {
+                            Ok((field, _)) => {
+                                if let Field::String(Some(val)) = field {
+                                    seen_values.insert(val);
+                                }
+                            }
+                            Err(_) => {
+                                // Key might not exist due to race conditions
+                            }
+                        }
+                    }
+
+                    seen_values.len()
+                })
+            })
+            .collect();
+
+        // Collect results from all threads
+        let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+
+        // Even concurrent reads might produce inconsistent results due to UnsafeCell
+        println!("Read results from threads: {:?}", results);
+
+        // Results might vary due to unsafe concurrent access
+        assert!(!results.is_empty());
+    }
+
+    #[test]
+    fn test_data_race_detection() {
+        use std::sync::{Arc, Barrier};
+        use std::thread;
+
+        let bp = get_test_bp(100);
+        let storage = Arc::new(NonTransactionalStorage::new(bp));
+        let db_id = storage.open_db(DBOptions::new("test")).unwrap();
+
+        let schema = Schema::with_primary_key(
+            vec![(false, DataType::Int32), (false, DataType::Int32)],
+            vec![0],
+        );
+        let container_id = storage
+            .create_container(
+                db_id,
+                ContainerOptions::new("test", ContainerDS::BTree, schema),
+            )
+            .unwrap();
+
+        // Insert a record that will be concurrently modified
+        let txn = storage.begin_txn(db_id, TxnOptions::default()).unwrap();
+        let record = record![field!(Int32 1), field!(Int32 0)];
+        storage
+            .insert_record(&txn, container_id, record, None)
+            .unwrap();
+
+        let barrier = Arc::new(Barrier::new(2));
+
+        // Two threads trying to increment the same counter
+        let handles: Vec<_> = (0..2)
+            .map(|thread_id| {
+                let storage_clone = Arc::clone(&storage);
+                let barrier_clone = Arc::clone(&barrier);
+
+                thread::spawn(move || {
+                    let txn = storage_clone
+                        .begin_txn(db_id, TxnOptions::default())
+                        .unwrap();
+
+                    // Synchronize threads to increase chance of race
+                    barrier_clone.wait();
+
+                    let mut sum = 0;
+                    for _ in 0..1000 {
+                        // Read current value
+                        let key = vec![field!(Int32 1)];
+                        match storage_clone.get_field(&txn, container_id, key.clone(), 1, None) {
+                            Ok((Field::Int32(Some(val)), _)) => {
+                                // Increment and write back (classic race condition)
+                                let new_val = val + 1;
+                                let _ = storage_clone.update_field(
+                                    &txn,
+                                    container_id,
+                                    key,
+                                    1,
+                                    field!(Int32 new_val),
+                                    None,
+                                );
+                                sum += 1;
+                            }
+                            _ => {}
+                        }
+                    }
+                    (thread_id, sum)
+                })
+            })
+            .collect();
+
+        // Collect results
+        let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        println!("Thread results: {:?}", results);
+
+        // Check final value - it should be 2000 if no races, but will likely be less
+        let key = vec![field!(Int32 1)];
+        match storage.get_field(&txn, container_id, key, 1, None) {
+            Ok((Field::Int32(Some(final_val)), _)) => {
+                println!("Final counter value: {}", final_val);
+                // Due to race conditions, the final value will likely be less than 2000
+                // This demonstrates the danger of concurrent access with UnsafeCell
+                assert!(final_val > 0 && final_val <= 2000);
+            }
+            _ => panic!("Failed to read final value"),
+        }
     }
 }

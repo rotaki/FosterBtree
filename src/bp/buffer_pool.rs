@@ -1042,7 +1042,7 @@ impl BufferPool {
         for i in 0..self.num_frames {
             let frame = self.get_read_guard(i);
             if let Some(key) = frame.page_key() {
-                let page_id = frame.get_id();
+                let page_id = frame.page_id();
                 assert_eq!(key.page_id, page_id);
             }
         }

@@ -180,11 +180,8 @@ pub fn run_payment_txn_with_stats<M: MemPool>(
         let res = storage.scan_range(
             &txn,
             containers.customer_secondary_cid,
-            ScanOptions::with_bounds(
-                scan_key_start,
-                scan_key_end,
-                &[customer_secondary_fields::C_POINTER],
-            ),
+            ScanOptions::new(&[customer_secondary_fields::C_POINTER])
+                .with_bounds(scan_key_start, scan_key_end),
         );
         if not_successful(&res) {
             return (

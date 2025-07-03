@@ -98,11 +98,8 @@ pub fn run_orderstatus_txn_with_stats<M: MemPool>(
         let res = storage.scan_range(
             &txn,
             containers.customer_secondary_cid,
-            ScanOptions::with_bounds(
-                scan_key_start,
-                scan_key_end,
-                &[customer_secondary_fields::C_POINTER],
-            ),
+            ScanOptions::new(&[customer_secondary_fields::C_POINTER])
+                .with_bounds(scan_key_start, scan_key_end),
         );
         if not_successful(&res) {
             return (
@@ -240,7 +237,7 @@ pub fn run_orderstatus_txn_with_stats<M: MemPool>(
     let res = storage.scan_range(
         &txn,
         containers.order_secondary_cid,
-        ScanOptions::with_bounds(scan_start, scan_end, &[order_secondary_fields::O_POINTER]),
+        ScanOptions::new(&[order_secondary_fields::O_POINTER]).with_bounds(scan_start, scan_end),
     );
     if not_successful(&res) {
         return (
@@ -353,17 +350,14 @@ pub fn run_orderstatus_txn_with_stats<M: MemPool>(
     let res = storage.scan_range(
         &txn,
         containers.order_line_cid,
-        ScanOptions::with_bounds(
-            ol_scan_start,
-            ol_scan_end,
-            &[
-                order_line_fields::OL_I_ID,
-                order_line_fields::OL_SUPPLY_W_ID,
-                order_line_fields::OL_QUANTITY,
-                order_line_fields::OL_AMOUNT,
-                order_line_fields::OL_DELIVERY_D,
-            ],
-        ),
+        ScanOptions::new(&[
+            order_line_fields::OL_I_ID,
+            order_line_fields::OL_SUPPLY_W_ID,
+            order_line_fields::OL_QUANTITY,
+            order_line_fields::OL_AMOUNT,
+            order_line_fields::OL_DELIVERY_D,
+        ])
+        .with_bounds(ol_scan_start, ol_scan_end),
     );
     if not_successful(&res) {
         return (

@@ -64,7 +64,7 @@ impl<T: MemPool> HashFosterBtree<T> {
             buckets.push(tree);
         }
 
-        let meta_page_id = meta_page.get_id();
+        let meta_page_id = meta_page.page_id();
 
         Self {
             mem_pool: mem_pool.clone(),
@@ -411,7 +411,7 @@ impl<T: MemPool> HashFosterBtreeAppendOnly<T> {
             buckets.push(tree);
         }
 
-        let meta_page_id = meta_page.get_id();
+        let meta_page_id = meta_page.page_id();
 
         Self {
             mem_pool: mem_pool.clone(),

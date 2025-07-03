@@ -30,7 +30,7 @@ impl<T: MemPool> ReadOptimizedChain<T> {
         Self {
             c_key,
             bp: bp.clone(),
-            first_page_id: first_page.get_id(),
+            first_page_id: first_page.page_id(),
             first_frame_id: AtomicU32::new(first_page.frame_id()),
         }
     }
@@ -120,7 +120,7 @@ impl<T: MemPool> ReadOptimizedChain<T> {
                 );
                 let mut new_page = self.bp.create_new_page_for_write(self.c_key).unwrap();
                 new_page.init();
-                last_page.set_next_page(new_page.get_id(), new_page.frame_id());
+                last_page.set_next_page(new_page.page_id(), new_page.frame_id());
                 log_trace!(
                     "Linked last page {} -> new page {}",
                     last_page.get_id(),
@@ -457,7 +457,8 @@ impl<T: MemPool> ReadOptimizedChain<T> {
                                 let mut new_page =
                                     self.bp.create_new_page_for_write(self.c_key).unwrap();
                                 new_page.init();
-                                upgraded_page.set_next_page(new_page.get_id(), new_page.frame_id());
+                                upgraded_page
+                                    .set_next_page(new_page.page_id(), new_page.frame_id());
                                 log_trace!(
                                     "Linked last page {} -> new page {}",
                                     upgraded_page.get_id(),
