@@ -5,6 +5,26 @@ use std::collections::HashMap;
 use crate::txn_storage2::Schema;
 
 // ============================================================================
+// Helper functions for fixed-size char types
+// ============================================================================
+
+/// Convert a string to a fixed-size byte array, padding with zeros if needed
+#[inline]
+pub fn string_to_fixed_bytes<const N: usize>(s: &str) -> [u8; N] {
+    let mut bytes = [0u8; N];
+    let len = s.len().min(N);
+    bytes[..len].copy_from_slice(&s.as_bytes()[..len]);
+    bytes
+}
+
+/// Convert a fixed-size byte array to a string, trimming null bytes
+#[inline]
+pub fn fixed_bytes_to_string<const N: usize>(bytes: &[u8; N]) -> String {
+    let len = bytes.iter().position(|&b| b == 0).unwrap_or(N);
+    String::from_utf8_lossy(&bytes[..len]).to_string()
+}
+
+// ============================================================================
 // Macros for Field Creation and Testing
 // ============================================================================
 
@@ -22,6 +42,21 @@ macro_rules! field {
     };
     (String $val:expr) => {
         $crate::txn_storage2::field::Field::String(Some($val.to_string()))
+    };
+    (Char8 $val:expr) => {
+        $crate::txn_storage2::field::Field::Char8(Some(
+            $crate::txn_storage2::field::string_to_fixed_bytes::<8>($val),
+        ))
+    };
+    (Char16 $val:expr) => {
+        $crate::txn_storage2::field::Field::Char16(Some(
+            $crate::txn_storage2::field::string_to_fixed_bytes::<16>($val),
+        ))
+    };
+    (Char24 $val:expr) => {
+        $crate::txn_storage2::field::Field::Char24(Some(
+            $crate::txn_storage2::field::string_to_fixed_bytes::<24>($val),
+        ))
     };
     (Float64 $val:expr) => {
         $crate::txn_storage2::field::Field::Float64(Some($val))
@@ -44,6 +79,15 @@ macro_rules! field {
     (Null String) => {
         $crate::txn_storage2::field::Field::String(None)
     };
+    (Null Char8) => {
+        $crate::txn_storage2::field::Field::Char8(None)
+    };
+    (Null Char16) => {
+        $crate::txn_storage2::field::Field::Char16(None)
+    };
+    (Null Char24) => {
+        $crate::txn_storage2::field::Field::Char24(None)
+    };
     (Null Bool) => {
         $crate::txn_storage2::field::Field::Bool(None)
     };
@@ -57,7 +101,7 @@ macro_rules! field {
 macro_rules! assert_field {
     ($field:expr, Int32($expected:expr)) => {
         match $field {
-            $crate::txn_storage2::field::Field::Int32(Some(v)) => assert_eq!(*v, $expected),
+            $crate::txn_storage2::field::Field::Int32(Some(v)) => assert_eq!(v, &$expected),
             _ => panic!("Expected Int32({}) but got {:?}", $expected, $field),
         }
     };
@@ -77,6 +121,33 @@ macro_rules! assert_field {
         match $field {
             $crate::txn_storage2::field::Field::String(Some(s)) => assert_eq!(s, $expected),
             _ => panic!("Expected String({}) but got {:?}", $expected, $field),
+        }
+    };
+    ($field:expr, Char8($expected:expr)) => {
+        match $field {
+            $crate::txn_storage2::field::Field::Char8(Some(bytes)) => {
+                let s = $crate::txn_storage2::field::fixed_bytes_to_string(&bytes);
+                assert_eq!(s, $expected)
+            }
+            _ => panic!("Expected Char8({}) but got {:?}", $expected, $field),
+        }
+    };
+    ($field:expr, Char16($expected:expr)) => {
+        match $field {
+            $crate::txn_storage2::field::Field::Char16(Some(bytes)) => {
+                let s = $crate::txn_storage2::field::fixed_bytes_to_string(&bytes);
+                assert_eq!(s, $expected)
+            }
+            _ => panic!("Expected Char16({}) but got {:?}", $expected, $field),
+        }
+    };
+    ($field:expr, Char24($expected:expr)) => {
+        match $field {
+            $crate::txn_storage2::field::Field::Char24(Some(bytes)) => {
+                let s = $crate::txn_storage2::field::fixed_bytes_to_string(&bytes);
+                assert_eq!(s, $expected)
+            }
+            _ => panic!("Expected Char24({}) but got {:?}", $expected, $field),
         }
     };
     ($field:expr, Float64($expected:expr)) => {
@@ -156,6 +227,9 @@ pub enum DataType {
     Uint64,
     Float32,
     Float64,
+    Char8,
+    Char16,
+    Char24,
     String,
     FixedBytes8,
     FixedBytes16,
@@ -182,16 +256,19 @@ impl DataType {
             DataType::Uint64 => 7,
             DataType::Float32 => 8,
             DataType::Float64 => 9,
-            DataType::String => 10,
-            DataType::FixedBytes8 => 11,
-            DataType::FixedBytes16 => 12,
-            DataType::FixedBytes24 => 13,
-            DataType::VarBytes => 14,
-            DataType::Bool => 15,
-            DataType::DateTime => 16,
-            DataType::Months => 17,
-            DataType::Days => 18,
-            DataType::Pointer => 19,
+            DataType::Char8 => 10,
+            DataType::Char16 => 11,
+            DataType::Char24 => 12,
+            DataType::String => 13,
+            DataType::FixedBytes8 => 14,
+            DataType::FixedBytes16 => 15,
+            DataType::FixedBytes24 => 16,
+            DataType::VarBytes => 17,
+            DataType::Bool => 18,
+            DataType::DateTime => 19,
+            DataType::Months => 20,
+            DataType::Days => 21,
+            DataType::Pointer => 22,
         }
     }
 
@@ -213,16 +290,19 @@ impl DataType {
             7 => Some(DataType::Uint64),
             8 => Some(DataType::Float32),
             9 => Some(DataType::Float64),
-            10 => Some(DataType::String),
-            11 => Some(DataType::FixedBytes8),
-            12 => Some(DataType::FixedBytes16),
-            13 => Some(DataType::FixedBytes24),
-            14 => Some(DataType::VarBytes),
-            15 => Some(DataType::Bool),
-            16 => Some(DataType::DateTime),
-            17 => Some(DataType::Months),
-            18 => Some(DataType::Days),
-            19 => Some(DataType::Pointer),
+            10 => Some(DataType::Char8),
+            11 => Some(DataType::Char16),
+            12 => Some(DataType::Char24),
+            13 => Some(DataType::String),
+            14 => Some(DataType::FixedBytes8),
+            15 => Some(DataType::FixedBytes16),
+            16 => Some(DataType::FixedBytes24),
+            17 => Some(DataType::VarBytes),
+            18 => Some(DataType::Bool),
+            19 => Some(DataType::DateTime),
+            20 => Some(DataType::Months),
+            21 => Some(DataType::Days),
+            22 => Some(DataType::Pointer),
             _ => None,
         }
     }
@@ -272,6 +352,9 @@ pub enum Field {
     Uint64(Option<u64>),
     Float32(Option<f32>),
     Float64(Option<f64>),
+    Char8(Option<[u8; 8]>),
+    Char16(Option<[u8; 16]>),
+    Char24(Option<[u8; 24]>),
     String(Option<String>),
     FixedBytes8(Option<[u8; 8]>),
     FixedBytes16(Option<[u8; 16]>),
@@ -298,6 +381,9 @@ impl Field {
             Field::Uint64(v) => v.is_none(),
             Field::Float32(v) => v.is_none(),
             Field::Float64(v) => v.is_none(),
+            Field::Char8(v) => v.is_none(),
+            Field::Char16(v) => v.is_none(),
+            Field::Char24(v) => v.is_none(),
             Field::String(v) => v.is_none(),
             Field::FixedBytes8(v) => v.is_none(),
             Field::FixedBytes16(v) => v.is_none(),
@@ -345,6 +431,9 @@ impl Field {
             Field::Uint64(_) => size += 8,
             Field::Float32(_) => size += 4,
             Field::Float64(_) => size += 8,
+            Field::Char8(_) => size += 8,   // Fixed 8 bytes
+            Field::Char16(_) => size += 16, // Fixed 16 bytes
+            Field::Char24(_) => size += 24, // Fixed 24 bytes
             Field::String(Some(s)) => size += 4 + s.len(), // Length + string bytes
             Field::FixedBytes8(_) => size += 8,
             Field::FixedBytes16(_) => size += 16,
@@ -383,6 +472,9 @@ impl Field {
             Field::Uint64(Some(v)) => Self::serialize_bytes(&mut bytes, &v.to_le_bytes()),
             Field::Float32(Some(v)) => Self::serialize_bytes(&mut bytes, &v.to_le_bytes()),
             Field::Float64(Some(v)) => Self::serialize_bytes(&mut bytes, &v.to_le_bytes()),
+            Field::Char8(Some(arr)) => Self::serialize_bytes(&mut bytes, arr),
+            Field::Char16(Some(arr)) => Self::serialize_bytes(&mut bytes, arr),
+            Field::Char24(Some(arr)) => Self::serialize_bytes(&mut bytes, arr),
             Field::String(Some(s)) => Self::serialize_var_length(&mut bytes, s.as_bytes()),
             Field::FixedBytes8(Some(arr)) => Self::serialize_bytes(&mut bytes, arr),
             Field::FixedBytes16(Some(arr)) => Self::serialize_bytes(&mut bytes, arr),
@@ -415,6 +507,9 @@ impl Field {
                     DataType::Uint64 => Field::Uint64(None),
                     DataType::Float32 => Field::Float32(None),
                     DataType::Float64 => Field::Float64(None),
+                    DataType::Char8 => Field::Char8(None),
+                    DataType::Char16 => Field::Char16(None),
+                    DataType::Char24 => Field::Char24(None),
                     DataType::String => Field::String(None),
                     DataType::FixedBytes8 => Field::FixedBytes8(None),
                     DataType::FixedBytes16 => Field::FixedBytes16(None),
@@ -523,6 +618,9 @@ impl Field {
                 ]);
                 Field::Float64(Some(value))
             }
+            DataType::Char8 => Field::Char8(Some(bytes[offset..offset + 8].try_into().unwrap())),
+            DataType::Char16 => Field::Char16(Some(bytes[offset..offset + 16].try_into().unwrap())),
+            DataType::Char24 => Field::Char24(Some(bytes[offset..offset + 24].try_into().unwrap())),
 
             DataType::String => {
                 let len = u32::from_le_bytes([
@@ -655,6 +753,9 @@ fn calculate_normalized_key_capacity(
         capacity += 1; // null indicator byte
 
         match &fields[field_idx] {
+            Field::Char8(_) => capacity += 8,   // Fixed 8 bytes
+            Field::Char16(_) => capacity += 16, // Fixed 16 bytes
+            Field::Char24(_) => capacity += 24, // Fixed 24 bytes
             Field::String(Some(s)) => {
                 capacity += s.len() + 1; // string bytes + terminator
                 var_field_count += 1;
@@ -775,6 +876,15 @@ pub fn to_normalized_key(fields: &[Field], key_indexes: &[(usize, bool, bool)]) 
                     null_first,
                 );
             }
+            Field::Char8(Some(val)) => {
+                append_bytes_key(&mut key, val, asc, null_first);
+            }
+            Field::Char16(Some(val)) => {
+                append_bytes_key(&mut key, val, asc, null_first);
+            }
+            Field::Char24(Some(val)) => {
+                append_bytes_key(&mut key, val, asc, null_first);
+            }
             Field::FixedBytes8(Some(val)) => {
                 append_bytes_key(&mut key, val, asc, null_first);
             }
@@ -865,6 +975,9 @@ fn create_null_field(data_type: &DataType) -> Field {
         DataType::Uint64 => Field::Uint64(None),
         DataType::Float32 => Field::Float32(None),
         DataType::Float64 => Field::Float64(None),
+        DataType::Char8 => Field::Char8(None),
+        DataType::Char16 => Field::Char16(None),
+        DataType::Char24 => Field::Char24(None),
         DataType::String => Field::String(None),
         DataType::FixedBytes8 => Field::FixedBytes8(None),
         DataType::FixedBytes16 => Field::FixedBytes16(None),
@@ -966,6 +1079,54 @@ pub fn from_normalized_key(
                 pos += *length as usize;
                 pos += 1; // Skip the string terminator
                 Field::String(Some(string))
+            }
+            DataType::Char8 => {
+                if pos + 8 > data_end {
+                    return Err("Char8 field extends beyond data boundary".to_string());
+                }
+
+                let mut arr = [0u8; 8];
+                if asc {
+                    arr.copy_from_slice(&normalized_key[pos..pos + 8]);
+                } else {
+                    for i in 0..8 {
+                        arr[i] = decode_byte(normalized_key[pos + i], asc);
+                    }
+                }
+                pos += 8;
+                Field::Char8(Some(arr))
+            }
+            DataType::Char16 => {
+                if pos + 16 > data_end {
+                    return Err("Char16 field extends beyond data boundary".to_string());
+                }
+
+                let mut arr = [0u8; 16];
+                if asc {
+                    arr.copy_from_slice(&normalized_key[pos..pos + 16]);
+                } else {
+                    for i in 0..16 {
+                        arr[i] = decode_byte(normalized_key[pos + i], asc);
+                    }
+                }
+                pos += 16;
+                Field::Char16(Some(arr))
+            }
+            DataType::Char24 => {
+                if pos + 24 > data_end {
+                    return Err("Char24 field extends beyond data boundary".to_string());
+                }
+
+                let mut arr = [0u8; 24];
+                if asc {
+                    arr.copy_from_slice(&normalized_key[pos..pos + 24]);
+                } else {
+                    for i in 0..24 {
+                        arr[i] = decode_byte(normalized_key[pos + i], asc);
+                    }
+                }
+                pos += 24;
+                Field::Char24(Some(arr))
             }
             DataType::VarBytes => {
                 let length = var_field_map
@@ -1245,6 +1406,12 @@ impl std::fmt::Display for Field {
             Field::Float32(None) => write!(f, "NULL"),
             Field::Float64(Some(v)) => write!(f, "{:.2}", v),
             Field::Float64(None) => write!(f, "NULL"),
+            Field::Char8(Some(bytes)) => write!(f, "'{}'", fixed_bytes_to_string(bytes)),
+            Field::Char8(None) => write!(f, "NULL"),
+            Field::Char16(Some(bytes)) => write!(f, "'{}'", fixed_bytes_to_string(bytes)),
+            Field::Char16(None) => write!(f, "NULL"),
+            Field::Char24(Some(bytes)) => write!(f, "'{}'", fixed_bytes_to_string(bytes)),
+            Field::Char24(None) => write!(f, "NULL"),
             Field::String(Some(v)) => write!(f, "'{}'", v),
             Field::String(None) => write!(f, "NULL"),
             Field::FixedBytes8(Some(v)) => write!(
@@ -1393,6 +1560,9 @@ mod tests {
             DataType::Uint64,
             DataType::Float32,
             DataType::Float64,
+            DataType::Char8,
+            DataType::Char16,
+            DataType::Char24,
             DataType::String,
             DataType::FixedBytes8,
             DataType::FixedBytes16,
@@ -1480,6 +1650,21 @@ mod tests {
             ),
             (Field::String(None), DataType::String),
             (
+                Field::Char8(Some(string_to_fixed_bytes::<8>("Hello"))),
+                DataType::Char8,
+            ),
+            (Field::Char8(None), DataType::Char8),
+            (
+                Field::Char16(Some(string_to_fixed_bytes::<16>("Hello, World!"))),
+                DataType::Char16,
+            ),
+            (Field::Char16(None), DataType::Char16),
+            (
+                Field::Char24(Some(string_to_fixed_bytes::<24>("The quick brown fox"))),
+                DataType::Char24,
+            ),
+            (Field::Char24(None), DataType::Char24),
+            (
                 Field::FixedBytes8(Some([1, 2, 3, 4, 5, 6, 7, 8])),
                 DataType::FixedBytes8,
             ),
@@ -1539,6 +1724,9 @@ mod tests {
                 (Field::Float32(a), Field::Float32(b)) => assert_eq!(a, b),
                 (Field::Float64(a), Field::Float64(b)) => assert_eq!(a, b),
                 (Field::String(a), Field::String(b)) => assert_eq!(a, b),
+                (Field::Char8(a), Field::Char8(b)) => assert_eq!(a, b),
+                (Field::Char16(a), Field::Char16(b)) => assert_eq!(a, b),
+                (Field::Char24(a), Field::Char24(b)) => assert_eq!(a, b),
                 (Field::FixedBytes8(a), Field::FixedBytes8(b)) => assert_eq!(a, b),
                 (Field::FixedBytes16(a), Field::FixedBytes16(b)) => assert_eq!(a, b),
                 (Field::FixedBytes24(a), Field::FixedBytes24(b)) => assert_eq!(a, b),
@@ -1572,6 +1760,18 @@ mod tests {
             (
                 Field::String(Some("Hello, World!".to_string())),
                 DataType::String,
+            ),
+            (
+                Field::Char8(Some(string_to_fixed_bytes::<8>("Hello"))),
+                DataType::Char8,
+            ),
+            (
+                Field::Char16(Some(string_to_fixed_bytes::<16>("Hello, World!"))),
+                DataType::Char16,
+            ),
+            (
+                Field::Char24(Some(string_to_fixed_bytes::<24>("The quick brown fox"))),
+                DataType::Char24,
             ),
             (
                 Field::FixedBytes8(Some([1, 2, 3, 4, 5, 6, 7, 8])),
@@ -1624,6 +1824,9 @@ mod tests {
                 (Field::Float32(a), Field::Float32(b)) => assert_eq!(a, b),
                 (Field::Float64(a), Field::Float64(b)) => assert_eq!(a, b),
                 (Field::String(a), Field::String(b)) => assert_eq!(a, b),
+                (Field::Char8(a), Field::Char8(b)) => assert_eq!(a, b),
+                (Field::Char16(a), Field::Char16(b)) => assert_eq!(a, b),
+                (Field::Char24(a), Field::Char24(b)) => assert_eq!(a, b),
                 (Field::FixedBytes8(a), Field::FixedBytes8(b)) => assert_eq!(a, b),
                 (Field::FixedBytes16(a), Field::FixedBytes16(b)) => assert_eq!(a, b),
                 (Field::FixedBytes24(a), Field::FixedBytes24(b)) => assert_eq!(a, b),
@@ -2446,5 +2649,159 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn test_char_field_creation_and_display() {
+        // Test char8
+        let char8_field = field!(Char8 "Hello");
+        assert_eq!(format!("{}", char8_field), "'Hello'");
+
+        // Test char16
+        let char16_field = field!(Char16 "Hello, World!");
+        assert_eq!(format!("{}", char16_field), "'Hello, World!'");
+
+        // Test char24
+        let char24_field = field!(Char24 "The quick brown fox");
+        assert_eq!(format!("{}", char24_field), "'The quick brown fox'");
+
+        // Test null values
+        let null_char8 = field!(Null Char8);
+        assert!(null_char8.is_null());
+        assert_eq!(format!("{}", null_char8), "NULL");
+    }
+
+    #[test]
+    fn test_char_field_truncation() {
+        // Test char8 truncation (more than 8 chars)
+        let char8_long = field!(Char8 "This is a very long string that should be truncated");
+        match char8_long {
+            Field::Char8(Some(bytes)) => {
+                let s = fixed_bytes_to_string(&bytes);
+                assert_eq!(s, "This is ");
+                assert_eq!(s.len(), 8);
+            }
+            _ => panic!("Expected Char8 field"),
+        }
+
+        // Test char16 truncation
+        let char16_long = field!(Char16 "This is a very long string that should be truncated");
+        match char16_long {
+            Field::Char16(Some(bytes)) => {
+                let s = fixed_bytes_to_string(&bytes);
+                assert_eq!(s, "This is a very l");
+                assert_eq!(s.len(), 16);
+            }
+            _ => panic!("Expected Char16 field"),
+        }
+
+        // Test char24 truncation
+        let char24_long =
+            field!(Char24 "This is a very long string that should be truncated at 24 characters");
+        match char24_long {
+            Field::Char24(Some(bytes)) => {
+                let s = fixed_bytes_to_string(&bytes);
+                assert_eq!(s, "This is a very long stri");
+                assert_eq!(s.len(), 24);
+            }
+            _ => panic!("Expected Char24 field"),
+        }
+    }
+
+    #[test]
+    fn test_char_field_special_characters() {
+        // Test with UTF-8 characters
+        let char8_utf8 = field!(Char8 "café");
+        assert_field!(&char8_utf8, Char8("café"));
+
+        let char16_utf8 = field!(Char16 "Hello 世界");
+        assert_field!(&char16_utf8, Char16("Hello 世界"));
+
+        // Test with empty string
+        let char8_empty = field!(Char8 "");
+        assert_field!(&char8_empty, Char8(""));
+
+        // Test with spaces
+        let char8_spaces = field!(Char8 "   test   ");
+        match char8_spaces {
+            Field::Char8(Some(bytes)) => {
+                let s = fixed_bytes_to_string(&bytes);
+                assert_eq!(s, "   test "); // Truncated to 8 chars
+            }
+            _ => panic!("Expected Char8 field"),
+        }
+    }
+
+    #[test]
+    fn test_char_field_normalized_keys() {
+        let fields = vec![
+            field!(Int32 1),
+            field!(Char8 "Hello"),
+            field!(Char16 "World!"),
+            field!(Char24 "Testing normalized keys"),
+            field!(String "variable string"),
+        ];
+
+        let key_indexes = vec![
+            (0, true, false), // Int32 ascending
+            (1, true, false), // Char8 ascending
+            (2, false, true), // Char16 descending, null first
+            (3, true, false), // Char24 ascending
+        ];
+
+        let normalized_key = to_normalized_key(&fields, &key_indexes);
+        assert!(!normalized_key.is_empty());
+
+        // Test recovery from normalized key
+        let field_types = vec![
+            DataType::Int32,
+            DataType::Char8,
+            DataType::Char16,
+            DataType::Char24,
+        ];
+
+        let recovered = from_normalized_key(&normalized_key, &key_indexes, &field_types).unwrap();
+
+        assert_eq!(recovered.len(), 4);
+        assert_field!(&recovered[0], Int32(1));
+        assert_field!(&recovered[1], Char8("Hello"));
+        assert_field!(&recovered[2], Char16("World!"));
+        assert_field!(&recovered[3], Char24("Testing normalized keys"));
+    }
+
+    #[test]
+    fn test_char_field_size_calculations() {
+        // Char fields should have fixed sizes regardless of content
+        let char8_short = field!(Char8 "Hi");
+        let char8_full = field!(Char8 "12345678");
+        assert_eq!(char8_short.size(false), 8);
+        assert_eq!(char8_full.size(false), 8);
+        assert_eq!(char8_short.size(true), 9); // +1 for null indicator
+
+        let char16_empty = field!(Char16 "");
+        let char16_full = field!(Char16 "1234567890123456");
+        assert_eq!(char16_empty.size(false), 16);
+        assert_eq!(char16_full.size(false), 16);
+
+        let char24_field = field!(Char24 "Test");
+        assert_eq!(char24_field.size(false), 24);
+        assert_eq!(char24_field.size(true), 25);
+    }
+
+    #[test]
+    fn test_char_field_comparison_with_fixedbytes() {
+        // Char8 and FixedBytes8 should have same binary representation
+        let text = "Hello";
+        let char8 = field!(Char8 text);
+        let mut bytes8 = [0u8; 8];
+        bytes8[..5].copy_from_slice(text.as_bytes());
+        let fixed8 = field!(FixedBytes8 bytes8);
+
+        // Binary representation should be the same
+        assert_eq!(char8.to_bytes(false), fixed8.to_bytes(false));
+
+        // But display should be different
+        assert_eq!(format!("{}", char8), "'Hello'");
+        assert!(format!("{}", fixed8).starts_with("0x"));
     }
 }

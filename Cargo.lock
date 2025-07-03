@@ -725,6 +725,7 @@ dependencies = [
  "serde",
  "serde_cbor",
  "tempfile",
+ "tpchgen",
  "wasm-bindgen",
 ]
 
@@ -1871,6 +1872,12 @@ dependencies = [
  "toml_datetime",
  "winnow",
 ]
+
+[[package]]
+name = "tpchgen"
+version = "1.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a4fdf684719132c392148d85c8a0766dba6a9d70a5948a6ccd7a20b227773ab6"
 
 [[package]]
 name = "unicode-ident"

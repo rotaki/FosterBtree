@@ -61,6 +61,7 @@ criterion = { version = "0.5", features = ["html_reports"]}
 hdrhistogram = "7.5.4"
 # mimalloc = "0.1.46"
 duckdb = { version = "1.2.2", features = ["bundled"], optional = true }
+tpchgen = {version = "1.1.1"}
 
 [dev-dependencies]
 serde_cbor = "0.11"

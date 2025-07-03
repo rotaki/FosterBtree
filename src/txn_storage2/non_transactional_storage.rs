@@ -38,7 +38,6 @@ unsafe impl<M: MemPool> Send for NonTxnIterator<M> {}
 unsafe impl<M: MemPool> Sync for NonTxnIterator<M> {}
 
 /// Non-transactional field-level storage implementation using Foster B-trees
-/// This implementation assumes single-threaded access and uses unsafe for performance
 pub struct NonTransactionalStorage<M: MemPool> {
     mem_pool: Arc<M>,
     containers: UnsafeCell<HashMap<ContainerId, ContainerInfo<M>>>,
@@ -50,18 +49,10 @@ pub struct NonTransactionalStorage<M: MemPool> {
 unsafe impl<M: MemPool> Sync for NonTransactionalStorage<M> {}
 unsafe impl<M: MemPool> Send for NonTransactionalStorage<M> {}
 
-// ============================================================================
-// Internal Types
-// ============================================================================
-
 struct ContainerInfo<M: MemPool> {
     options: ContainerOptions,
     btree: Arc<FosterBtree<M>>,
 }
-
-// ============================================================================
-// Core Implementation
-// ============================================================================
 
 impl<M: MemPool> NonTransactionalStorage<M> {
     /// Create a new non-transactional storage instance
@@ -73,10 +64,6 @@ impl<M: MemPool> NonTransactionalStorage<M> {
         }
     }
 }
-
-// ============================================================================
-// Database and Container Management
-// ============================================================================
 
 impl<M: MemPool> FieldLeveLStorageTrait for NonTransactionalStorage<M> {
     type TxnHandle = NonTxnHandle;

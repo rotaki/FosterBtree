@@ -6,6 +6,7 @@ pub mod container;
 pub mod event_tracer;
 pub mod print_cfg_flags;
 pub mod random;
+pub mod sort;
 pub mod time;
 pub mod tpcc;
 pub mod tpcc2;
