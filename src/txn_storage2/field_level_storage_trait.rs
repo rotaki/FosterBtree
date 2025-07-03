@@ -361,7 +361,7 @@ pub trait FieldLeveLStorageTrait: Send + Sync {
         &self,
         txn: &Self::TxnHandle,
         iter: &Self::IteratorHandle,
-    ) -> Result<Option<(Vec<Field>, Vec<Field>, RecordPointer)>, TxnStorageStatus>;
+    ) -> Result<Option<(Vec<Field>, RecordPointer)>, TxnStorageStatus>;
 
     // Drop an iterator handle.
     fn drop_iterator_handle(&self, iter: Self::IteratorHandle) -> Result<(), TxnStorageStatus>;

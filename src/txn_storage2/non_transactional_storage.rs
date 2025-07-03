@@ -575,7 +575,7 @@ impl<M: MemPool> FieldLeveLStorageTrait for NonTransactionalStorage<M> {
         &self,
         _txn: &Self::TxnHandle,
         iter: &Self::IteratorHandle,
-    ) -> Result<Option<(Vec<Field>, Vec<Field>, RecordPointer)>, TxnStorageStatus> {
+    ) -> Result<Option<(Vec<Field>, RecordPointer)>, TxnStorageStatus> {
         // SAFETY: We assume single-threaded access as per the requirements
         let container = unsafe {
             (*self.containers.get())
@@ -590,16 +590,7 @@ impl<M: MemPool> FieldLeveLStorageTrait for NonTransactionalStorage<M> {
             if let Some((_, value_bytes)) = scanner.next() {
                 let record = bytes_to_record(&value_bytes, container.options.schema());
 
-                // Extract primary key fields from the full record
-                let key_fields: Vec<Field> = container
-                    .options
-                    .schema()
-                    .key_indices()
-                    .iter()
-                    .map(|&idx| record[idx].clone())
-                    .collect();
-
-                let val_fields: Vec<Field> = iter
+                let fields: Vec<Field> = iter
                     .options
                     .cols
                     .iter()
@@ -608,7 +599,7 @@ impl<M: MemPool> FieldLeveLStorageTrait for NonTransactionalStorage<M> {
 
                 // TODO: Get actual page_id and frame_id from btree
                 let ptr = RecordPointer::new(0, 0);
-                Ok(Some((key_fields, val_fields, ptr)))
+                Ok(Some((fields, ptr)))
             } else {
                 Ok(None)
             }
@@ -1095,24 +1086,18 @@ mod tests {
             .unwrap();
 
         let mut count = 0;
-        let mut collected_keys = Vec::new();
         let mut collected_values = Vec::new();
 
-        while let Ok(Some((key_fields, value_fields, _ptr))) = storage.iter_next(&txn, &iter) {
+        while let Ok(Some((fields, ptr))) = storage.iter_next(&txn, &iter) {
+            collected_values.push(fields);
             count += 1;
-            collected_keys.push(key_fields);
-            collected_values.push(value_fields);
         }
 
         assert_eq!(count, 10);
-        assert_eq!(collected_keys.len(), 10);
         assert_eq!(collected_values.len(), 10);
 
         // Verify some collected data
         for i in 0..count {
-            // Keys should contain the primary key field
-            assert_eq!(collected_keys[i].len(), 1);
-
             // Values should contain all fields
             assert_eq!(collected_values[i].len(), 2);
         }

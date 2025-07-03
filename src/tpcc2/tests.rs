@@ -183,19 +183,16 @@ fn test_customer_loading_and_secondary_index() {
         .scan_range(
             &txn,
             containers.customer_secondary_cid,
-            ScanOptions::new(&[]).with_bounds(scan_start, scan_end),
+            ScanOptions::new(&[customer_secondary_fields::C_ID]).with_bounds(scan_start, scan_end),
         )
         .unwrap();
 
     let mut found = false;
-    while let Ok(Some((key_fields, _, _))) = storage.iter_next(&txn, &iter) {
-        if key_fields.len() >= 4 {
-            if let Field::Uint32(Some(c_id)) = &key_fields[3] {
-                assert_eq!(*c_id, 1); // First customer should have this last name
-                found = true;
-                break;
-            }
-        }
+    while let Ok(Some((fields, _))) = storage.iter_next(&txn, &iter) {
+        let c_id = get_u32_field(&fields, 0);
+        assert_eq!(c_id, 1); // Should match first customer
+        found = true;
+        break;
     }
     assert!(
         found,

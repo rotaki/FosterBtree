@@ -59,6 +59,13 @@ pub fn get_i16_field(fields: &[Field], index: usize) -> i16 {
     }
 }
 
+pub fn get_i32_field(fields: &[Field], index: usize) -> i32 {
+    match &fields[index] {
+        Field::Int32(Some(v)) => *v,
+        other => panic!("Expected Int32 field at index {}, found {:?}", index, other),
+    }
+}
+
 pub fn get_f64_field(fields: &[Field], index: usize) -> f64 {
     match &fields[index] {
         Field::Float64(Some(v)) => *v,

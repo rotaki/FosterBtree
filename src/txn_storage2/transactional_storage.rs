@@ -1116,7 +1116,7 @@ impl<M: MemPool> FieldLeveLStorageTrait for TransactionalStorage<M> {
         &self,
         txn: &Self::TxnHandle,
         iter: &Self::IteratorHandle,
-    ) -> Result<Option<(Vec<Field>, Vec<Field>, RecordPointer)>, TxnStorageStatus> {
+    ) -> Result<Option<(Vec<Field>, RecordPointer)>, TxnStorageStatus> {
         if iter.is_finished() {
             return Ok(None); // Iterator already finished
         }
@@ -1164,20 +1164,13 @@ impl<M: MemPool> FieldLeveLStorageTrait for TransactionalStorage<M> {
                     record
                 };
 
-                let key = container
-                    .options
-                    .schema()
-                    .key_indices()
-                    .iter()
-                    .map(|&i| record[i].clone())
-                    .collect();
                 let fields = iter
                     .options
                     .cols
                     .iter()
                     .map(|&i| record[i].clone())
                     .collect();
-                return Ok(Some((key, fields, ptr)));
+                return Ok(Some((fields, ptr)));
             } else {
                 // Last entry reached. Lock the &[] key to ensure no new entries are added
                 if rwset.get(&[]).is_none() {
@@ -1208,6 +1201,7 @@ mod tests {
     use super::*;
     use crate::bp::get_test_bp;
 
+    use crate::tpcc2::txn_utils::{get_i16_field, get_i32_field};
     use crate::txn_storage2::DataType;
     use crate::{assert_field, field, record, schema};
 
@@ -1694,16 +1688,15 @@ mod tests {
         // Start transaction and verify scan sees all records
         let txn2 = storage.begin_txn(db_id, TxnOptions::default()).unwrap();
         let iter = storage
-            .scan_range(&txn2, container_id, ScanOptions::new(&[]))
+            .scan_range(&txn2, container_id, ScanOptions::new(&[0]))
             .unwrap();
         let mut count = 0;
         let mut keys = Vec::new();
 
-        while let Ok(Some((key, _fields, _))) = storage.iter_next(&txn2, &iter) {
-            assert_eq!(key.len(), 1);
-            if let Field::Int32(Some(k)) = &key[0] {
-                keys.push(*k);
-            }
+        while let Ok(Some((fields, _))) = storage.iter_next(&txn2, &iter) {
+            assert_eq!(fields.len(), 1);
+            let k = get_i32_field(&fields, 0);
+            keys.push(k);
             count += 1;
         }
 

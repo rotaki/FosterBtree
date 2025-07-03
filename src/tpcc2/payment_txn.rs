@@ -180,8 +180,11 @@ pub fn run_payment_txn_with_stats<M: MemPool>(
         let res = storage.scan_range(
             &txn,
             containers.customer_secondary_cid,
-            ScanOptions::new(&[customer_secondary_fields::C_POINTER])
-                .with_bounds(scan_key_start, scan_key_end),
+            ScanOptions::new(&[
+                customer_secondary_fields::C_ID,
+                customer_secondary_fields::C_POINTER,
+            ])
+            .with_bounds(scan_key_start, scan_key_end),
         );
         if not_successful(&res) {
             return (
@@ -193,14 +196,10 @@ pub fn run_payment_txn_with_stats<M: MemPool>(
 
         loop {
             match storage.iter_next(&txn, &iter) {
-                Ok(Some((key_fields, value_fields, c_secondary_hint))) => {
-                    let c_id = get_u32_field(&key_fields, 3);
-                    matching_customers.push((
-                        c_id,
-                        key_fields,
-                        get_pointer_field(&value_fields, 0),
-                        c_secondary_hint,
-                    ));
+                Ok(Some((fields, c_secondary_hint))) => {
+                    let c_id = get_u32_field(&fields, 0);
+                    let ptr = get_pointer_field(&fields, 1);
+                    matching_customers.push((c_id, ptr, c_secondary_hint));
                 }
                 Ok(None) => break,
                 Err(e) => {
@@ -236,12 +235,19 @@ pub fn run_payment_txn_with_stats<M: MemPool>(
             Field::Uint8(Some(input.c_d_id)),
             Field::Uint32(Some(selected_c.0)),
         ];
+
+        let c_secondary_key = vec![
+            Field::Uint16(Some(input.c_w_id)),
+            Field::Uint8(Some(input.c_d_id)),
+            Field::String(Some(c_last.clone())),
+            Field::Uint32(Some(selected_c.0)),
+        ];
         (
             selected_c.0,
             key,
+            Some(c_secondary_key),
             Some(selected_c.1),
             Some(selected_c.2),
-            Some(selected_c.3),
         )
     } else {
         return (

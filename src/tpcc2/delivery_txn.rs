@@ -80,7 +80,7 @@ pub fn run_delivery_txn_with_stats<M: MemPool>(
         let res = storage.scan_range(
             &txn,
             containers.new_order_cid,
-            ScanOptions::new(&[]).with_bounds(scan_start, scan_end),
+            ScanOptions::new(&[new_order_fields::NO_O_ID]).with_bounds(scan_start, scan_end),
         );
         if not_successful(&res) {
             return (helper.kill(&txn, &res, AbortID::DeliveryScanNewOrder), None);
@@ -89,8 +89,8 @@ pub fn run_delivery_txn_with_stats<M: MemPool>(
 
         let mut oldest_no_o_id = None;
         match storage.iter_next(&txn, &iter) {
-            Ok(Some((key_fields, _, _))) => {
-                let o_id = get_u32_field(&key_fields, 2);
+            Ok(Some((fields, _))) => {
+                let o_id = get_u32_field(&fields, 0);
                 oldest_no_o_id = Some(o_id);
             }
             Ok(None) => {
@@ -181,7 +181,7 @@ pub fn run_delivery_txn_with_stats<M: MemPool>(
         let res = storage.scan_range(
             &txn,
             containers.order_line_cid,
-            ScanOptions::new(&[order_line_fields::OL_AMOUNT])
+            ScanOptions::new(&[order_line_fields::OL_NUMBER, order_line_fields::OL_AMOUNT])
                 .with_bounds(ol_scan_start, ol_scan_end),
         );
         if not_successful(&res) {
@@ -193,8 +193,15 @@ pub fn run_delivery_txn_with_stats<M: MemPool>(
         let mut order_line_updates = Vec::new();
         loop {
             match storage.iter_next(&txn, &iter) {
-                Ok(Some((key_fields, value_fields, hint))) => {
-                    let ol_amount = get_f64_field(&value_fields, 0);
+                Ok(Some((fields, hint))) => {
+                    let ol_number = get_u8_field(&fields, 0);
+                    let ol_amount = get_f64_field(&fields, 1);
+                    let key_fields = vec![
+                        Field::Uint16(Some(input.w_id)),
+                        Field::Uint8(Some(d_id)),
+                        Field::Uint32(Some(o_id)),
+                        Field::Uint8(Some(ol_number)),
+                    ];
                     total_amount += ol_amount;
                     order_line_updates.push((key_fields, hint));
                 }

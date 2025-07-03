@@ -88,14 +88,6 @@ trait SortedPage {
     fn get_slot(&self, slot_id: u16) -> Option<Slot>;
 }
 
-// Extension trait for FrameWriteGuard to provide page operations
-trait PageExt {
-    fn append(&mut self, key: &[u8], val: &[u8]) -> bool;
-    fn slot_count(&self) -> u16;
-    fn get_key(&self, slot_id: u16) -> &[u8];
-    fn get_val(&self, slot_id: u16) -> &[u8];
-    fn get_id(&self) -> PageFrameKey;
-}
 
 impl<T: crate::bp::EvictionPolicy> PageExt for FrameWriteGuard<T> {
     fn append(&mut self, key: &[u8], val: &[u8]) -> bool {
