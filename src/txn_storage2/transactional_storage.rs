@@ -1201,7 +1201,7 @@ mod tests {
     use super::*;
     use crate::bp::get_test_bp;
 
-    use crate::tpcc2::txn_utils::{get_i16_field, get_i32_field};
+    use crate::tpcc2::txn_utils::{get_i32_field};
     use crate::txn_storage2::DataType;
     use crate::{assert_field, field, record, schema};
 

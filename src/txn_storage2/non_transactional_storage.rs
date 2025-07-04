@@ -2,7 +2,7 @@ use std::{cell::UnsafeCell, collections::HashMap, sync::Arc};
 
 use crate::{
     access_method::{
-        fbt::{BTreeKey, FosterBtree, FosterBtreeRangeScanner},
+        fbt::{BTreeKey, FosterBtree, FosterBtreeRangeScanner, FosterBtreePage},
         prelude::*,
     },
     bp::{ContainerId, ContainerKey, DatabaseId, MemPool, PageFrameKey},
@@ -62,6 +62,36 @@ impl<M: MemPool> NonTransactionalStorage<M> {
             containers: UnsafeCell::new(HashMap::new()),
             next_container_id: UnsafeCell::new(1),
         }
+    }
+
+    /// Sample key boundaries for partitioning a BTree using root page keys
+    /// Returns (num_partitions - 1) boundary keys that divide the key space
+    fn root_keys(
+        &self,
+        btree: &Arc<FosterBtree<M>>,
+    ) -> Result<Vec<Vec<u8>>, TxnStorageStatus> {
+        // Access the root page to get separator keys
+        let root_page = btree.mem_pool.get_page_for_read(btree.root_key)
+            .map_err(|_| TxnStorageStatus::ContainerNotFound)?;
+        
+        // Extract keys from the root page using FosterBtreePage trait
+        // &[] is low fence
+        // &[] is high fence
+        // Might have foster child, but we don't care about it here
+        let num_slots = root_page.active_slot_count();
+        if num_slots == 0 {
+            return Ok(vec![]); // No keys to sample
+        }
+
+        let mut root_keys = Vec::with_capacity(num_slots as usize);
+
+        // Skip slot 0 (low fence) and collect actual separator keys
+        for slot_id in 1..=num_slots {
+            let key = FosterBtreePage::get_raw_key(&*root_page, slot_id);
+            root_keys.push(key.to_vec());
+        }
+        
+        Ok(root_keys)
     }
 }
 
@@ -571,6 +601,88 @@ impl<M: MemPool> FieldLeveLStorageTrait for NonTransactionalStorage<M> {
         })
     }
 
+    fn create_partitioned_scan(
+        &self,
+        txn: &Self::TxnHandle,
+        c_id: ContainerId,
+        num_partitions: usize,
+        columns: Vec<usize>,
+    ) -> Result<Vec<Self::IteratorHandle>, TxnStorageStatus> {
+        if num_partitions <= 1 {
+            // Single partition case - use default implementation
+            let options = ScanOptions {
+                lower_inc: vec![],
+                upper_exc: vec![],
+                cols: columns,
+            };
+            let iterator = self.scan_range(txn, c_id, options)?;
+            return Ok(vec![iterator]);
+        }
+
+        // SAFETY: We assume single-threaded access as per the requirements
+        let container = unsafe {
+            (*self.containers.get())
+                .get(&c_id)
+                .ok_or(TxnStorageStatus::ContainerNotFound)?
+        };
+
+        // For BTree, we'll create partitions based on key ranges
+        // First, we need to sample the key space to determine partition boundaries
+        let root_keys = self.root_keys(&container.btree)?;
+        // root_keys[0], root_keys[1], ..., root_keys[N]
+        //      <-----------> <-------  <---------->
+        //            P0           P1        P_{N-1}
+        // N+1 root keys can create N partitions
+
+        // Create iterator for each partition
+        let mut iterators = Vec::new();
+
+        if root_keys.len() <= num_partitions {
+            println!("Warning: Not enough root keys to create partitions, using single iterator for the whole range.");
+            // root_keys.len() needs to be >= partiion + 1
+            // Temporary solution: just return one iterator for the whole range
+            let options = ScanOptions {
+                lower_inc: vec![], // Start from the lowest key
+                upper_exc: vec![], // End at the highest key
+                cols: columns.clone(),
+            };
+            let iterator = self.scan_range(txn, c_id, options)?;
+            iterators.push(iterator);
+            return Ok(iterators);
+        }
+
+        let step = root_keys.len() as f64 / num_partitions as f64;
+        for i in 1..=num_partitions {
+            let lower_bound = if i == 1 {
+                vec![] // Start from the lowest key
+            } else {
+                let prev_index = ((i - 1) as f64 * step).round() as usize;
+                root_keys[prev_index].clone()
+            };
+
+            let upper_bound = if i == num_partitions {
+                vec![] // End at the highest key
+            } else {
+                let current_index = (i as f64 * step).round() as usize;
+                root_keys[current_index].clone()
+            };
+
+            println!("Creating partition {}: lower_bound = {:?}, upper_bound = {:?}", 
+                     i, lower_bound, upper_bound);
+            
+            let options = ScanOptions {
+                lower_inc: lower_bound,
+                upper_exc: upper_bound,
+                cols: columns.clone(),
+            };
+            
+            let iterator = self.scan_range(txn, c_id, options)?;
+            iterators.push(iterator);
+        }
+        
+        Ok(iterators)
+    }
+
     fn iter_next(
         &self,
         _txn: &Self::TxnHandle,
@@ -610,6 +722,7 @@ impl<M: MemPool> FieldLeveLStorageTrait for NonTransactionalStorage<M> {
         // Iterator will be dropped automatically
         Ok(())
     }
+
 }
 
 // ============================================================================
@@ -620,6 +733,7 @@ impl<M: MemPool> FieldLeveLStorageTrait for NonTransactionalStorage<M> {
 mod tests {
     use super::*;
     use crate::bp::get_test_bp;
+    use crate::tpcc2::txn_utils::get_i32_field;
     use crate::txn_storage2::DataType;
     use crate::{assert_field, field, record, schema};
 
@@ -1450,5 +1564,182 @@ mod tests {
             }
             _ => panic!("Failed to read final value"),
         }
+    }
+
+    #[test]
+    fn test_partitioned_scan() {
+        let mem_pool = get_test_bp(10);
+        let storage = NonTransactionalStorage::new(mem_pool);
+        let db_id = storage.open_db(DBOptions::new("test_db")).unwrap();
+        
+        // Create container with BTree
+        let schema = schema!(pk: [0], cols: [
+            (false, DataType::Int32),   // id (primary key)
+            (false, DataType::String),  // name
+            (false, DataType::Int32)    // age
+        ]);
+        let container_id = storage
+            .create_container(
+                db_id,
+                ContainerOptions::new("test_table", ContainerDS::BTree, schema),
+            )
+            .unwrap();
+        
+        let txn = storage.begin_txn(db_id, TxnOptions::default()).unwrap();
+        
+        // Insert multiple records to test partitioning
+        for i in 0..20 {
+            let record = record![
+                field!(Int32 i),
+                field!(String format!("User_{}", i)),
+                field!(Int32 20 + i)
+            ];
+            storage
+                .insert_record(&txn, container_id, record, None)
+                .unwrap();
+        }
+        
+        // Test single partition (should work like regular scan)
+        let single_iterators = storage
+            .create_partitioned_scan(&txn, container_id, 1, vec![0, 1, 2])
+            .unwrap();
+        assert_eq!(single_iterators.len(), 1);
+        
+        // Test multiple partitions
+        let num_partitions = 4;
+        let iterators = storage
+            .create_partitioned_scan(&txn, container_id, num_partitions, vec![0, 1, 2])
+            .unwrap();
+        assert_eq!(iterators.len(), num_partitions);
+        
+        // Collect all records from all partitions
+        let mut all_records = Vec::new();
+        for iterator in iterators {
+            while let Ok(Some((fields, _ptr))) = storage.iter_next(&txn, &iterator) {
+                // Verify we got the expected number of fields
+                assert_eq!(fields.len(), 3);
+                all_records.push(fields);
+            }
+            storage.drop_iterator_handle(iterator).unwrap();
+        }
+        
+        // Verify we got all records (no duplicates, no missing records)
+        assert_eq!(all_records.len(), 20);
+        
+        // Verify record completeness by checking IDs
+        let ids: Vec<i32> = all_records
+            .iter()
+            .map(|fields| {
+                get_i32_field(&fields, 0)
+            })
+            .collect();
+        
+        let expected_ids: Vec<i32> = (0..20).collect();
+        assert_eq!(ids, expected_ids, "All records should be present exactly once");
+        
+        storage.commit_txn(&txn, false).unwrap();
+    }
+    
+    #[test]
+    fn test_partitioned_scan_empty_container() {
+        let mem_pool = get_test_bp(10);
+        let storage = NonTransactionalStorage::new(mem_pool);
+        let db_id = storage.open_db(DBOptions::new("test_db")).unwrap();
+        
+        let schema = schema!(pk: [0], cols: [
+            (false, DataType::Int32)   // id (primary key)
+        ]);
+        let container_id = storage
+            .create_container(
+                db_id,
+                ContainerOptions::new("empty_table", ContainerDS::BTree, schema),
+            )
+            .unwrap();
+        
+        let txn = storage.begin_txn(db_id, TxnOptions::default()).unwrap();
+        
+        // Test partitioned scan on empty container
+        let iterators = storage
+            .create_partitioned_scan(&txn, container_id, 3, vec![0])
+            .unwrap();
+        
+        // All partitions should be empty
+        for iterator in iterators {
+            let result = storage.iter_next(&txn, &iterator).unwrap();
+            assert!(result.is_none(), "Empty container partitions should be empty");
+            storage.drop_iterator_handle(iterator).unwrap();
+        }
+        
+        storage.commit_txn(&txn, false).unwrap();
+    }
+
+    #[test]
+    fn test_partitioned_scan_demonstration() {
+        let mem_pool = get_test_bp(20);
+        let storage = NonTransactionalStorage::new(mem_pool);
+        let db_id = storage.open_db(DBOptions::new("demo_db")).unwrap();
+        
+        let schema = schema!(pk: [0], cols: [
+            (false, DataType::Int32),   // id (primary key)
+            (false, DataType::String)   // data
+        ]);
+        let container_id = storage
+            .create_container(
+                db_id,
+                ContainerOptions::new("demo_table", ContainerDS::BTree, schema),
+            )
+            .unwrap();
+        
+        let txn = storage.begin_txn(db_id, TxnOptions::default()).unwrap();
+        
+        // Insert more records to demonstrate partitioning
+        for i in 0..100 {
+            let record = record![
+                field!(Int32 i),
+                field!(String format!("Data_{}", i))
+            ];
+            storage
+                .insert_record(&txn, container_id, record, None)
+                .unwrap();
+        }
+        
+        println!("\n=== Demonstrating Automatic Partitioned Scan ===");
+        
+        // Create 4 partitions
+        let num_partitions = 4;
+        let iterators = storage
+            .create_partitioned_scan(&txn, container_id, num_partitions, vec![0, 1])
+            .unwrap();
+        
+        println!("Created {} partitions for parallel processing", iterators.len());
+        
+        // Process each partition and show statistics
+        for (partition_idx, iterator) in iterators.into_iter().enumerate() {
+            let mut partition_records = Vec::new();
+            let mut min_id = i32::MAX;
+            let mut max_id = i32::MIN;
+            
+            while let Ok(Some((fields, _ptr))) = storage.iter_next(&txn, &iterator) {
+                if let Field::Int32(Some(id)) = &fields[0] {
+                    min_id = min_id.min(*id);
+                    max_id = max_id.max(*id);
+                    partition_records.push(*id);
+                }
+            }
+            
+            storage.drop_iterator_handle(iterator).unwrap();
+            
+            if !partition_records.is_empty() {
+                println!(
+                    "Partition {}: {} records, ID range: {} to {}",
+                    partition_idx, partition_records.len(), min_id, max_id
+                );
+            } else {
+                println!("Partition {}: empty", partition_idx);
+            }
+        }
+        
+        storage.commit_txn(&txn, false).unwrap();
+        println!("=== Partitioned scan demonstration complete ===\n");
     }
 }

@@ -365,4 +365,23 @@ pub trait FieldLeveLStorageTrait: Send + Sync {
 
     // Drop an iterator handle.
     fn drop_iterator_handle(&self, iter: Self::IteratorHandle) -> Result<(), TxnStorageStatus>;
+
+    // Create multiple partitioned iterators for parallel scanning
+    // Returns a vector of iterator handles, each covering a disjoint partition of the data
+    fn create_partitioned_scan(
+        &self,
+        txn: &Self::TxnHandle,
+        c_id: ContainerId,
+        _num_partitions: usize,
+        columns: Vec<usize>,
+    ) -> Result<Vec<Self::IteratorHandle>, TxnStorageStatus> {
+        // Default implementation: return single full scan iterator
+        let options = ScanOptions {
+            lower_inc: vec![],
+            upper_exc: vec![],
+            cols: columns,
+        };
+        let iterator = self.scan_range(txn, c_id, options)?;
+        Ok(vec![iterator])
+    }
 }
