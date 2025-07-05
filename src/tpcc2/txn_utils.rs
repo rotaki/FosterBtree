@@ -1,9 +1,18 @@
+use chrono::NaiveDate;
+
 use crate::txn_storage2::{field::Field, RecordPointer};
 
 use super::record_definitions::string_to_address;
 use crate::tpcc::record_definitions::Address;
 
 // Helper functions for extracting fields from records
+
+pub fn get_date_field(fields: &[Field], index: usize) -> NaiveDate {
+    match &fields[index] {
+        Field::Date(Some(s)) => s.clone(),
+        other => panic!("Expected Date field at index {}, found {:?}", index, other),
+    }
+}
 
 pub fn get_string_field(fields: &[Field], index: usize) -> String {
     match &fields[index] {

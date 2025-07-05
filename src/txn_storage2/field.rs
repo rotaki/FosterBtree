@@ -1349,6 +1349,7 @@ fn f64_from_order_preserving_bytes(bytes: [u8; 8]) -> f64 {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct Record {
     pub fields: Vec<Field>,
 }
