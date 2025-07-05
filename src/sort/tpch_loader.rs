@@ -229,15 +229,11 @@ impl<M: MemPool> TpchLoader<M> {
 
         // Collect all records
         let mut records = Vec::new();
-        while let Ok(Some((_key_fields, value_fields, _ptr))) =
-            self.storage.iter_next(&txn, &iterator)
-        {
+        while let Ok(Some((fields, _ptr))) = self.storage.iter_next(&txn, &iterator) {
             // The value_fields contain the full record (all 17 fields)
             // The key_fields are just extracted views of fields at positions 0 and 3
             // So we only need the value_fields
-            records.push(crate::txn_storage2::field::Record {
-                fields: value_fields,
-            });
+            records.push(crate::txn_storage2::field::Record { fields });
         }
 
         // Clean up

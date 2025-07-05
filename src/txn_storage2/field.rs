@@ -1542,6 +1542,44 @@ pub fn bytes_to_record(bytes: &[u8], schema: &Schema) -> Vec<Field> {
     all_fields
 }
 
+#[inline(always)]
+pub fn fields_to_bytes(fields: &[Field], cols: &[(bool, DataType)]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(fields.len() * 8); // Estimate size
+    for (i, field) in fields.iter().enumerate() {
+        let (is_nullable, _) = &cols[i];
+        let field_bytes = field.to_bytes(*is_nullable);
+        bytes.extend_from_slice(&field_bytes);
+    }
+    bytes
+}
+
+#[inline(always)]
+pub fn bytes_to_fields(bytes: &[u8], cols: &[(bool, DataType)]) -> Vec<Field> {
+    let mut all_fields = Vec::with_capacity(cols.len());
+    let mut offset = 0;
+
+    for (is_nullable, data_type) in cols.iter() {
+        if offset >= bytes.len() {
+            panic!(
+                "Not enough bytes to read all fields. Expected {} fields, got {} bytes total, at offset {}. Schema: {:?}",
+                cols.len(),
+                bytes.len(),
+                offset,
+                cols
+            );
+        }
+
+        let remaining_bytes = &bytes[offset..];
+        let field = Field::from_bytes(remaining_bytes, *is_nullable, *data_type);
+        let consumed_bytes = field.size(*is_nullable);
+
+        offset += consumed_bytes;
+        all_fields.push(field);
+    }
+
+    all_fields
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
