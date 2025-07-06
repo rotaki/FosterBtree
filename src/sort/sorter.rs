@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::bp::{BufferPool, BufferPoolClock, ContainerKey, MemPool};
+use crate::bp::{BufferPool, ContainerKey, MemPool};
 use crate::txn_storage2::{
     bytes_to_fields, fields_to_bytes, from_normalized_key, DataType, Field,
     NonTransactionalStorage, Schema, TxnOptions,
@@ -9,9 +9,9 @@ use crate::txn_storage2::{
     field::to_normalized_key, field_level_storage_trait::FieldLeveLStorageTrait,
 };
 
+use super::external_merge_sort::ExternalMergeSort;
 use super::foster_btree_sort::FosterBtreeSort;
 use super::in_memory_sort::InMemorySort;
-// use super::external_merge_sort::ExternalMergeSort;
 
 // ============================================================================
 // Trait for different sorting strategies
@@ -165,6 +165,19 @@ impl Sorter {
     /// Create with in-memory sorting strategy
     pub fn new_in_mem_sort() -> Self {
         Self::new_with_strategy(Box::new(InMemorySort::new()))
+    }
+
+    /// Create with external merge sort strategy
+    pub fn new_external_merge_sort(
+        num_threads: usize,
+        total_frames: usize,
+        mem_pool: Arc<impl MemPool + 'static>,
+    ) -> Self {
+        Self::new_with_strategy(Box::new(ExternalMergeSort::new(
+            num_threads,
+            total_frames,
+            mem_pool,
+        )))
     }
 
     pub fn sort(&self, input: SortInput) -> Box<dyn Iterator<Item = (Vec<u8>, Vec<u8>)> + Send> {

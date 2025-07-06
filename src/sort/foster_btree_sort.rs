@@ -1,5 +1,4 @@
-use std::marker::PhantomData;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::thread;
 
 use super::sorter::{SortInput, SortStrategy};

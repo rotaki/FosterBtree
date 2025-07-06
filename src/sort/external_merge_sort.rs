@@ -1,120 +1,119 @@
-use std::sync::{Arc, Mutex};
-use std::thread;
-use std::marker::PhantomData;
 use std::cmp::{Ordering, Reverse};
 use std::collections::BinaryHeap;
+use std::marker::PhantomData;
+use std::sync::{Arc, Mutex};
+use std::thread;
 
-use crate::bp::{ContainerId, ContainerKey, FrameReadGuard, FrameWriteGuard, MemPool, PageFrameKey};
+use super::sorter::{SortInput, SortStrategy};
+use crate::bp::{
+    ContainerId, ContainerKey, FrameReadGuard, FrameWriteGuard, MemPool, PageFrameKey,
+};
 use crate::page::{Page, AVAILABLE_PAGE_SIZE};
-use super::sorter::{SortStrategy, SortInput};
 
 // Page layout constants for sorted pages
 const SORTED_PAGE_HEADER_SIZE: usize = 14;
 const SLOT_SIZE: usize = 6;
 
+pub struct ExternalMergeSortConfig {
+    pub num_threads: usize,
+    pub total_frames: usize,
+}
+
+impl ExternalMergeSortConfig {
+    pub fn frames_per_thread(&self) -> usize {
+        self.total_frames / self.num_threads
+    }
+}
+
 // ============================================================================
 // External merge sort strategy
 // ============================================================================
-pub struct ExternalMergeSort<M: MemPool + 'static> {
-    _phantom: PhantomData<M>,
+pub struct ExternalMergeSort<M: MemPool> {
+    config: ExternalMergeSortConfig,
+    mem_pool: Arc<M>,
 }
 
-impl<M: MemPool + 'static> ExternalMergeSort<M> {
-    pub fn new() -> Self {
+impl<M: MemPool> ExternalMergeSort<M> {
+    pub fn new(num_threads: usize, total_frames: usize, mem_pool: Arc<M>) -> Self {
         Self {
-            _phantom: PhantomData,
+            config: ExternalMergeSortConfig {
+                num_threads,
+                total_frames,
+            },
+            mem_pool,
         }
     }
 }
 
-impl<M: MemPool + 'static> SortStrategy<M> for ExternalMergeSort<M> {
-    fn sort(
-        &self,
-        input: SortInput<M>,
-    ) -> Box<dyn Iterator<Item = (Vec<u8>, Vec<u8>)> + Send> {
-        let frames_per_thread = input.config.frames_per_thread();
-        let runs = Arc::new(Mutex::new(Vec::new()));
-        
+impl<M: MemPool + 'static> SortStrategy for ExternalMergeSort<M> {
+    fn sort(&self, input: SortInput) -> Box<dyn Iterator<Item = (Vec<u8>, Vec<u8>)> + Send> {
+        let frames_per_thread = self.config.frames_per_thread();
+
+        let iterators = input.create_iterators(self.config.num_threads);
+
         // Process each iterator in parallel using scoped threads
+        let mut run_iters = Vec::new();
+
         thread::scope(|s| {
             let mut handles = Vec::new();
-            
-            for (idx, iterator) in input.iterators.into_iter().enumerate() {
-                let mem_pool = input.mem_pool.clone();
-                let container_key = ContainerKey::new(0, idx as ContainerId);
-                let runs_clone = runs.clone();
-                
+
+            for (_thread_id, mut iterator) in iterators.into_iter().enumerate() {
                 let handle = s.spawn(move || {
-                    let mut buffer = ThreadSortBuffer::new(
-                        mem_pool.clone(),
-                        container_key,
-                        frames_per_thread
-                    ).unwrap();
-                    
-                    // Fill buffer and create sorted runs
-                    let mut thread_runs = Vec::new();
-                    
-                    for (key, val) in iterator {
-                        if !buffer.append(&key, &val) {
-                            // Buffer full, sort and write run
-                            buffer.sort();
-                            let run = SortedRun::write_from_iterator(
-                                mem_pool.clone(),
-                                container_key,
-                                buffer.iter().map(|(k, v)| (k.to_vec(), v.to_vec())),
-                            ).unwrap();
-                            thread_runs.push(run);
-                            
-                            // Reset buffer and add current record
-                            buffer.reset();
-                            buffer.append(&key, &val);
-                        }
+                    // Currently employ a simple implementation
+                    let mut run = Vec::new();
+                    while let Some((key, val)) = iterator.next() {
+                        run.push((key, val));
                     }
-                    
-                    // Handle remaining records in buffer
-                    if buffer.ptrs.len() > 0 {
-                        buffer.sort();
-                        let run = SortedRun::write_from_iterator(
-                            mem_pool.clone(),
-                            container_key,
-                            buffer.iter().map(|(k, v)| (k.to_vec(), v.to_vec())),
-                        ).unwrap();
-                        thread_runs.push(run);
-                    }
-                    
-                    // Add runs to shared list
-                    runs_clone.lock().unwrap().extend(thread_runs);
+
+                    // Sort the run in memory
+                    run.sort_by(|a, b| a.0.cmp(&b.0));
+
+                    // Return a iterator over the sorted run
+                    Box::new(VecRunIter::new(run))
+                        as Box<dyn Iterator<Item = (Vec<u8>, Vec<u8>)> + Send>
                 });
-                
                 handles.push(handle);
             }
-            
-            // Wait for all threads to complete
+
             for handle in handles {
-                handle.join().unwrap();
+                let run_iter = handle.join().unwrap();
+                run_iters.push(run_iter);
             }
         });
-        
-        // Extract runs and create merge iterator
-        let runs = Arc::try_unwrap(runs).unwrap().into_inner().unwrap();
-        
-        if runs.is_empty() {
-            return Box::new(std::iter::empty());
-        }
-        
-        // Create iterators from runs
-        let run_iters: Vec<_> = runs.into_iter()
-            .map(|run| SortedRunIterator::new(run, vec![], vec![]))
-            .collect();
-        
+
         Box::new(MergeIterator::new(run_iters))
     }
-    
+
     fn name(&self) -> &str {
         "External Merge Sort"
     }
 }
 
+struct VecRunIter {
+    data: Vec<(Vec<u8>, Vec<u8>)>,
+    index: usize,
+}
+
+impl VecRunIter {
+    fn new(data: Vec<(Vec<u8>, Vec<u8>)>) -> Self {
+        Self { data, index: 0 }
+    }
+}
+
+impl Iterator for VecRunIter {
+    type Item = (Vec<u8>, Vec<u8>);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.index < self.data.len() {
+            let item = self.data[self.index].clone();
+            self.index += 1;
+            Some(item)
+        } else {
+            None
+        }
+    }
+}
+/*
 // ============================================================================
 // Page-based structures for external merge sort
 // ============================================================================
@@ -473,18 +472,18 @@ struct SortedRunIterator<M: MemPool> {
 
 impl<M: MemPool> SortedRunIterator<M> {
     pub fn new(sorted_run: SortedRun<M>, lower_inc: Vec<u8>, upper_exc: Vec<u8>) -> Self {
-        let start_idx = if lower_inc.is_empty() { 
-            0 
-        } else { 
-            sorted_run.find_largest_page_key_less_than(&lower_inc) 
+        let start_idx = if lower_inc.is_empty() {
+            0
+        } else {
+            sorted_run.find_largest_page_key_less_than(&lower_inc)
         };
-        
-        let end_idx = if upper_exc.is_empty() { 
-            sorted_run.stats.len() 
-        } else { 
-            sorted_run.find_smallest_page_key_greater_than_or_equal(&upper_exc) 
+
+        let end_idx = if upper_exc.is_empty() {
+            sorted_run.stats.len()
+        } else {
+            sorted_run.find_smallest_page_key_greater_than_or_equal(&upper_exc)
         };
-        
+
         Self {
             sorted_run,
             lower_inc,
@@ -540,6 +539,7 @@ impl<M: MemPool> Iterator for SortedRunIterator<M> {
         Some((key.to_vec(), val.to_vec()))
     }
 }
+*/
 
 // K-way merge iterator that merges multiple sorted runs
 pub struct MergeIterator<I>
@@ -632,5 +632,405 @@ where
         }
 
         Some(result)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bp::{get_test_bp_lru, ContainerKey};
+    use crate::sort::sorter::{SortInput, Sorter};
+
+    #[test]
+    fn test_external_merge_sort_unique_keys() {
+        let mem_pool = get_test_bp_lru(100);
+        let sorter = Sorter::new_external_merge_sort(4, 100, mem_pool);
+
+        // Create key-value pairs where key is sort key and value is primary key
+        let mut original_kv_pairs = Vec::new();
+        for i in (0..1000).rev() {
+            let key = i as i32;
+            let value = (i * 2) as i32;
+            let key = key.to_be_bytes().to_vec();
+            let value = value.to_be_bytes().to_vec();
+            original_kv_pairs.push((key, value));
+        }
+
+        let result = sorter
+            .sort(SortInput::new_from_vec(original_kv_pairs.clone()))
+            .collect::<Vec<_>>();
+
+        original_kv_pairs.sort_by(|a, b| a.0.cmp(&b.0)); // Sort by key to ensure uniqueness
+
+        // Check that the sorted iterator matches the expected sorted order
+        assert_eq!(result.len(), original_kv_pairs.len());
+
+        for (i, (key, value)) in result.iter().enumerate() {
+            assert_eq!(key, &original_kv_pairs[i].0);
+            assert_eq!(value, &original_kv_pairs[i].1);
+        }
+    }
+
+    #[test]
+    fn test_external_merge_sort_with_duplicates() {
+        let mem_pool = get_test_bp_lru(100);
+        let sorter = Sorter::new_external_merge_sort(4, 100, mem_pool);
+
+        // Create key-value pairs with duplicate keys
+        let mut original_kv_pairs = Vec::new();
+        for i in 0..1000 {
+            let key = (i % 100) as i32;
+            let value = key * 2;
+            let key = key.to_be_bytes().to_vec(); // Duplicate keys every 100
+            let value = value.to_be_bytes().to_vec();
+            original_kv_pairs.push((key, value));
+        }
+
+        let result = sorter
+            .sort(SortInput::new_from_vec(original_kv_pairs.clone()))
+            .collect::<Vec<_>>();
+        original_kv_pairs.sort_by(|a, b| a.0.cmp(&b.0)); // Sort by key to ensure duplicates are handled
+
+        // Check that the sorted iterator matches the expected sorted order
+        assert_eq!(result.len(), original_kv_pairs.len());
+        for (i, (key, value)) in result.iter().enumerate() {
+            assert_eq!(key, &original_kv_pairs[i].0);
+            assert_eq!(value, &original_kv_pairs[i].1);
+        }
+    }
+
+    #[test]
+    fn test_external_merge_sort_empty() {
+        let mem_pool = get_test_bp_lru(100);
+        let sorter = Sorter::new_external_merge_sort(4, 100, mem_pool);
+        let result = sorter
+            .sort(SortInput::new_from_vec(vec![]))
+            .collect::<Vec<_>>();
+        assert_eq!(result.len(), 0);
+    }
+
+    #[test]
+    fn test_external_merge_sort_single_element() {
+        let mem_pool = get_test_bp_lru(100);
+        let sorter = Sorter::new_external_merge_sort(4, 100, mem_pool);
+
+        let key = 42i32.to_be_bytes().to_vec();
+        let value = 84i32.to_be_bytes().to_vec();
+        let kv_pairs = vec![(key.clone(), value.clone())];
+
+        let result = sorter
+            .sort(SortInput::new_from_vec(kv_pairs))
+            .collect::<Vec<_>>();
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].0, key);
+        assert_eq!(result[0].1, value);
+    }
+
+    #[test]
+    fn test_external_merge_sort_multi_threaded() {
+        // Test with different thread counts to ensure correctness
+        for num_threads in vec![1, 2, 4, 8] {
+            let mem_pool = get_test_bp_lru(200);
+            let sorter = Sorter::new_external_merge_sort(num_threads, 200, mem_pool);
+
+            // Create larger dataset to ensure multi-threading is utilized
+            let mut original_kv_pairs = Vec::new();
+            for i in (0..5000).rev() {
+                let key = i as i32;
+                let value = (i * 3) as i32;
+                let key = key.to_be_bytes().to_vec();
+                let value = value.to_be_bytes().to_vec();
+                original_kv_pairs.push((key, value));
+            }
+
+            let result = sorter
+                .sort(SortInput::new_from_vec(original_kv_pairs.clone()))
+                .collect::<Vec<_>>();
+
+            original_kv_pairs.sort_by(|a, b| a.0.cmp(&b.0));
+
+            // Verify correctness
+            assert_eq!(
+                result.len(),
+                original_kv_pairs.len(),
+                "Failed with {} threads",
+                num_threads
+            );
+
+            for (i, (key, value)) in result.iter().enumerate() {
+                assert_eq!(
+                    key, &original_kv_pairs[i].0,
+                    "Key mismatch at index {} with {} threads",
+                    i, num_threads
+                );
+                assert_eq!(
+                    value, &original_kv_pairs[i].1,
+                    "Value mismatch at index {} with {} threads",
+                    i, num_threads
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_external_merge_sort_large_values() {
+        let mem_pool = get_test_bp_lru(100);
+        let sorter = Sorter::new_external_merge_sort(2, 100, mem_pool);
+
+        // Create key-value pairs with larger values
+        let mut original_kv_pairs = Vec::new();
+        for i in 0..100 {
+            let key = i as i32;
+            let key_bytes = key.to_be_bytes().to_vec();
+
+            // Create a larger value (e.g., 100 bytes)
+            let mut value = vec![0u8; 100];
+            value[0..4].copy_from_slice(&key.to_be_bytes());
+
+            original_kv_pairs.push((key_bytes, value));
+        }
+
+        let result = sorter
+            .sort(SortInput::new_from_vec(original_kv_pairs.clone()))
+            .collect::<Vec<_>>();
+
+        original_kv_pairs.sort_by(|a, b| a.0.cmp(&b.0));
+
+        // Check that the sorted iterator matches the expected sorted order
+        assert_eq!(result.len(), original_kv_pairs.len());
+        for (i, (key, value)) in result.iter().enumerate() {
+            assert_eq!(key, &original_kv_pairs[i].0);
+            assert_eq!(value, &original_kv_pairs[i].1);
+        }
+    }
+
+    #[test]
+    fn test_merge_iterator_correctness() {
+        // Test the MergeIterator directly with multiple sorted runs
+        let run1 = vec![
+            (vec![1u8], vec![10u8]),
+            (vec![4u8], vec![40u8]),
+            (vec![7u8], vec![70u8]),
+        ];
+
+        let run2 = vec![
+            (vec![2u8], vec![20u8]),
+            (vec![5u8], vec![50u8]),
+            (vec![8u8], vec![80u8]),
+        ];
+
+        let run3 = vec![
+            (vec![3u8], vec![30u8]),
+            (vec![6u8], vec![60u8]),
+            (vec![9u8], vec![90u8]),
+        ];
+
+        let runs: Vec<Box<dyn Iterator<Item = (Vec<u8>, Vec<u8>)> + Send>> = vec![
+            Box::new(run1.into_iter()),
+            Box::new(run2.into_iter()),
+            Box::new(run3.into_iter()),
+        ];
+
+        let merge_iter = MergeIterator::new(runs);
+        let result: Vec<_> = merge_iter.collect();
+
+        // Verify the merged result is sorted
+        assert_eq!(result.len(), 9);
+        for i in 0..9 {
+            assert_eq!(result[i].0, vec![(i + 1) as u8]);
+            assert_eq!(result[i].1, vec![((i + 1) * 10) as u8]);
+        }
+    }
+
+    #[test]
+    fn test_external_merge_sort_tpch_lineitem() {
+        use crate::sort::sorter::DeserializeRecord;
+        use crate::sort::tpch_loader::{lineitem_schema, TpchLoader};
+        use crate::tpcc2::txn_utils::get_date_field;
+        use crate::tpcc2::txn_utils::{get_f64_field, get_i32_field, get_string_field};
+        use crate::txn_storage2::DataType;
+        use chrono::NaiveDate;
+
+        // Setup with a small scale factor
+        let mem_pool = get_test_bp_lru(1000);
+        let loader = TpchLoader::new(mem_pool.clone());
+
+        // Load a very small scale factor for testing
+        let scale_factor = 0.001; // This should generate ~6000 lineitem records
+        let num_threads = 2;
+        loader.load_lineitem(scale_factor, num_threads);
+
+        let sorter = Sorter::new_external_merge_sort(4, 1000, mem_pool.clone());
+
+        // Test 1: Sort by l_shipdate (column 10)
+        println!("\nTest 1: Sorting by l_shipdate");
+        let sort_cols = vec![(10, true, true)]; // Sort by shipdate ascending
+        let payload_cols = vec![0, 1, 4, 5]; // l_orderkey, l_partkey, l_quantity, l_extendedprice
+
+        let sort_input = SortInput::new_from_storage(
+            loader.get_storage(),
+            ContainerKey::new(loader.get_db_id(), loader.get_lineitem_cid()),
+            lineitem_schema(),
+            sort_cols.clone(),
+            payload_cols.clone(),
+        );
+
+        let deserializer = DeserializeRecord::new(
+            vec![(0, true, true)],    // Adjusted sort columns
+            vec![DataType::DateTime], // l_shipdate
+            vec![
+                (false, DataType::Int32),   // l_orderkey
+                (false, DataType::Int32),   // l_partkey
+                (false, DataType::Float64), // l_quantity
+                (false, DataType::Float64), // l_extendedprice
+            ],
+        );
+
+        let sorted: Vec<_> = sorter
+            .sort_with_deserialization(sort_input, deserializer)
+            .collect();
+
+        // Verify sorting order
+        let mut prev_shipdate = NaiveDate::MIN;
+        for (i, (key_fields, _)) in sorted.iter().enumerate().take(100) {
+            let shipdate = get_date_field(&key_fields, 0);
+            assert!(
+                prev_shipdate <= shipdate,
+                "Shipdate not in ascending order at index {}",
+                i
+            );
+            prev_shipdate = shipdate;
+        }
+        println!("Sorted {} records by shipdate", sorted.len());
+
+        // Test 2: Sort by l_extendedprice descending
+        println!("\nTest 2: Sorting by l_extendedprice descending");
+        let sort_cols = vec![(5, false, true)]; // Sort by extended price descending
+        let payload_cols = vec![0, 3, 4]; // l_orderkey, l_linenumber, l_quantity
+
+        let sort_input = SortInput::new_from_storage(
+            loader.get_storage(),
+            ContainerKey::new(loader.get_db_id(), loader.get_lineitem_cid()),
+            lineitem_schema(),
+            sort_cols.clone(),
+            payload_cols.clone(),
+        );
+
+        let deserializer = DeserializeRecord::new(
+            vec![(0, false, true)],  // Adjusted sort columns (descending)
+            vec![DataType::Float64], // l_extendedprice
+            vec![
+                (false, DataType::Int32),   // l_orderkey
+                (false, DataType::Int32),   // l_linenumber
+                (false, DataType::Float64), // l_quantity
+            ],
+        );
+
+        let sorted: Vec<_> = sorter
+            .sort_with_deserialization(sort_input, deserializer)
+            .collect();
+
+        // Verify top 10 highest prices are in descending order
+        println!("Top 10 highest extended prices:");
+        for i in 0..sorted.len() {
+            let price = get_f64_field(&sorted[i].0, 0);
+            let orderkey = get_i32_field(&sorted[i].1, 0);
+            let linenumber = get_i32_field(&sorted[i].1, 1);
+            let quantity = get_f64_field(&sorted[i].1, 2);
+            println!(
+                "  Price: {:.2}, OrderKey: {}, LineNumber: {}, Quantity: {:.2}",
+                price, orderkey, linenumber, quantity
+            );
+
+            if i > 0 {
+                let prev_price = get_f64_field(&sorted[i - 1].0, 0);
+                assert!(
+                    prev_price >= price,
+                    "Extended price not in descending order at index {}",
+                    i
+                );
+            }
+        }
+
+        // Test 3: Multi-column sort - l_returnflag ASC, l_linestatus ASC, l_shipdate ASC
+        println!("\nTest 3: Multi-column sort (returnflag, linestatus, shipdate)");
+        let sort_cols = vec![
+            (8, true, true),  // l_returnflag ascending
+            (9, true, true),  // l_linestatus ascending
+            (10, true, true), // l_shipdate ascending
+        ];
+        let payload_cols = vec![0, 3, 5]; // l_orderkey, l_linenumber, l_extendedprice
+
+        let sort_input = SortInput::new_from_storage(
+            loader.get_storage(),
+            ContainerKey::new(loader.get_db_id(), loader.get_lineitem_cid()),
+            lineitem_schema(),
+            sort_cols.clone(),
+            payload_cols.clone(),
+        );
+
+        let deserializer = DeserializeRecord::new(
+            vec![(0, true, true), (1, true, true), (2, true, true)], // Adjusted sort columns
+            vec![DataType::String, DataType::String, DataType::DateTime], // returnflag, linestatus, shipdate
+            vec![
+                (false, DataType::Int32),   // l_orderkey
+                (false, DataType::Int32),   // l_linenumber
+                (false, DataType::Float64), // l_extendedprice
+            ],
+        );
+
+        let sorted: Vec<_> = sorter
+            .sort_with_deserialization(sort_input, deserializer)
+            .collect();
+
+        // Verify multi-column sort order
+        for i in 1..sorted.len() {
+            let curr_rf = get_string_field(&sorted[i].0, 0);
+            let curr_ls = get_string_field(&sorted[i].0, 1);
+            let curr_shipdate = get_date_field(&sorted[i].0, 2);
+            let prev_rf = get_string_field(&sorted[i - 1].0, 0);
+            let prev_ls = get_string_field(&sorted[i - 1].0, 1);
+            let prev_shipdate = get_date_field(&sorted[i - 1].0, 2);
+
+            // Check sort order
+            match prev_rf.cmp(&curr_rf) {
+                std::cmp::Ordering::Less => {} // Correct order
+                std::cmp::Ordering::Equal => {
+                    // If returnflag is equal, check linestatus
+                    match prev_ls.cmp(&curr_ls) {
+                        std::cmp::Ordering::Less => {
+                            // Correct order
+                        }
+                        std::cmp::Ordering::Equal => {
+                            // If both returnflag and linestatus are equal, check shipdate
+                            if prev_shipdate > curr_shipdate {
+                                panic!(
+                                    "Shipdate not in ascending order at index {}: {} > {}",
+                                    i, prev_shipdate, curr_shipdate
+                                );
+                            }
+                        }
+                        std::cmp::Ordering::Greater => {
+                            panic!(
+                                "Linestatus not in ascending order at index {}: {} > {}",
+                                i, prev_ls, curr_ls
+                            );
+                        }
+                    }
+                }
+                std::cmp::Ordering::Greater => {
+                    panic!(
+                        "Returnflag not in ascending order at index {}: {} > {}",
+                        i, prev_rf, curr_rf
+                    );
+                }
+            }
+        }
+
+        println!(
+            "Successfully sorted {} lineitem records with multi-column sort",
+            sorted.len()
+        );
     }
 }

@@ -9,6 +9,7 @@ pub mod fixed_size_store;
 pub mod hash_fbt;
 pub mod hashindex;
 pub mod heapstore;
+pub mod run_store;
 
 #[derive(Debug, PartialEq)]
 pub enum AccessMethodError {
