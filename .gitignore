@@ -5,9 +5,11 @@
 *.db.wal
 
 /results
+/Result-*
 
 /fbt_*
 /tpcc_*
+/test_bp_direct_*
 
 *.txt
 
