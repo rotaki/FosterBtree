@@ -10,6 +10,8 @@
 /fbt_*
 /tpcc_*
 /test_bp_direct_*
+/test_bp_clock_direct_*
+/test_pt_direct_*
 
 *.txt
 
