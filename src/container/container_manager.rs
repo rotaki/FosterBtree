@@ -247,6 +247,8 @@ impl ContainerManager {
 impl Drop for ContainerManager {
     fn drop(&mut self) {
         if self.remove_dir_on_drop {
+            // Drop containers first so file handles are closed before removing the directory.
+            drop(std::mem::replace(&mut self.containers, DashMap::new()));
             std::fs::remove_dir_all(&self.base_dir).unwrap();
         }
     }
