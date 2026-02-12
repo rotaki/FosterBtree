@@ -245,6 +245,10 @@ impl PredictiveTranslationBP {
                 if guard.page_key().is_none() {
                     return Some(guard);
                 }
+                // Frame still has a page; don't push back (would re-queue non-free frame).
+            } else {
+                // Couldn't get latch (e.g. still held by evictor that just pushed); put back.
+                self.free_list.push(idx).ok();
             }
         }
         None
@@ -452,23 +456,36 @@ impl MemPool for PredictiveTranslationBP {
             return Err(MemPoolStatus::FrameWriteLatchGrantFailed);
         }
 
-        // Page fault: load from disk into a free frame.
+        // Page fault: claim frame first so only one thread loads this page.
         self.used_frames.fetch_add(1, Ordering::AcqRel);
-        let mut victim = self
-            .choose_victim()
-            .ok_or(MemPoolStatus::CannotEvictPage)?;
+        let mut victim = match self.choose_victim() {
+            Some(v) => v,
+            None => {
+                self.used_frames.fetch_sub(1, Ordering::AcqRel);
+                return Err(MemPoolStatus::CannotEvictPage);
+            }
+        };
 
         debug_assert!(victim.page_key().is_none());
 
-        let container = self.container_manager.get_container(key.p_key().c_key);
-        container.read_page(key.p_key().page_id, &mut victim)?;
+        // Claim the mapping before loading so concurrent lookups for this page
+        // see this frame and wait for our guard instead of loading a second copy.
+        self.translation
+            .insert(key.p_key(), victim.frame_id() as usize);
+
+        if let Err(e) = self.container_manager.get_container(key.p_key().c_key)
+            .read_page(key.p_key().page_id, &mut victim)
+        {
+            self.translation.remove(&key.p_key());
+            victim.set_page_key(None);
+            self.free_list.push(victim.frame_id() as usize).ok();
+            self.used_frames.fetch_sub(1, Ordering::AcqRel);
+            return Err(MemPoolStatus::FileManagerError(e.to_string()));
+        }
 
         victim.set_page_key(Some(key.p_key()));
         victim.evict_info().reset();
         victim.dirty().store(true, Ordering::Release);
-
-        self.translation
-            .insert(key.p_key(), victim.frame_id() as usize);
 
         Ok(victim)
     }
@@ -490,22 +507,34 @@ impl MemPool for PredictiveTranslationBP {
             return Err(MemPoolStatus::FrameReadLatchGrantFailed);
         }
 
-        // Page fault: load from disk into a free frame.
+        // Page fault: claim frame first so only one thread loads this page.
         self.used_frames.fetch_add(1, Ordering::AcqRel);
-        let mut victim = self
-            .choose_victim()
-            .ok_or(MemPoolStatus::CannotEvictPage)?;
+        let mut victim = match self.choose_victim() {
+            Some(v) => v,
+            None => {
+                self.used_frames.fetch_sub(1, Ordering::AcqRel);
+                return Err(MemPoolStatus::CannotEvictPage);
+            }
+        };
 
         debug_assert!(victim.page_key().is_none());
 
-        let container = self.container_manager.get_container(key.p_key().c_key);
-        container.read_page(key.p_key().page_id, &mut victim)?;
+        // Claim the mapping before loading so concurrent lookups see this frame.
+        self.translation
+            .insert(key.p_key(), victim.frame_id() as usize);
+
+        if let Err(e) = self.container_manager.get_container(key.p_key().c_key)
+            .read_page(key.p_key().page_id, &mut victim)
+        {
+            self.translation.remove(&key.p_key());
+            victim.set_page_key(None);
+            self.free_list.push(victim.frame_id() as usize).ok();
+            self.used_frames.fetch_sub(1, Ordering::AcqRel);
+            return Err(MemPoolStatus::FileManagerError(e.to_string()));
+        }
 
         victim.set_page_key(Some(key.p_key()));
         victim.evict_info().reset();
-
-        self.translation
-            .insert(key.p_key(), victim.frame_id() as usize);
 
         Ok(victim.downgrade())
     }
