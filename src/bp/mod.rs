@@ -4,6 +4,7 @@ mod eviction_policy;
 mod frame_guards;
 mod in_mem_pool;
 mod mem_pool_trait;
+pub mod predictive_translation;
 mod resident_set;
 mod vmcache;
 
@@ -17,6 +18,7 @@ pub use in_mem_pool::InMemPool;
 pub use mem_pool_trait::{
     ContainerId, ContainerKey, DatabaseId, MemPool, MemPoolStatus, PageFrameKey,
 };
+pub use predictive_translation::PredictiveTranslationBP;
 pub use vmcache::VMCachePool;
 
 use crate::{container::ContainerManager, random::gen_random_pathname};
@@ -49,12 +51,19 @@ pub fn get_test_bp_clock<const EVICTION_BATCH_SIZE: usize>(
     Arc::new(BufferPoolClock::<EVICTION_BATCH_SIZE>::new(num_frames, cm).unwrap())
 }
 
+pub fn get_test_pt(num_frames: usize) -> Arc<PredictiveTranslationBP> {
+    let base_dir = gen_random_pathname(Some("test_pt_direct"));
+    let cm = Arc::new(ContainerManager::new(base_dir, true, true).unwrap());
+    Arc::new(PredictiveTranslationBP::new(num_frames, cm).unwrap())
+}
+
 pub fn get_in_mem_pool() -> Arc<InMemPool> {
     Arc::new(InMemPool::new())
 }
 pub mod prelude {
     pub use super::{
-        get_in_mem_pool, get_test_bp, BufferPool, ContainerId, ContainerKey, DatabaseId,
-        FrameReadGuard, FrameWriteGuard, InMemPool, MemPool, MemPoolStatus, PageFrameKey,
+        get_in_mem_pool, get_test_bp, get_test_pt, BufferPool, ContainerId, ContainerKey,
+        DatabaseId, FrameReadGuard, FrameWriteGuard, InMemPool, MemPool, MemPoolStatus,
+        PageFrameKey, PredictiveTranslationBP,
     };
 }

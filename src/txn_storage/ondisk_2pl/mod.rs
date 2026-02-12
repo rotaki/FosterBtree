@@ -1599,7 +1599,7 @@ impl<M: MemPool> TxnStorageTrait for NoWaitTxnStorage<M> {
 #[cfg(test)]
 mod tests {
     use crate::{
-        bp::get_test_bp,
+        bp::{get_test_bp, get_test_pt},
         prelude::{ContainerDS, ContainerOptions, DBOptions, TxnOptions},
     };
 
@@ -1645,6 +1645,32 @@ mod tests {
         assert_eq!(value, b"value1".to_vec());
 
         // Commit the transaction
+        storage.commit_txn(&txn2, false).unwrap();
+    }
+
+    /// Same as test_insert_and_read_back but with PredictiveTranslation BP (e2e hook-in check).
+    #[test]
+    fn test_insert_and_read_back_pt() {
+        let bp = get_test_pt(10);
+        let storage = NoWaitTxnStorage::new(&bp);
+
+        let db_id = storage.open_db(DBOptions::new("testdb")).unwrap();
+        let c_id = storage
+            .create_container(
+                db_id,
+                ContainerOptions::primary("testtable_pt", ContainerDS::BTree),
+            )
+            .unwrap();
+
+        let txn = storage.begin_txn(db_id, TxnOptions::default()).unwrap();
+        storage
+            .insert_value(&txn, c_id, b"key1".to_vec(), b"value1".to_vec())
+            .unwrap();
+        storage.commit_txn(&txn, false).unwrap();
+
+        let txn2 = storage.begin_txn(db_id, TxnOptions::default()).unwrap();
+        let value = storage.get_value(&txn2, c_id, b"key1").unwrap();
+        assert_eq!(value, b"value1".to_vec());
         storage.commit_txn(&txn2, false).unwrap();
     }
 
