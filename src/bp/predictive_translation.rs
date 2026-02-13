@@ -1,19 +1,21 @@
 //! Predictive Translation Buffer Pool
 //!
-//! A simple buffer pool that uses a hashmap to translate (container_key, page_id)
-//! to a frame index, with clock-based eviction. This is the baseline implementation
-//! for the predictive translation project — it mirrors the structure of BufferPoolClock
-//! but uses only the translation table for page-to-frame lookup (no physical hints).
+//! Buffer pool with **deterministic frame placement**: each page has a preferred
+//! frame computed as `hash(page_key) % num_frames`.
 //!
-//! The translation table is the only part that will change as we evolve toward
-//! hash-based deterministic frame placement (hash(page_key) % num_frames).
+//! **Lookup:** check the preferred frame first (tag check on `FrameMeta::key()`).
+//! If the preferred frame holds the right page, we're done (fast path).
+//! Otherwise fall through to the overflow DashMap for pages not in their
+//! preferred frame.
 //!
-//! ## TODO — paper implementation roadmap
+//! **Page fault:** if the preferred frame is free, load the page there (no DashMap
+//! entry needed). If occupied, load into any free frame and insert into the
+//! overflow DashMap.
 //!
-//! - [ ] **Deterministic placement** (Sec 3.1): replace DashMap with
-//!       `hash(page_key) % num_frames` to compute a preferred frame per page.
-//!       If preferred frame is occupied, fall back to a free frame.
-//!       On lookup, optimistically check the preferred frame first.
+//! **Eviction:** clock sweep over all frames. On evict, only remove from the
+//! DashMap if the page was in overflow (i.e. not in its preferred frame).
+//!
+//! ## TODO — remaining paper ideas
 //!
 //! - [ ] **Promotion / demotion** (Sec 3.2, 5.1): after the second access to a
 //!       page NOT in its preferred frame, probabilistically promote it
@@ -54,6 +56,7 @@ use crate::{
 use std::{
     cell::UnsafeCell,
     collections::BTreeMap,
+    hash::{Hash, Hasher},
     sync::{
         atomic::{AtomicUsize, Ordering},
         Arc,
@@ -73,15 +76,16 @@ type FWGuard = FrameWriteGuard<EvictionPolicyImpl>;
 type FRGuard = FrameReadGuard<EvictionPolicyImpl>;
 
 // ---------------------------------------------------------------------------
-// Page-to-frame translation layer
+// Overflow translation table
 // ---------------------------------------------------------------------------
-// Plain DashMap keyed on (container_key, page_id) -> frame index.
-// This is the piece that will eventually become hash-based deterministic placement.
-struct TranslationTable {
-    map: DashMap<PageKey, usize>, // PageKey -> frame index
+// Only holds pages that are NOT in their preferred frame (overflow / probes).
+// Pages that sit in their preferred frame are found via the tag check and do
+// not appear in this map.
+struct OverflowTable {
+    map: DashMap<PageKey, usize>, // PageKey -> frame index (overflow pages only)
 }
 
-impl TranslationTable {
+impl OverflowTable {
     fn new() -> Self {
         Self {
             map: DashMap::new(),
@@ -138,8 +142,9 @@ pub struct PredictiveTranslationBP {
     /// Per-frame metadata (latch, dirty bit, eviction info, page key).
     #[allow(clippy::vec_box)]
     metas: UnsafeCell<Vec<Box<FMeta>>>,
-    /// Translation layer: maps PageKey -> frame index.
-    translation: TranslationTable,
+    /// Overflow table: maps PageKey -> frame index for pages NOT in their
+    /// preferred frame.  Pages in their preferred frame are found via tag check.
+    overflow: OverflowTable,
     /// Runtime statistics.
     stats: BPStats,
 }
@@ -196,9 +201,37 @@ impl PredictiveTranslationBP {
             free_list,
             pages,
             metas,
-            translation: TranslationTable::new(),
+            overflow: OverflowTable::new(),
             stats: BPStats::new(),
         })
+    }
+
+    // ------------------------------------------------------------------
+    // Deterministic placement
+    // ------------------------------------------------------------------
+
+    /// Compute the preferred frame index for a page key.
+    /// `hash(page_key) % num_frames`.
+    #[inline]
+    fn preferred_frame(&self, key: &PageKey) -> usize {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        key.hash(&mut hasher);
+        hasher.finish() as usize % self.num_frames
+    }
+
+    /// Check whether frame `idx` currently holds `key` (tag check).
+    /// This reads the atomic page key from FrameMeta without latching.
+    #[inline]
+    fn frame_holds_page(&self, idx: usize, key: &PageKey) -> bool {
+        let meta = &unsafe { &*self.metas.get() }[idx];
+        meta.key() == Some(*key)
+    }
+
+    /// Returns true if `page_key` is in its preferred frame (i.e. NOT in
+    /// the overflow table).
+    #[inline]
+    fn is_in_preferred_frame(&self, page_key: &PageKey) -> bool {
+        self.frame_holds_page(self.preferred_frame(page_key), page_key)
     }
 
     pub fn eviction_stats(&self) -> String {
@@ -307,9 +340,11 @@ impl PredictiveTranslationBP {
                     }
                     // Flush if dirty.
                     self.write_to_disk_if_dirty_w(&guard).unwrap();
-                    // Remove from translation table.
+                    // Remove from overflow table only if NOT in preferred frame.
                     if let Some(pk) = guard.page_key() {
-                        self.translation.remove(&pk);
+                        if self.preferred_frame(&pk) != idx {
+                            self.overflow.remove(&pk);
+                        }
                     }
                     // Clear the frame.
                     guard.set_page_key(None);
@@ -329,6 +364,70 @@ impl PredictiveTranslationBP {
         } else {
             Ok(())
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Page fault (shared by get_page_for_read and get_page_for_write)
+    // ------------------------------------------------------------------
+
+    /// Load a page from disk into a frame.  Returns a write guard on the
+    /// newly-loaded frame.
+    ///
+    /// We always obtain a frame via `choose_victim()` (free-list pop) to keep
+    /// the free-list invariant intact.  After getting the frame, we check
+    /// whether it happens to be the preferred frame — if so the page is NOT
+    /// added to the overflow table (it can be found via tag check).
+    fn handle_page_fault_write(
+        &self,
+        page_key: PageKey,
+        pref: usize,
+    ) -> Result<FWGuard, MemPoolStatus> {
+        self.used_frames.fetch_add(1, Ordering::AcqRel);
+
+        let mut victim = match self.choose_victim() {
+            Some(v) => v,
+            None => {
+                self.used_frames.fetch_sub(1, Ordering::AcqRel);
+                return Err(MemPoolStatus::CannotEvictPage);
+            }
+        };
+
+        debug_assert!(victim.page_key().is_none());
+
+        let in_preferred = victim.frame_id() as usize == pref;
+
+        // Claim the mapping BEFORE reading from disk so that concurrent
+        // lookups for this page see the frame and wait on the latch rather
+        // than triggering a duplicate page-fault.
+        //  - Set page_key early → tag check at the preferred frame matches.
+        //  - Insert into overflow  → overflow lookup finds the frame.
+        // We hold the write latch, so no concurrent reader can see
+        // incomplete page data.
+        victim.set_page_key(Some(page_key));
+        if !in_preferred {
+            self.overflow.insert(page_key, victim.frame_id() as usize);
+        }
+
+        // Read the page from disk.
+        if let Err(e) = self
+            .container_manager
+            .get_container(page_key.c_key)
+            .read_page(page_key.page_id, &mut victim)
+        {
+            // Undo claims.
+            victim.set_page_key(None);
+            if !in_preferred {
+                self.overflow.remove(&page_key);
+            }
+            self.free_list.push(victim.frame_id() as usize).ok();
+            self.used_frames.fetch_sub(1, Ordering::AcqRel);
+            return Err(MemPoolStatus::FileManagerError(e.to_string()));
+        }
+
+        victim.evict_info().reset();
+        victim.dirty().store(true, Ordering::Release);
+
+        Ok(victim)
     }
 
     // ------------------------------------------------------------------
@@ -399,9 +498,12 @@ impl MemPool for PredictiveTranslationBP {
         let page_id = container.inc_page_count(1) as PageId;
         let page_key = PageKey::new(c_key, page_id);
 
-        // Register in translation table.
-        self.translation
-            .insert(page_key, victim.frame_id() as usize);
+        let in_preferred = victim.frame_id() as usize == self.preferred_frame(&page_key);
+
+        // Only register in overflow table if NOT in preferred frame.
+        if !in_preferred {
+            self.overflow.insert(page_key, victim.frame_id() as usize);
+        }
 
         // Initialise the frame.
         victim.set_id(page_id);
@@ -431,12 +533,36 @@ impl MemPool for PredictiveTranslationBP {
     // ----- page presence --------------------------------------------------
 
     fn is_in_mem(&self, key: PageFrameKey) -> bool {
-        // No physical hint — only use (c_key, page_id) via translation table.
-        self.translation.contains_key(&key.p_key())
+        let pk = key.p_key();
+        // Check preferred frame (tag check) OR overflow table.
+        self.is_in_preferred_frame(&pk) || self.overflow.contains_key(&pk)
     }
 
     fn get_page_keys_in_mem(&self, c_key: ContainerKey) -> Vec<PageFrameKey> {
-        self.translation.get_page_keys(c_key)
+        // We need to return ALL resident pages for this container:
+        // (a) pages in their preferred frame (found by scanning frames), and
+        // (b) pages in overflow.
+        let mut result = Vec::new();
+
+        // Scan all frames for pages belonging to c_key that are in their
+        // preferred frame (these are NOT in the overflow table).
+        for i in 0..self.num_frames {
+            let meta = &unsafe { &*self.metas.get() }[i];
+            if let Some(pk) = meta.key() {
+                if pk.c_key == c_key && self.preferred_frame(&pk) == i {
+                    result.push(PageFrameKey::new_with_frame_id(
+                        pk.c_key,
+                        pk.page_id,
+                        i as u32,
+                    ));
+                }
+            }
+        }
+
+        // Add overflow pages for this container.
+        result.extend(self.overflow.get_page_keys(c_key));
+
+        result
     }
 
     // ----- get page for write ---------------------------------------------
@@ -445,49 +571,49 @@ impl MemPool for PredictiveTranslationBP {
         log_debug!("PT page write: {}", key);
         self.stats.inc_write_count();
 
-        // No physical hint — go straight to the translation table.
         self.ensure_free_frames()?;
 
-        if let Some(idx) = self.translation.lookup(&key.p_key()) {
+        let page_key = key.p_key();
+        let pref = self.preferred_frame(&page_key);
+
+        // 1. Fast path: check the preferred frame (tag check).
+        if self.frame_holds_page(pref, &page_key) {
+            if let Some(g) = self.try_get_write_guard(pref, true) {
+                // Re-verify under latch: page may have been evicted between
+                // the tag check and latch acquisition.
+                if g.page_key() == Some(page_key) {
+                    g.evict_info().update();
+                    return Ok(g);
+                }
+                // Page was replaced between tag check and latch; drop guard
+                // and fall through to overflow / fault.
+            } else {
+                // Latch failed.  Re-check: if the page is still here then
+                // another thread genuinely holds the latch → tell the caller
+                // to retry.  If the page disappeared (evicted between the
+                // first tag check and latch attempt), fall through.
+                if self.frame_holds_page(pref, &page_key) {
+                    return Err(MemPoolStatus::FrameWriteLatchGrantFailed);
+                }
+            }
+        }
+
+        // 2. Slow path: check the overflow table.
+        if let Some(idx) = self.overflow.lookup(&page_key) {
             if let Some(g) = self.try_get_write_guard(idx, true) {
-                g.evict_info().update();
-                return Ok(g);
+                if g.page_key() == Some(page_key) {
+                    g.evict_info().update();
+                    return Ok(g);
+                }
+                // Stale overflow entry (page was evicted); fall through to fault.
+            } else {
+                // Overflow has the page but latch failed → someone holds it.
+                return Err(MemPoolStatus::FrameWriteLatchGrantFailed);
             }
-            return Err(MemPoolStatus::FrameWriteLatchGrantFailed);
         }
 
-        // Page fault: claim frame first so only one thread loads this page.
-        self.used_frames.fetch_add(1, Ordering::AcqRel);
-        let mut victim = match self.choose_victim() {
-            Some(v) => v,
-            None => {
-                self.used_frames.fetch_sub(1, Ordering::AcqRel);
-                return Err(MemPoolStatus::CannotEvictPage);
-            }
-        };
-
-        debug_assert!(victim.page_key().is_none());
-
-        // Claim the mapping before loading so concurrent lookups for this page
-        // see this frame and wait for our guard instead of loading a second copy.
-        self.translation
-            .insert(key.p_key(), victim.frame_id() as usize);
-
-        if let Err(e) = self.container_manager.get_container(key.p_key().c_key)
-            .read_page(key.p_key().page_id, &mut victim)
-        {
-            self.translation.remove(&key.p_key());
-            victim.set_page_key(None);
-            self.free_list.push(victim.frame_id() as usize).ok();
-            self.used_frames.fetch_sub(1, Ordering::AcqRel);
-            return Err(MemPoolStatus::FileManagerError(e.to_string()));
-        }
-
-        victim.set_page_key(Some(key.p_key()));
-        victim.evict_info().reset();
-        victim.dirty().store(true, Ordering::Release);
-
-        Ok(victim)
+        // 3. Page fault — load from disk.
+        self.handle_page_fault_write(page_key, pref)
     }
 
     // ----- get page for read ----------------------------------------------
@@ -496,46 +622,45 @@ impl MemPool for PredictiveTranslationBP {
         log_debug!("PT page read: {}", key);
         self.stats.inc_read_count();
 
-        // No physical hint — go straight to the translation table.
         self.ensure_free_frames()?;
 
-        if let Some(idx) = self.translation.lookup(&key.p_key()) {
+        let page_key = key.p_key();
+        let pref = self.preferred_frame(&page_key);
+
+        // 1. Fast path: check the preferred frame (tag check).
+        if self.frame_holds_page(pref, &page_key) {
+            if let Some(g) = self.try_get_read_guard(pref) {
+                // Re-verify under latch.
+                if g.page_key() == Some(page_key) {
+                    g.evict_info().update();
+                    return Ok(g);
+                }
+                // Page was replaced; drop guard and fall through.
+            } else {
+                // Latch failed.  Re-check: if still here, someone else has
+                // the write latch → retry.  If gone, fall through.
+                if self.frame_holds_page(pref, &page_key) {
+                    return Err(MemPoolStatus::FrameReadLatchGrantFailed);
+                }
+            }
+        }
+
+        // 2. Slow path: check the overflow table.
+        if let Some(idx) = self.overflow.lookup(&page_key) {
             if let Some(g) = self.try_get_read_guard(idx) {
-                g.evict_info().update();
-                return Ok(g);
+                if g.page_key() == Some(page_key) {
+                    g.evict_info().update();
+                    return Ok(g);
+                }
+                // Stale overflow entry; fall through to fault.
+            } else {
+                // Overflow has the page but latch failed.
+                return Err(MemPoolStatus::FrameReadLatchGrantFailed);
             }
-            return Err(MemPoolStatus::FrameReadLatchGrantFailed);
         }
 
-        // Page fault: claim frame first so only one thread loads this page.
-        self.used_frames.fetch_add(1, Ordering::AcqRel);
-        let mut victim = match self.choose_victim() {
-            Some(v) => v,
-            None => {
-                self.used_frames.fetch_sub(1, Ordering::AcqRel);
-                return Err(MemPoolStatus::CannotEvictPage);
-            }
-        };
-
-        debug_assert!(victim.page_key().is_none());
-
-        // Claim the mapping before loading so concurrent lookups see this frame.
-        self.translation
-            .insert(key.p_key(), victim.frame_id() as usize);
-
-        if let Err(e) = self.container_manager.get_container(key.p_key().c_key)
-            .read_page(key.p_key().page_id, &mut victim)
-        {
-            self.translation.remove(&key.p_key());
-            victim.set_page_key(None);
-            self.free_list.push(victim.frame_id() as usize).ok();
-            self.used_frames.fetch_sub(1, Ordering::AcqRel);
-            return Err(MemPoolStatus::FileManagerError(e.to_string()));
-        }
-
-        victim.set_page_key(Some(key.p_key()));
-        victim.evict_info().reset();
-
+        // 3. Page fault — load from disk.
+        let victim = self.handle_page_fault_write(page_key, pref)?;
         Ok(victim.downgrade())
     }
 
@@ -572,7 +697,10 @@ impl MemPool for PredictiveTranslationBP {
             };
             self.write_to_disk_if_dirty_w(&frame).unwrap();
             if let Some(pk) = frame.page_key() {
-                self.translation.remove(&pk);
+                // Only remove from overflow if NOT in preferred frame.
+                if self.preferred_frame(&pk) != i {
+                    self.overflow.remove(&pk);
+                }
             }
             frame.clear();
         });
@@ -679,20 +807,31 @@ impl PredictiveTranslationBP {
 
     unsafe fn check_translation_table(&self) {
         use std::collections::HashMap;
-        let mut frame_to_page: HashMap<usize, PageKey> = HashMap::new();
-        self.translation.map.iter().for_each(|r| {
+        // Build map of overflow entries: frame_id -> page_key.
+        let mut overflow_frame_to_page: HashMap<usize, PageKey> = HashMap::new();
+        self.overflow.map.iter().for_each(|r| {
             let (pk, &fid) = r.pair();
-            frame_to_page.insert(fid, *pk);
+            overflow_frame_to_page.insert(fid, *pk);
         });
         for i in 0..self.num_frames {
             let meta = &(*self.metas.get())[i];
             if let Some(pk) = meta.key() {
-                assert!(
-                    frame_to_page.get(&i) == Some(&pk),
-                    "frame {} has key {:?} but translation table disagrees",
-                    i,
-                    pk
-                );
+                let pref = self.preferred_frame(&pk);
+                if pref == i {
+                    // Page is in its preferred frame — must NOT be in overflow.
+                    assert!(
+                        !overflow_frame_to_page.contains_key(&i),
+                        "frame {} has key {:?} in preferred position but is also in overflow",
+                        i, pk
+                    );
+                } else {
+                    // Page is in overflow — must be in the overflow table.
+                    assert!(
+                        overflow_frame_to_page.get(&i) == Some(&pk),
+                        "frame {} has key {:?} (preferred={}) but overflow table disagrees",
+                        i, pk, pref
+                    );
+                }
             }
         }
     }
