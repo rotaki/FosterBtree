@@ -28,7 +28,12 @@ pub fn get_bp(num_frames: usize, cm: Arc<ContainerManager>) -> Arc<impl MemPool>
         use fbtree::bp::BufferPoolClock;
         Arc::new(BufferPoolClock::<64>::new(num_frames, cm).unwrap())
     }
-    #[cfg(not(any(feature = "vmcache", feature = "bp_clock")))]
+    #[cfg(feature = "bp_pt")]
+    {
+        use fbtree::bp::PredictiveTranslationBP;
+        Arc::new(PredictiveTranslationBP::new(num_frames, cm).unwrap())
+    }
+    #[cfg(not(any(feature = "vmcache", feature = "bp_clock", feature = "bp_pt")))]
     {
         use fbtree::bp::BufferPool;
         Arc::new(BufferPool::new(num_frames, cm).unwrap())

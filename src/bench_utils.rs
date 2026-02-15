@@ -13,6 +13,12 @@ use crate::{
     random::{RandomKVs, RandomOp},
 };
 
+#[cfg(feature = "bp_clock")]
+use crate::bp::{get_test_bp_clock, BufferPoolClock};
+
+#[cfg(feature = "bp_pt")]
+use crate::bp::{get_test_pt, PredictiveTranslationBP};
+
 #[derive(Debug, Parser, Clone)]
 pub struct BenchParams {
     /// Number of threads.
@@ -118,11 +124,25 @@ pub fn gen_foster_btree_in_mem() -> Arc<FosterBtree<InMemPool>> {
     Arc::new(btree)
 }
 
-pub fn gen_foster_btree_on_disk(bp_size: usize) -> Arc<FosterBtree<BufferPool>> {
+pub fn gen_foster_btree_on_disk(bp_size: usize) -> Arc<FosterBtree<impl MemPool>> {
     let (db_id, c_id) = (0, 0);
     let c_key = ContainerKey::new(db_id, c_id);
-    let btree = FosterBtree::new(c_key, get_test_bp(bp_size));
-    Arc::new(btree)
+
+    #[cfg(feature = "bp_clock")]
+    {
+        let btree = FosterBtree::new(c_key, get_test_bp_clock::<64>(bp_size));
+        return Arc::new(btree);
+    }
+    #[cfg(feature = "bp_pt")]
+    {
+        let btree = FosterBtree::new(c_key, get_test_pt(bp_size));
+        return Arc::new(btree);
+    }
+    #[cfg(not(any(feature = "bp_clock", feature = "bp_pt")))]
+    {
+        let btree = FosterBtree::new(c_key, get_test_bp(bp_size));
+        Arc::new(btree)
+    }
 }
 
 pub fn insert_into_foster_tree<M: MemPool>(btree: Arc<FosterBtree<M>>, kvs: &[RandomKVs]) {
