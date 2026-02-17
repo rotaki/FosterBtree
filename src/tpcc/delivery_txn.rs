@@ -75,7 +75,7 @@ impl TPCCTxnProfile for DeliveryTxn {
                         // Iterate again to ensure phantom protection. TODO fix iter_next to lock not only
                         // the current key but also the next one.
                         let _ = txn_storage.iter_next(&txn, &iter);
-                        let no_key = *unsafe { NewOrderKey::from_bytes(&key_bytes) };
+                        let no_key = NewOrderKey::from_be_bytes(&key_bytes);
                         (no_key, value)
                     }
                     Ok(None) => {

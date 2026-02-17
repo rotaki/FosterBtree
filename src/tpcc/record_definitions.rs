@@ -534,21 +534,19 @@ impl NewOrderKey {
         self.no_key.to_be_bytes()
     }
 
-    /// # Safety
-    ///
-    /// The caller must ensure that the bytes are of the correct length
-    /// and that the lifetime of the returned reference is valid.
-    pub unsafe fn from_bytes(bytes: &[u8]) -> &NewOrderKey {
-        &*(bytes.as_ptr() as *const NewOrderKey)
+    /// Deserialize from big-endian bytes (matching `into_bytes` / `to_be_bytes`).
+    pub fn from_be_bytes(bytes: &[u8]) -> NewOrderKey {
+        NewOrderKey {
+            no_key: u64::from_be_bytes(bytes[..8].try_into().unwrap()),
+        }
     }
 
-    /// # Safety
-    ///
-    /// The caller must ensure that the bytes are of the correct length
-    /// and that the lifetime of the returned reference is valid.
-    /// Also, the caller must ensure that the bytes are mutable.
-    pub unsafe fn from_bytes_mut(bytes: &mut [u8]) -> &mut NewOrderKey {
-        &mut *(bytes.as_mut_ptr() as *mut NewOrderKey)
+    /// Deserialize from big-endian bytes (mutable variant, matching `into_bytes` / `to_be_bytes`).
+    /// Note: mutations to the returned value are NOT reflected back into the original bytes.
+    pub fn from_be_bytes_mut(bytes: &mut [u8]) -> NewOrderKey {
+        NewOrderKey {
+            no_key: u64::from_be_bytes(bytes[..8].try_into().unwrap()),
+        }
     }
 
     pub fn create_key(w_id: u16, d_id: u8, o_id: u32) -> Self {
