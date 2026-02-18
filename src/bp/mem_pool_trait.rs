@@ -210,6 +210,8 @@ pub enum MemPoolStatus {
     FrameWriteLatchGrantFailed,
     CannotEvictPage,
     MemoryAllocationError(&'static str),
+    /// Another thread loaded this page; caller should retry lookup/fault.
+    RetryPageFault,
 }
 
 impl From<std::io::Error> for MemPoolStatus {
@@ -236,6 +238,7 @@ impl std::fmt::Display for MemPoolStatus {
             MemPoolStatus::MemoryAllocationError(s) => {
                 write!(f, "[MP] Memory allocation error: {}", s)
             }
+            MemPoolStatus::RetryPageFault => write!(f, "[MP] Page fault race; retry"),
         }
     }
 }
