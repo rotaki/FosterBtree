@@ -4,6 +4,7 @@ mod eviction_policy;
 mod frame_guards;
 mod in_mem_pool;
 mod mem_pool_trait;
+mod overflow_table;
 pub mod predictive_translation;
 mod resident_set;
 mod vmcache;

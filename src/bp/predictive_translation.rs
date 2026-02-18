@@ -75,54 +75,7 @@ type FMeta = FrameMeta<EvictionPolicyImpl>;
 type FWGuard = FrameWriteGuard<EvictionPolicyImpl>;
 type FRGuard = FrameReadGuard<EvictionPolicyImpl>;
 
-// ---------------------------------------------------------------------------
-// Overflow translation table
-// ---------------------------------------------------------------------------
-// Only holds pages that are NOT in their preferred frame (overflow / probes).
-// Pages that sit in their preferred frame are found via the tag check and do
-// not appear in this map.
-struct OverflowTable {
-    map: DashMap<PageKey, usize>, // PageKey -> frame index (overflow pages only)
-}
-
-impl OverflowTable {
-    fn new() -> Self {
-        Self {
-            map: DashMap::new(),
-        }
-    }
-
-    #[inline]
-    fn lookup(&self, key: &PageKey) -> Option<usize> {
-        self.map.get(key).map(|r| *r)
-    }
-
-    #[inline]
-    fn insert(&self, key: PageKey, frame_id: usize) {
-        self.map.insert(key, frame_id);
-    }
-
-    #[inline]
-    fn remove(&self, key: &PageKey) -> Option<usize> {
-        self.map.remove(key).map(|(_, v)| v)
-    }
-
-    #[inline]
-    fn contains_key(&self, key: &PageKey) -> bool {
-        self.map.contains_key(key)
-    }
-
-    fn get_page_keys(&self, c_key: ContainerKey) -> Vec<PageFrameKey> {
-        self.map
-            .iter()
-            .filter(|r| r.key().c_key == c_key)
-            .map(|r| {
-                let (pk, &frame_id) = r.pair();
-                PageFrameKey::new_with_frame_id(pk.c_key, pk.page_id, frame_id as u32)
-            })
-            .collect()
-    }
-}
+use super::overflow_table::OverflowTable;
 
 // ---------------------------------------------------------------------------
 // Per-page fault claim (ensures only one thread faults a given page at a time)
@@ -216,7 +169,7 @@ impl PredictiveTranslationBP {
             free_list,
             pages,
             metas,
-            overflow: OverflowTable::new(),
+            overflow: OverflowTable::new(num_frames),
             fault_in_progress: Arc::new(DashMap::new()),
             stats: BPStats::new(),
         })
@@ -867,9 +820,8 @@ impl PredictiveTranslationBP {
         use std::collections::HashMap;
         // Build map of overflow entries: frame_id -> page_key.
         let mut overflow_frame_to_page: HashMap<usize, PageKey> = HashMap::new();
-        self.overflow.map.iter().for_each(|r| {
-            let (pk, &fid) = r.pair();
-            overflow_frame_to_page.insert(fid, *pk);
+        self.overflow.for_each_entry(|pk, fid| {
+            overflow_frame_to_page.insert(fid, pk);
         });
         for i in 0..self.num_frames {
             let meta = &(*self.metas.get())[i];
