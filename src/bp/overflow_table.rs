@@ -67,6 +67,37 @@ impl OverflowTable {
         hasher.finish() as usize % self.num_buckets
     }
 
+    /// Lock-free lookup using a precomputed bucket index (avoids re-hashing when
+    /// caller already has the placement index, e.g. same as preferred_frame when num_buckets == num_frames).
+    #[inline]
+    pub(crate) fn lookup_with_bucket(&self, key: &PageKey, bucket_idx: usize) -> Option<usize> {
+        let idx = bucket_idx % self.num_buckets;
+        let bucket = &self.buckets[idx];
+        for _ in 0..MAX_READ_RETRIES {
+            let v1 = bucket.version.load(Ordering::Acquire);
+            if v1 % 2 != 0 {
+                continue;
+            }
+            let result = {
+                let snapshot = bucket.data.load();
+                if let Some((k, v)) = &snapshot.inlined {
+                    if k == key {
+                        Some(*v)
+                    } else {
+                        snapshot.chain.iter().find(|(k2, _)| k2 == key).map(|(_, v)| *v)
+                    }
+                } else {
+                    snapshot.chain.iter().find(|(k2, _)| k2 == key).map(|(_, v)| *v)
+                }
+            };
+            let v2 = bucket.version.load(Ordering::Acquire);
+            if v1 == v2 {
+                return result;
+            }
+        }
+        self.lookup_slow(key, idx)
+    }
+
     /// Lock-free read path: load snapshot (no mutex), read, validate version.
     #[inline]
     pub(crate) fn lookup(&self, key: &PageKey) -> Option<usize> {

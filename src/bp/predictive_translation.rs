@@ -605,14 +605,14 @@ impl MemPool for PredictiveTranslationBP {
                 }
             }
 
-            // 2. Slow path: check the overflow table.
-            if let Some(idx) = self.overflow.lookup(&page_key) {
+            // 2. Slow path: check the overflow table (same bucket as pref when num_buckets == num_frames).
+            if let Some(idx) = self.overflow.lookup_with_bucket(&page_key, pref) {
                 if let Some(g) = self.try_get_write_guard(idx, true) {
                     if g.page_key() == Some(page_key) {
                         g.evict_info().update();
                         return Ok(g);
                     }
-                } else if self.overflow.lookup(&page_key) == Some(idx) {
+                } else if self.overflow.lookup_with_bucket(&page_key, pref) == Some(idx) {
                     return Err(MemPoolStatus::FrameWriteLatchGrantFailed);
                 }
                 continue;
@@ -651,14 +651,14 @@ impl MemPool for PredictiveTranslationBP {
                 }
             }
 
-            // 2. Slow path: check the overflow table.
-            if let Some(idx) = self.overflow.lookup(&page_key) {
+            // 2. Slow path: check the overflow table (same bucket as pref when num_buckets == num_frames).
+            if let Some(idx) = self.overflow.lookup_with_bucket(&page_key, pref) {
                 if let Some(g) = self.try_get_read_guard(idx) {
                     if g.page_key() == Some(page_key) {
                         g.evict_info().update();
                         return Ok(g);
                     }
-                } else if self.overflow.lookup(&page_key) == Some(idx) {
+                } else if self.overflow.lookup_with_bucket(&page_key, pref) == Some(idx) {
                     return Err(MemPoolStatus::FrameReadLatchGrantFailed);
                 }
                 continue;
