@@ -32,6 +32,7 @@ no_bp_hint = []
 
 # BP type
 bp_clock = []
+bp_pt = []
 vmcache = ["no_bp_hint"] # vmcache does not need a bp hint
 
 # Old iterator for foster btree
@@ -57,6 +58,7 @@ io-uring = {version = "0.7.4"}
 libc = {version = "0.2.169"}
 memchr = "2.7.4"
 dashmap = "6.1"
+arc-swap = "1.7"
 criterion = { version = "0.5", features = ["html_reports"]}
 hdrhistogram = "7.5.4"
 # mimalloc = "0.1.46"
