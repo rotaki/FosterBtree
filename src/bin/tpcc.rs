@@ -40,7 +40,17 @@ pub fn get_bp(num_frames: usize) -> Arc<impl MemPool> {
         use fbtree::bp::get_test_pt;
         get_test_pt(num_frames)
     }
-    #[cfg(not(any(feature = "vmcache", feature = "bp_clock", feature = "bp_pt")))]
+    #[cfg(feature = "bp_basic_hashmap")]
+    {
+        use fbtree::bp::get_test_basic_hashmap_bp;
+        get_test_basic_hashmap_bp(num_frames)
+    }
+    #[cfg(not(any(
+        feature = "vmcache",
+        feature = "bp_clock",
+        feature = "bp_pt",
+        feature = "bp_basic_hashmap"
+    )))]
     {
         use fbtree::bp::get_test_bp;
         get_test_bp(num_frames)

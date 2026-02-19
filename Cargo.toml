@@ -31,6 +31,7 @@ no_tree_hint = []
 no_bp_hint = []
 
 # BP type
+bp_basic_hashmap = []  # dumb DashMap + clock, no hints (bench vs PT)
 bp_clock = []
 bp_pt = []
 vmcache = ["no_bp_hint"] # vmcache does not need a bp hint

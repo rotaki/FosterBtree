@@ -1,3 +1,4 @@
+mod basic_hashmap_bp;
 mod buffer_pool;
 mod buffer_pool_clock;
 mod eviction_policy;
@@ -11,6 +12,7 @@ mod vmcache;
 
 use std::sync::Arc;
 
+pub use basic_hashmap_bp::BasicHashmapBP;
 pub use buffer_pool::BufferPool;
 pub use buffer_pool_clock::BufferPoolClock;
 pub use eviction_policy::EvictionPolicy;
@@ -58,13 +60,19 @@ pub fn get_test_pt(num_frames: usize) -> Arc<PredictiveTranslationBP> {
     Arc::new(PredictiveTranslationBP::new(num_frames, cm).unwrap())
 }
 
+pub fn get_test_basic_hashmap_bp(num_frames: usize) -> Arc<BasicHashmapBP> {
+    let base_dir = gen_random_pathname(Some("test_basic_hashmap_direct"));
+    let cm = Arc::new(ContainerManager::new(base_dir, true, true).unwrap());
+    Arc::new(BasicHashmapBP::new(num_frames, cm).unwrap())
+}
+
 pub fn get_in_mem_pool() -> Arc<InMemPool> {
     Arc::new(InMemPool::new())
 }
 pub mod prelude {
     pub use super::{
-        get_in_mem_pool, get_test_bp, get_test_pt, BufferPool, ContainerId, ContainerKey,
-        DatabaseId, FrameReadGuard, FrameWriteGuard, InMemPool, MemPool, MemPoolStatus,
-        PageFrameKey, PredictiveTranslationBP,
+        get_in_mem_pool, get_test_basic_hashmap_bp, get_test_bp, get_test_pt, BasicHashmapBP,
+        BufferPool, ContainerId, ContainerKey, DatabaseId, FrameReadGuard, FrameWriteGuard,
+        InMemPool, MemPool, MemPoolStatus, PageFrameKey, PredictiveTranslationBP,
     };
 }
