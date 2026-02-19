@@ -1,59 +1,96 @@
 //! Overflow table for predictive translation (Section 4.1 + 4.2).
 //!
-//! Chaining hash table with inlined first slot. Phase 2: optimistic latch with
-//! **lock-free reads** — readers load a snapshot (Arc) via ArcSwap and validate
-//! version; no mutex on the read path. Writers clone-modify-swap under a mutex.
+//! Chaining hash table with inlined first slot. **In-place updates** with a
+//! versioned lock (PrediCache-style): writers mutate the chain under the lock;
+//! readers read version → data → re-read version (no lock, no copy). Chain
+//! nodes are allocated and retired via crossbeam_epoch for safe reclamation.
 
 use super::mem_pool_trait::{ContainerKey, PageFrameKey, PageKey};
-use arc_swap::ArcSwap;
+use crossbeam_epoch::{Atomic, Owned};
+use std::cell::UnsafeCell;
 use std::hash::{Hash, Hasher};
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU64, Ordering};
 
-/// Bucket payload: inlined first slot + chain. Cloneable for copy-on-write.
-#[derive(Clone)]
-struct BucketData {
-    inlined: Option<(PageKey, usize)>,
-    chain: Vec<(PageKey, usize)>,
+const LOCK_BIT: u64 = 1u64 << 63;
+const MAX_READ_RETRIES: u32 = 32;
+const MAX_WRITE_SPIN: u32 = 1_000_000;
+
+/// Chain node: key, value, and atomic next pointer. Retired on remove via epoch.
+struct ChainNode {
+    key: PageKey,
+    value: usize,
+    next: Atomic<ChainNode>,
 }
 
-impl BucketData {
+/// Per-bucket: versioned lock (MSB = locked) and in-place data.
+struct Bucket {
+    /// MSB = 1 when a writer holds the lock; low 63 bits = version (bumped on unlock).
+    version: AtomicU64,
+    /// Inlined first slot. Writers mutate under lock; readers read under version check.
+    inlined: UnsafeCell<Option<(PageKey, usize)>>,
+    /// Head of chain. Atomic so readers can follow without holding the lock.
+    chain_head: Atomic<ChainNode>,
+}
+
+unsafe impl Send for Bucket {}
+unsafe impl Sync for Bucket {}
+
+impl Bucket {
     fn new() -> Self {
         Self {
-            inlined: None,
-            chain: Vec::new(),
+            version: AtomicU64::new(0),
+            inlined: UnsafeCell::new(None),
+            chain_head: Atomic::null(),
         }
+    }
+
+    #[inline]
+    fn is_locked(v: u64) -> bool {
+        v & LOCK_BIT != 0
+    }
+
+    /// Try to acquire the write lock (set MSB). Returns true on success.
+    #[inline]
+    fn try_lock(&self) -> bool {
+        let mut v = self.version.load(Ordering::Acquire);
+        for _ in 0..MAX_WRITE_SPIN {
+            if Self::is_locked(v) {
+                std::hint::spin_loop();
+                v = self.version.load(Ordering::Acquire);
+                continue;
+            }
+            match self.version.compare_exchange_weak(
+                v,
+                v | LOCK_BIT,
+                Ordering::Acquire,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return true,
+                Err(actual) => v = actual,
+            }
+        }
+        false
+    }
+
+    /// Release the write lock and bump version.
+    #[inline]
+    fn unlock(&self) {
+        let v = self.version.load(Ordering::Acquire);
+        debug_assert!(Self::is_locked(v));
+        self.version
+            .store((v & !LOCK_BIT).wrapping_add(1), Ordering::Release);
     }
 }
 
-/// Per-bucket: version (even = no writer), ArcSwap snapshot, mutex for writers only.
-struct BucketHandle {
-    version: AtomicU32,
-    data: ArcSwap<BucketData>,
-    write_mutex: Mutex<()>,
-}
-
-impl BucketHandle {
-    fn new() -> Self {
-        Self {
-            version: AtomicU32::new(0),
-            data: ArcSwap::from_pointee(BucketData::new()),
-            write_mutex: Mutex::new(()),
-        }
-    }
-}
-
-/// Overflow table: fixed number of buckets, chaining with inlined first slot.
+/// Overflow table: fixed number of buckets, chaining with inlined first slot, in-place updates.
 pub(crate) struct OverflowTable {
     num_buckets: usize,
-    buckets: Vec<BucketHandle>,
+    buckets: Vec<Bucket>,
 }
-
-const MAX_READ_RETRIES: u32 = 32;
 
 impl OverflowTable {
     pub(crate) fn new(num_buckets: usize) -> Self {
-        let buckets = (0..num_buckets).map(|_| BucketHandle::new()).collect();
+        let buckets = (0..num_buckets).map(|_| Bucket::new()).collect();
         Self {
             num_buckets,
             buckets,
@@ -67,27 +104,27 @@ impl OverflowTable {
         hasher.finish() as usize % self.num_buckets
     }
 
-    /// Lock-free lookup using a precomputed bucket index (avoids re-hashing when
-    /// caller already has the placement index, e.g. same as preferred_frame when num_buckets == num_frames).
+    /// Lock-free lookup using a precomputed bucket index.
     #[inline]
     pub(crate) fn lookup_with_bucket(&self, key: &PageKey, bucket_idx: usize) -> Option<usize> {
         let idx = bucket_idx % self.num_buckets;
         let bucket = &self.buckets[idx];
+        let guard = crossbeam_epoch::pin();
         for _ in 0..MAX_READ_RETRIES {
             let v1 = bucket.version.load(Ordering::Acquire);
-            if v1 % 2 != 0 {
+            if Bucket::is_locked(v1) {
                 continue;
             }
-            let result = {
-                let snapshot = bucket.data.load();
-                if let Some((k, v)) = &snapshot.inlined {
+            let result = unsafe {
+                let inlined = (*bucket.inlined.get()).clone();
+                if let Some((k, v)) = &inlined {
                     if k == key {
                         Some(*v)
                     } else {
-                        snapshot.chain.iter().find(|(k2, _)| k2 == key).map(|(_, v)| *v)
+                        Self::lookup_chain(&bucket.chain_head, key, &guard)
                     }
                 } else {
-                    snapshot.chain.iter().find(|(k2, _)| k2 == key).map(|(_, v)| *v)
+                    Self::lookup_chain(&bucket.chain_head, key, &guard)
                 }
             };
             let v2 = bucket.version.load(Ordering::Acquire);
@@ -95,119 +132,170 @@ impl OverflowTable {
                 return result;
             }
         }
-        self.lookup_slow(key, idx)
+        self.lookup_slow(key, idx, &guard)
     }
 
-    /// Lock-free read path: load snapshot (no mutex), read, validate version.
     #[inline]
-    pub(crate) fn lookup(&self, key: &PageKey) -> Option<usize> {
-        let idx = self.bucket_index(key);
-        let bucket = &self.buckets[idx];
-        for _ in 0..MAX_READ_RETRIES {
-            let v1 = bucket.version.load(Ordering::Acquire);
-            if v1 % 2 != 0 {
-                continue;
+    fn lookup_chain(
+        head: &Atomic<ChainNode>,
+        key: &PageKey,
+        guard: &crossbeam_epoch::Guard,
+    ) -> Option<usize> {
+        let mut current = head.load(Ordering::Acquire, guard);
+        while !current.is_null() {
+            let node = unsafe { current.deref() };
+            if node.key == *key {
+                return Some(node.value);
             }
-            let result = {
-                let snapshot = bucket.data.load();
-                if let Some((k, v)) = &snapshot.inlined {
-                    if k == key {
-                        Some(*v)
-                    } else {
-                        snapshot.chain.iter().find(|(k2, _)| k2 == key).map(|(_, v)| *v)
-                    }
-                } else {
-                    snapshot.chain.iter().find(|(k2, _)| k2 == key).map(|(_, v)| *v)
-                }
-            };
-            let v2 = bucket.version.load(Ordering::Acquire);
-            if v1 == v2 {
-                return result;
-            }
+            current = node.next.load(Ordering::Acquire, guard);
         }
-        self.lookup_slow(key, idx)
+        None
     }
 
     #[cold]
-    fn lookup_slow(&self, key: &PageKey, idx: usize) -> Option<usize> {
+    fn lookup_slow(
+        &self,
+        key: &PageKey,
+        idx: usize,
+        guard: &crossbeam_epoch::Guard,
+    ) -> Option<usize> {
         let bucket = &self.buckets[idx];
-        let snapshot = bucket.data.load();
-        if let Some((k, v)) = &snapshot.inlined {
+        let inlined = unsafe { (*bucket.inlined.get()).clone() };
+        if let Some((k, v)) = &inlined {
             if k == key {
                 return Some(*v);
             }
         }
-        snapshot.chain.iter().find(|(k, _)| k == key).map(|(_, v)| *v)
+        Self::lookup_chain(&bucket.chain_head, key, guard)
     }
 
-    /// Write path: mutex, clone-modify-swap, bump version.
+    /// Lock-free read path.
+    #[inline]
+    pub(crate) fn lookup(&self, key: &PageKey) -> Option<usize> {
+        let idx = self.bucket_index(key);
+        self.lookup_with_bucket(key, idx)
+    }
+
+    /// In-place insert: take versioned lock, mutate bucket, unlock. No clone.
     #[inline]
     pub(crate) fn insert(&self, key: PageKey, frame_id: usize) {
         let idx = self.bucket_index(&key);
         let bucket = &self.buckets[idx];
-        let _guard = bucket.write_mutex.lock().unwrap();
-        let ver = bucket.version.load(Ordering::Acquire);
-        bucket.version.store(ver.wrapping_add(1), Ordering::Release);
-        let current = bucket.data.load();
-        let mut new_data = (**current).clone();
-        if let Some((k, ref mut slot_val)) = &mut new_data.inlined {
-            if *k == key {
-                *slot_val = frame_id;
-                bucket.data.store(Arc::new(new_data));
-                bucket.version.store(ver.wrapping_add(2), Ordering::Release);
+        let guard = crossbeam_epoch::pin();
+        while !bucket.try_lock() {
+            std::hint::spin_loop();
+        }
+        unsafe {
+            let inlined = &mut *bucket.inlined.get();
+            if let Some((k, ref mut slot_val)) = inlined {
+                if *k == key {
+                    *slot_val = frame_id;
+                    bucket.unlock();
+                    return;
+                }
+            }
+            if let Some(ptr) = Self::find_in_chain_mut(&bucket.chain_head, &key, &guard) {
+                *ptr = frame_id;
+                bucket.unlock();
                 return;
             }
+            if inlined.is_none() {
+                *inlined = Some((key, frame_id));
+            } else {
+                let current = bucket.chain_head.load(Ordering::Acquire, &guard);
+                let new_node = Owned::new(ChainNode {
+                    key,
+                    value: frame_id,
+                    next: Atomic::null(),
+                });
+                new_node.next.store(current, Ordering::Release);
+                bucket
+                    .chain_head
+                    .store(new_node.into_shared(&guard), Ordering::Release);
+            }
         }
-        if let Some(entry) = new_data.chain.iter_mut().find(|(k, _)| *k == key) {
-            entry.1 = frame_id;
-            bucket.data.store(Arc::new(new_data));
-            bucket.version.store(ver.wrapping_add(2), Ordering::Release);
-            return;
-        }
-        if new_data.inlined.is_none() {
-            new_data.inlined = Some((key, frame_id));
-        } else {
-            new_data.chain.push((key, frame_id));
-        }
-        bucket.data.store(Arc::new(new_data));
-        bucket.version.store(ver.wrapping_add(2), Ordering::Release);
+        bucket.unlock();
     }
 
+    /// Find *mut value in chain under lock. Caller holds lock; mutate via the returned pointer.
+    #[inline]
+    unsafe fn find_in_chain_mut(
+        head: &Atomic<ChainNode>,
+        key: &PageKey,
+        guard: &crossbeam_epoch::Guard,
+    ) -> Option<*mut usize> {
+        let mut current = head.load(Ordering::Acquire, guard);
+        while !current.is_null() {
+            let node = current.deref() as *const ChainNode as *mut ChainNode;
+            if (*node).key == *key {
+                return Some(&mut (*node).value as *mut usize);
+            }
+            current = (*node).next.load(Ordering::Acquire, guard);
+        }
+        None
+    }
+
+    /// In-place remove: take versioned lock, unlink node, retire with epoch, unlock.
     #[inline]
     pub(crate) fn remove(&self, key: &PageKey) -> Option<usize> {
         let idx = self.bucket_index(key);
         let bucket = &self.buckets[idx];
-        let _guard = bucket.write_mutex.lock().unwrap();
-        let ver = bucket.version.load(Ordering::Acquire);
-        bucket.version.store(ver.wrapping_add(1), Ordering::Release);
-        let current = bucket.data.load();
-        let mut new_data = (**current).clone();
-        let result = if let Some((k, val)) = &new_data.inlined {
-            if k == key {
-                let out = *val;
-                if let Some((chain_key, chain_val)) = new_data.chain.pop() {
-                    new_data.inlined = Some((chain_key, chain_val));
-                } else {
-                    new_data.inlined = None;
-                }
-                Some(out)
-            } else {
-                new_data.chain.iter().position(|(k2, _)| k2 == key).map(|pos| {
-                    let (_, val) = new_data.chain.remove(pos);
-                    val
-                })
-            }
-        } else {
-            new_data.chain.iter().position(|(k2, _)| k2 == key).map(|pos| {
-                let (_, val) = new_data.chain.remove(pos);
-                val
-            })
-        };
-        if result.is_some() {
-            bucket.data.store(Arc::new(new_data));
+        let guard = crossbeam_epoch::pin();
+        while !bucket.try_lock() {
+            std::hint::spin_loop();
         }
-        bucket.version.store(ver.wrapping_add(2), Ordering::Release);
+        let result = unsafe {
+            let inlined = &mut *bucket.inlined.get();
+            if let Some((k, val)) = inlined.as_ref() {
+                if k == key {
+                    let out = *val;
+                    let head = bucket.chain_head.load(Ordering::Acquire, &guard);
+                    if !head.is_null() {
+                        let node = head.deref();
+                        *inlined = Some((node.key, node.value));
+                        bucket.chain_head.store(
+                            node.next.load(Ordering::Acquire, &guard),
+                            Ordering::Release,
+                        );
+                        guard.defer_destroy(head);
+                    } else {
+                        *inlined = None;
+                    }
+                    bucket.unlock();
+                    return Some(out);
+                }
+            }
+            Self::remove_from_chain(&bucket.chain_head, key, &guard)
+        };
+        bucket.unlock();
         result
+    }
+
+    /// Unlink the first node matching key from the chain; retire it. Returns its value. Caller holds lock.
+    #[inline]
+    unsafe fn remove_from_chain(
+        head: &Atomic<ChainNode>,
+        key: &PageKey,
+        guard: &crossbeam_epoch::Guard,
+    ) -> Option<usize> {
+        let mut prev_ptr: Option<&Atomic<ChainNode>> = None;
+        let mut current = head.load(Ordering::Acquire, guard);
+        while !current.is_null() {
+            let node = current.deref();
+            if node.key == *key {
+                let out = node.value;
+                let next = node.next.load(Ordering::Acquire, guard);
+                match prev_ptr {
+                    Some(prev) => prev.store(next, Ordering::Release),
+                    None => head.store(next, Ordering::Release),
+                }
+                guard.defer_destroy(current);
+                return Some(out);
+            }
+            prev_ptr = Some(&node.next);
+            current = node.next.load(Ordering::Acquire, guard);
+        }
+        None
     }
 
     #[inline]
@@ -229,23 +317,25 @@ impl OverflowTable {
         out
     }
 
-    /// Lock-free iteration: load snapshot, copy entries, validate version.
+    /// Lock-free iteration: copy entries under version check, then call f.
     pub(crate) fn for_each_entry(&self, mut f: impl FnMut(PageKey, usize)) {
+        let guard = crossbeam_epoch::pin();
         for bucket in &self.buckets {
-            let mut done = false;
             for _ in 0..MAX_READ_RETRIES {
                 let v1 = bucket.version.load(Ordering::Acquire);
-                if v1 % 2 != 0 {
+                if Bucket::is_locked(v1) {
                     continue;
                 }
                 let mut entries = Vec::new();
-                {
-                    let snapshot = bucket.data.load();
-                    if let Some((pk, fid)) = &snapshot.inlined {
-                        entries.push((*pk, *fid));
+                unsafe {
+                    if let Some((pk, fid)) = (*bucket.inlined.get()).clone() {
+                        entries.push((pk, fid));
                     }
-                    for (pk, fid) in &snapshot.chain {
-                        entries.push((*pk, *fid));
+                    let mut current = bucket.chain_head.load(Ordering::Acquire, &guard);
+                    while !current.is_null() {
+                        let node = current.deref();
+                        entries.push((node.key, node.value));
+                        current = node.next.load(Ordering::Acquire, &guard);
                     }
                 }
                 let v2 = bucket.version.load(Ordering::Acquire);
@@ -253,17 +343,7 @@ impl OverflowTable {
                     for (pk, fid) in entries {
                         f(pk, fid);
                     }
-                    done = true;
                     break;
-                }
-            }
-            if !done {
-                let snapshot = bucket.data.load();
-                if let Some((pk, fid)) = &snapshot.inlined {
-                    f(*pk, *fid);
-                }
-                for (pk, fid) in &snapshot.chain {
-                    f(*pk, *fid);
                 }
             }
         }

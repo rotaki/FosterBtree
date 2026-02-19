@@ -721,6 +721,7 @@ dependencies = [
  "clap",
  "concurrent-queue",
  "criterion",
+ "crossbeam-epoch",
  "dashmap",
  "duckdb",
  "getrandom 0.3.1",

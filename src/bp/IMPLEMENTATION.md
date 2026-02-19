@@ -31,7 +31,7 @@ This document is the **master reference** for the PrediCache-style predictive tr
 ### 1.4 Overflow table (§4.1, §4.2) — structure and lock-free reads
 
 - **Custom chaining hash table** (`overflow_table.rs`): `num_buckets == num_frames`, one bucket per logical slot. Each bucket has an **inlined first slot** (`Option<(PageKey, usize)>`) plus a chain for collisions. API: `lookup`, `lookup_with_bucket`, `insert`, `remove`, `contains_key`, `get_page_keys`, `for_each_entry`.
-- **Lock-free read path:** Per bucket: version counter (even = no writer) and an `ArcSwap<BucketData>` snapshot. Readers: load version (must be even), load snapshot, read inlined slot and chain, re-read version; if unchanged, use result; else retry. No mutex on the read path, so overflow lookup can overlap with preferred-frame load.
+- **In-place updates (versioned lock):** Per bucket: one `AtomicU64` with **MSB = lock bit** (1 = writer), low bits = version (PrediCache-style). Writers: spin until MSB is 0, CAS to set MSB, mutate inlined slot and chain, then clear MSB and bump version. Readers: load version (skip if MSB set), read inlined slot and chain (chain nodes are `crossbeam_epoch::Atomic`), re-read version; if unchanged, use result; else retry. No copy on insert/remove; chain nodes are allocated and retired via crossbeam-epoch.
 - **Single hash on hot path:** `get_page_for_read` / `get_page_for_write` compute `pref = preferred_frame(key)` once and call `overflow.lookup_with_bucket(&page_key, pref)` so we do not re-hash for overflow.
 
 ### 1.5 Superscalar interleaving (§3.1, Listing 2)
@@ -53,7 +53,7 @@ This document is the **master reference** for the PrediCache-style predictive tr
 | Feature | Notes |
 |--------|--------|
 | **Clock eviction** | Same `ClockEvictionPolicy` as `BufferPoolClock`. Paper is agnostic to eviction policy. |
-| **Free list** | `ConcurrentQueue<usize>` for frame indices; bounded, concurrent. |
+| **Free frames** | `DashSet<usize>` of free frame indices; `choose_victim(Some(preferred))` picks preferred frame when free, else any from set (snapshot iteration). |
 | **Eviction threshold** | Eviction when usage exceeds 95%; evict in batches of up to 64. |
 | **Per-frame metadata** | `metas: Vec<Box<FrameMeta>>` (latch, dirty bit, eviction state, page key). |
 
@@ -83,7 +83,7 @@ This document is the **master reference** for the PrediCache-style predictive tr
 - **`ht.hpp`:** Chaining table with **first entry inlined** in each bucket; `VersionedLock` + inlined head + chain. Read path: load version (skip if MSB set), walk head and chain without locking, re-check version. Insert/remove: take versioned lock, mutate chain, unlock.
 - **`buffer_manager.hpp`:** Uses this hash table for translation; `fix`-style API calls `ht.access(pid, hash)` then fixes the returned frame.
 
-**Difference from our Rust overflow:** PrediCache does **in-place updates**: writers take the versioned lock, mutate the chain, then unlock. Readers validate the version on the same memory; no copy. Our implementation uses **copy-on-write** (ArcSwap + clone on write): writers clone the bucket, modify, then store a new `Arc`; readers load the current `Arc` (no mutex). Both give lock-free reads. CoW avoids partial-update concerns but pays clone + allocation on insert/remove. An in-place design (versioned lock + atomic chain + safe reclamation, e.g. with crossbeam-epoch) would be closer to the C++ and the paper; we use the CoW design for simplicity unless profiling shows write-heavy overflow as a bottleneck. See `OVERFLOW_ROADMAP.md` for more detail and a possible in-place roadmap.
+**Our Rust overflow (current):** We use **in-place updates** aligned with PrediCache: versioned lock (MSB = lock, low bits = version), inlined first slot per bucket, chain with `crossbeam_epoch::Atomic<ChainNode>` and safe retirement. Writers take the lock, mutate the chain, unlock; readers validate version and read without locking. No copy on insert/remove; this avoids the clone+allocation cost of a CoW design and is closer to the C++ and the paper. See `OVERFLOW_ROADMAP.md` for history and alternatives.
 
 ---
 
@@ -109,9 +109,9 @@ Fault path: claim page in `fault_in_progress`, pop frame from free list, re-chec
 
 | Name | Role |
 |------|------|
-| **OverflowTable** | Custom chaining table (`overflow_table.rs`). Maps page → frame index for pages not in their preferred frame. Inlined first slot per bucket; lock-free reads (version + ArcSwap snapshot), CoW writes. `lookup_with_bucket(key, pref)` avoids re-hash. |
+| **OverflowTable** | Custom chaining table (`overflow_table.rs`). Maps page → frame index for pages not in their preferred frame. Inlined first slot per bucket; versioned lock (MSB = lock, low bits = version), in-place writes, chain with crossbeam-epoch. Lock-free reads via version check. `lookup_with_bucket(key, pref)` avoids re-hash. |
 | **fault_in_progress** | `Arc<DashMap<PageKey, ()>>`. Set of pages currently being faulted; one fault at a time per page. |
-| **free_list** | `ConcurrentQueue<usize>`. Indices of frames known to be free. |
+| **free_frames** | `DashSet<usize>`. Indices of frames known to be free; victim choice prefers preferred frame when free. |
 | **metas** | `Vec<Box<FrameMeta>>`. Per-frame metadata: latch, dirty bit, eviction state, page key. |
 | **pages** | `Vec<Box<Page>>`. Page data, one per frame. |
 | **clock_hand** | `AtomicUsize`. Clock pointer for eviction sweep. |
