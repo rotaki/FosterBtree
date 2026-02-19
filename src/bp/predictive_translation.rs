@@ -15,12 +15,15 @@
 //! **Eviction:** clock sweep over all frames. On evict, only remove from the
 //! overflow table if the page was in overflow (i.e. not in its preferred frame).
 //!
-//! ## TODO — remaining paper ideas
+//! ## Paper alignment
 //!
-//! - [ ] **Promotion / demotion** (Sec 3.2, 5.1): after the second access to a
-//!       page NOT in its preferred frame, probabilistically promote it
-//!       (swap into preferred frame, demote current occupant).
+//! - [x] **Promotion / demotion** (Sec 3.2, 5.1): after the second access to a
+//!       page NOT in its preferred frame, probabilistically promote it on write
+//!       (move to preferred frame if free, or swap with occupant and demote).
 //!       Probabilities: 1/50 (no demotion) or 1/512 (demotion needed).
+//!
+//! - [x] **One-hit-wonder** (Sec 3.2): overflow access count per page; promotion
+//!       only considered when count >= 2 (so first access never promotes).
 //!
 //! - [x] **Lock-free overflow reads** (Sec 4.2): overflow table uses version +
 //!       ArcSwap per bucket; read path has no mutex so lookup can overlap with
@@ -52,13 +55,15 @@ use crate::{
     log_debug, log_warn,
     page::{Page, PageId},
 };
+use crate::random::small_thread_rng;
+use rand::RngCore;
 
 use std::{
     cell::UnsafeCell,
     collections::BTreeMap,
     hash::{Hash, Hasher},
     sync::{
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicU32, AtomicUsize, Ordering},
         Arc,
     },
 };
@@ -111,6 +116,9 @@ pub struct PredictiveTranslationBP {
     /// Overflow table: maps PageKey -> frame index for pages NOT in their
     /// preferred frame.  Pages in their preferred frame are found via tag check.
     overflow: OverflowTable,
+    /// One-hit-wonder (§3.2): access count per page while in overflow. Used to
+    /// defer promotion until at least the second access.
+    overflow_access_count: Arc<DashMap<PageKey, AtomicU32>>,
     /// Pages currently being faulted; claim before faulting, release on drop.
     fault_in_progress: Arc<DashMap<PageKey, ()>>,
     /// Runtime statistics.
@@ -170,6 +178,7 @@ impl PredictiveTranslationBP {
             pages,
             metas,
             overflow: OverflowTable::new(num_frames),
+            overflow_access_count: Arc::new(DashMap::new()),
             fault_in_progress: Arc::new(DashMap::new()),
             stats: BPStats::new(),
         })
@@ -201,6 +210,13 @@ impl PredictiveTranslationBP {
     #[inline]
     fn is_in_preferred_frame(&self, page_key: &PageKey) -> bool {
         self.frame_holds_page(self.preferred_frame(page_key), page_key)
+    }
+
+    /// Returns true if frame `idx` has no page (key is None). Lock-free read of atomic key.
+    #[inline]
+    fn frame_is_free(&self, idx: usize) -> bool {
+        let metas = unsafe { &*self.metas.get() };
+        metas[idx].key().is_none()
     }
 
     pub fn eviction_stats(&self) -> String {
@@ -315,6 +331,7 @@ impl PredictiveTranslationBP {
                             && self.overflow.lookup(&pk) == Some(idx)
                         {
                             self.overflow.remove(&pk);
+                            self.overflow_access_count.remove(&pk);
                         }
                     }
                     // Clear the frame.
@@ -417,6 +434,7 @@ impl PredictiveTranslationBP {
             victim.set_page_key(None);
             if !in_preferred && self.overflow.lookup(&page_key) == Some(victim.frame_id() as usize) {
                 self.overflow.remove(&page_key);
+                self.overflow_access_count.remove(&page_key);
             }
             self.free_list.push(victim.frame_id() as usize).ok();
             self.used_frames.fetch_sub(1, Ordering::AcqRel);
@@ -436,6 +454,7 @@ impl PredictiveTranslationBP {
                 victim.set_page_key(None);
                 if self.overflow.lookup(&page_key) == Some(victim.frame_id() as usize) {
                     self.overflow.remove(&page_key);
+                    self.overflow_access_count.remove(&page_key);
                 }
                 self.free_list.push(victim.frame_id() as usize).ok();
                 self.used_frames.fetch_sub(1, Ordering::AcqRel);
@@ -476,6 +495,84 @@ impl PredictiveTranslationBP {
             }
         }
         Ok(())
+    }
+
+    // ------------------------------------------------------------------
+    // Promotion / demotion (§3.2, 5.1) with one-hit-wonder
+    // ------------------------------------------------------------------
+
+    /// Paper probabilities: 1/50 when preferred frame is free, 1/512 when demotion needed.
+    const PROMOTE_PROB_NO_DEMOTE: u32 = 50;
+    const PROMOTE_PROB_DEMOTE: u32 = 512;
+
+    /// Try to promote the page from its current (overflow) frame to its preferred frame.
+    /// Caller holds a write guard on the overflow frame. Returns either the same guard
+    /// (no promotion / failed) or a new write guard on the preferred frame (promotion done).
+    fn try_promote_to_preferred(
+        &self,
+        mut current_guard: FWGuard,
+        page_key: PageKey,
+        pref: usize,
+    ) -> Result<FWGuard, MemPoolStatus> {
+        let current_idx = current_guard.frame_id() as usize;
+        if current_idx == pref {
+            return Ok(current_guard);
+        }
+
+        let mut pref_guard = match self.try_get_write_guard(pref, false) {
+            Some(g) => g,
+            None => return Ok(current_guard),
+        };
+
+        if pref_guard.page_key().is_none() {
+            // Simple promotion: preferred frame is free. Move our page there.
+            pref_guard.page_mut().copy(current_guard.page());
+            pref_guard.set_page_key(Some(page_key));
+            pref_guard
+                .dirty()
+                .store(current_guard.dirty().load(Ordering::Acquire), Ordering::Release);
+            pref_guard.evict_info().update();
+
+            current_guard.clear();
+            self.overflow.remove(&page_key);
+            self.overflow_access_count.remove(&page_key);
+            self.free_list.push(current_idx).ok();
+            self.used_frames.fetch_sub(1, Ordering::AcqRel);
+
+            drop(current_guard);
+            return Ok(pref_guard);
+        }
+
+        // Demotion: preferred frame holds another page. Swap contents.
+        let other_key = pref_guard.page_key().unwrap();
+        let mut temp = Page::new_empty();
+        temp.copy(current_guard.page());
+        current_guard.page_mut().copy(pref_guard.page());
+        pref_guard.page_mut().copy(&temp);
+
+        pref_guard.set_page_key(Some(page_key));
+        current_guard.set_page_key(Some(other_key));
+        let other_dirty = pref_guard.dirty().load(Ordering::Acquire);
+        pref_guard
+            .dirty()
+            .store(current_guard.dirty().load(Ordering::Acquire), Ordering::Release);
+        current_guard.dirty().store(other_dirty, Ordering::Release);
+        pref_guard.evict_info().update();
+        current_guard.evict_info().update();
+
+        self.overflow.remove(&page_key);
+        self.overflow.insert(other_key, current_idx);
+        self.overflow_access_count.remove(&page_key);
+
+        drop(current_guard);
+        Ok(pref_guard)
+    }
+
+    /// Roll for promotion: true with probability 1/denom. Uses next_u32() % denom == 0.
+    #[inline]
+    fn promote_roll(denom: u32) -> bool {
+        let mut rng = small_thread_rng();
+        rng.next_u32() % denom == 0
     }
 }
 
@@ -613,6 +710,25 @@ impl MemPool for PredictiveTranslationBP {
                 if let Some(g) = self.try_get_write_guard(idx, true) {
                     if g.page_key() == Some(page_key) {
                         g.evict_info().update();
+                        // One-hit-wonder (§3.2): only consider promotion after second access
+                        let prev = self
+                            .overflow_access_count
+                            .entry(page_key)
+                            .or_insert_with(|| AtomicU32::new(0))
+                            .fetch_add(1, Ordering::Relaxed);
+                        if prev >= 1 {
+                            let pref_free = self.frame_is_free(pref);
+                            let denom = if pref_free {
+                                Self::PROMOTE_PROB_NO_DEMOTE
+                            } else {
+                                Self::PROMOTE_PROB_DEMOTE
+                            };
+                            if Self::promote_roll(denom) {
+                                let guard =
+                                    self.try_promote_to_preferred(g, page_key, pref)?;
+                                return Ok(guard);
+                            }
+                        }
                         return Ok(g);
                     }
                 } else if self.overflow.lookup_with_bucket(&page_key, pref) == Some(idx) {
@@ -661,6 +777,11 @@ impl MemPool for PredictiveTranslationBP {
                 if let Some(g) = self.try_get_read_guard(idx) {
                     if g.page_key() == Some(page_key) {
                         g.evict_info().update();
+                        // One-hit-wonder: count overflow accesses (promotion only on write path)
+                        self.overflow_access_count
+                            .entry(page_key)
+                            .or_insert_with(|| AtomicU32::new(0))
+                            .fetch_add(1, Ordering::Relaxed);
                         return Ok(g);
                     }
                 } else if self.overflow.lookup_with_bucket(&page_key, pref) == Some(idx) {
@@ -715,6 +836,7 @@ impl MemPool for PredictiveTranslationBP {
                     && self.overflow.lookup(&pk) == Some(i)
                 {
                     self.overflow.remove(&pk);
+                    self.overflow_access_count.remove(&pk);
                 }
             }
             frame.clear();
