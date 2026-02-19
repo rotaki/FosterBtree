@@ -5,15 +5,15 @@
 //!
 //! **Lookup:** check the preferred frame first (tag check on `FrameMeta::key()`).
 //! If the preferred frame holds the right page, we're done (fast path).
-//! Otherwise fall through to the overflow DashMap for pages not in their
+//! Otherwise fall through to the overflow table for pages not in their
 //! preferred frame.
 //!
-//! **Page fault:** if the preferred frame is free, load the page there (no DashMap
+//! **Page fault:** if the preferred frame is free, load the page there (no overflow
 //! entry needed). If occupied, load into any free frame and insert into the
-//! overflow DashMap.
+//! overflow table.
 //!
 //! **Eviction:** clock sweep over all frames. On evict, only remove from the
-//! DashMap if the page was in overflow (i.e. not in its preferred frame).
+//! overflow table if the page was in overflow (i.e. not in its preferred frame).
 //!
 //! ## TODO — remaining paper ideas
 //!
@@ -22,17 +22,17 @@
 //!       (swap into preferred frame, demote current occupant).
 //!       Probabilities: 1/50 (no demotion) or 1/512 (demotion needed).
 //!
-//! - [ ] **Optimistic latch** (Sec 4.2): replace per-bucket locking with a
-//!       version-counter optimistic latch so read-path translations are lock-free.
-//!       This is what lets the CPU overlap lookup and predicted-frame access.
+//! - [x] **Lock-free overflow reads** (Sec 4.2): overflow table uses version +
+//!       ArcSwap per bucket; read path has no mutex so lookup can overlap with
+//!       preferred-frame load.
 //!
-//! - [ ] **Inlined chaining hash table** (Sec 4.1): custom hash table with the
-//!       first slot inlined in the bucket (no pointer chase). Frame header stored
-//!       inside the hash entry — eliminates one indirection.
+//! - [x] **Inlined chaining overflow table** (Sec 4.1): custom table with first
+//!       slot inlined per bucket. Frame metadata remains in `metas` (no header
+//!       in hash entry yet).
 //!
-//! - [ ] **Superscalar interleaving** (Sec 3.1, Listing 2): structure the read
-//!       hot path so predicted-frame access and hash verification are independent
-//!       loads, letting the CPU issue them in parallel.
+//! - [x] **Superscalar interleaving** (Sec 3.1, Listing 2): hot path issues
+//!       preferred-frame tag check and overflow lookup before branching, so the
+//!       CPU can overlap both loads.
 //!
 //! - [ ] **Benchmarks**: TPC-C + YCSB (uniform & skewed) vs BufferPoolClock /
 //!       VMCachePool. Track throughput, IPC, L2 misses, promotion overhead.
@@ -593,8 +593,12 @@ impl MemPool for PredictiveTranslationBP {
         let pref = self.preferred_frame(&page_key);
 
         loop {
-            // 1. Fast path: check the preferred frame (tag check).
-            if self.frame_holds_page(pref, &page_key) {
+            // Superscalar interleaving (§3.1, Listing 2): issue both lookups before branching
+            // so the CPU can overlap preferred-frame load with overflow lookup.
+            let preferred_hit = self.frame_holds_page(pref, &page_key);
+            let overflow_frame = self.overflow.lookup_with_bucket(&page_key, pref);
+
+            if preferred_hit {
                 if let Some(g) = self.try_get_write_guard(pref, true) {
                     if g.page_key() == Some(page_key) {
                         g.evict_info().update();
@@ -605,8 +609,7 @@ impl MemPool for PredictiveTranslationBP {
                 }
             }
 
-            // 2. Slow path: check the overflow table (same bucket as pref when num_buckets == num_frames).
-            if let Some(idx) = self.overflow.lookup_with_bucket(&page_key, pref) {
+            if let Some(idx) = overflow_frame {
                 if let Some(g) = self.try_get_write_guard(idx, true) {
                     if g.page_key() == Some(page_key) {
                         g.evict_info().update();
@@ -618,7 +621,6 @@ impl MemPool for PredictiveTranslationBP {
                 continue;
             }
 
-            // 3. Page fault — load from disk.
             match self.handle_page_fault_write(page_key, pref) {
                 Ok(g) => return Ok(g),
                 Err(MemPoolStatus::RetryPageFault) => continue,
@@ -639,8 +641,12 @@ impl MemPool for PredictiveTranslationBP {
         let pref = self.preferred_frame(&page_key);
 
         loop {
-            // 1. Fast path: check the preferred frame (tag check).
-            if self.frame_holds_page(pref, &page_key) {
+            // Superscalar interleaving (§3.1, Listing 2): issue both lookups before branching
+            // so the CPU can overlap preferred-frame load with overflow lookup.
+            let preferred_hit = self.frame_holds_page(pref, &page_key);
+            let overflow_frame = self.overflow.lookup_with_bucket(&page_key, pref);
+
+            if preferred_hit {
                 if let Some(g) = self.try_get_read_guard(pref) {
                     if g.page_key() == Some(page_key) {
                         g.evict_info().update();
@@ -651,8 +657,7 @@ impl MemPool for PredictiveTranslationBP {
                 }
             }
 
-            // 2. Slow path: check the overflow table (same bucket as pref when num_buckets == num_frames).
-            if let Some(idx) = self.overflow.lookup_with_bucket(&page_key, pref) {
+            if let Some(idx) = overflow_frame {
                 if let Some(g) = self.try_get_read_guard(idx) {
                     if g.page_key() == Some(page_key) {
                         g.evict_info().update();
@@ -664,7 +669,6 @@ impl MemPool for PredictiveTranslationBP {
                 continue;
             }
 
-            // 3. Page fault — load from disk.
             match self.handle_page_fault_write(page_key, pref) {
                 Ok(victim) => return Ok(victim.downgrade()),
                 Err(MemPoolStatus::RetryPageFault) => continue,
