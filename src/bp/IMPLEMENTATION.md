@@ -1,216 +1,124 @@
-# Predictive Translation — Implementation Status
+# Predictive Translation in LIPAH — Implementation Status
 
-What is actually built in `predictive_translation.rs` right now, what isn't,
-and how the pieces fit together.
+This document is the **master reference** for the PrediCache-style predictive translation buffer pool in the LIPAH repo: what is implemented, what is not, how it fits together, and how it relates to the paper and the C++ prototype.
 
----
+**Paper:** *Predictive Translation: High-Performance Buffer Management Without the Trade-Offs* (Zinsmeister et al., SIGMOD ’26).
 
-## Implemented (from the paper)
-
-### Deterministic frame placement (Section 3.1)
-
-Every page has a **preferred frame** computed as `hash(page_key) % num_frames`.
-
-- **Lookup fast path:** hash the page key, go to the preferred frame, do an
-  unlatched **tag check** (`FrameMeta::key() == page_key`). If it matches, latch
-  the frame and return. No hash-table lookup needed.
-- **Lookup slow path:** if the tag check misses, fall back to an **overflow
-  table** (`OverflowTable`) that maps `PageKey -> frame_index` for pages not
-  in their preferred frame. The overflow table is a custom chaining hash table
-  with inlined first slot and lock-free reads (see `overflow_table.rs`).
-- **Overflow table is secondary, not primary.** In a conventional buffer pool
-  *every* resident page lives in a translation hash table. Here, pages sitting
-  in their preferred frame have no hash-table entry — only overflow pages appear
-  in the table.
-
-### Preferred-frame-aware page fault
-
-When a page fault loads a page from disk:
-
-1. A free frame is obtained from the free list (via `choose_victim()`).
-2. If the free frame *happens to be* the page's preferred frame, the page is
-   placed there and **no overflow entry is created** (the tag check is enough).
-3. Otherwise the page goes into whatever free frame was available, and an entry
-   is added to the overflow table.
-
-The preferred frame is **not** proactively claimed. The free list is always the
-source of frames. Whether a page ends up in its preferred frame is
-opportunistic. This avoids desynchronising the free list.
-
-### Preferred-frame-aware eviction
-
-Clock-sweep eviction is unchanged. When evicting a frame we remove its page
-from the overflow table only if (a) the page was *not* in its preferred frame,
-and (b) this frame is still the one recorded for that page in the overflow table
-(`overflow.lookup(pk) == this_frame`). That way we never remove the canonical
-mapping when evicting a duplicate or when the same page landed in another frame
-after our eviction decision. Pages evicted from their preferred frame have no
-overflow entry to clean up. (Same rule applies in flush/undo paths.)
-
-### Concurrency
-
-The design keeps the fast path (tag check on preferred frame) mostly lock-free
-while guaranteeing that each resident page has exactly one canonical location
-(preferred frame tag or overflow table). The following are implemented so that
-behaviour holds under concurrency.
-
-1. **Re-verification under latch (TOCTOU guard).** After an unlatched tag check
-   passes and the latch is acquired, we re-verify that the frame still holds the
-   expected page. If the page was evicted and replaced between the tag check and
-   the latch, we drop the guard and fall through to the overflow/fault path.
-
-2. **Re-check after latch failure.** If the tag check passes but the latch
-   fails (another thread holds it), we re-read the tag. If the page is still
-   there, it's genuinely held by another thread — return a latch-failed error so
-   the caller retries. If the page disappeared (evicted between the two checks),
-   fall through to overflow/fault instead of returning a spurious latch error.
-
-3. **Per-page fault serialization.** Only one thread may run the fault path for a
-   given page at a time. Before faulting we claim the page in a `fault_in_progress`
-   set (insert; if already present, return `RetryPageFault`). A guard removes the
-   claim on drop so any return path (success or failure) releases it. Callers
-   (`get_page_for_write` / `get_page_for_read`) loop on `RetryPageFault` until
-   the page is present or another error occurs.
-
-4. **Early claim and duplicate-fault detection in the fault path.** After
-   obtaining a victim frame we set `page_key` on it before `read_page` (early
-   claim). We also avoid creating duplicate mappings:
-   - Before using the victim we re-check that the page is not already in the
-     preferred frame or the overflow table; if it is, we release the victim and
-     return `RetryPageFault`.
-   - If we put the page in the overflow table (non-preferred frame), we re-check
-     that we are still the entry after insert and before/after disk I/O; if
-     another thread won the mapping or loaded the page into the preferred frame,
-     we release our frame (and remove our overflow entry only when we are still
-     the entry) and return `RetryPageFault`.
-   On undo (e.g. `read_page` failure) we remove from the overflow table only when
-   this frame is still the entry for that page.
-
-5. **Conditional remove from overflow.** Whenever we remove a page from the
-   overflow table (eviction, flush, or fault undo/duplicate release), we remove
-   only if the current frame is still the one stored for that page. So we never
-   remove the canonical mapping when evicting a frame that no longer holds the
-   canonical copy (e.g. duplicate fault that lost the race).
+**C++ reference implementation:** `~/databases-research/PrediCache`. See [Overflow table: our design vs paper vs C++](#overflow-table-our-design-vs-paper-vs-c) below and `OVERFLOW_ROADMAP.md` for detailed paper quotes and file references (`versioned_lock.hpp`, `ht.hpp`, `buffer_manager.hpp`).
 
 ---
 
-### Overflow table (Section 4.1, 4.2) — custom table, lock-free reads
+## 1. Implemented (from the paper)
 
-- **Custom chaining hash table** (`overflow_table.rs`): Fixed capacity `num_buckets == num_frames`, one bucket per frame. Each bucket has an inlined first slot (`Option<(PageKey, usize)>`) plus a chain (`Vec`) for collisions. API: `lookup`, `lookup_with_bucket`, `insert`, `remove`, `contains_key`, `get_page_keys`, `for_each_entry`.
-- **Lock-free read path:** Readers do not take a mutex. Per bucket: version counter (even = no writer), `ArcSwap<BucketData>` (copy-on-write). Read path: load version (must be even), load snapshot `Arc`, read inlined slot and chain, re-read version; if unchanged, use result; else retry. Fallback `lookup_slow` uses load only. So overflow lookup can be overlapped with preferred-frame load (superscalar).
-- **Single hash on hot path:** `get_page_for_read` / `get_page_for_write` compute `pref = preferred_frame(key)` once and call `overflow.lookup_with_bucket(&page_key, pref)` so we do not re-hash for overflow (same index when `num_buckets == num_frames`).
+### 1.1 Deterministic frame placement (§3.1)
 
----
+- **Preferred frame:** `preferred_frame(key) = hash(page_key) % num_frames`.
+- **Lookup fast path:** Go to the preferred frame, do an unlatched **tag check** (`FrameMeta::key() == page_key`). If it matches, latch the frame, re-verify under latch, and return. No hash-table lookup.
+- **Lookup slow path:** If the tag check misses, use the **overflow table** (`OverflowTable`) mapping `PageKey → frame_index` for pages not in their preferred frame.
+- **Overflow is secondary:** Pages in their preferred frame have no overflow entry; only overflow pages appear in the table.
 
-## Not implemented (from the paper)
+### 1.2 Preferred-frame-aware page fault
 
-| Paper feature | Section | Why it matters |
-|---|---|---|
-| **Promotion / demotion** | 3.2, 5.1 | Hot pages are NOT migrated into their preferred frame. Whether a page lands in its preferred frame is purely opportunistic (depends on free-list order). The overflow map does not shrink over time via promotion. |
-| **One-hit-wonder detection** | 3.2 | All pages are treated equally. No access-count tracking, no deferred promotion for first-access pages. |
-| **Frame header in hash table entry** | 4.1 | We store only frame index in the overflow table; metadata lives in `metas: Vec<Box<FrameMeta>>`. Paper inlines frame header in the hash entry to remove one indirection. Optional improvement. |
-| **Superscalar interleaving** | 3.1, Listing 2 | **One step left:** We still do preferred check *then* overflow lookup sequentially. To finish: restructure the hot path so we *issue* both the preferred-frame load and `lookup_with_bucket` (without branching on the first result), then resolve from the two results. Overflow is already lock-free and we hash once; only the control-flow change remains. |
-| **Benchmarks** | 6 | No TPC-C / YCSB comparison against `BufferPoolClock` or `VMCachePool` yet. |
+- Free frame from the free list (via `choose_victim()`).
+- If that frame is the page’s preferred frame → place the page there, **no overflow entry**.
+- Otherwise → place in the free frame and **insert** into the overflow table.
+- Preferred frame is not proactively claimed; placement is opportunistic to keep the free list simple.
 
----
+### 1.3 Preferred-frame-aware eviction
 
-## What’s left to finish PrediCache in LIPAH (walkthrough)
+- Clock sweep over all frames. On evict, **remove from overflow only if** (a) the page was not in its preferred frame, and (b) this frame is still the one recorded for that page (`overflow.lookup(pk) == this_frame`). Prevents removing the canonical mapping when evicting a duplicate or a frame that was reassigned. Same rule for flush and fault-undo paths.
 
-Paper reference: *Predictive Translation: High-Performance Buffer Management Without the Trade-Offs* (Zinsmeister et al., SIGMOD ’26). C++ reference: `~/databases-research/PrediCache` (see `OVERFLOW_ROADMAP.md` for `versioned_lock.hpp`, `ht.hpp`, `buffer_manager.hpp`).
+### 1.4 Overflow table (§4.1, §4.2) — structure and lock-free reads
 
-### Done (paper-aligned)
+- **Custom chaining hash table** (`overflow_table.rs`): `num_buckets == num_frames`, one bucket per logical slot. Each bucket has an **inlined first slot** (`Option<(PageKey, usize)>`) plus a chain for collisions. API: `lookup`, `lookup_with_bucket`, `insert`, `remove`, `contains_key`, `get_page_keys`, `for_each_entry`.
+- **Lock-free read path:** Per bucket: version counter (even = no writer) and an `ArcSwap<BucketData>` snapshot. Readers: load version (must be even), load snapshot, read inlined slot and chain, re-read version; if unchanged, use result; else retry. No mutex on the read path, so overflow lookup can overlap with preferred-frame load.
+- **Single hash on hot path:** `get_page_for_read` / `get_page_for_write` compute `pref = preferred_frame(key)` once and call `overflow.lookup_with_bucket(&page_key, pref)` so we do not re-hash for overflow.
 
-| Paper | Our status |
-|-------|------------|
-| **§3.1 Deterministic placement** | Preferred frame = `hash(page_key) % num_frames`; tag check on preferred; overflow for the rest. |
-| **§4.1 Chaining, inlined first slot** | Custom overflow table: one inlined slot per bucket + chain, `num_buckets == num_frames`. |
-| **§4.2 Lock-free translation reads** | Overflow read path is lock-free (version + ArcSwap snapshot, no mutex). |
-| **Single hash on hot path** | `pref` computed once; `lookup_with_bucket(&page_key, pref)` so no double hash. |
-| **Eviction + overflow cleanup** | On evict/flush we remove from overflow only when this frame is still the entry for that page. |
+### 1.5 Superscalar interleaving (§3.1, Listing 2)
 
-### One step left: superscalar interleaving (§3.1, Listing 2)
+- The hot path **issues** both the preferred-frame tag check and the overflow lookup at the start of each loop iteration, then resolves: preferred hit → use it; overflow hit → use that frame; else fault. The CPU can overlap both loads.
 
-**Goal (paper):** Let the CPU overlap the *predicted-frame load* with the *hash-table lookup* so translation latency is hidden behind the page read.
+### 1.6 Concurrency
 
-**Current code:** We do (1) preferred-frame tag check, (2) if miss → overflow lookup, (3) if miss → fault. So we never have both in flight.
-
-**Change:** Restructure `get_page_for_read` and `get_page_for_write` so that we *issue* both operations before we use either result:
-
-1. Compute `pref = preferred_frame(&page_key)` (already once per call).
-2. *Issue* the preferred-frame load (e.g. load `metas[pref]` for the tag check).
-3. *Issue* `overflow.lookup_with_bucket(&page_key, pref)` (no lock, same bucket index).
-4. *Then* resolve: if preferred holds the page → use it; else if overflow returned a frame → use it; else page fault.
-
-No new data structures; overflow is already lock-free and we already hash once. Only the control flow in the hot path changes so both lookups are in flight before branching.
-
-### Optional later (paper / roadmap)
-
-- **§3.2 Promotion / demotion, one-hit wonder:** Probabilistically promote hot pages into their preferred frame; demote current occupant to overflow. Defer promotion until second access. Not required for correctness; improves fast-path hit rate over time.
-- **§4.1 Frame header in entry:** Store minimal metadata inside the overflow entry instead of only frame index (removes one indirection to `metas`). See `OVERFLOW_ROADMAP.md` Phase 3.
-- **Benchmarks (§6):** TPC-C / YCSB vs `BufferPoolClock` and `VMCachePool`; optional micro-bench for overflow vs DashMap.
-
-### Summary
-
-To “finish” the PrediCache-style implementation on the superscalar branch: implement the hot-path restructure above so both the preferred-frame load and the overflow lookup are issued before we branch on the result. Everything else (deterministic placement, custom overflow, lock-free reads, single hash, eviction/overflow cleanup) is in place.
+- **Re-verification under latch (TOCTOU):** After the tag check passes and the latch is acquired, re-verify that the frame still holds the page; if not, drop the guard and fall through to overflow/fault.
+- **Re-check after latch failure:** If the latch fails, re-read the tag; if the page is gone, fall through instead of returning a spurious latch error.
+- **Per-page fault serialization:** `fault_in_progress` set ensures only one thread runs the fault path per page; callers loop on `RetryPageFault`.
+- **Early claim and duplicate-fault handling:** Set `page_key` on the victim before `read_page`; re-check that the page is not already in preferred or overflow before/after using the victim and after I/O; on undo, remove from overflow only when this frame is still the entry for that page.
+- **Conditional remove from overflow:** Every remove (eviction, flush, fault undo) removes only if the current frame is still the one stored for that page.
 
 ---
 
-## Implemented but NOT from the paper
-
-These are standard buffer-pool components, not paper contributions:
+## 2. Implemented (LIPAH / standard BP, not from the paper)
 
 | Feature | Notes |
-|---|---|
-| **Clock eviction** | Standard clock sweep (same `ClockEvictionPolicy` as `BufferPoolClock`). The paper is agnostic about eviction policy; clock is our baseline. |
-| **Free list (`ConcurrentQueue`)** | Frames recycled through a bounded concurrent queue. |
-| **`ensure_free_frames` threshold** | Eviction triggers when frame usage exceeds 95%. Evicts in batches of up to 64. |
+|--------|--------|
+| **Clock eviction** | Same `ClockEvictionPolicy` as `BufferPoolClock`. Paper is agnostic to eviction policy. |
+| **Free list** | `ConcurrentQueue<usize>` for frame indices; bounded, concurrent. |
+| **Eviction threshold** | Eviction when usage exceeds 95%; evict in batches of up to 64. |
+| **Per-frame metadata** | `metas: Vec<Box<FrameMeta>>` (latch, dirty bit, eviction state, page key). |
 
 ---
 
-## How lookup works
+## 3. Not implemented (paper-mentioned optimizations)
+
+| Paper feature | Section | Status / notes |
+|---------------|---------|----------------|
+| **Promotion / demotion** | 3.2, 5.1 | Hot pages are *not* migrated into their preferred frame. Placement is opportunistic; overflow does not shrink over time via promotion. Paper uses probabilistic promotion (e.g. 1/50 without demotion, 1/512 with demotion). |
+| **One-hit-wonder detection** | 3.2 | No access-count tracking; promotion is not deferred until second access. All pages are treated the same. |
+| **Frame header in hash table entry** | 4.1 | We store only frame index in the overflow table; metadata stays in `metas`. Paper inlines frame header in the hash entry to remove one indirection. Optional improvement. |
+| **Benchmarks** | 6 | No TPC-C / YCSB comparison vs `BufferPoolClock` or `VMCachePool` in this repo yet. |
+
+---
+
+## 4. Overflow table: our design vs paper vs C++
+
+### Paper (Section 4)
+
+- **Structure:** Chaining hash table; **first slot inlined** in the translation (bucket) array; **frame header in the hash table entry** (no separate metadata array).
+- **Synchronization:** **Optimistic latch** per bucket (version counter). Readers: read version → walk chain → re-read version; no lock. Writers take the latch exclusively and bump the version on release. Lock-free reads allow superscalar overlap with page access.
+
+### PrediCache C++ prototype (`~/databases-research/PrediCache`)
+
+- **`versioned_lock.hpp`:** One `atomic<uint64_t>` per bucket; **MSB = lock bit** (1 = writer), low bits = version. Writers: spin until MSB is 0, then CAS to set MSB; when done, clear MSB and increment version. Readers never take the lock; they read version, read data, re-read version and retry if changed.
+- **`ht.hpp`:** Chaining table with **first entry inlined** in each bucket; `VersionedLock` + inlined head + chain. Read path: load version (skip if MSB set), walk head and chain without locking, re-check version. Insert/remove: take versioned lock, mutate chain, unlock.
+- **`buffer_manager.hpp`:** Uses this hash table for translation; `fix`-style API calls `ht.access(pid, hash)` then fixes the returned frame.
+
+**Difference from our Rust overflow:** PrediCache does **in-place updates**: writers take the versioned lock, mutate the chain, then unlock. Readers validate the version on the same memory; no copy. Our implementation uses **copy-on-write** (ArcSwap + clone on write): writers clone the bucket, modify, then store a new `Arc`; readers load the current `Arc` (no mutex). Both give lock-free reads. CoW avoids partial-update concerns but pays clone + allocation on insert/remove. An in-place design (versioned lock + atomic chain + safe reclamation, e.g. with crossbeam-epoch) would be closer to the C++ and the paper; we use the CoW design for simplicity unless profiling shows write-heavy overflow as a bottleneck. See `OVERFLOW_ROADMAP.md` for more detail and a possible in-place roadmap.
+
+---
+
+## 5. How lookup works (high level)
 
 ```
 get_page_for_read / get_page_for_write  (loop until success or hard error)
 │
-├─ 1. preferred_frame = hash(page_key) % num_frames
-│     frame_holds_page(preferred_frame, page_key)?  ← unlatched tag check
-│     │
-│     ├─ YES → latch frame → re-verify page_key under latch
-│     │         ├─ match   → return guard                    (FAST PATH)
-│     │         └─ mismatch → drop guard, fall through       (page was replaced)
-│     │
-│     └─ NO → fall through
-│
-├─ 2. overflow.lookup_with_bucket(page_key, pref)?   // same pref, no re-hash
-│     │
-│     ├─ Some(idx) → latch frame → re-verify
-│     │         ├─ match   → return guard                    (SLOW PATH)
-│     │         └─ mismatch → continue (retry) / fall through (stale entry)
-│     │
-│     └─ None → fall through
-│
-└─ 3. handle_page_fault_write(page_key)                (PAGE FAULT)
-        claim page in fault_in_progress (if already claimed → RetryPageFault, loop)
-        pop frame from free list (choose_victim)
-        re-check: page in preferred or overflow? → release victim, RetryPageFault
-        set page_key on frame (early claim)
-        if frame ≠ preferred: insert overflow; re-check we're still the entry
-        read page from disk (on failure: undo claim only if we're still the entry)
-        if in overflow: re-check preferred/overflow; if duplicate → release, RetryPageFault
-        return guard  (claim released on drop)
-        ─ on RetryPageFault, caller continues loop
+├─ pref = preferred_frame(key)
+│  Issue: frame_holds_page(pref, key)?   and   overflow.lookup_with_bucket(key, pref)?
+│  Then resolve:
+│  • Preferred hit  → latch frame, re-verify → return guard (fast path)
+│  • Overflow hit   → latch that frame, re-verify → return guard (slow path)
+│  • Both miss      → handle_page_fault (claim page, choose_victim, maybe overflow.insert, read_page, …)
+└─ On RetryPageFault, caller continues loop.
 ```
+
+Fault path: claim page in `fault_in_progress`, pop frame from free list, re-check preferred/overflow for duplicate, set page_key (early claim), insert into overflow if frame ≠ preferred, read page, re-check after I/O; on failure/duplicate, conditional remove from overflow and release victim.
 
 ---
 
-## Key data structures
+## 6. Key data structures
 
-| Name | Type | Role |
-|------|------|------|
-| `OverflowTable` | Custom chaining table (`overflow_table.rs`) | Maps page → frame index for pages NOT in their preferred frame. Inlined first slot per bucket, lock-free reads (ArcSwap + version), CoW writes. `lookup_with_bucket` avoids re-hash when caller has `pref`. |
-| `fault_in_progress` | `Arc<DashMap<PageKey, ()>>` | Set of pages currently being faulted; one thread per page. Claim before faulting, released on drop. |
-| `free_list` | `ConcurrentQueue<usize>` | Indices of frames known to be free. |
-| `metas` | `Vec<Box<FrameMeta>>` | Per-frame metadata: latch, dirty bit, eviction info, page key (atomic). |
-| `pages` | `Vec<Box<Page>>` | Actual page data, one per frame. |
-| `clock_hand` | `AtomicUsize` | Global clock pointer for eviction sweep. |
-| `used_frames` | `AtomicUsize` | Count of frames currently holding a page. |
+| Name | Role |
+|------|------|
+| **OverflowTable** | Custom chaining table (`overflow_table.rs`). Maps page → frame index for pages not in their preferred frame. Inlined first slot per bucket; lock-free reads (version + ArcSwap snapshot), CoW writes. `lookup_with_bucket(key, pref)` avoids re-hash. |
+| **fault_in_progress** | `Arc<DashMap<PageKey, ()>>`. Set of pages currently being faulted; one fault at a time per page. |
+| **free_list** | `ConcurrentQueue<usize>`. Indices of frames known to be free. |
+| **metas** | `Vec<Box<FrameMeta>>`. Per-frame metadata: latch, dirty bit, eviction state, page key. |
+| **pages** | `Vec<Box<Page>>`. Page data, one per frame. |
+| **clock_hand** | `AtomicUsize`. Clock pointer for eviction sweep. |
+| **used_frames** | `AtomicUsize`. Count of frames currently in use. |
+
+---
+
+## Summary
+
+LIPAH’s predictive translation implements the **core** of the paper: deterministic placement, tag check on preferred frame, custom overflow table with inlined first slot and lock-free reads, single hash on the hot path, superscalar-style overlap, and correct concurrent fault/eviction/flush behavior. **Not implemented** are the paper’s **policy optimizations** (promotion/demotion, one-hit-wonder), the optional **frame header in the hash entry**, and **benchmarks**. The overflow table uses a **CoW** design (ArcSwap + version) rather than the C++ **in-place** versioned lock; both provide lock-free reads and match the paper’s intent for the read path.
