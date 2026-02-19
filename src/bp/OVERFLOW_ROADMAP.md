@@ -119,6 +119,14 @@ Goal: replace `OverflowTable` (backed by `DashMap<PageKey, usize>`) with a paper
 - **Inline minimal metadata in overflow entry** (e.g. frame index + dirty bit or just frame index if we still want to keep one indirection to `metas` for latch): only if we want to fully match the paper’s “frame header in hash table entry” and remove the extra indirection.
 - **Superscalar interleaving:** Restructure the **read hot path** in `get_page_for_read` / `get_page_for_write` so that the predicted-frame load is **issued in parallel** with the overflow lookup (Section 3.1, Listing 2). This is a separate change in the caller; it becomes viable once overflow lookup is lock-free (Phase 2).
 
+**Are we fully ready for superscalar (will interleaving actually help)?**
+
+- **Overflow table:** Yes. Lookup is lock-free (no mutex on read path), so we can "issue" an overflow lookup without blocking and overlap it with the preferred-frame load.
+- **Single hash:** Done. The hot path (`get_page_for_read` / `get_page_for_write`) computes `pref = preferred_frame(key)` once and uses `overflow.lookup_with_bucket(&page_key, pref)` so we do not re-hash for overflow; with `num_buckets == num_frames`, `pref` is the bucket index.
+- **Control flow:** Not yet. We still do preferred check first, then overflow only on miss, so we never have "both in flight." Superscalar requires **restructuring** the hot path so we issue both the preferred-frame load and the overflow lookup, then resolve from the two results. That is the only remaining step.
+
+**Summary:** We are one step away. Overflow is lock-free and we hash once on the hot path. The only remaining work is to restructure so both lookups are issued before we branch on the result.
+
 ---
 
 ## Summary
