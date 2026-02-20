@@ -1,19 +1,9 @@
 //! Predictive Translation Buffer Pool
 //!
-//! Buffer pool with **deterministic frame placement**: each page has a preferred
-//! frame computed as `hash(page_key) % num_frames`.
-//!
-//! **Lookup:** check the preferred frame first (tag check on `FrameMeta::key()`).
-//! If the preferred frame holds the right page, we're done (fast path).
-//! Otherwise fall through to the overflow table for pages not in their
-//! preferred frame.
-//!
-//! **Page fault:** if the preferred frame is free, load the page there (no overflow
-//! entry needed). If occupied, load into any free frame and insert into the
-//! overflow table.
-//!
-//! **Eviction:** clock sweep over all frames. On evict, only remove from the
-//! overflow table if the page was in overflow (i.e. not in its preferred frame).
+//! **Unified translation** (paper/C++ style): one hash table holds all page→frame
+//! mappings. Lookup = `overflow.lookup_with_bucket(key, pref)` (bucket head =
+//! preferred slot, chain = overflow). Fault always inserts into overflow; evict
+//! removes when this frame is still the entry for that page.
 //!
 //! ## Paper alignment
 //!
@@ -33,9 +23,7 @@
 //!       slot inlined per bucket. Frame metadata remains in `metas` (no header
 //!       in hash entry yet).
 //!
-//! - [x] **Superscalar interleaving** (Sec 3.1, Listing 2): hot path issues
-//!       preferred-frame tag check and overflow lookup before branching, so the
-//!       CPU can overlap both loads.
+//! - [x] **Single lookup**: one overflow lookup per access (bucket = preferred slot).
 //!
 //! - [ ] **Benchmarks**: TPC-C + YCSB (uniform & skewed) vs BufferPoolClock /
 //!       VMCachePool. Track throughput, IPC, L2 misses, promotion overhead.
@@ -336,11 +324,9 @@ impl PredictiveTranslationBP {
                     }
                     // Flush if dirty.
                     self.write_to_disk_if_dirty_w(&guard).unwrap();
-                    // Remove from overflow only if this frame is the one in the table.
+                    // Unified: every resident page is in overflow; remove when we evict.
                     if let Some(pk) = guard.page_key() {
-                        if self.preferred_frame(&pk) != idx
-                            && self.overflow.lookup(&pk) == Some(idx)
-                        {
+                        if self.overflow.lookup(&pk) == Some(idx) {
                             self.overflow.remove(&pk);
                             self.overflow_access_count.remove(&pk);
                         }
@@ -398,37 +384,27 @@ impl PredictiveTranslationBP {
 
         debug_assert!(victim.page_key().is_none());
 
-        // Avoid duplicate fault: another thread may have loaded this page (overflow or preferred).
-        if self.frame_holds_page(pref, &page_key) || self.overflow.contains_key(&page_key) {
+        // Avoid duplicate fault: another thread may have loaded this page (unified: only overflow).
+        if self.overflow.contains_key(&page_key) {
             self.free_frames.insert(victim.frame_id() as usize);
             self.used_frames.fetch_sub(1, Ordering::AcqRel);
             return Err(MemPoolStatus::RetryPageFault);
         }
 
-        let in_preferred = victim.frame_id() as usize == pref;
-
         victim.set_page_key(Some(page_key));
-        if !in_preferred {
-            // Re-check: another thread may have loaded into preferred after we took the victim.
-            if self.frame_holds_page(pref, &page_key) {
-                victim.set_page_key(None);
-                self.free_frames.insert(victim.frame_id() as usize);
-                self.used_frames.fetch_sub(1, Ordering::AcqRel);
-                return Err(MemPoolStatus::RetryPageFault);
-            }
-            self.overflow.insert(page_key, victim.frame_id() as usize);
-            // If another thread inserted (overwrote us), we're a duplicate.
-            if self.overflow.lookup(&page_key) != Some(victim.frame_id() as usize) {
-                victim.set_page_key(None);
-                self.free_frames.insert(victim.frame_id() as usize);
-                self.used_frames.fetch_sub(1, Ordering::AcqRel);
-                return Err(MemPoolStatus::RetryPageFault);
-            }
+        self.overflow.insert(page_key, victim.frame_id() as usize);
+        if self.overflow.lookup(&page_key) != Some(victim.frame_id() as usize) {
+            victim.set_page_key(None);
+            self.overflow.remove(&page_key);
+            self.free_frames.insert(victim.frame_id() as usize);
+            self.used_frames.fetch_sub(1, Ordering::AcqRel);
+            return Err(MemPoolStatus::RetryPageFault);
         }
 
         // Re-check before disk I/O.
-        if !in_preferred && self.overflow.lookup(&page_key) != Some(victim.frame_id() as usize) {
+        if self.overflow.lookup(&page_key) != Some(victim.frame_id() as usize) {
             victim.set_page_key(None);
+            self.overflow.remove(&page_key);
             self.free_frames.insert(victim.frame_id() as usize);
             self.used_frames.fetch_sub(1, Ordering::AcqRel);
             return Err(MemPoolStatus::RetryPageFault);
@@ -440,9 +416,8 @@ impl PredictiveTranslationBP {
             .get_container(page_key.c_key)
             .read_page(page_key.page_id, &mut victim)
         {
-            // Undo claims (only remove from overflow if we're still the entry).
             victim.set_page_key(None);
-            if !in_preferred && self.overflow.lookup(&page_key) == Some(victim.frame_id() as usize) {
+            if self.overflow.lookup(&page_key) == Some(victim.frame_id() as usize) {
                 self.overflow.remove(&page_key);
                 self.overflow_access_count.remove(&page_key);
             }
@@ -454,22 +429,16 @@ impl PredictiveTranslationBP {
         victim.evict_info().reset();
         victim.dirty().store(true, Ordering::Release);
 
-        // After load: if we're in overflow but the page is now in preferred (another thread)
-        // or we were overwritten in overflow, don't return a duplicate.
-        if !in_preferred {
-            if self.frame_holds_page(pref, &page_key)
-                || self.overflow.lookup(&page_key) != Some(victim.frame_id() as usize)
-            {
-                self.write_to_disk_if_dirty_w(&victim).ok();
-                victim.set_page_key(None);
-                if self.overflow.lookup(&page_key) == Some(victim.frame_id() as usize) {
-                    self.overflow.remove(&page_key);
-                    self.overflow_access_count.remove(&page_key);
-                }
-                self.free_frames.insert(victim.frame_id() as usize);
-                self.used_frames.fetch_sub(1, Ordering::AcqRel);
-                return Err(MemPoolStatus::RetryPageFault);
+        if self.overflow.lookup(&page_key) != Some(victim.frame_id() as usize) {
+            self.write_to_disk_if_dirty_w(&victim).ok();
+            victim.set_page_key(None);
+            if self.overflow.lookup(&page_key) == Some(victim.frame_id() as usize) {
+                self.overflow.remove(&page_key);
+                self.overflow_access_count.remove(&page_key);
             }
+            self.free_frames.insert(victim.frame_id() as usize);
+            self.used_frames.fetch_sub(1, Ordering::AcqRel);
+            return Err(MemPoolStatus::RetryPageFault);
         }
 
         Ok(victim)
@@ -545,6 +514,7 @@ impl PredictiveTranslationBP {
 
             current_guard.clear();
             self.overflow.remove(&page_key);
+            self.overflow.insert(page_key, pref); // Unified: preferred slot still in table
             self.overflow_access_count.remove(&page_key);
             self.free_frames.insert(current_idx);
             self.used_frames.fetch_sub(1, Ordering::AcqRel);
@@ -620,12 +590,8 @@ impl MemPool for PredictiveTranslationBP {
         debug_assert!(victim.page_key().is_none());
         debug_assert!(!victim.dirty().load(Ordering::Acquire));
 
-        let in_preferred = victim.frame_id() as usize == self.preferred_frame(&page_key);
-
-        // Only register in overflow table if NOT in preferred frame.
-        if !in_preferred {
-            self.overflow.insert(page_key, victim.frame_id() as usize);
-        }
+        // Unified: every resident page is in the overflow table.
+        self.overflow.insert(page_key, victim.frame_id() as usize);
 
         // Initialise the frame.
         victim.set_id(page_id);
@@ -655,36 +621,11 @@ impl MemPool for PredictiveTranslationBP {
     // ----- page presence --------------------------------------------------
 
     fn is_in_mem(&self, key: PageFrameKey) -> bool {
-        let pk = key.p_key();
-        // Check preferred frame (tag check) OR overflow table.
-        self.is_in_preferred_frame(&pk) || self.overflow.contains_key(&pk)
+        self.overflow.contains_key(&key.p_key())
     }
 
     fn get_page_keys_in_mem(&self, c_key: ContainerKey) -> Vec<PageFrameKey> {
-        // We need to return ALL resident pages for this container:
-        // (a) pages in their preferred frame (found by scanning frames), and
-        // (b) pages in overflow.
-        let mut result = Vec::new();
-
-        // Scan all frames for pages belonging to c_key that are in their
-        // preferred frame (these are NOT in the overflow table).
-        for i in 0..self.num_frames {
-            let meta = &unsafe { &*self.metas.get() }[i];
-            if let Some(pk) = meta.key() {
-                if pk.c_key == c_key && self.preferred_frame(&pk) == i {
-                    result.push(PageFrameKey::new_with_frame_id(
-                        pk.c_key,
-                        pk.page_id,
-                        i as u32,
-                    ));
-                }
-            }
-        }
-
-        // Add overflow pages for this container.
-        result.extend(self.overflow.get_page_keys(c_key));
-
-        result
+        self.overflow.get_page_keys(c_key)
     }
 
     // ----- get page for write ---------------------------------------------
@@ -699,23 +640,10 @@ impl MemPool for PredictiveTranslationBP {
         let pref = self.preferred_frame(&page_key);
 
         loop {
-            // Superscalar interleaving (§3.1, Listing 2): issue both lookups before branching
-            // so the CPU can overlap preferred-frame load with overflow lookup.
-            let preferred_hit = self.frame_holds_page(pref, &page_key);
-            let overflow_frame = self.overflow.lookup_with_bucket(&page_key, pref);
+            // Unified translation: single lookup (paper/C++ style).
+            let frame_idx = self.overflow.lookup_with_bucket(&page_key, pref);
 
-            if preferred_hit {
-                if let Some(g) = self.try_get_write_guard(pref, true) {
-                    if g.page_key() == Some(page_key) {
-                        g.evict_info().update();
-                        return Ok(g);
-                    }
-                } else if self.frame_holds_page(pref, &page_key) {
-                    return Err(MemPoolStatus::FrameWriteLatchGrantFailed);
-                }
-            }
-
-            if let Some(idx) = overflow_frame {
+            if let Some(idx) = frame_idx {
                 if let Some(g) = self.try_get_write_guard(idx, true) {
                     if g.page_key() == Some(page_key) {
                         g.evict_info().update();
@@ -766,23 +694,10 @@ impl MemPool for PredictiveTranslationBP {
         let pref = self.preferred_frame(&page_key);
 
         loop {
-            // Superscalar interleaving (§3.1, Listing 2): issue both lookups before branching
-            // so the CPU can overlap preferred-frame load with overflow lookup.
-            let preferred_hit = self.frame_holds_page(pref, &page_key);
-            let overflow_frame = self.overflow.lookup_with_bucket(&page_key, pref);
+            // Unified translation: single lookup (paper/C++ style).
+            let frame_idx = self.overflow.lookup_with_bucket(&page_key, pref);
 
-            if preferred_hit {
-                if let Some(g) = self.try_get_read_guard(pref) {
-                    if g.page_key() == Some(page_key) {
-                        g.evict_info().update();
-                        return Ok(g);
-                    }
-                } else if self.frame_holds_page(pref, &page_key) {
-                    return Err(MemPoolStatus::FrameReadLatchGrantFailed);
-                }
-            }
-
-            if let Some(idx) = overflow_frame {
+            if let Some(idx) = frame_idx {
                 if let Some(g) = self.try_get_read_guard(idx) {
                     if g.page_key() == Some(page_key) {
                         g.evict_info().update();
@@ -840,10 +755,7 @@ impl MemPool for PredictiveTranslationBP {
             };
             self.write_to_disk_if_dirty_w(&frame).unwrap();
             if let Some(pk) = frame.page_key() {
-                // Only remove from overflow if this frame is the one in the table.
-                if self.preferred_frame(&pk) != i
-                    && self.overflow.lookup(&pk) == Some(i)
-                {
+                if self.overflow.lookup(&pk) == Some(i) {
                     self.overflow.remove(&pk);
                     self.overflow_access_count.remove(&pk);
                 }
@@ -953,7 +865,7 @@ impl PredictiveTranslationBP {
 
     unsafe fn check_translation_table(&self) {
         use std::collections::HashMap;
-        // Build map of overflow entries: frame_id -> page_key.
+        // Unified: every resident page is in overflow. Check overflow matches frames.
         let mut overflow_frame_to_page: HashMap<usize, PageKey> = HashMap::new();
         self.overflow.for_each_entry(|pk, fid| {
             overflow_frame_to_page.insert(fid, pk);
@@ -961,22 +873,11 @@ impl PredictiveTranslationBP {
         for i in 0..self.num_frames {
             let meta = &(*self.metas.get())[i];
             if let Some(pk) = meta.key() {
-                let pref = self.preferred_frame(&pk);
-                if pref == i {
-                    // Page is in its preferred frame — must NOT be in overflow.
-                    assert!(
-                        !overflow_frame_to_page.contains_key(&i),
-                        "frame {} has key {:?} in preferred position but is also in overflow",
-                        i, pk
-                    );
-                } else {
-                    // Page is in overflow — must be in the overflow table.
-                    assert!(
-                        overflow_frame_to_page.get(&i) == Some(&pk),
-                        "frame {} has key {:?} (preferred={}) but overflow table disagrees",
-                        i, pk, pref
-                    );
-                }
+                assert!(
+                    overflow_frame_to_page.get(&i) == Some(&pk),
+                    "frame {} has key {:?} but overflow table disagrees",
+                    i, pk
+                );
             }
         }
     }

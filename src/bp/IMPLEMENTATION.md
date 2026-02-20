@@ -1,6 +1,6 @@
-# Predictive Translation in LIPAH — Implementation Status
+# Predictive Translation — Implementation Status
 
-This document is the **master reference** for the PrediCache-style predictive translation buffer pool in the LIPAH repo: what is implemented, what is not, how it fits together, and how it relates to the paper and the C++ prototype.
+This document is the **master reference** for the PrediCache-style predictive translation buffer pool in this repo: what is implemented, what is not, how it fits together, and how it relates to the paper and the C++ prototype.
 
 **Paper:** *Predictive Translation: High-Performance Buffer Management Without the Trade-Offs* (Zinsmeister et al., SIGMOD ’26).
 
@@ -10,23 +10,19 @@ This document is the **master reference** for the PrediCache-style predictive tr
 
 ## 1. Implemented (from the paper)
 
-### 1.1 Deterministic frame placement (§3.1)
+### 1.1 Deterministic frame placement (§3.1) — unified translation
 
 - **Preferred frame:** `preferred_frame(key) = hash(page_key) % num_frames`.
-- **Lookup fast path:** Go to the preferred frame, do an unlatched **tag check** (`FrameMeta::key() == page_key`). If it matches, latch the frame, re-verify under latch, and return. No hash-table lookup.
-- **Lookup slow path:** If the tag check misses, use the **overflow table** (`OverflowTable`) mapping `PageKey → frame_index` for pages not in their preferred frame.
-- **Overflow is secondary:** Pages in their preferred frame have no overflow entry; only overflow pages appear in the table.
+- **Unified translation (single lookup):** One hash table holds *all* page→frame mappings (paper/C++ style). Lookup is a single `overflow.lookup_with_bucket(key, pref)`: the preferred slot is the bucket head, the chain is overflow. No separate tag check; no “preferred ⇒ not in overflow.”
+- **Fault / eviction / promotion:** Always insert into overflow on fault (including when placing in preferred frame). On eviction or flush, remove from overflow when this frame is still the entry for that page. On promotion to preferred, insert the preferred frame into overflow so the table stays canonical.
 
 ### 1.2 Preferred-frame-aware page fault
 
-- Free frame from the free list (via `choose_victim()`).
-- If that frame is the page’s preferred frame → place the page there, **no overflow entry**.
-- Otherwise → place in the free frame and **insert** into the overflow table.
-- Preferred frame is not proactively claimed; placement is opportunistic to keep the free list simple.
+- Free frame from the free list (via `choose_victim()`). Place page there; **always** `overflow.insert(page_key, frame_id)` (unified: preferred and overflow both in the table). Preferred frame is not proactively claimed; placement is opportunistic.
 
-### 1.3 Preferred-frame-aware eviction
+### 1.3 Eviction
 
-- Clock sweep over all frames. On evict, **remove from overflow only if** (a) the page was not in its preferred frame, and (b) this frame is still the one recorded for that page (`overflow.lookup(pk) == this_frame`). Prevents removing the canonical mapping when evicting a duplicate or a frame that was reassigned. Same rule for flush and fault-undo paths.
+- Clock sweep over all frames. On evict, remove from overflow when `overflow.lookup(pk) == this_frame`. Same for flush and fault-undo paths.
 
 ### 1.4 Overflow table (§4.1, §4.2) — structure and lock-free reads
 
@@ -34,21 +30,21 @@ This document is the **master reference** for the PrediCache-style predictive tr
 - **In-place updates (versioned lock):** Per bucket: one `AtomicU64` with **MSB = lock bit** (1 = writer), low bits = version (PrediCache-style). Writers: spin until MSB is 0, CAS to set MSB, mutate inlined slot and chain, then clear MSB and bump version. Readers: load version (skip if MSB set), read inlined slot and chain (chain nodes are `crossbeam_epoch::Atomic`), re-read version; if unchanged, use result; else retry. No copy on insert/remove; chain nodes are allocated and retired via crossbeam-epoch.
 - **Single hash on hot path:** `get_page_for_read` / `get_page_for_write` compute `pref = preferred_frame(key)` once and call `overflow.lookup_with_bucket(&page_key, pref)` so we do not re-hash for overflow.
 
-### 1.5 Superscalar interleaving (§3.1, Listing 2)
+### 1.5 Single lookup (paper/C++ style)
 
-- The hot path **issues** both the preferred-frame tag check and the overflow lookup at the start of each loop iteration, then resolves: preferred hit → use it; overflow hit → use that frame; else fault. The CPU can overlap both loads.
+- Hot path does one `overflow.lookup_with_bucket(key, pref)` per iteration; bucket head = preferred slot, chain = overflow. Resolve: hit → latch frame and return; miss → fault.
 
 ### 1.6 Concurrency
 
 - **Re-verification under latch (TOCTOU):** After the tag check passes and the latch is acquired, re-verify that the frame still holds the page; if not, drop the guard and fall through to overflow/fault.
 - **Re-check after latch failure:** If the latch fails, re-read the tag; if the page is gone, fall through instead of returning a spurious latch error.
 - **Per-page fault serialization:** `fault_in_progress` set ensures only one thread runs the fault path per page; callers loop on `RetryPageFault`.
-- **Early claim and duplicate-fault handling:** Set `page_key` on the victim before `read_page`; re-check that the page is not already in preferred or overflow before/after using the victim and after I/O; on undo, remove from overflow only when this frame is still the entry for that page.
-- **Conditional remove from overflow:** Every remove (eviction, flush, fault undo) removes only if the current frame is still the one stored for that page.
+- **Early claim and duplicate-fault handling:** Set `page_key` on the victim before `read_page`; re-check via overflow that the page is not already loaded; on undo, remove from overflow when this frame is still the entry for that page.
+- **Conditional remove from overflow:** Eviction, flush, fault undo: remove only when `overflow.lookup(pk) == this_frame`.
 
 ---
 
-## 2. Implemented (LIPAH / standard BP, not from the paper)
+## 2. Implemented (standard BP / not from the paper)
 
 | Feature | Notes |
 |--------|--------|
@@ -63,10 +59,10 @@ This document is the **master reference** for the PrediCache-style predictive tr
 
 | Paper feature | Section | Status / notes |
 |---------------|---------|----------------|
-| **Promotion / demotion** | 3.2, 5.1 | Hot pages are *not* migrated into their preferred frame. Placement is opportunistic; overflow does not shrink over time via promotion. Paper uses probabilistic promotion (e.g. 1/50 without demotion, 1/512 with demotion). |
-| **One-hit-wonder detection** | 3.2 | No access-count tracking; promotion is not deferred until second access. All pages are treated the same. |
-| **Frame header in hash table entry** | 4.1 | We store only frame index in the overflow table; metadata stays in `metas`. Paper inlines frame header in the hash entry to remove one indirection. Optional improvement. |
-| **Benchmarks** | 6 | No TPC-C / YCSB comparison vs `BufferPoolClock` or `VMCachePool` in this repo yet. |
+| **Promotion / demotion** | 3.2, 5.1 | Implemented: probabilistic promotion on write (1/50 no demotion, 1/512 demotion). |
+| **One-hit-wonder detection** | 3.2 | Implemented: overflow access count; promotion only after second access. |
+| **Frame header in hash table entry** | 4.1 | Not implemented: we store only frame index; metadata in `metas`. |
+| **Benchmarks** | 6 | Scripts exist; more concurrency testing (PT vs basic_hashmap) planned. |
 
 ---
 
@@ -89,19 +85,19 @@ This document is the **master reference** for the PrediCache-style predictive tr
 
 ## 5. How lookup works (high level)
 
+Unified translation: one table, one lookup.
+
 ```
 get_page_for_read / get_page_for_write  (loop until success or hard error)
 │
 ├─ pref = preferred_frame(key)
-│  Issue: frame_holds_page(pref, key)?   and   overflow.lookup_with_bucket(key, pref)?
-│  Then resolve:
-│  • Preferred hit  → latch frame, re-verify → return guard (fast path)
-│  • Overflow hit   → latch that frame, re-verify → return guard (slow path)
-│  • Both miss      → handle_page_fault (claim page, choose_victim, maybe overflow.insert, read_page, …)
-└─ On RetryPageFault, caller continues loop.
+│  frame_idx = overflow.lookup_with_bucket(key, pref)   // single lookup; bucket head = preferred
+│  • Some(idx) → latch frame, re-verify → return guard
+│  • None      → handle_page_fault (claim, choose_victim, overflow.insert, read_page, …)
+└─ On RetryPageFault, continue loop.
 ```
 
-Fault path: claim page in `fault_in_progress`, pop frame from free list, re-check preferred/overflow for duplicate, set page_key (early claim), insert into overflow if frame ≠ preferred, read page, re-check after I/O; on failure/duplicate, conditional remove from overflow and release victim.
+Fault: always `overflow.insert(page_key, frame_id)`. Evict/flush: remove from overflow when this frame is still the entry for that page.
 
 ---
 
@@ -109,7 +105,7 @@ Fault path: claim page in `fault_in_progress`, pop frame from free list, re-chec
 
 | Name | Role |
 |------|------|
-| **OverflowTable** | Custom chaining table (`overflow_table.rs`). Maps page → frame index for pages not in their preferred frame. Inlined first slot per bucket; versioned lock (MSB = lock, low bits = version), in-place writes, chain with crossbeam-epoch. Lock-free reads via version check. `lookup_with_bucket(key, pref)` avoids re-hash. |
+| **OverflowTable** | Custom chaining table (`overflow_table.rs`). **Unified translation:** maps *all* page → frame (preferred and overflow). Inlined first slot per bucket (= preferred slot); chain = overflow. Versioned lock, in-place writes, lock-free reads. `lookup_with_bucket(key, pref)` = single lookup. |
 | **fault_in_progress** | `Arc<DashMap<PageKey, ()>>`. Set of pages currently being faulted; one fault at a time per page. |
 | **free_frames** | `DashSet<usize>`. Indices of frames known to be free; victim choice prefers preferred frame when free. |
 | **metas** | `Vec<Box<FrameMeta>>`. Per-frame metadata: latch, dirty bit, eviction state, page key. |
@@ -121,4 +117,4 @@ Fault path: claim page in `fault_in_progress`, pop frame from free list, re-chec
 
 ## Summary
 
-LIPAH’s predictive translation implements the **core** of the paper: deterministic placement, tag check on preferred frame, custom overflow table with inlined first slot and lock-free reads, single hash on the hot path, superscalar-style overlap, and correct concurrent fault/eviction/flush behavior. **Not implemented** are the paper’s **policy optimizations** (promotion/demotion, one-hit-wonder), the optional **frame header in the hash entry**, and **benchmarks**. The overflow table uses a **CoW** design (ArcSwap + version) rather than the C++ **in-place** versioned lock; both provide lock-free reads and match the paper’s intent for the read path.
+This predictive translation implementation uses **unified translation** (single lookup, paper/C++ style): one overflow table holds all page→frame mappings; lookup is `overflow.lookup_with_bucket(key, pref)`. Implemented: deterministic placement, in-place overflow table with lock-free reads, promotion/demotion, one-hit-wonder. **Not implemented:** frame header in hash entry, benchmarks. More concurrency testing (multi-thread PT vs basic_hashmap) is planned.
