@@ -1,10 +1,25 @@
 # Predictive Translation — Implementation Status
 
-This document is the **master reference** for the PrediCache-style predictive translation buffer pool in this repo: what is implemented, what is not, how it fits together, and how it relates to the paper and the C++ prototype.
+This document is the **master reference** for the PrediCache-style predictive translation buffer pool in this repo: what is implemented, what is not, how it fits together, and how it relates to the paper and the C++ prototype. **If you don’t know PT:** we reimplemented the design from the paper (Zinsmeister et al., SIGMOD ’26) and the C++ PrediCache prototype so this storage engine has a PrediCache-equivalent buffer pool. The non-obvious part is the **overflow table** — a custom hash table (not a stock `HashMap` or DashMap) that matches the C++ code: versioned lock per bucket, inlined first slot, lock-free reads. See [§4 Overflow table](#4-overflow-table-our-design-vs-paper-vs-c) and `OVERFLOW_ROADMAP.md` for details. The repo root `README.md` also has a short “Predictive Translation (PT) and overflow table” subsection for newcomers.
 
 **Paper:** *Predictive Translation: High-Performance Buffer Management Without the Trade-Offs* (Zinsmeister et al., SIGMOD ’26).
 
-**C++ reference implementation:** `~/databases-research/PrediCache`. See [Overflow table: our design vs paper vs C++](#overflow-table-our-design-vs-paper-vs-c) below and `OVERFLOW_ROADMAP.md` for detailed paper quotes and file references (`versioned_lock.hpp`, `ht.hpp`, `buffer_manager.hpp`).
+**C++ reference implementation:** `~/databases-research/PrediCache`. Key files: `versioned_lock.hpp`, `ht.hpp`, `buffer_manager.hpp`. See [§4](#4-overflow-table-our-design-vs-paper-vs-c) and `OVERFLOW_ROADMAP.md` for alignment.
+
+---
+
+## Buffer pool implementations in this repo
+
+| Implementation | Module / feature | Description |
+|----------------|------------------|-------------|
+| **LRU** | `buffer_pool.rs` (default) | Classic hash table + LRU eviction. |
+| **Clock** | `buffer_pool_clock.rs`, `bp_clock` | Hash table + clock eviction. |
+| **VMCache** | `vmcache.rs`, `vmcache` | Virtual-memory–assisted cache (optional). |
+| **Predictive Translation (PT)** | `predictive_translation.rs`, `bp_pt` | PrediCache-equivalent: deterministic placement, custom overflow table (versioned lock, inlined first slot, lock-free reads), promotion/demotion, one-hit-wonder. |
+| **dashmap** | `dashmap_bp.rs`, `bp_dashmap` | Baseline: DashMap (sharded) + clock. Concurrent translation. |
+| **hashmap** | `hashmap_bp.rs`, `bp_hashmap` | Baseline: single `RwLock<HashMap<...>>` + clock. Paper-style “traditional” (one latch on the table). |
+
+Build/run with a specific BP: e.g. `cargo run --release --features bp_pt --bin tpcc -- ...` for PT. See [§7 Baselines and benchmarking](#7-baselines-and-benchmarking) for comparing PT vs dashmap vs hashmap.
 
 ---
 
@@ -36,8 +51,8 @@ This document is the **master reference** for the PrediCache-style predictive tr
 
 ### 1.6 Concurrency
 
-- **Re-verification under latch (TOCTOU):** After the tag check passes and the latch is acquired, re-verify that the frame still holds the page; if not, drop the guard and fall through to overflow/fault.
-- **Re-check after latch failure:** If the latch fails, re-read the tag; if the page is gone, fall through instead of returning a spurious latch error.
+- **Re-verification under latch (TOCTOU):** After the overflow lookup returns a frame and the latch is acquired, re-verify that the frame still holds the page; if not, drop the guard and retry/fall through to fault.
+- **Re-check after latch failure:** If the latch fails, re-check overflow; if the page moved or is gone, fall through instead of returning a spurious latch error.
 - **Per-page fault serialization:** `fault_in_progress` set ensures only one thread runs the fault path per page; callers loop on `RetryPageFault`.
 - **Early claim and duplicate-fault handling:** Set `page_key` on the victim before `read_page`; re-check via overflow that the page is not already loaded; on undo, remove from overflow when this frame is still the entry for that page.
 - **Conditional remove from overflow:** Eviction, flush, fault undo: remove only when `overflow.lookup(pk) == this_frame`.
@@ -55,14 +70,16 @@ This document is the **master reference** for the PrediCache-style predictive tr
 
 ---
 
-## 3. Not implemented (paper-mentioned optimizations)
+## 3. Implemented vs not implemented (paper)
 
-| Paper feature | Section | Status / notes |
-|---------------|---------|----------------|
-| **Promotion / demotion** | 3.2, 5.1 | Implemented: probabilistic promotion on write (1/50 no demotion, 1/512 demotion). |
-| **One-hit-wonder detection** | 3.2 | Implemented: overflow access count; promotion only after second access. |
-| **Frame header in hash table entry** | 4.1 | Not implemented: we store only frame index; metadata in `metas`. |
-| **Benchmarks** | 6 | Scripts exist; more concurrency testing (PT vs basic_hashmap) planned. |
+**Implemented (paper features):** Deterministic placement (§3.1), unified translation / single lookup (§3.1, §4), promotion and demotion (§3.2, 5.1), one-hit-wonder (§3.2), overflow table with inlined first slot and versioned lock / lock-free reads (§4.1, §4.2), per-page fault serialization, conditional remove from overflow.
+
+**Not implemented (paper-mentioned):**
+
+| Paper feature | Section | Notes |
+|---------------|---------|--------|
+| **Frame header in hash table entry** | 4.1 | We store only frame index in the overflow table; metadata stays in `metas: Vec<FrameMeta>`. |
+| **Benchmarks** | 6 | Scripts exist (`scripts/tpcc_bench.sh`, `tpcc_bench_pt_vs_bh.sh`); systematic PT vs baselines at scale is planned. |
 
 ---
 
@@ -80,6 +97,8 @@ This document is the **master reference** for the PrediCache-style predictive tr
 - **`buffer_manager.hpp`:** Uses this hash table for translation; `fix`-style API calls `ht.access(pid, hash)` then fixes the returned frame.
 
 **Our Rust overflow (current):** We use **in-place updates** aligned with PrediCache: versioned lock (MSB = lock, low bits = version), inlined first slot per bucket, chain with `crossbeam_epoch::Atomic<ChainNode>` and safe retirement. Writers take the lock, mutate the chain, unlock; readers validate version and read without locking. No copy on insert/remove; this avoids the clone+allocation cost of a CoW design and is closer to the C++ and the paper. See `OVERFLOW_ROADMAP.md` for history and alternatives.
+
+**Why the overflow table is non-straightforward:** The C++ PrediCache repo does *not* use a standard hash map. It uses a custom chaining table where (1) each bucket has a **versioned lock** (one `atomic<uint64_t>`: MSB = writer lock, low bits = version) so readers never take a mutex — they read version → read bucket → re-read version and retry if changed; (2) the **first entry of each chain is inlined** in the bucket to avoid a pointer chase on the common case; (3) writers **mutate the chain in place** under the lock. Our Rust version mirrors that: `overflow_table.rs` implements this scheme with `crossbeam_epoch` for safe reclamation of chain nodes. So the PT BP depends on this custom table, not on `std::collections::HashMap` or DashMap.
 
 ---
 
@@ -115,6 +134,21 @@ Fault: always `overflow.insert(page_key, frame_id)`. Evict/flush: remove from ov
 
 ---
 
+## 7. Baselines and benchmarking
+
+We provide two hash-table baselines for comparison:
+
+| Baseline | Feature | Translation | Purpose |
+|----------|---------|-------------|--------|
+| **dashmap** | `bp_dashmap` | **DashMap** (sharded concurrent map) | Concurrent translation; PT may not beat this at low thread count. |
+| **hashmap** | `bp_hashmap` | **Single `RwLock<HashMap<PageKey, usize>>`** | Paper-style “traditional” baseline (one latch on the table). |
+
+The paper compares PrediCache against a **traditional** buffer pool with a read-write spin latch per bucket (Shore-MT style). Our **hashmap** module uses one global `RwLock` so every lookup/insert/remove serializes at the table; it is the regime where PT’s lock-free overflow is designed to win. The **dashmap** module (DashMap) is already concurrent, so PT does not get a concurrency advantage over it.
+
+**Pool size and thread count:** The paper’s in-memory evaluation uses **256GB** buffer and **192 threads**; their gains (e.g. 7.4× from optimistic latching over traditional at 192 threads) show at high concurrency. Our default TPC-C config (1 warehouse ≈ 1GB pool, 1–8 threads) is much smaller. To see PT outperform **hashmap**, use more threads (e.g. `-t 8` or higher) and enough warehouses; to see PT competitive with or ahead of **dashmap**, similar scaling helps. Script: `scripts/tpcc_bench_pt_vs_bh.sh` (runs PT, dashmap, and hashmap with warmup and multiple runs).
+
+---
+
 ## Summary
 
-This predictive translation implementation uses **unified translation** (single lookup, paper/C++ style): one overflow table holds all page→frame mappings; lookup is `overflow.lookup_with_bucket(key, pref)`. Implemented: deterministic placement, in-place overflow table with lock-free reads, promotion/demotion, one-hit-wonder. **Not implemented:** frame header in hash entry, benchmarks. More concurrency testing (multi-thread PT vs basic_hashmap) is planned.
+This predictive translation implementation uses **unified translation** (single lookup, paper/C++ style): one overflow table holds all page→frame mappings; lookup is `overflow.lookup_with_bucket(key, pref)`. Implemented: deterministic placement, in-place overflow table with lock-free reads, promotion/demotion, one-hit-wonder. **Not implemented:** frame header in hash entry, benchmarks. More concurrency testing (multi-thread PT vs dashmap/hashmap) is planned.

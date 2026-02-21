@@ -1,6 +1,6 @@
-//! Basic hashmap buffer pool (no hints, same eviction as PT).
+//! Dashmap buffer pool: DashMap (sharded) translation + clock eviction.
 //!
-//! Dead-simple DashMap translation from (container_key, page_id) to frame index,
+//! DashMap translation from (container_key, page_id) to frame index,
 //! with the same clock-based eviction as the predictive translation BP. Does not
 //! use the frame_id hint (no physical hints). Exists to benchmark PT against an
 //! otherwise comparable BP that only differs in the lookup path (one hash lookup
@@ -116,11 +116,11 @@ impl TranslationTable {
 }
 
 // ---------------------------------------------------------------------------
-// BasicHashmapBP
+// DashmapBP
 // ---------------------------------------------------------------------------
 
 /// Buffer pool: plain DashMap translation + clock eviction, no hints.
-pub struct BasicHashmapBP {
+pub struct DashmapBP {
     num_frames: usize,
     used_frames: AtomicUsize,
     clock_hand: AtomicUsize,
@@ -140,10 +140,10 @@ pub struct BasicHashmapBP {
 }
 
 // SAFETY: synchronisation is done via per-frame latches and the translation table.
-unsafe impl Sync for BasicHashmapBP {}
-unsafe impl Send for BasicHashmapBP {}
+unsafe impl Sync for DashmapBP {}
+unsafe impl Send for DashmapBP {}
 
-impl Drop for BasicHashmapBP {
+impl Drop for DashmapBP {
     fn drop(&mut self) {
         if self.container_manager.remove_dir_on_drop() {
             // Test mode — directory will be cleaned up by ContainerManager.
@@ -153,7 +153,7 @@ impl Drop for BasicHashmapBP {
     }
 }
 
-impl BasicHashmapBP {
+impl DashmapBP {
     // ------------------------------------------------------------------
     // Construction
     // ------------------------------------------------------------------
@@ -162,7 +162,7 @@ impl BasicHashmapBP {
         num_frames: usize,
         container_manager: Arc<ContainerManager>,
     ) -> Result<Self, MemPoolStatus> {
-        log_debug!("BasicHashmapBP (dumb hashmap) created: num_frames={}", num_frames);
+        log_debug!("DashmapBP (DashMap) created: num_frames={}", num_frames);
 
         let free_list = ConcurrentQueue::bounded(num_frames);
         for i in 0..num_frames {
@@ -197,11 +197,11 @@ impl BasicHashmapBP {
     }
 
     pub fn eviction_stats(&self) -> String {
-        "BasicHashmapBP: eviction stats not yet implemented".to_string()
+        "DashmapBP: eviction stats not yet implemented".to_string()
     }
 
     pub fn file_stats(&self) -> String {
-        "BasicHashmapBP: file stats disabled".to_string()
+        "DashmapBP: file stats disabled".to_string()
     }
 
     // ------------------------------------------------------------------
@@ -365,7 +365,7 @@ impl BasicHashmapBP {
 // MemPool trait implementation
 // ===========================================================================
 
-impl MemPool for BasicHashmapBP {
+impl MemPool for DashmapBP {
     type EP = EvictionPolicyImpl;
 
     fn create_container(&self, _c_key: ContainerKey, _is_temp: bool) -> Result<(), MemPoolStatus> {
@@ -732,7 +732,7 @@ impl MemPool for BasicHashmapBP {
 // ===========================================================================
 
 #[cfg(test)]
-impl BasicHashmapBP {
+impl DashmapBP {
     /// # Safety
     /// Must not be called while the BP is in use by other threads.
     unsafe fn run_checks(&self) {
@@ -777,17 +777,17 @@ mod tests {
     use crate::{container::ContainerManager, random::gen_random_pathname};
     use std::sync::Arc;
 
-    fn get_test_basic_hashmap_bp(num_frames: usize) -> Arc<BasicHashmapBP> {
-        let base_dir = gen_random_pathname(Some("test_basic_hashmap_direct"));
+    fn get_test_dashmap_bp(num_frames: usize) -> Arc<DashmapBP> {
+        let base_dir = gen_random_pathname(Some("test_dashmap_direct"));
         let cm = Arc::new(ContainerManager::new(base_dir, true, true).unwrap());
-        Arc::new(BasicHashmapBP::new(num_frames, cm).unwrap())
+        Arc::new(DashmapBP::new(num_frames, cm).unwrap())
     }
 
     #[test]
-    fn test_basic_hashmap_create_and_read() {
+    fn test_dashmap_create_and_read() {
         let db_id = 0;
         let num_frames = 10;
-        let bp = get_test_basic_hashmap_bp(num_frames);
+        let bp = get_test_dashmap_bp(num_frames);
         let c_key = ContainerKey::new(db_id, 0);
 
         let mut keys = Vec::new();
@@ -809,10 +809,10 @@ mod tests {
     }
 
     #[test]
-    fn test_basic_hashmap_write_back() {
+    fn test_dashmap_write_back() {
         let db_id = 0;
         let num_frames = 2;
-        let bp = get_test_basic_hashmap_bp(num_frames);
+        let bp = get_test_dashmap_bp(num_frames);
         let c_key = ContainerKey::new(db_id, 0);
 
         // Create more pages than frames → forces eviction & disk I/O.
@@ -835,10 +835,10 @@ mod tests {
     }
 
     #[test]
-    fn test_basic_hashmap_flush_and_reset() {
+    fn test_dashmap_flush_and_reset() {
         let db_id = 0;
         let num_frames = 10;
-        let bp = get_test_basic_hashmap_bp(num_frames);
+        let bp = get_test_dashmap_bp(num_frames);
         let c_key = ContainerKey::new(db_id, 0);
 
         let mut keys = Vec::new();
@@ -864,10 +864,10 @@ mod tests {
     }
 
     #[test]
-    fn test_basic_hashmap_concurrent_latch() {
+    fn test_dashmap_concurrent_latch() {
         let db_id = 0;
         let num_frames = 10;
-        let bp = get_test_basic_hashmap_bp(num_frames);
+        let bp = get_test_dashmap_bp(num_frames);
         let c_key = ContainerKey::new(db_id, 0);
 
         let frame = bp.create_new_page_for_write(c_key).unwrap();

@@ -74,13 +74,15 @@ declare -a VARIANT_NAMES=(
   "bp_lru"
   "bp_clock"
   "bp_pt"
-  "bp_basic_hashmap"
+  "bp_dashmap"
+  "bp_hashmap"
 )
 declare -A VARIANT_FEATURES=(
   [bp_lru]=""
   [bp_clock]="bp_clock"
   [bp_pt]="bp_pt"
-  [bp_basic_hashmap]="bp_basic_hashmap"
+  [bp_dashmap]="bp_dashmap"
+  [bp_hashmap]="bp_hashmap"
 )
 
 # ─────────── Build phase ─────────────────────────────────────────────────────
