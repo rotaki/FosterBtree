@@ -23,7 +23,25 @@ pub fn print_cfg_flags() {
     {
         println!("Using BufferPool with clock replacement policy");
     }
-    #[cfg(not(any(feature = "vmcache", feature = "bp_clock")))]
+    #[cfg(feature = "bp_pt")]
+    {
+        println!("Using Predictive Translation (PT) buffer pool");
+    }
+    #[cfg(feature = "bp_dashmap")]
+    {
+        println!("Using DashMap baseline buffer pool");
+    }
+    #[cfg(feature = "bp_hashmap")]
+    {
+        println!("Using HashMap baseline buffer pool");
+    }
+    #[cfg(not(any(
+        feature = "vmcache",
+        feature = "bp_clock",
+        feature = "bp_pt",
+        feature = "bp_dashmap",
+        feature = "bp_hashmap"
+    )))]
     {
         println!("Using BufferPool with LRU replacement policy");
     }
