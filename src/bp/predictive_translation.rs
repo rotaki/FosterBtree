@@ -37,13 +37,12 @@ use super::{
     frame_guards::{FrameMeta, FrameReadGuard, FrameWriteGuard},
     mem_pool_trait::{ContainerKey, MemPool, MemPoolStatus, MemoryStats, PageFrameKey, PageKey},
 };
+use crate::random::small_thread_rng;
 use crate::{
-    bp::frame_guards::box_as_mut_ptr,
     container::ContainerManager,
     log_debug, log_warn,
     page::{Page, PageId},
 };
-use crate::random::small_thread_rng;
 use rand::RngCore;
 
 use std::{
@@ -51,12 +50,13 @@ use std::{
     collections::BTreeMap,
     hash::{Hash, Hasher},
     sync::{
-        atomic::{AtomicU32, AtomicUsize, Ordering},
+        atomic::{AtomicUsize, Ordering},
         Arc,
     },
 };
 
-use dashmap::{DashMap, DashSet};
+use concurrent_queue::ConcurrentQueue;
+use dashmap::DashMap;
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 
 // ---------------------------------------------------------------------------
@@ -92,8 +92,9 @@ pub struct PredictiveTranslationBP {
     used_frames: AtomicUsize,
     clock_hand: AtomicUsize,
     container_manager: Arc<ContainerManager>,
-    /// Indices of frames known to be free. Set allows taking the preferred frame when free.
-    free_frames: DashSet<usize>,
+    /// Indices of frames known to be free.  Unbounded so push() never fails even when
+    /// stale entries (from the preferred-frame fast-path) temporarily inflate the count.
+    free_frames: ConcurrentQueue<usize>,
     /// The actual page data for each frame.
     #[allow(clippy::vec_box)]
     pages: UnsafeCell<Vec<Box<Page>>>,
@@ -103,9 +104,6 @@ pub struct PredictiveTranslationBP {
     /// Overflow table: maps PageKey -> frame index for pages NOT in their
     /// preferred frame.  Pages in their preferred frame are found via tag check.
     overflow: OverflowTable,
-    /// One-hit-wonder (§3.2): access count per page while in overflow. Used to
-    /// defer promotion until at least the second access.
-    overflow_access_count: Arc<DashMap<PageKey, AtomicU32>>,
     /// Pages currently being faulted; claim before faulting, release on drop.
     fault_in_progress: Arc<DashMap<PageKey, ()>>,
     /// Runtime statistics.
@@ -137,9 +135,9 @@ impl PredictiveTranslationBP {
     ) -> Result<Self, MemPoolStatus> {
         log_debug!("PredictiveTranslationBP created: num_frames={}", num_frames);
 
-        let free_frames = DashSet::new();
+        let free_frames = ConcurrentQueue::unbounded();
         for i in 0..num_frames {
-            free_frames.insert(i);
+            free_frames.push(i).ok();
         }
 
         let pages: UnsafeCell<Vec<Box<Page>>> = UnsafeCell::new(
@@ -165,7 +163,6 @@ impl PredictiveTranslationBP {
             pages,
             metas,
             overflow: OverflowTable::new(num_frames),
-            overflow_access_count: Arc::new(DashMap::new()),
             fault_in_progress: Arc::new(DashMap::new()),
             stats: BPStats::new(),
         })
@@ -219,20 +216,20 @@ impl PredictiveTranslationBP {
     // ------------------------------------------------------------------
 
     fn try_get_read_guard(&self, index: usize) -> Option<FRGuard> {
-        let metas = unsafe { &mut *self.metas.get() };
-        let pages = unsafe { &mut *self.pages.get() };
+        let metas = unsafe { &*self.metas.get() };
+        let pages = unsafe { &*self.pages.get() };
         FRGuard::try_new(
-            box_as_mut_ptr(&mut metas[index]),
-            box_as_mut_ptr(&mut pages[index]),
+            Box::as_ptr(&metas[index]) as *mut FMeta,
+            Box::as_ptr(&pages[index]) as *mut Page,
         )
     }
 
     fn try_get_write_guard(&self, index: usize, make_dirty: bool) -> Option<FWGuard> {
-        let metas = unsafe { &mut *self.metas.get() };
-        let pages = unsafe { &mut *self.pages.get() };
+        let metas = unsafe { &*self.metas.get() };
+        let pages = unsafe { &*self.pages.get() };
         FWGuard::try_new(
-            box_as_mut_ptr(&mut metas[index]),
-            box_as_mut_ptr(&mut pages[index]),
+            Box::as_ptr(&metas[index]) as *mut FMeta,
+            Box::as_ptr(&pages[index]) as *mut Page,
             make_dirty,
         )
     }
@@ -243,30 +240,35 @@ impl PredictiveTranslationBP {
 
     /// Try to get a free frame. If `preferred` is Some(p), try to take that frame first
     /// (so pages are placed in their preferred frame when free — paper §3.1).
+    ///
+    /// The preferred frame is claimed via atomic tag-check + exclusive latch (no queue pop).
+    /// If it succeeds, its stale queue entry (if any) will be found later by another thread,
+    /// see `page_key != None`, and discarded; the frame re-enters the queue on eviction.
     fn choose_victim(&self, preferred: Option<usize>) -> Option<FWGuard> {
-        // Prefer the preferred frame when it's free.
+        // Fast path: try the preferred frame via atomic tag-check + exclusive latch.
         if let Some(p) = preferred {
-            if self.free_frames.remove(&p).is_some() {
+            if self.frame_is_free(p) {
                 if let Some(guard) = self.try_get_write_guard(p, false) {
                     if guard.page_key().is_none() {
                         return Some(guard);
                     }
+                    // Lost the race: another thread set page_key between our check and latch.
                 }
-                self.free_frames.insert(p);
             }
         }
-        // Otherwise take any free frame. Snapshot indices to avoid unbounded or
-        // inconsistent iteration over the concurrent set (could hang under contention).
-        let indices: Vec<usize> = self.free_frames.iter().map(|x| *x).collect();
-        for idx in indices {
-            if self.free_frames.remove(&idx).is_some() {
-                if let Some(guard) = self.try_get_write_guard(idx, false) {
-                    if guard.page_key().is_none() {
-                        return Some(guard);
-                    }
+        // Fallback: pop any entry from the free queue.
+        while let Ok(idx) = self.free_frames.pop() {
+            if let Some(guard) = self.try_get_write_guard(idx, false) {
+                if guard.page_key().is_none() {
+                    return Some(guard);
                 }
-                self.free_frames.insert(idx);
+                // Stale entry: preferred-path took this frame without a queue pop.
+                // Its page will be evicted eventually, which re-queues it.
             }
+            // Transient latch failure: the frame guard was released just before we latched.
+            // The pushing thread already dropped its guard (we push after drop), so this
+            // should be exceedingly rare. Don't push back to avoid busy-looping; the frame
+            // will be re-queued when its page is evicted.
         }
         None
     }
@@ -304,7 +306,7 @@ impl PredictiveTranslationBP {
             let start = self.fetch_add_clock_hand(batch);
             for offset in 0..batch {
                 let idx = (start + offset) % self.num_frames;
-                let meta = &mut unsafe { &mut *self.metas.get() }[idx];
+                let meta = &unsafe { &*self.metas.get() }[idx];
 
                 if meta.key().is_none() || meta.latch.is_locked() {
                     continue;
@@ -318,7 +320,7 @@ impl PredictiveTranslationBP {
                 }
 
                 // Try to write-latch the frame for eviction.
-                if let Some(guard) = self.try_get_write_guard(idx, false) {
+                if let Some(mut guard) = self.try_get_write_guard(idx, false) {
                     if guard.page_key().is_none() {
                         continue;
                     }
@@ -328,13 +330,11 @@ impl PredictiveTranslationBP {
                     if let Some(pk) = guard.page_key() {
                         if self.overflow.lookup(&pk) == Some(idx) {
                             self.overflow.remove(&pk);
-                            self.overflow_access_count.remove(&pk);
                         }
                     }
-                    // Clear the frame.
-                    guard.set_page_key(None);
-                    guard.evict_info().reset();
-                    self.free_frames.insert(idx);
+                    // Clear the frame (resets dirty, evict_info, page_key, and access_count).
+                    guard.clear();
+                    self.free_frames.push(idx).ok();
                     evicted += 1;
                 }
             }
@@ -386,7 +386,7 @@ impl PredictiveTranslationBP {
 
         // Avoid duplicate fault: another thread may have loaded this page (unified: only overflow).
         if self.overflow.contains_key(&page_key) {
-            self.free_frames.insert(victim.frame_id() as usize);
+            self.free_frames.push(victim.frame_id() as usize).ok();
             self.used_frames.fetch_sub(1, Ordering::AcqRel);
             return Err(MemPoolStatus::RetryPageFault);
         }
@@ -396,16 +396,7 @@ impl PredictiveTranslationBP {
         if self.overflow.lookup(&page_key) != Some(victim.frame_id() as usize) {
             victim.set_page_key(None);
             self.overflow.remove(&page_key);
-            self.free_frames.insert(victim.frame_id() as usize);
-            self.used_frames.fetch_sub(1, Ordering::AcqRel);
-            return Err(MemPoolStatus::RetryPageFault);
-        }
-
-        // Re-check before disk I/O.
-        if self.overflow.lookup(&page_key) != Some(victim.frame_id() as usize) {
-            victim.set_page_key(None);
-            self.overflow.remove(&page_key);
-            self.free_frames.insert(victim.frame_id() as usize);
+            self.free_frames.push(victim.frame_id() as usize).ok();
             self.used_frames.fetch_sub(1, Ordering::AcqRel);
             return Err(MemPoolStatus::RetryPageFault);
         }
@@ -419,9 +410,8 @@ impl PredictiveTranslationBP {
             victim.set_page_key(None);
             if self.overflow.lookup(&page_key) == Some(victim.frame_id() as usize) {
                 self.overflow.remove(&page_key);
-                self.overflow_access_count.remove(&page_key);
             }
-            self.free_frames.insert(victim.frame_id() as usize);
+            self.free_frames.push(victim.frame_id() as usize).ok();
             self.used_frames.fetch_sub(1, Ordering::AcqRel);
             return Err(MemPoolStatus::FileManagerError(e.to_string()));
         }
@@ -434,9 +424,8 @@ impl PredictiveTranslationBP {
             victim.set_page_key(None);
             if self.overflow.lookup(&page_key) == Some(victim.frame_id() as usize) {
                 self.overflow.remove(&page_key);
-                self.overflow_access_count.remove(&page_key);
             }
-            self.free_frames.insert(victim.frame_id() as usize);
+            self.free_frames.push(victim.frame_id() as usize).ok();
             self.used_frames.fetch_sub(1, Ordering::AcqRel);
             return Err(MemPoolStatus::RetryPageFault);
         }
@@ -507,16 +496,18 @@ impl PredictiveTranslationBP {
             // Simple promotion: preferred frame is free. Move our page there.
             pref_guard.page_mut().copy(current_guard.page());
             pref_guard.set_page_key(Some(page_key));
-            pref_guard
-                .dirty()
-                .store(current_guard.dirty().load(Ordering::Acquire), Ordering::Release);
+            pref_guard.dirty().store(
+                current_guard.dirty().load(Ordering::Acquire),
+                Ordering::Release,
+            );
             pref_guard.evict_info().update();
 
             current_guard.clear();
             self.overflow.remove(&page_key);
             self.overflow.insert(page_key, pref); // Unified: preferred slot still in table
-            self.overflow_access_count.remove(&page_key);
-            self.free_frames.insert(current_idx);
+                                                  // Promoted page starts fresh at its preferred frame.
+            pref_guard.access_count().store(0, Ordering::Relaxed);
+            self.free_frames.push(current_idx).ok();
             self.used_frames.fetch_sub(1, Ordering::AcqRel);
 
             drop(current_guard);
@@ -533,16 +524,19 @@ impl PredictiveTranslationBP {
         pref_guard.set_page_key(Some(page_key));
         current_guard.set_page_key(Some(other_key));
         let other_dirty = pref_guard.dirty().load(Ordering::Acquire);
-        pref_guard
-            .dirty()
-            .store(current_guard.dirty().load(Ordering::Acquire), Ordering::Release);
+        pref_guard.dirty().store(
+            current_guard.dirty().load(Ordering::Acquire),
+            Ordering::Release,
+        );
         current_guard.dirty().store(other_dirty, Ordering::Release);
         pref_guard.evict_info().update();
         current_guard.evict_info().update();
 
         self.overflow.remove(&page_key);
         self.overflow.insert(other_key, current_idx);
-        self.overflow_access_count.remove(&page_key);
+        // Promoted page and demoted page both start fresh (one-hit-wonder resets).
+        pref_guard.access_count().store(0, Ordering::Relaxed);
+        current_guard.access_count().store(0, Ordering::Relaxed);
 
         drop(current_guard);
         Ok(pref_guard)
@@ -647,12 +641,9 @@ impl MemPool for PredictiveTranslationBP {
                 if let Some(g) = self.try_get_write_guard(idx, true) {
                     if g.page_key() == Some(page_key) {
                         g.evict_info().update();
-                        // One-hit-wonder (§3.2): only consider promotion after second access
-                        let prev = self
-                            .overflow_access_count
-                            .entry(page_key)
-                            .or_insert_with(|| AtomicU32::new(0))
-                            .fetch_add(1, Ordering::Relaxed);
+                        // One-hit-wonder (§3.2): only consider promotion after second access.
+                        // Count lives in the frame itself — no external map lookup needed.
+                        let prev = g.access_count().fetch_add(1, Ordering::Relaxed);
                         if prev >= 1 {
                             let pref_free = self.frame_is_free(pref);
                             let denom = if pref_free {
@@ -661,8 +652,7 @@ impl MemPool for PredictiveTranslationBP {
                                 Self::PROMOTE_PROB_DEMOTE
                             };
                             if Self::promote_roll(denom) {
-                                let guard =
-                                    self.try_promote_to_preferred(g, page_key, pref)?;
+                                let guard = self.try_promote_to_preferred(g, page_key, pref)?;
                                 return Ok(guard);
                             }
                         }
@@ -701,11 +691,8 @@ impl MemPool for PredictiveTranslationBP {
                 if let Some(g) = self.try_get_read_guard(idx) {
                     if g.page_key() == Some(page_key) {
                         g.evict_info().update();
-                        // One-hit-wonder: count overflow accesses (promotion only on write path)
-                        self.overflow_access_count
-                            .entry(page_key)
-                            .or_insert_with(|| AtomicU32::new(0))
-                            .fetch_add(1, Ordering::Relaxed);
+                        // One-hit-wonder: count overflow accesses (promotion only on write path).
+                        g.access_count().fetch_add(1, Ordering::Relaxed);
                         return Ok(g);
                     }
                 } else if self.overflow.lookup_with_bucket(&page_key, pref) == Some(idx) {
@@ -757,18 +744,17 @@ impl MemPool for PredictiveTranslationBP {
             if let Some(pk) = frame.page_key() {
                 if self.overflow.lookup(&pk) == Some(i) {
                     self.overflow.remove(&pk);
-                    self.overflow_access_count.remove(&pk);
                 }
             }
-            frame.clear();
+            frame.clear(); // also resets access_count
         });
 
         self.container_manager.flush_all()?;
 
-        // Repopulate the free set.
-        self.free_frames.clear();
+        // Drain any stale entries (preferred-path ghosts) then repopulate.
+        while self.free_frames.pop().is_ok() {}
         for i in 0..self.num_frames {
-            self.free_frames.insert(i);
+            self.free_frames.push(i).ok();
         }
         self.used_frames.store(0, Ordering::Release);
 
@@ -777,7 +763,7 @@ impl MemPool for PredictiveTranslationBP {
 
     fn clear_dirty_flags(&self) -> Result<(), MemPoolStatus> {
         (0..self.num_frames).into_par_iter().for_each(|i| {
-            let meta = &mut unsafe { &mut *self.metas.get() }[i];
+            let meta = &unsafe { &*self.metas.get() }[i];
             meta.is_dirty.store(false, Ordering::Release);
         });
         self.container_manager.flush_all()?;
@@ -871,12 +857,13 @@ impl PredictiveTranslationBP {
             overflow_frame_to_page.insert(fid, pk);
         });
         for i in 0..self.num_frames {
-            let meta = &(*self.metas.get())[i];
+            let meta = &unsafe { &*self.metas.get() }[i];
             if let Some(pk) = meta.key() {
                 assert!(
                     overflow_frame_to_page.get(&i) == Some(&pk),
                     "frame {} has key {:?} but overflow table disagrees",
-                    i, pk
+                    i,
+                    pk
                 );
             }
         }

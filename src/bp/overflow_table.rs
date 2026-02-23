@@ -253,10 +253,9 @@ impl OverflowTable {
                     if !head.is_null() {
                         let node = head.deref();
                         *inlined = Some((node.key, node.value));
-                        bucket.chain_head.store(
-                            node.next.load(Ordering::Acquire, &guard),
-                            Ordering::Release,
-                        );
+                        bucket
+                            .chain_head
+                            .store(node.next.load(Ordering::Acquire, &guard), Ordering::Release);
                         guard.defer_destroy(head);
                     } else {
                         *inlined = None;

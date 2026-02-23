@@ -1,3 +1,4 @@
+#![feature(box_as_ptr)]
 pub mod access_method;
 pub mod affinity;
 pub mod bench_utils;

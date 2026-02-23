@@ -7,7 +7,6 @@ use super::{
     mem_pool_trait::{ContainerKey, MemPool, MemPoolStatus, MemoryStats, PageFrameKey, PageKey},
 };
 use crate::{
-    bp::frame_guards::box_as_mut_ptr,
     container::ContainerManager,
     log_debug,
     page::{Page, PageId},
@@ -286,29 +285,35 @@ impl BufferPool {
 
     #[allow(dead_code)]
     fn get_read_guard(&self, index: usize) -> FRGuard {
-        let metas = unsafe { &mut *self.metas.get() };
-        let pages = unsafe { &mut *self.pages.get() };
+        // SAFETY: The Vec is never structurally modified after init; a shared reference is
+        // valid even when multiple threads call this concurrently. Box::as_ptr returns a
+        // stable *const T which we cast to *mut T — all mutations on FMeta/Page go through
+        // interior mutability (atomics, RwLatch), so the cast is sound.
+        let metas = unsafe { &*self.metas.get() };
+        let pages = unsafe { &*self.pages.get() };
         FRGuard::new(
-            box_as_mut_ptr(&mut metas[index]),
-            box_as_mut_ptr(&mut pages[index]),
+            Box::as_ptr(&metas[index]) as *mut FMeta,
+            Box::as_ptr(&pages[index]) as *mut Page,
         )
     }
 
     fn try_get_read_guard(&self, index: usize) -> Option<FRGuard> {
-        let metas = unsafe { &mut *self.metas.get() };
-        let pages = unsafe { &mut *self.pages.get() };
+        // SAFETY: see get_read_guard.
+        let metas = unsafe { &*self.metas.get() };
+        let pages = unsafe { &*self.pages.get() };
         FRGuard::try_new(
-            box_as_mut_ptr(&mut metas[index]),
-            box_as_mut_ptr(&mut pages[index]),
+            Box::as_ptr(&metas[index]) as *mut FMeta,
+            Box::as_ptr(&pages[index]) as *mut Page,
         )
     }
 
     fn try_get_write_guard(&self, index: usize, make_dirty: bool) -> Option<FWGuard> {
-        let metas = unsafe { &mut *self.metas.get() };
-        let pages = unsafe { &mut *self.pages.get() };
+        // SAFETY: see get_read_guard.
+        let metas = unsafe { &*self.metas.get() };
+        let pages = unsafe { &*self.pages.get() };
         FWGuard::try_new(
-            box_as_mut_ptr(&mut metas[index]),
-            box_as_mut_ptr(&mut pages[index]),
+            Box::as_ptr(&metas[index]) as *mut FMeta,
+            Box::as_ptr(&pages[index]) as *mut Page,
             make_dirty,
         )
     }
@@ -607,7 +612,7 @@ impl MemPool for BufferPool {
             // Fast path access to the frame using frame_id
             let frame_id = key.frame_id();
             if (frame_id as usize) < self.num_frames
-                && unsafe { &(*self.metas.get())[frame_id as usize] }.key() == Some(key.p_key())
+                && unsafe { &*self.metas.get() }[frame_id as usize].key() == Some(key.p_key())
             {
                 return true;
             }
@@ -641,7 +646,7 @@ impl MemPool for BufferPool {
             let frame_id = key.frame_id();
             if (frame_id as usize) < self.num_frames {
                 // Check the page_key first to avoid acquiring the latch of a not-matching pageA
-                if unsafe { &(*self.metas.get())[frame_id as usize] }.key() == Some(key.p_key()) {
+                if unsafe { &*self.metas.get() }[frame_id as usize].key() == Some(key.p_key()) {
                     match self.try_get_write_guard(frame_id as usize, false) {
                         Some(g) if g.page_key().map(|k| k == key.p_key()).unwrap_or(false) => {
                             g.evict_info().update();
@@ -667,7 +672,8 @@ impl MemPool for BufferPool {
         // 3. If the page is not found, then a victim must be chosen to evict.
         {
             self.shared();
-            let page_to_frame = unsafe { &mut *self.page_to_frame.get() };
+            // SAFETY: shared latch is held; we only read page_to_frame here, so &* is correct.
+            let page_to_frame = unsafe { &*self.page_to_frame.get() };
 
             if let Some(&index) = page_to_frame.get(&key.p_key()) {
                 let guard = self.try_get_write_guard(index, true);
@@ -751,7 +757,7 @@ impl MemPool for BufferPool {
             let frame_id = key.frame_id();
             if (frame_id as usize) < self.num_frames {
                 // Check the page_key first to avoid acquiring the latch of a not-matching page
-                if unsafe { &(*self.metas.get())[frame_id as usize] }.key() == Some(key.p_key()) {
+                if unsafe { &*self.metas.get() }[frame_id as usize].key() == Some(key.p_key()) {
                     let guard = self.try_get_read_guard(frame_id as usize);
                     match guard {
                         Some(g) if g.page_key().map(|k| k == key.p_key()).unwrap_or(false) => {
@@ -778,7 +784,8 @@ impl MemPool for BufferPool {
         // 3. If the page is not found, then a victim must be chosen to evict.
         {
             self.shared();
-            let page_to_frame = unsafe { &mut *self.page_to_frame.get() };
+            // SAFETY: shared latch is held; we only read page_to_frame here, so &* is correct.
+            let page_to_frame = unsafe { &*self.page_to_frame.get() };
 
             if let Some(&index) = page_to_frame.get(&key.p_key()) {
                 let guard = self.try_get_read_guard(index);

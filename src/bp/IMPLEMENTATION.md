@@ -64,7 +64,7 @@ Build/run with a specific BP: e.g. `cargo run --release --features bp_pt --bin t
 | Feature | Notes |
 |--------|--------|
 | **Clock eviction** | Same `ClockEvictionPolicy` as `BufferPoolClock`. Paper is agnostic to eviction policy. |
-| **Free frames** | `DashSet<usize>` of free frame indices; `choose_victim(Some(preferred))` picks preferred frame when free, else any from set (snapshot iteration). |
+| **Free frames** | `ConcurrentQueue<usize>` of free frame indices; `choose_victim(Some(preferred))` checks preferred frame via atomic tag + exclusive latch, else pops any from queue. |
 | **Eviction threshold** | Eviction when usage exceeds 95%; evict in batches of up to 64. |
 | **Per-frame metadata** | `metas: Vec<Box<FrameMeta>>` (latch, dirty bit, eviction state, page key). |
 
@@ -126,7 +126,7 @@ Fault: always `overflow.insert(page_key, frame_id)`. Evict/flush: remove from ov
 |------|------|
 | **OverflowTable** | Custom chaining table (`overflow_table.rs`). **Unified translation:** maps *all* page → frame (preferred and overflow). Inlined first slot per bucket (= preferred slot); chain = overflow. Versioned lock, in-place writes, lock-free reads. `lookup_with_bucket(key, pref)` = single lookup. |
 | **fault_in_progress** | `Arc<DashMap<PageKey, ()>>`. Set of pages currently being faulted; one fault at a time per page. |
-| **free_frames** | `DashSet<usize>`. Indices of frames known to be free; victim choice prefers preferred frame when free. |
+| **free_frames** | `ConcurrentQueue<usize>`. Indices of frames known to be free; victim choice prefers preferred frame when free. |
 | **metas** | `Vec<Box<FrameMeta>>`. Per-frame metadata: latch, dirty bit, eviction state, page key. |
 | **pages** | `Vec<Box<Page>>`. Page data, one per frame. |
 | **clock_hand** | `AtomicUsize`. Clock pointer for eviction sweep. |
@@ -146,6 +146,59 @@ We provide two hash-table baselines for comparison:
 The paper compares PrediCache against a **traditional** buffer pool with a read-write spin latch per bucket (Shore-MT style). Our **hashmap** module uses one global `RwLock` so every lookup/insert/remove serializes at the table; it is the regime where PT’s lock-free overflow is designed to win. The **dashmap** module (DashMap) is already concurrent, so PT does not get a concurrency advantage over it.
 
 **Pool size and thread count:** The paper’s in-memory evaluation uses **256GB** buffer and **192 threads**; their gains (e.g. 7.4× from optimistic latching over traditional at 192 threads) show at high concurrency. Our default TPC-C config (1 warehouse ≈ 1GB pool, 1–8 threads) is much smaller. To see PT outperform **hashmap**, use more threads (e.g. `-t 8` or higher) and enough warehouses; to see PT competitive with or ahead of **dashmap**, similar scaling helps. Script: `scripts/tpcc_bench_pt_vs_bh.sh` (runs PT, dashmap, and hashmap with warmup and multiple runs).
+
+---
+
+## 8. Riki's changes
+
+Two performance optimizations were made to `predictive_translation.rs` and `frame_guards.rs`. Each is described below with the problem and the fix.
+
+### 8.1 overflow_access_count — DashMap removed, count moved into FrameMeta
+
+**Problem.** The one-hit-wonder filter (§3.2) defers promotion until a page has been accessed at least twice. The original implementation tracked this per-page in:
+
+```rust
+overflow_access_count: Arc<DashMap<PageKey, AtomicU32>>
+```
+
+Every call to `get_page_for_read` and `get_page_for_write` — i.e. on every single page access — performed a `DashMap::entry()` lookup, which acquires a shard lock, hashes the key, and may allocate. This was unnecessary overhead because the caller already holds the frame latch for the duration of the access.
+
+**Fix.** An `access_count: AtomicU32` field was added directly to `FrameMeta<T>` in `frame_guards.rs`. Because `FrameMeta` is `#[repr(C, align(64))]` and `ClockEvictionPolicy` uses only ~1 byte, there was ample cache-line padding; the 4-byte field costs nothing extra.
+
+The `DashMap` and its `Arc` were removed entirely from `PredictiveTranslationBP`. Access sites now operate directly on the frame guard:
+
+```rust
+let prev = g.access_count().fetch_add(1, Ordering::Relaxed);
+```
+
+The counter is reset to 0 by `FrameWriteGuard::clear()`, which is already called on eviction, promotion, and `flush_all_and_reset`. No external map operations are needed anywhere.
+
+### 8.2 free_frames — DashSet replaced with ConcurrentQueue
+
+**Problem.** Free frame indices were tracked in:
+
+```rust
+free_frames: DashSet<usize>
+```
+
+The fallback path in `choose_victim` had to snapshot the entire set into a `Vec` before iterating, because `DashSet`'s iterator holds a shard read-lock that conflicts with the `remove()` needed to claim a frame:
+
+```rust
+let indices: Vec<usize> = self.free_frames.iter().map(|x| *x).collect();
+for idx in indices { self.free_frames.remove(&idx); ... }
+```
+
+This caused a heap allocation per call to the fallback path, plus a second pass over the same indices to attempt removal. Under contention, multiple threads could grab the same index from the snapshot before either removed it.
+
+**Fix.** `free_frames` was changed to `ConcurrentQueue<usize>` (unbounded), giving O(1) lock-free `push()` and `pop()` with no allocation. The fallback path is now a simple loop:
+
+```rust
+while let Ok(idx) = self.free_frames.pop() { ... }
+```
+
+The preferred-frame fast-path claims a frame via `frame_is_free(p)` (atomic tag read) + `try_get_write_guard(p)` (exclusive latch) without popping from the queue. This can leave a stale queue entry for that frame, but consuming threads discard it harmlessly when they pop it and find `page_key != None`. The frame re-enters the queue when its page is later evicted.
+
+The queue is unbounded (not capped at `num_frames`) because stale entries from the preferred-path fast-path can temporarily inflate the count beyond `num_frames`, which would cause `push()` to fail on a bounded queue and permanently lose the entry.
 
 ---
 

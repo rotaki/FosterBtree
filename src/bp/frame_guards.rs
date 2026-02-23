@@ -8,7 +8,7 @@ use super::{
 use crate::log;
 use crate::page::{Page, PageId};
 use crate::rwlatch::RwLatch;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicU32, AtomicU64};
 use std::{
     fmt::Debug,
     ops::{Deref, DerefMut},
@@ -108,7 +108,12 @@ where
     pub(crate) is_dirty: AtomicBool, // Can be updated even when ReadGuard is held (see flush_all() in buffer_pool.rs)
     pub(crate) evict_info: T, // Can be updated even when ReadGuard is held (see get_page_for_read() in buffer_pool.rs). Interior mutability must be used.
     key: AtomicOptionKey,
-} // This is around 4 bytes
+    /// One-hit-wonder access counter. Counts how many times this frame's page has
+    /// been accessed. Reset to 0 whenever the frame is cleared or a new page is
+    /// assigned (via `clear()`). Allows lock-free increment via guards without
+    /// any external map lookup.
+    pub(crate) access_count: AtomicU32,
+}
 
 impl<T: EvictionPolicy> FrameMeta<T> {
     pub fn new(frame_id: u32) -> Self {
@@ -118,6 +123,7 @@ impl<T: EvictionPolicy> FrameMeta<T> {
             is_dirty: AtomicBool::new(false),
             evict_info: T::new(),
             key: AtomicOptionKey::new_none(),
+            access_count: AtomicU32::new(0),
         }
     }
 
@@ -127,6 +133,10 @@ impl<T: EvictionPolicy> FrameMeta<T> {
     }
     pub fn set_key(&self, k: Option<PageKey>) {
         self.key.replace(k);
+    }
+
+    pub fn access_count(&self) -> &AtomicU32 {
+        &self.access_count
     }
 }
 
@@ -194,6 +204,12 @@ impl<T: EvictionPolicy> FrameReadGuard<T> {
     pub fn evict_info(&self) -> &impl EvictionPolicy {
         // SAFETY: This is safe because frame meta must be a valid pointer.
         unsafe { &self.meta.as_ref().evict_info }
+    }
+
+    pub fn access_count(&self) -> &AtomicU32 {
+        // SAFETY: This is safe because frame meta must be a valid pointer.
+        // AtomicU32 provides interior mutability so this is valid under a shared latch.
+        unsafe { &self.meta.as_ref().access_count }
     }
 
     pub fn page_key(&self) -> Option<PageKey> {
@@ -326,6 +342,12 @@ impl<T: EvictionPolicy> FrameWriteGuard<T> {
         unsafe { &self.meta.as_ref().evict_info }
     }
 
+    pub fn access_count(&self) -> &AtomicU32 {
+        // SAFETY: This is safe because frame meta must be a valid pointer.
+        // Exclusive latch is held so no other thread can access this frame.
+        unsafe { &self.meta.as_ref().access_count }
+    }
+
     pub fn page_key(&self) -> Option<PageKey> {
         // SAFETY: This is safe because frame meta must be a valid pointer.
         unsafe { self.meta.as_ref().key() }
@@ -367,6 +389,7 @@ impl<T: EvictionPolicy> FrameWriteGuard<T> {
         self.dirty().store(false, Ordering::Release);
         self.evict_info().reset();
         self.set_page_key(None);
+        self.access_count().store(0, Ordering::Relaxed);
     }
 }
 
