@@ -9,14 +9,13 @@ use crate::{
 };
 
 use super::{
-    eviction_policy::DummyEvictionPolicy,
     frame_guards::{box_as_mut_ptr, FrameMeta},
     mem_pool_trait::{MemPool, MemoryStats, PageKey},
     prelude::{ContainerKey, FrameReadGuard, FrameWriteGuard, MemPoolStatus, PageFrameKey},
 };
 
-type FWGuard = FrameWriteGuard<DummyEvictionPolicy>;
-type FRGuard = FrameReadGuard<DummyEvictionPolicy>;
+type FWGuard = FrameWriteGuard;
+type FRGuard = FrameReadGuard;
 
 /// A simple in-memory page pool.
 /// All the pages are stored in a vector in memory.
@@ -28,7 +27,7 @@ pub struct InMemPool {
     #[allow(clippy::vec_box)]
     pages: UnsafeCell<Vec<Box<Page>>>, // This must be a vector of boxes to allow for dynamic size of the vector
     #[allow(clippy::vec_box)]
-    metas: UnsafeCell<Vec<Box<FrameMeta<DummyEvictionPolicy>>>>, // This must be a vector of boxes to allow for dynamic size of the vector
+    metas: UnsafeCell<Vec<Box<FrameMeta>>>, // This must be a vector of boxes to allow for dynamic size of the vector
     page_to_frame: UnsafeCell<HashMap<PageKey, usize>>,
     container_page_count: UnsafeCell<HashMap<ContainerKey, u32>>,
 }
@@ -123,8 +122,6 @@ impl InMemPool {
 }
 
 impl MemPool for InMemPool {
-    type EP = DummyEvictionPolicy;
-
     fn create_container(&self, _c_key: ContainerKey, _is_temp: bool) -> Result<(), MemPoolStatus> {
         Ok(())
     }

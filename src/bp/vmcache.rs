@@ -11,7 +11,7 @@ use std::{
 };
 
 use crate::{
-    bp::{eviction_policy::EvictionPolicy, frame_guards::box_as_mut_ptr},
+    bp::frame_guards::box_as_mut_ptr,
     container::ContainerManager,
     log_warn,
     page::{Page, PageId, PAGE_SIZE},
@@ -24,16 +24,15 @@ use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use std::{io, ptr};
 
 use super::{
-    eviction_policy::ClockEvictionPolicy,
     frame_guards::FrameMeta,
     mem_pool_trait::{MemoryStats, PageKey},
     resident_set::ResidentPageSet,
     BPStats, ContainerKey, FrameReadGuard, FrameWriteGuard, MemPool, MemPoolStatus, PageFrameKey,
 };
 
-type FMeta = FrameMeta<ClockEvictionPolicy>;
-type FWGuard = FrameWriteGuard<ClockEvictionPolicy>;
-type FRGuard = FrameReadGuard<ClockEvictionPolicy>;
+type FMeta = FrameMeta;
+type FWGuard = FrameWriteGuard;
+type FRGuard = FrameReadGuard;
 
 pub const VMCACHE_LARGE_PAGE_ENTRIES: usize = 1 << 27; // 2^27 pages = 2 TiB with 16 KiB page size
 const fn page_key_to_offset_large(page_key: &PageKey) -> usize {
@@ -384,9 +383,9 @@ impl<const IS_SMALL: bool, const EVICTION_BATCH_SIZE: usize>
             return;
         }
 
-        let marked = meta.evict_info.score() > 0;
+        let marked = meta.eviction_score() > 0;
         if !marked {
-            meta.evict_info.update();
+            meta.update_eviction_score(1); // Mark the page for the next round
             return;
         }
 
@@ -474,7 +473,7 @@ impl<const IS_SMALL: bool, const EVICTION_BATCH_SIZE: usize>
             freed += 1;
             assert!(!g.dirty().load(Ordering::Acquire));
             g.set_page_key(None);
-            g.evict_info().reset();
+            g.update_eviction_score(0);
             assert!(self.resident_set.remove(index as u64));
         }
         self.used_frames.fetch_sub(freed, Ordering::AcqRel);
@@ -484,8 +483,6 @@ impl<const IS_SMALL: bool, const EVICTION_BATCH_SIZE: usize>
 impl<const IS_SMALL: bool, const EVICTION_BATCH_SIZE: usize> MemPool
     for VMCachePool<IS_SMALL, EVICTION_BATCH_SIZE>
 {
-    type EP = ClockEvictionPolicy;
-
     fn create_container(&self, _c_key: ContainerKey, _is_temp: bool) -> Result<(), MemPoolStatus> {
         Ok(())
     }
@@ -520,7 +517,7 @@ impl<const IS_SMALL: bool, const EVICTION_BATCH_SIZE: usize> MemPool
         guard.set_id(page_key.page_id); // Initialize the page with the page id
         guard.set_page_key(Some(page_key)); // Set the frame key to the new page key
         guard.dirty().store(true, Ordering::Release);
-        guard.evict_info().reset();
+        guard.update_eviction_score(0);
         self.resident_set
             .insert(self.page_key_to_offset(&page_key) as u64);
         self.used_frames.fetch_add(1, Ordering::AcqRel);
@@ -563,7 +560,7 @@ impl<const IS_SMALL: bool, const EVICTION_BATCH_SIZE: usize> MemPool
             Some(k) => {
                 // Page is already in memory
                 assert!(k == key.p_key(), "Page key mismatch");
-                guard.evict_info().reset(); // Reset unmarks the page
+                guard.update_eviction_score(0); // Reset unmarks the page
                 Ok(guard)
             }
             None => {
@@ -575,7 +572,7 @@ impl<const IS_SMALL: bool, const EVICTION_BATCH_SIZE: usize> MemPool
                     .read_page(key.p_key().page_id, &mut guard)
                     .map(|()| {
                         guard.set_page_key(Some(key.p_key()));
-                        guard.evict_info().reset(); // Reset unmarks the page
+                        guard.update_eviction_score(0); // Reset unmarks the page
                     })?;
 
                 self.resident_set.insert(page_offset as u64);
@@ -603,7 +600,7 @@ impl<const IS_SMALL: bool, const EVICTION_BATCH_SIZE: usize> MemPool
             Some(k) => {
                 // Page is already in memory
                 assert!(k == key.p_key(), "Page key mismatch");
-                guard.evict_info().reset(); // Reset unmarks the page
+                guard.update_eviction_score(0); // Reset unmarks the page
                 Ok(guard)
             }
             None => {
@@ -621,7 +618,7 @@ impl<const IS_SMALL: bool, const EVICTION_BATCH_SIZE: usize> MemPool
                     .read_page(key.p_key().page_id, &mut guard)
                     .map(|()| {
                         guard.set_page_key(Some(key.p_key()));
-                        guard.evict_info().reset();
+                        guard.update_eviction_score(0);
                     })?;
                 self.resident_set.insert(page_offset as u64);
                 self.used_frames.fetch_add(1, Ordering::AcqRel);

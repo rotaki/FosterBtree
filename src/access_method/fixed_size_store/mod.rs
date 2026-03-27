@@ -175,7 +175,7 @@ impl<T: MemPool> FixedSizeStore<T> {
         storage
     }
 
-    fn write_page(&self, page_key: &PageFrameKey) -> FrameWriteGuard<T::EP> {
+    fn write_page(&self, page_key: &PageFrameKey) -> FrameWriteGuard {
         let mut attempts = 0;
         loop {
             match self.mem_pool.get_page_for_write(*page_key) {
@@ -191,7 +191,7 @@ impl<T: MemPool> FixedSizeStore<T> {
         }
     }
 
-    fn read_page(&self, page_key: PageFrameKey) -> FrameReadGuard<T::EP> {
+    fn read_page(&self, page_key: PageFrameKey) -> FrameReadGuard {
         let mut attempts = 0;
         loop {
             match self.mem_pool.get_page_for_read(page_key) {
@@ -313,7 +313,7 @@ pub struct FixedSizeStoreScanner<T: MemPool> {
 
     initialized: bool,
     finished: bool,
-    current_page: Option<FrameReadGuard<T::EP>>,
+    current_page: Option<FrameReadGuard>,
     current_slot_id: u32, // Current slot id in the current page
 
     filter: Option<FilterType>,

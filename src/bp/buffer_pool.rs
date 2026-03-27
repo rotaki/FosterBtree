@@ -2,7 +2,6 @@
 use crate::log;
 
 use super::{
-    eviction_policy::{EvictionPolicy, LRUEvictionPolicy},
     frame_guards::{FrameMeta, FrameReadGuard, FrameWriteGuard},
     mem_pool_trait::{ContainerKey, MemPool, MemPoolStatus, MemoryStats, PageFrameKey, PageKey},
 };
@@ -11,7 +10,7 @@ use crate::{
     container::ContainerManager,
     log_debug,
     page::{Page, PageId},
-    random::gen_random_int,
+    random::{gen_random_int, small_thread_rng},
     rwlatch::RwLatch,
 };
 
@@ -19,17 +18,24 @@ use std::{
     cell::{RefCell, UnsafeCell},
     collections::{BTreeMap, HashMap},
     sync::{
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicU64, Ordering},
         Arc,
     },
 };
 
-type EvictionPolicyImpl = LRUEvictionPolicy;
-type FMeta = FrameMeta<EvictionPolicyImpl>;
-type FWGuard = FrameWriteGuard<EvictionPolicyImpl>;
-type FRGuard = FrameReadGuard<EvictionPolicyImpl>;
+// Static atomic counter for LRU timestamp
+pub const INITIAL_COUNTER: u64 = 1;
+static LRU_COUNTER: AtomicU64 = AtomicU64::new(INITIAL_COUNTER);
+fn get_lru_counter() -> u64 {
+    LRU_COUNTER.fetch_add(1, Ordering::AcqRel)
+}
+
+type FMeta = FrameMeta;
+type FWGuard = FrameWriteGuard;
+type FRGuard = FrameReadGuard;
 
 use concurrent_queue::ConcurrentQueue;
+use rand::RngCore;
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 
 const EVICTION_SCAN_TRIALS: usize = 5;
@@ -321,7 +327,7 @@ impl BufferPool {
                     let frame = self.try_get_write_guard(*i, false);
                     if let Some(guard) = frame {
                         if let Some(current_min_score) = frame_with_min_score.as_ref() {
-                            if guard.evict_info().score() < current_min_score.evict_info().score() {
+                            if guard.eviction_score() < current_min_score.eviction_score() {
                                 frame_with_min_score = Some(guard);
                             } else {
                                 // No need to update the min frame
@@ -388,8 +394,6 @@ impl BufferPool {
 }
 
 impl MemPool for BufferPool {
-    type EP = EvictionPolicyImpl;
-
     fn create_container(&self, c_key: ContainerKey, is_temp: bool) -> Result<(), MemPoolStatus> {
         self.container_manager.create_container(c_key, is_temp);
         Ok(())
@@ -445,8 +449,9 @@ impl MemPool for BufferPool {
                     victim.set_id(page_key.page_id); // Initialize the page with the page id
                     victim.set_page_key(Some(page_key)); // Set the frame key to the new page key
                     victim.dirty().store(true, Ordering::Release);
-                    victim.evict_info().reset(); // Reset the eviction info
-                    victim.evict_info().update(); // Update the eviction info
+                    if small_thread_rng().next_u64() % 10 == 0 {
+                        victim.update_eviction_score(LRU_COUNTER.fetch_add(1, Ordering::AcqRel));
+                    }
 
                     Ok(victim)
                 }
@@ -508,8 +513,7 @@ impl MemPool for BufferPool {
                 victim.set_id(page_id);
                 victim.set_page_key(Some(key));
                 victim.dirty().store(true, Ordering::Release);
-                victim.evict_info().reset(); // Reset the eviction info
-                victim.evict_info().update(); // Update the eviction info
+                victim.update_eviction_score(get_lru_counter());
             }
 
             Ok(victims)
@@ -559,7 +563,7 @@ impl MemPool for BufferPool {
                 if self.frame_matches_key(frame_id as usize, key.p_key()) {
                     match self.try_get_write_guard(frame_id as usize, false) {
                         Some(g) if g.page_key().map(|k| k == key.p_key()).unwrap_or(false) => {
-                            g.evict_info().update();
+                            g.update_eviction_score(get_lru_counter());
                             g.dirty().store(true, Ordering::Release);
                             log_debug!("Page fast path write: {}", key);
                             return Ok(g);
@@ -589,7 +593,7 @@ impl MemPool for BufferPool {
                 self.release_shared(); // Critical section ends here
                 return guard
                     .inspect(|g| {
-                        g.evict_info().update();
+                        g.update_eviction_score(get_lru_counter());
                     })
                     .ok_or(MemPoolStatus::FrameWriteLatchGrantFailed);
             }
@@ -624,7 +628,7 @@ impl MemPool for BufferPool {
 
                     guard
                         .inspect(|g| {
-                            g.evict_info().update();
+                            g.update_eviction_score(get_lru_counter());
                         })
                         .ok_or(MemPoolStatus::FrameWriteLatchGrantFailed)
                 }
@@ -646,8 +650,7 @@ impl MemPool for BufferPool {
                         .read_page(key.p_key().page_id, &mut victim)
                         .map(|()| {
                             victim.set_page_key(Some(key.p_key()));
-                            victim.evict_info().reset();
-                            victim.evict_info().update();
+                            victim.update_eviction_score(get_lru_counter());
                         })?;
                     victim.dirty().store(true, Ordering::Release); // Prepare the page for writing.
                     Ok(victim)
@@ -671,7 +674,7 @@ impl MemPool for BufferPool {
                     match guard {
                         Some(g) if g.page_key().map(|k| k == key.p_key()).unwrap_or(false) => {
                             // Update the eviction info
-                            g.evict_info().update();
+                            g.update_eviction_score(get_lru_counter());
                             log_debug!("Page fast path read: {}", key);
                             return Ok(g);
                         }
@@ -700,7 +703,7 @@ impl MemPool for BufferPool {
                 self.release_shared();
                 return guard
                     .inspect(|g| {
-                        g.evict_info().update();
+                        g.update_eviction_score(get_lru_counter());
                     })
                     .ok_or(MemPoolStatus::FrameReadLatchGrantFailed);
             }
@@ -738,7 +741,7 @@ impl MemPool for BufferPool {
 
                     guard
                         .inspect(|g| {
-                            g.evict_info().update();
+                            g.update_eviction_score(get_lru_counter());
                         })
                         .ok_or(MemPoolStatus::FrameReadLatchGrantFailed)
                 }
@@ -758,8 +761,7 @@ impl MemPool for BufferPool {
                         .read_page(key.p_key().page_id, &mut victim)
                         .map(|()| {
                             victim.set_page_key(Some(key.p_key()));
-                            victim.evict_info().reset();
-                            victim.evict_info().update();
+                            victim.update_eviction_score(get_lru_counter());
                         })?;
                     Ok(victim.downgrade())
                 }

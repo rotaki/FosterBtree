@@ -9,7 +9,7 @@ use std::{
 
 use crate::{
     access_method::{AccessMethodError, FilterType, OrderedUniqueKeyIndex, UniqueKeyIndex},
-    bp::{prelude::*, EvictionPolicy},
+    bp::prelude::*,
     page::{Page, PageId, PageVisitor, AVAILABLE_PAGE_SIZE},
     random::gen_truncated_randomized_exponential_backoff,
 };
@@ -645,11 +645,11 @@ fn should_root_descend(this: &Page, child: &Page) -> bool {
 
 /// Opportunistically try to fix the child page frame id
 #[inline]
-fn fix_frame_id<T: EvictionPolicy>(
-    this: FrameReadGuard<T>,
+fn fix_frame_id(
+    this: FrameReadGuard,
     _slot_id: u32,
     _new_frame_key: &PageFrameKey,
-) -> FrameReadGuard<T> {
+) -> FrameReadGuard {
     #[cfg(feature = "no_bp_hint")]
     {
         this
@@ -678,10 +678,7 @@ fn fix_frame_id<T: EvictionPolicy>(
 /// Split this page into two pages.
 /// The foster child will be the right page of this page after the split.
 /// Returns the foster key
-fn split_even<T: EvictionPolicy>(
-    this: &mut FrameWriteGuard<T>,
-    foster_child: &mut FrameWriteGuard<T>,
-) -> Vec<u8> {
+fn split_even(this: &mut FrameWriteGuard, foster_child: &mut FrameWriteGuard) -> Vec<u8> {
     #[cfg(feature = "stat")]
     inc_local_stat_success(OpType::Split);
 
@@ -738,10 +735,7 @@ fn split_even<T: EvictionPolicy>(
 
 /// Split this page into two pages with minimum moving slots
 /// from this to foster child.
-fn split_min_move<T: EvictionPolicy>(
-    this: &mut FrameWriteGuard<T>,
-    foster_child: &mut FrameWriteGuard<T>,
-) -> Vec<u8> {
+fn split_min_move(this: &mut FrameWriteGuard, foster_child: &mut FrameWriteGuard) -> Vec<u8> {
     #[cfg(feature = "stat")]
     inc_local_stat_success(OpType::Split);
 
@@ -785,9 +779,9 @@ fn split_min_move<T: EvictionPolicy>(
 /// Some assumptions:
 /// 1. Key must be in the range of the page.
 /// 2. The foster child is a unused page. It will be initialized in this function.
-fn split_insert<T: EvictionPolicy>(
-    this: &mut FrameWriteGuard<T>,
-    foster_child: &mut FrameWriteGuard<T>,
+fn split_insert(
+    this: &mut FrameWriteGuard,
+    foster_child: &mut FrameWriteGuard,
     key: &[u8],
     value: &[u8],
     is_ghost: bool,
@@ -923,7 +917,7 @@ fn split_insert_triple(
 ///
 /// After:
 ///   this [k0, k2)
-fn merge<T: EvictionPolicy>(this: &mut FrameWriteGuard<T>, foster_child: &mut FrameWriteGuard<T>) {
+fn merge(this: &mut FrameWriteGuard, foster_child: &mut FrameWriteGuard) {
     #[cfg(feature = "stat")]
     inc_local_stat_success(OpType::Merge);
 
@@ -960,10 +954,7 @@ fn merge<T: EvictionPolicy>(this: &mut FrameWriteGuard<T>, foster_child: &mut Fr
 /// 2. The two pages are initialized. (have low fence and high fence)
 /// 3. Balancing does not move the foster key from one page to another.
 /// 4. Balancing does not move the low fence and high fence.
-fn balance<T: EvictionPolicy>(
-    this: &mut FrameWriteGuard<T>,
-    foster_child: &mut FrameWriteGuard<T>,
-) {
+fn balance(this: &mut FrameWriteGuard, foster_child: &mut FrameWriteGuard) {
     #[cfg(feature = "stat")]
     inc_local_stat_success(OpType::LoadBalance);
 
@@ -1099,7 +1090,7 @@ fn balance<T: EvictionPolicy>(
 ///    |                   |
 ///    v                   v
 ///   child1 [k0, k1)    child2 [k1, k2)
-fn adopt<T: EvictionPolicy>(parent: &mut FrameWriteGuard<T>, child1: &mut FrameWriteGuard<T>) {
+fn adopt(parent: &mut FrameWriteGuard, child1: &mut FrameWriteGuard) {
     #[cfg(feature = "stat")]
     inc_local_stat_success(OpType::Adopt);
 
@@ -1136,7 +1127,7 @@ fn adopt<T: EvictionPolicy>(parent: &mut FrameWriteGuard<T>, child1: &mut FrameW
 ///  |
 ///  v
 /// child1 [k0, k2) --> foster_child [k1, k2)
-fn anti_adopt<T: EvictionPolicy>(parent: &mut FrameWriteGuard<T>, child1: &mut FrameWriteGuard<T>) {
+fn anti_adopt(parent: &mut FrameWriteGuard, child1: &mut FrameWriteGuard) {
     #[cfg(feature = "stat")]
     inc_local_stat_success(OpType::AntiAdopt);
 
@@ -1183,7 +1174,7 @@ fn anti_adopt<T: EvictionPolicy>(parent: &mut FrameWriteGuard<T>, child1: &mut F
 ///
 /// After:
 /// root [-inf, +inf)
-fn descend_root<T: EvictionPolicy>(root: &mut FrameWriteGuard<T>, child: &mut FrameWriteGuard<T>) {
+fn descend_root(root: &mut FrameWriteGuard, child: &mut FrameWriteGuard) {
     #[cfg(feature = "stat")]
     inc_local_stat_success(OpType::DescendRoot);
 
@@ -1226,7 +1217,7 @@ fn descend_root<T: EvictionPolicy>(root: &mut FrameWriteGuard<T>, child: &mut Fr
 ///  |                   |
 ///  v                   v
 /// child [-inf, k0)    foster_child [k0, +inf)
-fn ascend_root<T: EvictionPolicy>(root: &mut FrameWriteGuard<T>, child: &mut FrameWriteGuard<T>) {
+fn ascend_root(root: &mut FrameWriteGuard, child: &mut FrameWriteGuard) {
     #[cfg(feature = "stat")]
     inc_local_stat_success(OpType::AscendRoot);
 
@@ -1423,7 +1414,7 @@ impl<T: MemPool> FosterBtree<T> {
     }
 
     /// System transaction that allocates a new page.
-    fn allocate_page(&self) -> FrameWriteGuard<T::EP> {
+    fn allocate_page(&self) -> FrameWriteGuard {
         if let Ok(page_id) = self.unused_pages.pop() {
             let page = self
                 .mem_pool
@@ -1450,7 +1441,7 @@ impl<T: MemPool> FosterBtree<T> {
         new_page
     }
 
-    fn read_page(&self, page_key: PageFrameKey) -> FrameReadGuard<T::EP> {
+    fn read_page(&self, page_key: PageFrameKey) -> FrameReadGuard {
         let mut attempts = 0;
         loop {
             #[cfg(feature = "stat")]
@@ -1487,7 +1478,7 @@ impl<T: MemPool> FosterBtree<T> {
 
     pub fn insert_at_slot_or_split(
         &self,
-        this: &mut FrameWriteGuard<T::EP>,
+        this: &mut FrameWriteGuard,
         slot: u32,
         key: &[u8],
         value: &[u8],
@@ -1531,7 +1522,7 @@ impl<T: MemPool> FosterBtree<T> {
 
     pub fn update_at_slot_or_split(
         &self,
-        this: &mut FrameWriteGuard<T::EP>,
+        this: &mut FrameWriteGuard,
         slot: u32,
         key: &[u8],
         value: &[u8],
@@ -1582,10 +1573,10 @@ impl<T: MemPool> FosterBtree<T> {
     fn modify_structure_if_needed_for_read(
         &self,
         is_foster_relationship: bool,
-        this: FrameReadGuard<T::EP>,
-        child: FrameReadGuard<T::EP>,
+        this: FrameReadGuard,
+        child: FrameReadGuard,
         op_byte: &mut OpByte,
-    ) -> (Option<OpType>, FrameReadGuard<T::EP>, FrameReadGuard<T::EP>) {
+    ) -> (Option<OpType>, FrameReadGuard, FrameReadGuard) {
         if should_split_this(&this, op_byte) {
             log_debug!("Should split this page: {}", this.get_id());
             #[cfg(feature = "stat")]
@@ -1647,8 +1638,8 @@ impl<T: MemPool> FosterBtree<T> {
     fn modify_structure(
         &self,
         op: OpType,
-        this: &mut FrameWriteGuard<T::EP>,
-        child: &mut FrameWriteGuard<T::EP>,
+        this: &mut FrameWriteGuard,
+        child: &mut FrameWriteGuard,
     ) {
         match op {
             OpType::Merge => {
@@ -1689,7 +1680,7 @@ impl<T: MemPool> FosterBtree<T> {
         &self,
         key: &[u8],
         _hint: Option<PageFrameKey>,
-    ) -> FrameReadGuard<T::EP> {
+    ) -> FrameReadGuard {
         #[cfg(feature = "no_tree_hint")]
         {
             self.traverse_to_leaf_for_read(key)
@@ -1723,7 +1714,7 @@ impl<T: MemPool> FosterBtree<T> {
         }
     }
 
-    fn traverse_to_leaf_for_read(&self, key: &[u8]) -> FrameReadGuard<T::EP> {
+    fn traverse_to_leaf_for_read(&self, key: &[u8]) -> FrameReadGuard {
         self.traverse_to_leaf_for_read_from(key, self.root_key)
     }
 
@@ -1731,7 +1722,7 @@ impl<T: MemPool> FosterBtree<T> {
         &self,
         key: &[u8],
         start_key: PageFrameKey,
-    ) -> FrameReadGuard<T::EP> {
+    ) -> FrameReadGuard {
         let mut current_page = {
             let start_page = self.read_page(start_key);
             if start_page.is_valid() && start_page.inside_range(&BTreeKey::Normal(key)) {
@@ -1838,7 +1829,7 @@ impl<T: MemPool> FosterBtree<T> {
         &self,
         key: &[u8],
         _hint: Option<PageFrameKey>,
-    ) -> FrameWriteGuard<T::EP> {
+    ) -> FrameWriteGuard {
         #[cfg(feature = "no_tree_hint")]
         {
             self.traverse_to_leaf_for_write(key)
@@ -1891,7 +1882,7 @@ impl<T: MemPool> FosterBtree<T> {
         &self,
         key: &[u8],
         start_key: PageFrameKey,
-    ) -> Result<FrameWriteGuard<T::EP>, AccessMethodError> {
+    ) -> Result<FrameWriteGuard, AccessMethodError> {
         let leaf_page = self.traverse_to_leaf_for_read_from(key, start_key);
         #[cfg(feature = "stat")]
         inc_exclusive_page_latch_count();
@@ -1910,7 +1901,7 @@ impl<T: MemPool> FosterBtree<T> {
         &self,
         key: &[u8],
         start_key: PageFrameKey,
-    ) -> FrameWriteGuard<T::EP> {
+    ) -> FrameWriteGuard {
         let mut attempts = 0;
 
         {
@@ -1935,7 +1926,7 @@ impl<T: MemPool> FosterBtree<T> {
         }
     }
 
-    fn traverse_to_leaf_for_write(&self, key: &[u8]) -> FrameWriteGuard<T::EP> {
+    fn traverse_to_leaf_for_write(&self, key: &[u8]) -> FrameWriteGuard {
         self.traverse_to_leaf_for_write_from(key, self.root_key)
     }
 
@@ -2164,7 +2155,7 @@ pub struct FosterBtreeCursor<T: MemPool> {
     r_key: Vec<u8>,
 
     // States
-    current_leaf_page: Option<FrameReadGuard<T::EP>>,
+    current_leaf_page: Option<FrameReadGuard>,
     current_slot_id: u32,
     current_high_fence: Option<Vec<u8>>,
     visited: Vec<PageFrameKey>,
@@ -2579,7 +2570,7 @@ impl<T: MemPool> FosterBtreeAppendOnly<T> {
         &self,
         key: &[u8],
         hint: Option<PageFrameKey>,
-    ) -> FrameReadGuard<T::EP> {
+    ) -> FrameReadGuard {
         let mut suffixed_key = key.to_vec();
         suffixed_key.extend(0_u32.to_be_bytes());
         self.fbt
@@ -2590,7 +2581,7 @@ impl<T: MemPool> FosterBtreeAppendOnly<T> {
         &self,
         key: &[u8],
         hint: Option<PageFrameKey>,
-    ) -> FrameWriteGuard<T::EP> {
+    ) -> FrameWriteGuard {
         let mut suffixed_key = key.to_vec();
         suffixed_key.extend(0_u32.to_be_bytes());
         self.fbt

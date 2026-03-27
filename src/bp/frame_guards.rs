@@ -1,9 +1,6 @@
 use super::mem_pool_trait::PageFrameKey;
+use super::mem_pool_trait::PageKey;
 use super::ContainerKey;
-use super::{
-    eviction_policy::{EvictionPolicy, LRUEvictionPolicy},
-    mem_pool_trait::PageKey,
-};
 #[allow(unused_imports)]
 use crate::log;
 use crate::page::{Page, PageId};
@@ -15,8 +12,6 @@ use std::{
     ptr::NonNull,
     sync::atomic::{AtomicBool, Ordering},
 };
-
-type DefaultEvictionPolicy = LRUEvictionPolicy;
 
 /// ───── sentinel & packing helpers ──────────────────────────────────────────
 const EMPTY: u64 = u64::MAX; // 0xFFFF_FFFF_FFFF_FFFF  ⇔  None
@@ -98,25 +93,21 @@ impl AtomicOptionKey {
 }
 
 #[repr(C, align(64))]
-pub struct FrameMeta<T = DefaultEvictionPolicy>
-// Defaults to LRU eviction policy
-where
-    T: EvictionPolicy,
-{
+pub struct FrameMeta {
     pub(crate) frame_id: u32, // An index of the frame in the buffer pool. This is a constant value.
     pub(crate) latch: RwLatch,
     pub(crate) is_dirty: AtomicBool, // Can be updated even when ReadGuard is held (see flush_all() in buffer_pool.rs)
-    pub(crate) evict_info: T, // Can be updated even when ReadGuard is held (see get_page_for_read() in buffer_pool.rs). Interior mutability must be used.
+    pub(crate) eviction_state: AtomicU64,
     key: AtomicOptionKey,
 } // This is around 4 bytes
 
-impl<T: EvictionPolicy> FrameMeta<T> {
+impl FrameMeta {
     pub fn new(frame_id: u32) -> Self {
         FrameMeta {
             frame_id,
             latch: RwLatch::default(),
             is_dirty: AtomicBool::new(false),
-            evict_info: T::new(),
+            eviction_state: AtomicU64::new(0),
             key: AtomicOptionKey::new_none(),
         }
     }
@@ -128,27 +119,32 @@ impl<T: EvictionPolicy> FrameMeta<T> {
     pub fn set_key(&self, k: Option<PageKey>) {
         self.key.replace(k);
     }
+
+    pub fn eviction_score(&self) -> u64 {
+        self.eviction_state.load(Ordering::Acquire)
+    }
+
+    pub fn update_eviction_score(&self, new_score: u64) {
+        self.eviction_state.store(new_score, Ordering::Release);
+    }
 }
 
-unsafe impl<T: EvictionPolicy> Send for FrameMeta<T> {}
-unsafe impl<T: EvictionPolicy> Sync for FrameMeta<T> {}
+unsafe impl Send for FrameMeta {}
+unsafe impl Sync for FrameMeta {}
 
-pub struct FrameReadGuard<T = DefaultEvictionPolicy>
-where
-    T: EvictionPolicy,
-{
+pub struct FrameReadGuard {
     upgraded: AtomicBool,
-    meta: NonNull<FrameMeta<T>>,
+    meta: NonNull<FrameMeta>,
     page: NonNull<Page>,
     _marker: std::marker::PhantomData<*mut ()>,
 }
 
-unsafe impl<T: EvictionPolicy> Send for FrameReadGuard<T> {}
+unsafe impl Send for FrameReadGuard {}
 // I don't think we need sync for FrameReadGuard, because it is not shared between threads.
 
-impl<T: EvictionPolicy> FrameReadGuard<T> {
+impl FrameReadGuard {
     #[inline]
-    fn meta_ref(&self) -> &FrameMeta<T> {
+    fn meta_ref(&self) -> &FrameMeta {
         unsafe { self.meta.as_ref() }
     }
 
@@ -157,7 +153,7 @@ impl<T: EvictionPolicy> FrameReadGuard<T> {
         unsafe { self.page.as_ref() }
     }
 
-    pub fn new(meta: *mut FrameMeta<T>, page: *mut Page) -> Self {
+    pub fn new(meta: *mut FrameMeta, page: *mut Page) -> Self {
         let upgraded = AtomicBool::new(false);
         let meta = NonNull::new(meta).expect("Meta pointer is null");
         let page = NonNull::new(page).expect("Page pointer is null");
@@ -170,7 +166,7 @@ impl<T: EvictionPolicy> FrameReadGuard<T> {
         }
     }
 
-    pub fn try_new(meta: *mut FrameMeta<T>, page: *mut Page) -> Option<Self> {
+    pub fn try_new(meta: *mut FrameMeta, page: *mut Page) -> Option<Self> {
         let upgraded = AtomicBool::new(false);
         let meta = NonNull::new(meta).expect("Meta pointer is null");
         let page = NonNull::new(page).expect("Page pointer is null");
@@ -198,10 +194,6 @@ impl<T: EvictionPolicy> FrameReadGuard<T> {
         &self.meta_ref().is_dirty
     }
 
-    pub fn evict_info(&self) -> &impl EvictionPolicy {
-        &self.meta_ref().evict_info
-    }
-
     pub fn page_key(&self) -> Option<PageKey> {
         self.meta_ref().key()
     }
@@ -216,13 +208,21 @@ impl<T: EvictionPolicy> FrameReadGuard<T> {
         self.page_ref()
     }
 
-    pub fn try_upgrade(self, make_dirty: bool) -> Result<FrameWriteGuard<T>, FrameReadGuard<T>> {
+    pub fn eviction_score(&self) -> u64 {
+        self.meta_ref().eviction_score()
+    }
+
+    pub fn update_eviction_score(&self, new_score: u64) {
+        self.meta_ref().update_eviction_score(new_score);
+    }
+
+    pub fn try_upgrade(self, make_dirty: bool) -> Result<FrameWriteGuard, FrameReadGuard> {
         if self.latch().try_upgrade() {
             self.upgraded.store(true, Ordering::Relaxed);
             if make_dirty {
                 self.dirty().store(true, Ordering::Release);
             }
-            Ok(FrameWriteGuard::<T> {
+            Ok(FrameWriteGuard {
                 downgraded: AtomicBool::new(false),
                 meta: self.meta,
                 page: self.page,
@@ -234,7 +234,7 @@ impl<T: EvictionPolicy> FrameReadGuard<T> {
     }
 }
 
-impl<T: EvictionPolicy> Drop for FrameReadGuard<T> {
+impl Drop for FrameReadGuard {
     fn drop(&mut self) {
         if !self.upgraded.load(Ordering::Relaxed) {
             self.latch().release_shared();
@@ -242,7 +242,7 @@ impl<T: EvictionPolicy> Drop for FrameReadGuard<T> {
     }
 }
 
-impl<T: EvictionPolicy> Deref for FrameReadGuard<T> {
+impl Deref for FrameReadGuard {
     type Target = Page;
 
     fn deref(&self) -> &Self::Target {
@@ -250,7 +250,7 @@ impl<T: EvictionPolicy> Deref for FrameReadGuard<T> {
     }
 }
 
-impl<T: EvictionPolicy> Debug for FrameReadGuard<T> {
+impl Debug for FrameReadGuard {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("FrameReadGuard")
             .field("key", &self.page_key())
@@ -259,20 +259,16 @@ impl<T: EvictionPolicy> Debug for FrameReadGuard<T> {
     }
 }
 
-pub struct FrameWriteGuard<T = DefaultEvictionPolicy>
-// Defaults to LRU eviction policy{
-where
-    T: EvictionPolicy,
-{
+pub struct FrameWriteGuard {
     downgraded: AtomicBool,
-    meta: NonNull<FrameMeta<T>>,
+    meta: NonNull<FrameMeta>,
     page: NonNull<Page>,
     _marker: std::marker::PhantomData<*mut ()>,
 }
 
-impl<T: EvictionPolicy> FrameWriteGuard<T> {
+impl FrameWriteGuard {
     #[inline]
-    fn meta_ref(&self) -> &FrameMeta<T> {
+    fn meta_ref(&self) -> &FrameMeta {
         unsafe { self.meta.as_ref() }
     }
 
@@ -286,7 +282,7 @@ impl<T: EvictionPolicy> FrameWriteGuard<T> {
         unsafe { self.page.as_mut() }
     }
 
-    pub fn new(meta: *mut FrameMeta<T>, page: *mut Page, make_dirty: bool) -> Self {
+    pub fn new(meta: *mut FrameMeta, page: *mut Page, make_dirty: bool) -> Self {
         let downgraded = AtomicBool::new(false);
         let meta = NonNull::new(meta).expect("Meta pointer is null");
         let page = NonNull::new(page).expect("Page pointer is null");
@@ -304,7 +300,7 @@ impl<T: EvictionPolicy> FrameWriteGuard<T> {
         }
     }
 
-    pub fn try_new(meta: *mut FrameMeta<T>, page: *mut Page, make_dirty: bool) -> Option<Self> {
+    pub fn try_new(meta: *mut FrameMeta, page: *mut Page, make_dirty: bool) -> Option<Self> {
         let downgraded = AtomicBool::new(false);
         let meta = NonNull::new(meta).expect("Meta pointer is null");
         let page = NonNull::new(page).expect("Page pointer is null");
@@ -337,8 +333,14 @@ impl<T: EvictionPolicy> FrameWriteGuard<T> {
         &self.meta_ref().is_dirty
     }
 
-    pub fn evict_info(&self) -> &impl EvictionPolicy {
-        &self.meta_ref().evict_info
+    pub fn eviction_score(&self) -> u64 {
+        self.meta_ref().eviction_state.load(Ordering::Acquire)
+    }
+
+    pub fn update_eviction_score(&self, new_score: u64) {
+        self.meta_ref()
+            .eviction_state
+            .store(new_score, Ordering::Release);
     }
 
     pub fn page_key(&self) -> Option<PageKey> {
@@ -363,10 +365,10 @@ impl<T: EvictionPolicy> FrameWriteGuard<T> {
         self.page_mut_ref()
     }
 
-    pub fn downgrade(self) -> FrameReadGuard<T> {
+    pub fn downgrade(self) -> FrameReadGuard {
         self.latch().downgrade();
         self.downgraded.store(true, Ordering::Relaxed);
-        FrameReadGuard::<T> {
+        FrameReadGuard {
             upgraded: AtomicBool::new(false),
             meta: self.meta,
             page: self.page,
@@ -376,12 +378,12 @@ impl<T: EvictionPolicy> FrameWriteGuard<T> {
 
     pub fn clear(&mut self) {
         self.dirty().store(false, Ordering::Release);
-        self.evict_info().reset();
+        self.update_eviction_score(0);
         self.set_page_key(None);
     }
 }
 
-impl<T: EvictionPolicy> Drop for FrameWriteGuard<T> {
+impl Drop for FrameWriteGuard {
     fn drop(&mut self) {
         if !self.downgraded.load(Ordering::Relaxed) {
             self.latch().release_exclusive();
@@ -389,7 +391,7 @@ impl<T: EvictionPolicy> Drop for FrameWriteGuard<T> {
     }
 }
 
-impl<T: EvictionPolicy> Deref for FrameWriteGuard<T> {
+impl Deref for FrameWriteGuard {
     type Target = Page;
 
     fn deref(&self) -> &Self::Target {
@@ -398,14 +400,14 @@ impl<T: EvictionPolicy> Deref for FrameWriteGuard<T> {
     }
 }
 
-impl<T: EvictionPolicy> DerefMut for FrameWriteGuard<T> {
+impl DerefMut for FrameWriteGuard {
     fn deref_mut(&mut self) -> &mut Self::Target {
         // SAFETY: This is safe because the latch is held exclusively.
         self.page_mut()
     }
 }
 
-impl<T: EvictionPolicy> Debug for FrameWriteGuard<T> {
+impl Debug for FrameWriteGuard {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("FrameWriteGuard")
             .field("key", &self.page_key())
