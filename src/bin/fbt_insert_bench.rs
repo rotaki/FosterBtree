@@ -87,7 +87,7 @@ fn main() {
             // BP stats
             let stats = bp.stats();
             println!("BP Stats: {}", stats);
-            bp.clear_dirty_flags().unwrap();
+            bp.clear_all().unwrap();
         }
         BPType::BPClock => {
             let bp = get_test_bp_clock::<128>(bp_size);
@@ -110,7 +110,7 @@ fn main() {
             // BP stats
             let stats = bp.stats();
             println!("BP Stats: {}", stats);
-            bp.clear_dirty_flags().unwrap();
+            bp.clear_all().unwrap();
         }
         BPType::VMCache => {
             let bp = get_test_vmcache::<false, 128>(bp_size);
@@ -133,7 +133,7 @@ fn main() {
             // BP stats
             let stats = bp.stats();
             println!("BP Stats: {}", stats);
-            bp.clear_dirty_flags().unwrap();
+            bp.clear_all().unwrap();
         }
     };
 }

@@ -99,5 +99,5 @@ pub fn main() {
     result.print(true);
 
     println!("BP stats: \n{}", bp.stats());
-    bp.clear_dirty_flags().unwrap();
+    bp.clear_all().unwrap();
 }

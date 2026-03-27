@@ -598,7 +598,7 @@ pub fn one_experiment(params: SecBenchParams) {
         }
     }
     println!("BP stats: \n{}", bp.stats());
-    bp.clear_dirty_flags().unwrap();
+    bp.clear_all().unwrap();
 }
 
 fn flush_internal_cache_and_everything() {

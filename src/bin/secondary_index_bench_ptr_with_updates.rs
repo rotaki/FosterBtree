@@ -574,6 +574,6 @@ fn main() {
         println!("Summary");
         println!("With all hints enabled: {} ms", with_slot_hint_time);
         println!("=========================================================================================");
-        bp.clear_dirty_flags().unwrap();
+        bp.clear_all().unwrap();
     }
 }

@@ -771,7 +771,8 @@ fn main() {
         println!("++++++++++++++++++++++++++++++++++++++++++++");
         println!("No hint");
         let normal = SecondaryNoHint::new(&primary, 10);
-        bp.flush_all_and_reset().unwrap();
+        bp.flush_all().unwrap();
+        bp.clear_all().unwrap();
         println!("BP stats: \n{}", bp.stats());
         let normal_time = bench_secondary(&params, &normal, &bp);
         println!("BP stats: \n{}", bp.stats());
@@ -792,7 +793,8 @@ fn main() {
         println!("++++++++++++++++++++++++++++++++++++++++++++");
         println!("[Page] hint");
         let with_page_hint = SecondaryLeafPageHint::new(&primary, 20);
-        bp.flush_all_and_reset().unwrap();
+        bp.flush_all().unwrap();
+        bp.clear_all().unwrap();
         println!("BP stats: \n{}", bp.stats());
         let with_page_hint_time = bench_secondary(&params, &with_page_hint, &bp);
         println!("BP stats: \n{}", bp.stats());
@@ -813,7 +815,8 @@ fn main() {
         println!("++++++++++++++++++++++++++++++++++++++++++++");
         println!("[Page, Frame] hint");
         let with_frame_hint = SecondaryLeafPageFrameHint::new(&primary, 30);
-        bp.flush_all_and_reset().unwrap();
+        bp.flush_all().unwrap();
+        bp.clear_all().unwrap();
         println!("BP stats: \n{}", bp.stats());
         let with_frame_hint_time = bench_secondary(&params, &with_frame_hint, &bp);
         println!("BP stats: \n{}", bp.stats());
@@ -833,7 +836,8 @@ fn main() {
         println!("++++++++++++++++++++++++++++++++++++++++++++");
         println!("[Page, Slot] hint");
         let with_slot_hint = SecondaryPageSlotHint::new(&primary, 40);
-        bp.flush_all_and_reset().unwrap();
+        bp.flush_all().unwrap();
+        bp.clear_all().unwrap();
         println!("BP stats: \n{}", bp.stats());
         let with_slot_hint_time = bench_secondary(&params, &with_slot_hint, &bp);
         println!("BP stats: \n{}", bp.stats());
@@ -855,7 +859,8 @@ fn main() {
         println!("++++++++++++++++++++++++++++++++++++++++++++");
         println!("[Page, Frame, Slot] hint");
         let with_slot_hint = SecondaryPageFrameSlotHint::new(&primary, 50);
-        bp.flush_all_and_reset().unwrap();
+        bp.flush_all().unwrap();
+        bp.clear_all().unwrap();
         println!("BP stats: \n{}", bp.stats());
         let with_slot_hint_time = bench_secondary(&params, &with_slot_hint, &bp);
         println!("BP stats: \n{}", bp.stats());

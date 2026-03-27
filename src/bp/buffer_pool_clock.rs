@@ -196,7 +196,7 @@ impl<const EVICTION_BATCH_SIZE: usize> Drop for BufferPoolClock<EVICTION_BATCH_S
             // Do nothing. Directory will be removed when the container manager is dropped.
         } else {
             // Persist all the pages to disk
-            self.flush_all_and_reset().unwrap();
+            self.flush_all().unwrap();
         }
     }
 }
@@ -382,7 +382,9 @@ impl<const EVICTION_BATCH_SIZE: usize> BufferPoolClock<EVICTION_BATCH_SIZE> {
         let is_dirty = meta.is_dirty.load(Ordering::Acquire);
         if is_dirty {
             // Try read‑latch on dirty page
-            if let Some(g) = FrameReadGuard::try_new(self.frame_meta_ptr(index), self.page_ptr(index)) {
+            if let Some(g) =
+                FrameReadGuard::try_new(self.frame_meta_ptr(index), self.page_ptr(index))
+            {
                 if g.page_key().is_some() {
                     dirty.push((index, g));
                 }
@@ -487,7 +489,10 @@ impl<const EVICTION_BATCH_SIZE: usize> BufferPoolClock<EVICTION_BATCH_SIZE> {
 
     // The exclusive latch is NOT NEEDED when calling this function
     // This function will write the victim page to disk if it is dirty, and set the dirty bit to false.
-    fn write_victim_to_disk_if_dirty_w(&self, victim: &FrameWriteGuard) -> Result<(), MemPoolStatus> {
+    fn write_victim_to_disk_if_dirty_w(
+        &self,
+        victim: &FrameWriteGuard,
+    ) -> Result<(), MemPoolStatus> {
         if let Some(key) = victim.page_key() {
             if victim
                 .dirty()
@@ -504,7 +509,10 @@ impl<const EVICTION_BATCH_SIZE: usize> BufferPoolClock<EVICTION_BATCH_SIZE> {
 
     // The exclusive latch is NOT NEEDED when calling this function
     // This function will write the victim page to disk if it is dirty, and set the dirty bit to false.
-    fn write_victim_to_disk_if_dirty_r(&self, victim: &FrameReadGuard) -> Result<(), MemPoolStatus> {
+    fn write_victim_to_disk_if_dirty_r(
+        &self,
+        victim: &FrameReadGuard,
+    ) -> Result<(), MemPoolStatus> {
         if let Some(key) = victim.page_key() {
             // Compare and swap is_dirty because we don't want to write the page if it is already written by another thread.
             if victim
@@ -522,30 +530,15 @@ impl<const EVICTION_BATCH_SIZE: usize> BufferPoolClock<EVICTION_BATCH_SIZE> {
 }
 
 impl<const EVICTION_BATCH_SIZE: usize> MemPool for BufferPoolClock<EVICTION_BATCH_SIZE> {
-    fn create_container(&self, _c_key: ContainerKey, _is_temp: bool) -> Result<(), MemPoolStatus> {
-        unimplemented!("Create container is not implemented");
-        // self.container_manager.create_container(c_key, is_temp);
-        // Ok(())
-    }
-
-    fn drop_container(&self, _c_key: ContainerKey) -> Result<(), MemPoolStatus> {
-        unimplemented!("Drop container is not implemented");
-        // self.container_manager.get_container(c_key).set_temp(true);
-        // self.shared();
-        // let page_to_frame = unsafe { &mut *self.page_to_frame.get() };
-        // for (_, frame_index) in page_to_frame.iter_container(c_key) {
-        //     self.eviction_hints.push(*frame_index).unwrap();
-        // }
-        // self.release_shared();
-        // Ok(())
-    }
-
     /// Create a new page for write in memory.
     /// NOTE: This function does not write the page to disk.
     /// See more at `handle_page_fault(key, new_page=true)`
     /// The newly allocated page is not formatted except for the page id.
     /// The caller is responsible for initializing the page.
-    fn create_new_page_for_write(&self, c_key: ContainerKey) -> Result<FrameWriteGuard, MemPoolStatus> {
+    fn create_new_page_for_write(
+        &self,
+        c_key: ContainerKey,
+    ) -> Result<FrameWriteGuard, MemPoolStatus> {
         self.stats.inc_new_page();
 
         self.ensure_free_frames()?;
@@ -599,10 +592,6 @@ impl<const EVICTION_BATCH_SIZE: usize> MemPool for BufferPoolClock<EVICTION_BATC
         {
             self.page_to_frame.contains_key(&key.p_key())
         }
-    }
-
-    fn get_page_keys_in_mem(&self, c_key: ContainerKey) -> Vec<PageFrameKey> {
-        self.page_to_frame.get_page_keys(c_key)
     }
 
     fn get_page_for_write(&self, key: PageFrameKey) -> Result<FrameWriteGuard, MemPoolStatus> {
@@ -808,10 +797,7 @@ impl<const EVICTION_BATCH_SIZE: usize> MemPool for BufferPoolClock<EVICTION_BATC
         self.stats.clear();
     }
 
-    /// Reset the buffer pool to its initial state.
-    /// This will write all the dirty pages to disk and flush the files.
-    /// After this operation, the buffer pool will have all the frames cleared.
-    fn flush_all_and_reset(&self) -> Result<(), MemPoolStatus> {
+    fn clear_all(&self) -> Result<(), MemPoolStatus> {
         (0..self.num_frames).into_par_iter().for_each(|i| {
             let mut frame = loop {
                 if let Some(guard) = self.try_get_write_guard(i, false) {
@@ -820,7 +806,6 @@ impl<const EVICTION_BATCH_SIZE: usize> MemPool for BufferPoolClock<EVICTION_BATC
                 // spin
                 std::hint::spin_loop();
             };
-            self.write_victim_to_disk_if_dirty_w(&frame).unwrap();
             if let Some(key) = frame.page_key() {
                 self.page_to_frame.remove(&key);
             }
@@ -834,16 +819,6 @@ impl<const EVICTION_BATCH_SIZE: usize> MemPool for BufferPoolClock<EVICTION_BATC
             self.eviction_hints.push(i).unwrap();
         }
         self.used_frames.store(0, Ordering::Release);
-        Ok(())
-    }
-
-    fn clear_dirty_flags(&self) -> Result<(), MemPoolStatus> {
-        (0..self.num_frames).into_par_iter().for_each(|i| {
-            let meta = self.frame_meta(i);
-            meta.is_dirty.store(false, Ordering::Release);
-        });
-
-        self.container_manager.flush_all()?;
         Ok(())
     }
 }
@@ -1111,7 +1086,8 @@ mod tests {
         }
 
         // Clear the buffer pool
-        bp.flush_all_and_reset().unwrap();
+        bp.flush_all().unwrap();
+        bp.clear_all().unwrap();
 
         unsafe {
             bp.run_checks();
@@ -1151,7 +1127,8 @@ mod tests {
             }
 
             // Clear the buffer pool
-            bp1.flush_all_and_reset().unwrap();
+            bp1.flush_all().unwrap();
+            bp1.clear_all().unwrap();
 
             unsafe {
                 bp1.run_checks();

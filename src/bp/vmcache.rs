@@ -212,7 +212,10 @@ impl<const IS_SMALL: bool, const EVICTION_BATCH_SIZE: usize>
     }
 
     // This function will write the victim page to disk if it is dirty, and set the dirty bit to false.
-    fn write_victim_to_disk_if_dirty_w(&self, victim: &FrameWriteGuard) -> Result<(), MemPoolStatus> {
+    fn write_victim_to_disk_if_dirty_w(
+        &self,
+        victim: &FrameWriteGuard,
+    ) -> Result<(), MemPoolStatus> {
         if let Some(key) = victim.page_key() {
             if victim
                 .dirty()
@@ -228,7 +231,10 @@ impl<const IS_SMALL: bool, const EVICTION_BATCH_SIZE: usize>
     }
 
     // This function will write the victim page to disk if it is dirty, and set the dirty bit to false.
-    fn write_victim_to_disk_if_dirty_r(&self, victim: &FrameReadGuard) -> Result<(), MemPoolStatus> {
+    fn write_victim_to_disk_if_dirty_r(
+        &self,
+        victim: &FrameReadGuard,
+    ) -> Result<(), MemPoolStatus> {
         if let Some(key) = victim.page_key() {
             // Compare and swap is_dirty because we don't want to write the page if it is already written by another thread.
             if victim
@@ -415,7 +421,9 @@ impl<const IS_SMALL: bool, const EVICTION_BATCH_SIZE: usize>
         to_evict: &mut Vec<(usize, FrameWriteGuard)>,
     ) {
         for (index, meta) in clean_pages.drain(..) {
-            if let Some(g) = FrameWriteGuard::try_new(meta, unsafe { self.pages.ptr.add(index) }, false) {
+            if let Some(g) =
+                FrameWriteGuard::try_new(meta, unsafe { self.pages.ptr.add(index) }, false)
+            {
                 if g.page_key().is_none() {
                     continue;
                 }
@@ -479,15 +487,10 @@ impl<const IS_SMALL: bool, const EVICTION_BATCH_SIZE: usize>
 impl<const IS_SMALL: bool, const EVICTION_BATCH_SIZE: usize> MemPool
     for VMCachePool<IS_SMALL, EVICTION_BATCH_SIZE>
 {
-    fn create_container(&self, _c_key: ContainerKey, _is_temp: bool) -> Result<(), MemPoolStatus> {
-        Ok(())
-    }
-
-    fn drop_container(&self, _c_key: ContainerKey) -> Result<(), MemPoolStatus> {
-        Ok(())
-    }
-
-    fn create_new_page_for_write(&self, c_key: ContainerKey) -> Result<FrameWriteGuard, MemPoolStatus> {
+    fn create_new_page_for_write(
+        &self,
+        c_key: ContainerKey,
+    ) -> Result<FrameWriteGuard, MemPoolStatus> {
         self.stats.inc_new_page();
 
         self.ensure_free_pages()?;
@@ -532,10 +535,6 @@ impl<const IS_SMALL: bool, const EVICTION_BATCH_SIZE: usize> MemPool
     fn is_in_mem(&self, key: PageFrameKey) -> bool {
         let meta = &mut unsafe { &mut *self.metas.get() }[self.page_key_to_offset(&key.p_key())];
         meta.key().is_some()
-    }
-
-    fn get_page_keys_in_mem(&self, _c_key: ContainerKey) -> Vec<PageFrameKey> {
-        todo!()
     }
 
     fn get_page_for_write(&self, key: PageFrameKey) -> Result<FrameWriteGuard, MemPoolStatus> {
@@ -690,8 +689,7 @@ impl<const IS_SMALL: bool, const EVICTION_BATCH_SIZE: usize> MemPool
         self.stats.clear();
     }
 
-    fn flush_all_and_reset(&self) -> Result<(), MemPoolStatus> {
-        self.flush_all()?;
+    fn clear_all(&self) -> Result<(), MemPoolStatus> {
         for i in self.resident_set.clock_batch_iter(self.resident_set.len()) {
             let meta = &mut unsafe { &mut *self.metas.get() }[i as usize];
             let guard = FrameWriteGuard::try_new(
@@ -706,21 +704,6 @@ impl<const IS_SMALL: bool, const EVICTION_BATCH_SIZE: usize> MemPool
 
         self.resident_set.clear();
         self.used_frames.store(0, Ordering::Release);
-
-        Ok(())
-    }
-
-    fn clear_dirty_flags(&self) -> Result<(), MemPoolStatus> {
-        for i in self.resident_set.clock_batch_iter(self.resident_set.len()) {
-            let meta = &mut unsafe { &mut *self.metas.get() }[i as usize];
-            let guard = FrameWriteGuard::try_new(
-                box_as_mut_ptr(meta),
-                unsafe { self.pages.ptr.add(i as usize) },
-                false,
-            )
-            .ok_or(MemPoolStatus::FrameWriteLatchGrantFailed)?;
-            guard.dirty().store(false, Ordering::Release);
-        }
 
         Ok(())
     }
@@ -1023,7 +1006,8 @@ mod tests {
         }
 
         // Clear the buffer pool
-        vmc.flush_all_and_reset().unwrap();
+        vmc.flush_all().unwrap();
+        vmc.clear_all().unwrap();
 
         unsafe {
             vmc.run_checks();
@@ -1067,7 +1051,8 @@ mod tests {
             log_warn!("Flushing all pages");
 
             // Clear the buffer pool
-            vmc1.flush_all_and_reset().unwrap();
+            vmc1.flush_all().unwrap();
+            vmc1.clear_all().unwrap();
 
             log_warn!("Flushed all pages");
 

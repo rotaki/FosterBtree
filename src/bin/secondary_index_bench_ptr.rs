@@ -765,7 +765,7 @@ fn main() {
         println!("Summary");
         println!("Without hint: {} ms", normal_time);
         println!("=========================================================================================");
-        bp.clear_dirty_flags().unwrap();
+        bp.clear_all().unwrap();
     }
 
     {
@@ -791,7 +791,7 @@ fn main() {
         println!("Summary");
         println!("With leaf hint: {} ms", with_page_hint_time);
         println!("=========================================================================================");
-        bp.clear_dirty_flags().unwrap();
+        bp.clear_all().unwrap();
     }
 
     {
@@ -817,7 +817,7 @@ fn main() {
         println!("Summary");
         println!("With leaf hint: {} ms", with_frame_hint_time);
         println!("=========================================================================================");
-        bp.clear_dirty_flags().unwrap();
+        bp.clear_all().unwrap();
     }
 
     {
@@ -843,7 +843,7 @@ fn main() {
         println!("Summary");
         println!("With slot hint: {} ms", with_slot_hint_time);
         println!("=========================================================================================");
-        bp.clear_dirty_flags().unwrap();
+        bp.clear_all().unwrap();
     }
 
     {
@@ -870,6 +870,6 @@ fn main() {
         println!("Summary");
         println!("With slot hint: {} ms", with_slot_hint_time);
         println!("=========================================================================================");
-        bp.clear_dirty_flags().unwrap();
+        bp.clear_all().unwrap();
     }
 }

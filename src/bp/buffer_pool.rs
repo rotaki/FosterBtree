@@ -135,7 +135,7 @@ impl Drop for BufferPool {
             // Do nothing. Directory will be removed when the container manager is dropped.
         } else {
             // Persist all the pages to disk
-            self.flush_all_and_reset().unwrap();
+            self.flush_all().unwrap();
         }
     }
 }
@@ -355,7 +355,10 @@ impl BufferPool {
 
     // The exclusive latch is NOT NEEDED when calling this function
     // This function will write the victim page to disk if it is dirty, and set the dirty bit to false.
-    fn write_victim_to_disk_if_dirty_w(&self, victim: &FrameWriteGuard) -> Result<(), MemPoolStatus> {
+    fn write_victim_to_disk_if_dirty_w(
+        &self,
+        victim: &FrameWriteGuard,
+    ) -> Result<(), MemPoolStatus> {
         if let Some(key) = victim.page_key() {
             if victim
                 .dirty()
@@ -372,7 +375,10 @@ impl BufferPool {
 
     // The exclusive latch is NOT NEEDED when calling this function
     // This function will write the victim page to disk if it is dirty, and set the dirty bit to false.
-    fn write_victim_to_disk_if_dirty_r(&self, victim: &FrameReadGuard) -> Result<(), MemPoolStatus> {
+    fn write_victim_to_disk_if_dirty_r(
+        &self,
+        victim: &FrameReadGuard,
+    ) -> Result<(), MemPoolStatus> {
         if let Some(key) = victim.page_key() {
             // Compare and swap is_dirty because we don't want to write the page if it is already written by another thread.
             if victim
@@ -390,28 +396,15 @@ impl BufferPool {
 }
 
 impl MemPool for BufferPool {
-    fn create_container(&self, c_key: ContainerKey, is_temp: bool) -> Result<(), MemPoolStatus> {
-        self.container_manager.create_container(c_key, is_temp);
-        Ok(())
-    }
-
-    fn drop_container(&self, c_key: ContainerKey) -> Result<(), MemPoolStatus> {
-        self.container_manager.get_container(c_key).set_temp(true);
-        self.shared();
-        let page_to_frame = unsafe { &mut *self.page_to_frame.get() };
-        for (_, frame_index) in page_to_frame.iter_container(c_key) {
-            self.eviction_hints.push(*frame_index).unwrap();
-        }
-        self.release_shared();
-        Ok(())
-    }
-
     /// Create a new page for write in memory.
     /// NOTE: This function does not write the page to disk.
     /// See more at `handle_page_fault(key, new_page=true)`
     /// The newly allocated page is not formatted except for the page id.
     /// The caller is responsible for initializing the page.
-    fn create_new_page_for_write(&self, c_key: ContainerKey) -> Result<FrameWriteGuard, MemPoolStatus> {
+    fn create_new_page_for_write(
+        &self,
+        c_key: ContainerKey,
+    ) -> Result<FrameWriteGuard, MemPoolStatus> {
         log_debug!("Page create: {}", c_key);
         self.stats.inc_new_page();
 
@@ -536,14 +529,6 @@ impl MemPool for BufferPool {
             self.release_shared();
             res
         }
-    }
-
-    fn get_page_keys_in_mem(&self, c_key: ContainerKey) -> Vec<PageFrameKey> {
-        self.shared();
-        let page_to_frame = unsafe { &*self.page_to_frame.get() };
-        let keys = page_to_frame.get_page_keys(c_key);
-        self.release_shared();
-        keys
     }
 
     fn get_page_for_write(&self, key: PageFrameKey) -> Result<FrameWriteGuard, MemPoolStatus> {
@@ -846,7 +831,7 @@ impl MemPool for BufferPool {
     /// Reset the buffer pool to its initial state.
     /// This will write all the dirty pages to disk and flush the files.
     /// After this operation, the buffer pool will have all the frames cleared.
-    fn flush_all_and_reset(&self) -> Result<(), MemPoolStatus> {
+    fn clear_all(&self) -> Result<(), MemPoolStatus> {
         self.exclusive();
 
         let page_to_frame = unsafe { &mut *self.page_to_frame.get() };
@@ -860,11 +845,6 @@ impl MemPool for BufferPool {
                 // spin
                 std::hint::spin_loop();
             };
-            self.write_victim_to_disk_if_dirty_w(&frame)
-                .inspect_err(|_| {
-                    self.release_exclusive();
-                })
-                .unwrap();
             frame.clear();
         });
 
@@ -878,28 +858,6 @@ impl MemPool for BufferPool {
         for i in 0..self.num_frames {
             self.eviction_hints.push(i).unwrap();
         }
-
-        self.release_exclusive();
-        Ok(())
-    }
-
-    fn clear_dirty_flags(&self) -> Result<(), MemPoolStatus> {
-        self.exclusive();
-
-        (0..self.num_frames).into_par_iter().for_each(|i| {
-            let frame = loop {
-                if let Some(guard) = self.try_get_write_guard(i, false) {
-                    break guard;
-                }
-                // spin
-                std::hint::spin_loop();
-            };
-            frame.dirty().store(false, Ordering::Release);
-        });
-
-        self.container_manager.flush_all().inspect_err(|_| {
-            self.release_exclusive();
-        })?;
 
         self.release_exclusive();
         Ok(())
@@ -1163,7 +1121,8 @@ mod tests {
         }
 
         // Clear the buffer pool
-        bp.flush_all_and_reset().unwrap();
+        bp.flush_all().unwrap();
+        bp.clear_all().unwrap();
 
         unsafe {
             bp.run_checks();
@@ -1203,7 +1162,8 @@ mod tests {
             }
 
             // Clear the buffer pool
-            bp1.flush_all_and_reset().unwrap();
+            bp1.flush_all().unwrap();
+            bp1.clear_all().unwrap();
 
             unsafe {
                 bp1.run_checks();

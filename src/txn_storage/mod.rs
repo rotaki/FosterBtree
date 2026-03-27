@@ -265,7 +265,8 @@ mod tests {
                 }
                 storage1.commit_txn(&txn, false).unwrap();
             }
-            bp1.flush_all_and_reset().unwrap();
+            bp1.flush_all().unwrap();
+            bp1.clear_all().unwrap();
 
             (db_id, (c_id1, c_id2, c_id3))
         };
