@@ -648,12 +648,12 @@ pub fn get_bp(num_frames: usize, cm: Arc<ContainerManager>) -> Arc<impl MemPool>
     #[cfg(feature = "vmcache")]
     {
         use fbtree::bp::VMCachePool;
-        Arc::new(VMCachePool::<false, 64>::new(num_frames, cm).unwrap())
+        Arc::new(VMCachePool::<false>::new(num_frames, cm).unwrap())
     }
     #[cfg(feature = "bp_clock")]
     {
         use fbtree::bp::BufferPoolClock;
-        Arc::new(BufferPoolClock::<64>::new(num_frames, cm).unwrap())
+        Arc::new(BufferPoolClock::new(num_frames, cm).unwrap())
     }
     #[cfg(not(any(feature = "vmcache", feature = "bp_clock")))]
     {
@@ -665,7 +665,7 @@ pub fn get_bp(num_frames: usize, cm: Arc<ContainerManager>) -> Arc<impl MemPool>
 pub fn main() {
     let params = SecBenchParams::parse();
     println!("{:?}", params);
-    let bp = get_test_bp_clock::<64>(params.bp_size);
+    let bp = get_test_bp_clock(params.bp_size);
     let primary = Arc::new(FosterBtree::new(ContainerKey::new(0, 0), Arc::clone(&bp)));
     let total_num_keys = params.num_keys;
     println!("Loading the table with {} keys", total_num_keys);

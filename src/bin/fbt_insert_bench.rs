@@ -90,7 +90,7 @@ fn main() {
             bp.clear_all().unwrap();
         }
         BPType::BPClock => {
-            let bp = get_test_bp_clock::<128>(bp_size);
+            let bp = get_test_bp_clock(bp_size);
             let btree = Arc::new(FosterBtree::new(c_key, bp.clone()));
 
             let start = std::time::Instant::now();
@@ -113,7 +113,7 @@ fn main() {
             bp.clear_all().unwrap();
         }
         BPType::VMCache => {
-            let bp = get_test_vmcache::<false, 128>(bp_size);
+            let bp = get_test_vmcache::<false>(bp_size);
             let btree = Arc::new(FosterBtree::new(c_key, bp.clone()));
 
             let start = std::time::Instant::now();

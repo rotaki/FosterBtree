@@ -84,7 +84,7 @@ fn main() {
         num_frames
     );
 
-    let bp = get_test_bp_clock::<64>(num_frames);
+    let bp = get_test_bp_clock(num_frames);
     let table = get_index(bp.clone(), &params);
 
     println!("Loading table...");

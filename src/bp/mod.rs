@@ -112,11 +112,11 @@ impl BPStats {
 pub fn get_bp(num_frames: usize, cm: Arc<ContainerManager>) -> Arc<impl MemPool> {
     #[cfg(feature = "vmcache")]
     {
-        Arc::new(VMCachePool::<false, 64>::new(num_frames, cm).unwrap())
+        Arc::new(VMCachePool::<false>::new(num_frames, cm).unwrap())
     }
     #[cfg(feature = "bp_clock")]
     {
-        Arc::new(BufferPoolClock::<64>::new(num_frames, cm).unwrap())
+        Arc::new(BufferPoolClock::new(num_frames, cm).unwrap())
     }
     #[cfg(not(any(feature = "vmcache", feature = "bp_clock")))]
     {
@@ -128,11 +128,11 @@ pub fn get_bp(num_frames: usize, cm: Arc<ContainerManager>) -> Arc<impl MemPool>
 pub fn get_test_bp(num_frames: usize) -> Arc<impl MemPool> {
     #[cfg(feature = "vmcache")]
     {
-        get_test_vmcache::<false, 64>(num_frames)
+        get_test_vmcache::<false>(num_frames)
     }
     #[cfg(feature = "bp_clock")]
     {
-        get_test_bp_clock::<64>(num_frames)
+        get_test_bp_clock(num_frames)
     }
     #[cfg(not(any(feature = "vmcache", feature = "bp_clock")))]
     {
@@ -140,12 +140,10 @@ pub fn get_test_bp(num_frames: usize) -> Arc<impl MemPool> {
     }
 }
 
-pub fn get_test_vmcache<const IS_SMALL: bool, const EVICTION_BATCH_SIZE: usize>(
-    num_frames: usize,
-) -> Arc<VMCachePool<IS_SMALL, EVICTION_BATCH_SIZE>> {
+pub fn get_test_vmcache<const IS_SMALL: bool>(num_frames: usize) -> Arc<VMCachePool<IS_SMALL>> {
     let base_dir = gen_random_pathname(Some("test_bp_vmcache_direct"));
     let cm = Arc::new(ContainerManager::new(base_dir, true, true).unwrap());
-    Arc::new(VMCachePool::<IS_SMALL, EVICTION_BATCH_SIZE>::new(num_frames, cm).unwrap())
+    Arc::new(VMCachePool::<IS_SMALL>::new(num_frames, cm).unwrap())
 }
 
 pub fn get_test_bp_lru(num_frames: usize) -> Arc<BufferPool> {
@@ -160,12 +158,10 @@ pub fn get_test_bp_lru_with_kpc(num_frames: usize) -> Arc<BufferPool> {
     Arc::new(BufferPool::new(num_frames, cm).unwrap())
 }
 
-pub fn get_test_bp_clock<const EVICTION_BATCH_SIZE: usize>(
-    num_frames: usize,
-) -> Arc<BufferPoolClock<EVICTION_BATCH_SIZE>> {
+pub fn get_test_bp_clock(num_frames: usize) -> Arc<BufferPoolClock> {
     let base_dir = gen_random_pathname(Some("test_bp_clock_direct"));
     let cm = Arc::new(ContainerManager::new(base_dir, true, true).unwrap());
-    Arc::new(BufferPoolClock::<EVICTION_BATCH_SIZE>::new(num_frames, cm).unwrap())
+    Arc::new(BufferPoolClock::new(num_frames, cm).unwrap())
 }
 
 pub fn get_in_mem_pool() -> Arc<InMemPool> {

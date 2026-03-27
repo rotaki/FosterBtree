@@ -64,7 +64,7 @@ pub fn main() {
         num_frames * PAGE_SIZE / (1024 * 1024 * 1024)
     );
 
-    let bp = get_test_bp_clock::<64>(num_frames);
+    let bp = get_test_bp_clock(num_frames);
 
     // Create the TPC-C2 benchmark
     println!(

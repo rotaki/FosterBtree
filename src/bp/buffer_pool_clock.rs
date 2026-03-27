@@ -25,6 +25,8 @@ use concurrent_queue::ConcurrentQueue;
 use dashmap::{mapref::entry, DashMap};
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 
+const EVICTION_BATCH_SIZE: usize = 32;
+
 pub struct PageToFrame {
     map: DashMap<ContainerKey, Arc<DashMap<PageId, usize>>>, // (c_key, page_id) -> frame_index
 }
@@ -176,7 +178,7 @@ where
 }
 
 /// Buffer pool that manages the buffer frames.
-pub struct BufferPoolClock<const EVICTION_BATCH_SIZE: usize> {
+pub struct BufferPoolClock {
     num_frames: usize,
     used_frames: AtomicUsize,
     clock_hand: AtomicUsize,
@@ -190,7 +192,7 @@ pub struct BufferPoolClock<const EVICTION_BATCH_SIZE: usize> {
     stats: BPStats,
 }
 
-impl<const EVICTION_BATCH_SIZE: usize> Drop for BufferPoolClock<EVICTION_BATCH_SIZE> {
+impl Drop for BufferPoolClock {
     fn drop(&mut self) {
         if self.container_manager.remove_dir_on_drop() {
             // Do nothing. Directory will be removed when the container manager is dropped.
@@ -201,14 +203,14 @@ impl<const EVICTION_BATCH_SIZE: usize> Drop for BufferPoolClock<EVICTION_BATCH_S
     }
 }
 
-impl<const EVICTION_BATCH_SIZE: usize> BufferPoolClock<EVICTION_BATCH_SIZE> {
+impl BufferPoolClock {
     /// Create a new buffer pool with the given number of frames.
     pub fn new(
         num_frames: usize,
         container_manager: Arc<ContainerManager>,
     ) -> Result<Self, MemPoolStatus> {
-        if num_frames < EVICTION_BATCH_SIZE {
-            panic!("Number of frames must be greater than the eviction batch size");
+        if num_frames == 0 {
+            panic!("Number of frames must be greater than 0");
         }
         log_debug!("Buffer pool created: num_frames: {}", num_frames);
 
@@ -238,6 +240,11 @@ impl<const EVICTION_BATCH_SIZE: usize> BufferPoolClock<EVICTION_BATCH_SIZE> {
             metas,
             stats: BPStats::new(),
         })
+    }
+
+    #[inline]
+    fn eviction_batch_size(&self) -> usize {
+        self.num_frames.min(EVICTION_BATCH_SIZE)
     }
 
     pub fn eviction_stats(&self) -> String {
@@ -301,10 +308,11 @@ impl<const EVICTION_BATCH_SIZE: usize> BufferPoolClock<EVICTION_BATCH_SIZE> {
 
     /// Evict up to `EVICTION_BATCH_SIZE` pages.
     pub fn evict_batch(&self) -> Result<(), MemPoolStatus> {
+        let batch_size = self.eviction_batch_size();
         with_eviction_scratch(EVICTION_BATCH_SIZE, |scratch| {
             // ─── 1. Collect candidate pages ────────────────────────────
             // This may return CannotEvictPage if it cannot find any candidates.
-            self.collect_candidates(scratch, EVICTION_BATCH_SIZE)?;
+            self.collect_candidates(scratch, batch_size)?;
 
             log_warn!(
                 "    Trying to evict {} pages ({} dirty, {} clean)",
@@ -529,7 +537,7 @@ impl<const EVICTION_BATCH_SIZE: usize> BufferPoolClock<EVICTION_BATCH_SIZE> {
     }
 }
 
-impl<const EVICTION_BATCH_SIZE: usize> MemPool for BufferPoolClock<EVICTION_BATCH_SIZE> {
+impl MemPool for BufferPoolClock {
     /// Create a new page for write in memory.
     /// NOTE: This function does not write the page to disk.
     /// See more at `handle_page_fault(key, new_page=true)`
@@ -824,7 +832,7 @@ impl<const EVICTION_BATCH_SIZE: usize> MemPool for BufferPoolClock<EVICTION_BATC
 }
 
 #[cfg(test)]
-impl<const EVICTION_BATCH_SIZE: usize> BufferPoolClock<EVICTION_BATCH_SIZE> {
+impl BufferPoolClock {
     /// # Safety
     ///
     /// The caller must ensure that the buffer pool is not being used by any other thread.
@@ -889,9 +897,9 @@ mod tests {
     use std::thread::{self};
     use tempfile::TempDir;
 
-    fn get_test_bp<const EVICTION_BATCH_SIZE: usize>(
-        num_frames: usize,
-    ) -> Arc<BufferPoolClock<EVICTION_BATCH_SIZE>> {
+    const TEST_NUM_FRAMES: usize = EVICTION_BATCH_SIZE * 2;
+
+    fn get_test_bp(num_frames: usize) -> Arc<BufferPoolClock> {
         let base_dir = gen_random_pathname(Some("test_bp_direct"));
         let cm = Arc::new(ContainerManager::new(base_dir, true, true).unwrap());
         Arc::new(BufferPoolClock::new(num_frames, cm).unwrap())
@@ -900,8 +908,8 @@ mod tests {
     #[test]
     fn test_bpc_and_frame_latch() {
         let db_id = 0;
-        let num_frames = 10;
-        let bp = get_test_bp::<2>(num_frames);
+        let num_frames = TEST_NUM_FRAMES;
+        let bp = get_test_bp(num_frames);
         let c_key = ContainerKey::new(db_id, 0);
         let frame = bp.create_new_page_for_write(c_key).unwrap();
         let key = frame.page_frame_key().unwrap();
@@ -943,35 +951,32 @@ mod tests {
     #[test]
     fn test_bpc_write_back_simple() {
         let db_id = 0;
-        let num_frames = 1;
-        let bp = get_test_bp::<1>(num_frames);
+        let num_frames = TEST_NUM_FRAMES;
+        let bp = get_test_bp(num_frames);
         let c_key = ContainerKey::new(db_id, 0);
 
-        let key1 = {
+        let total_pages = num_frames + 2;
+        let mut keys = Vec::with_capacity(total_pages);
+        for i in 0..total_pages {
             let mut guard = bp.create_new_page_for_write(c_key).unwrap();
-            guard[0] = 1;
-            guard.page_frame_key().unwrap()
-        };
-        let key2 = {
-            let mut guard = bp.create_new_page_for_write(c_key).unwrap();
-            guard[0] = 2;
-            guard.page_frame_key().unwrap()
-        };
+            guard[0] = i as u8;
+            keys.push(guard.page_frame_key().unwrap());
+        }
+
         unsafe {
             bp.run_checks();
         }
-        // check contents of evicted page
+
         {
-            assert!(!bp.is_in_mem(key1));
-            let guard = bp.get_page_for_read(key1).unwrap();
-            assert_eq!(guard[0], 1);
+            let first = bp.get_page_for_read(keys[0]).unwrap();
+            assert_eq!(first[0], 0);
         }
-        // check contents of the second page
+
         {
-            assert!(!bp.is_in_mem(key2));
-            let guard = bp.get_page_for_read(key2).unwrap();
-            assert_eq!(guard[0], 2);
+            let last = bp.get_page_for_read(keys[total_pages - 1]).unwrap();
+            assert_eq!(last[0], (total_pages - 1) as u8);
         }
+
         unsafe {
             bp.run_checks();
         }
@@ -981,13 +986,13 @@ mod tests {
     fn test_bpc_write_back_many() {
         let db_id = 0;
         let mut keys = Vec::new();
-        let num_frames = 1;
-        let bp = get_test_bp::<1>(num_frames);
+        let num_frames = TEST_NUM_FRAMES;
+        let bp = get_test_bp(num_frames);
         let c_key = ContainerKey::new(db_id, 0);
 
-        for i in 0..100 {
+        for i in 0..num_frames * 3 {
             let mut guard = bp.create_new_page_for_write(c_key).unwrap();
-            guard[0] = i;
+            guard[0] = i as u8;
             keys.push(guard.page_frame_key().unwrap());
         }
         unsafe {
@@ -1006,11 +1011,11 @@ mod tests {
     fn test_bpc_create_new_page() {
         let db_id = 0;
 
-        let num_frames = 2;
-        let bp = get_test_bp::<1>(num_frames);
+        let num_frames = TEST_NUM_FRAMES;
+        let bp = get_test_bp(num_frames);
         let c_key = ContainerKey::new(db_id, 0);
 
-        let num_traversal = 100;
+        let num_traversal = num_frames;
 
         let mut count = 0;
         let mut keys = Vec::new();
@@ -1048,18 +1053,23 @@ mod tests {
     fn test_bpc_all_frames_latched() {
         let db_id = 0;
 
-        let num_frames = 1;
-        let bp = get_test_bp::<1>(num_frames);
+        let num_frames = TEST_NUM_FRAMES;
+        let bp = get_test_bp(num_frames);
         let c_key = ContainerKey::new(db_id, 0);
 
-        let mut guard1 = bp.create_new_page_for_write(c_key).unwrap();
-        guard1[0] = 1;
+        let latched_frames = num_frames * 19 / 20 + 1;
+        let mut guards = Vec::with_capacity(latched_frames);
+        for i in 0..latched_frames {
+            let mut guard = bp.create_new_page_for_write(c_key).unwrap();
+            guard[0] = i as u8;
+            guards.push(guard);
+        }
 
-        // Try to get a new page for write. This should fail because all the frames are latched.
+        // Once the pool wants to evict, it should fail because every resident frame is latched.
         let res = bp.create_new_page_for_write(c_key);
         assert_eq!(res.unwrap_err(), MemPoolStatus::CannotEvictPage);
 
-        drop(guard1);
+        drop(guards);
 
         // Now, we should be able to get a new page for write.
         let guard2 = bp.create_new_page_for_write(c_key).unwrap();
@@ -1070,8 +1080,8 @@ mod tests {
     fn test_bpc_clear_frames() {
         let db_id = 0;
 
-        let num_frames = 10;
-        let bp = get_test_bp::<2>(num_frames);
+        let num_frames = TEST_NUM_FRAMES;
+        let bp = get_test_bp(num_frames);
         let c_key = ContainerKey::new(db_id, 0);
 
         let mut keys = Vec::new();
@@ -1108,15 +1118,15 @@ mod tests {
     fn test_bpc_clear_frames_durable() {
         let temp_dir = TempDir::new().unwrap();
         let db_id = 0;
-        let num_frames = 10;
+        let num_frames = TEST_NUM_FRAMES;
         let mut keys = Vec::new();
 
         {
             let cm = Arc::new(ContainerManager::new(&temp_dir, false, false).unwrap());
-            let bp1 = BufferPoolClock::<2>::new(num_frames, cm).unwrap();
+            let bp1 = BufferPoolClock::new(num_frames, cm).unwrap();
             let c_key = ContainerKey::new(db_id, 0);
 
-            for i in 0..num_frames * 10 {
+            for i in 0..num_frames * 2 {
                 let mut guard = bp1.create_new_page_for_write(c_key).unwrap();
                 guard[0] = i as u8;
                 keys.push(guard.page_frame_key().unwrap());
@@ -1137,7 +1147,7 @@ mod tests {
 
         {
             let cm = Arc::new(ContainerManager::new(&temp_dir, false, false).unwrap());
-            let bp2 = BufferPoolClock::<2>::new(num_frames, cm).unwrap();
+            let bp2 = BufferPoolClock::new(num_frames, cm).unwrap();
 
             // Check the contents of the pages
             for (i, key) in keys.iter().enumerate() {
@@ -1155,8 +1165,8 @@ mod tests {
     fn test_bpc_stats() {
         let db_id = 0;
 
-        let num_frames = 1;
-        let bp = get_test_bp::<1>(num_frames);
+        let num_frames = TEST_NUM_FRAMES;
+        let bp = get_test_bp(num_frames);
         let c_key = ContainerKey::new(db_id, 0);
 
         let key_1 = {

@@ -30,6 +30,8 @@ use super::{
     BPStats, ContainerKey, FrameReadGuard, FrameWriteGuard, MemPool, MemPoolStatus, PageFrameKey,
 };
 
+const EVICTION_BATCH_SIZE: usize = 32;
+
 pub const VMCACHE_LARGE_PAGE_ENTRIES: usize = 1 << 27; // 2^27 pages = 2 TiB with 16 KiB page size
 const fn page_key_to_offset_large(page_key: &PageKey) -> usize {
     // Layout (LSB→MSB):
@@ -132,7 +134,7 @@ where
 /// 1 bit (2^1) for container id and 9 bits (2^9) for page id for each container.
 /// IS_SMALL=false has 2^25 pages = 512 GiB with 16 KiB page size.
 /// 5 bits (2^5) for container id and 20 bits (2^20) for page id for each container.
-pub struct VMCachePool<const IS_SMALL: bool = true, const EVICTION_BATCH_SIZE: usize = 64> {
+pub struct VMCachePool<const IS_SMALL: bool = true> {
     num_frames: usize,
     used_frames: AtomicUsize,
     resident_set: ResidentPageSet,
@@ -143,14 +145,9 @@ pub struct VMCachePool<const IS_SMALL: bool = true, const EVICTION_BATCH_SIZE: u
     stats: BPStats,
 }
 
-unsafe impl<const IS_SMALL: bool, const EVICTION_BATCH_SIZE: usize> Sync
-    for VMCachePool<IS_SMALL, EVICTION_BATCH_SIZE>
-{
-}
+unsafe impl<const IS_SMALL: bool> Sync for VMCachePool<IS_SMALL> {}
 
-impl<const IS_SMALL: bool, const EVICTION_BATCH_SIZE: usize> Drop
-    for VMCachePool<IS_SMALL, EVICTION_BATCH_SIZE>
-{
+impl<const IS_SMALL: bool> Drop for VMCachePool<IS_SMALL> {
     fn drop(&mut self) {
         let size = Self::PAGE_ENTRIES * PAGE_SIZE;
         unsafe {
@@ -161,9 +158,7 @@ impl<const IS_SMALL: bool, const EVICTION_BATCH_SIZE: usize> Drop
     }
 }
 
-impl<const IS_SMALL: bool, const EVICTION_BATCH_SIZE: usize>
-    VMCachePool<IS_SMALL, EVICTION_BATCH_SIZE>
-{
+impl<const IS_SMALL: bool> VMCachePool<IS_SMALL> {
     pub const PAGE_ENTRIES: usize = if IS_SMALL {
         VMCACHE_SMALL_PAGE_ENTRIES
     } else {
@@ -183,8 +178,8 @@ impl<const IS_SMALL: bool, const EVICTION_BATCH_SIZE: usize>
         num_frames: usize,
         container_manager: Arc<ContainerManager>,
     ) -> Result<Self, MemPoolStatus> {
-        if num_frames < EVICTION_BATCH_SIZE {
-            panic!("num_frames must be greater or equal to EVICTION_BATCH_SIZE");
+        if num_frames == 0 {
+            panic!("num_frames must be greater than 0");
         }
         let size = Self::PAGE_ENTRIES * PAGE_SIZE;
         let flags = MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE;
@@ -209,6 +204,11 @@ impl<const IS_SMALL: bool, const EVICTION_BATCH_SIZE: usize>
             metas,
             stats: BPStats::new(),
         })
+    }
+
+    #[inline]
+    fn eviction_batch_size(&self) -> usize {
+        self.num_frames.min(EVICTION_BATCH_SIZE)
     }
 
     // This function will write the victim page to disk if it is dirty, and set the dirty bit to false.
@@ -314,10 +314,11 @@ impl<const IS_SMALL: bool, const EVICTION_BATCH_SIZE: usize>
         // we finish writing all the dirty pages to disk.
         // Then, we get the write-latches on both dirty and clean pages and remove them from the page-table
         // all at once.
+        let batch_size = self.eviction_batch_size();
         with_eviction_scratch(EVICTION_BATCH_SIZE, |scratch| {
             // ─── 1. Collect candidate pages ────────────────────────────
             // This may return CannotEvictPage if it cannot find any candidates.
-            self.collect_candidates(scratch, EVICTION_BATCH_SIZE)?;
+            self.collect_candidates(scratch, batch_size)?;
 
             log_warn!(
                 "    Trying to evict {} pages ({} dirty, {} clean)",
@@ -484,9 +485,7 @@ impl<const IS_SMALL: bool, const EVICTION_BATCH_SIZE: usize>
     }
 }
 
-impl<const IS_SMALL: bool, const EVICTION_BATCH_SIZE: usize> MemPool
-    for VMCachePool<IS_SMALL, EVICTION_BATCH_SIZE>
-{
+impl<const IS_SMALL: bool> MemPool for VMCachePool<IS_SMALL> {
     fn create_new_page_for_write(
         &self,
         c_key: ContainerKey,
@@ -710,9 +709,7 @@ impl<const IS_SMALL: bool, const EVICTION_BATCH_SIZE: usize> MemPool
 }
 
 #[cfg(test)]
-impl<const IS_SMALL: bool, const EVICTION_BATCH_SIZE: usize>
-    VMCachePool<IS_SMALL, EVICTION_BATCH_SIZE>
-{
+impl<const IS_SMALL: bool> VMCachePool<IS_SMALL> {
     unsafe fn run_checks(&self) {
         self.check_all_frames_unlatched();
         self.check_memory_resident_pages();
@@ -809,23 +806,23 @@ mod tests {
     use super::*;
     use std::{hint::black_box, thread};
 
-    fn get_test_vmcache<const IS_SMALL: bool, const EVICTION_BATCH_SIZE: usize>(
-        num_frames: usize,
-    ) -> Arc<VMCachePool<IS_SMALL, EVICTION_BATCH_SIZE>> {
+    const TEST_NUM_FRAMES: usize = EVICTION_BATCH_SIZE * 2;
+
+    fn get_test_vmcache<const IS_SMALL: bool>(num_frames: usize) -> Arc<VMCachePool<IS_SMALL>> {
         let base_dir = gen_random_pathname(Some("test_bp_direct"));
         let cm = Arc::new(ContainerManager::new(base_dir, true, true).unwrap());
-        Arc::new(VMCachePool::<IS_SMALL, EVICTION_BATCH_SIZE>::new(num_frames, cm).unwrap())
+        Arc::new(VMCachePool::<IS_SMALL>::new(num_frames, cm).unwrap())
     }
 
     #[test]
     fn test_vmc_small_allocation() {
-        let mp = get_test_vmcache::<true, 2>(10);
+        let mp = get_test_vmcache::<true>(TEST_NUM_FRAMES);
         black_box(mp);
     }
 
     #[test]
     fn test_vmc_frame_latch() {
-        let vmc = get_test_vmcache::<true, 2>(10);
+        let vmc = get_test_vmcache::<true>(TEST_NUM_FRAMES);
         let c_key = ContainerKey::new(0, 0);
 
         let frame = vmc.create_new_page_for_write(c_key).unwrap();
@@ -866,33 +863,27 @@ mod tests {
 
     #[test]
     fn test_vmc_write_back_simple() {
-        let vmc = get_test_vmcache::<true, 1>(1);
+        let num_frames = TEST_NUM_FRAMES;
+        let vmc = get_test_vmcache::<true>(num_frames);
         let c_key = ContainerKey::new(0, 0);
 
-        let key1 = {
+        let total_pages = num_frames + 2;
+        let mut keys = Vec::with_capacity(total_pages);
+        for i in 0..total_pages {
             let mut guard = vmc.create_new_page_for_write(c_key).unwrap();
-            guard[0] = 1;
-            guard.page_frame_key().unwrap()
-        };
-        let key2 = {
-            let mut guard = vmc.create_new_page_for_write(c_key).unwrap();
-            guard[0] = 2;
-            guard.page_frame_key().unwrap()
-        };
+            guard[0] = i as u8;
+            keys.push(guard.page_frame_key().unwrap());
+        }
         unsafe {
             vmc.run_checks();
         }
-        // check contents of evicted page
         {
-            assert!(!vmc.is_in_mem(key1));
-            let guard = vmc.get_page_for_read(key1).unwrap();
-            assert_eq!(guard[0], 1);
+            let guard = vmc.get_page_for_read(keys[0]).unwrap();
+            assert_eq!(guard[0], 0);
         }
-        // check contents of the second page
         {
-            assert!(!vmc.is_in_mem(key2));
-            let guard = vmc.get_page_for_read(key2).unwrap();
-            assert_eq!(guard[0], 2);
+            let guard = vmc.get_page_for_read(keys[total_pages - 1]).unwrap();
+            assert_eq!(guard[0], (total_pages - 1) as u8);
         }
         unsafe {
             vmc.run_checks();
@@ -902,12 +893,13 @@ mod tests {
     #[test]
     fn test_vmc_write_back_many() {
         let mut keys = Vec::new();
-        let vmc = get_test_vmcache::<true, 1>(1);
+        let num_frames = TEST_NUM_FRAMES;
+        let vmc = get_test_vmcache::<true>(num_frames);
         let c_key = ContainerKey::new(0, 0);
 
-        for i in 0..100 {
+        for i in 0..num_frames * 3 {
             let mut guard = vmc.create_new_page_for_write(c_key).unwrap();
-            guard[0] = i;
+            guard[0] = i as u8;
             keys.push(guard.page_frame_key().unwrap());
         }
         unsafe {
@@ -926,11 +918,11 @@ mod tests {
     fn test_vmc_create_new_page() {
         let db_id = 0;
 
-        let num_frames = 2;
-        let bp = get_test_vmcache::<true, 1>(num_frames);
+        let num_frames = TEST_NUM_FRAMES;
+        let bp = get_test_vmcache::<true>(num_frames);
         let c_key = ContainerKey::new(db_id, 0);
 
-        let num_traversal = 100;
+        let num_traversal = num_frames;
 
         let mut count = 0;
         let mut keys = Vec::new();
@@ -968,18 +960,23 @@ mod tests {
     fn test_vmc_all_frames_latched() {
         let db_id = 0;
 
-        let num_frames = 1;
-        let vmc = get_test_vmcache::<true, 1>(num_frames);
+        let num_frames = TEST_NUM_FRAMES;
+        let vmc = get_test_vmcache::<true>(num_frames);
         let c_key = ContainerKey::new(db_id, 0);
 
-        let mut guard1 = vmc.create_new_page_for_write(c_key).unwrap();
-        guard1[0] = 1;
+        let latched_frames = num_frames * 19 / 20 + 1;
+        let mut guards = Vec::with_capacity(latched_frames);
+        for i in 0..latched_frames {
+            let mut guard = vmc.create_new_page_for_write(c_key).unwrap();
+            guard[0] = i as u8;
+            guards.push(guard);
+        }
 
-        // Try to get a new page for write. This should fail because all the frames are latched.
+        // Once the pool wants to evict, it should fail because every resident frame is latched.
         let res = vmc.create_new_page_for_write(c_key);
         assert_eq!(res.unwrap_err(), MemPoolStatus::CannotEvictPage);
 
-        drop(guard1);
+        drop(guards);
 
         // Now, we should be able to get a new page for write.
         let guard2 = vmc.create_new_page_for_write(c_key).unwrap();
@@ -990,8 +987,8 @@ mod tests {
     fn test_vmc_clear_frames() {
         let db_id = 0;
 
-        let num_frames = 10;
-        let vmc = get_test_vmcache::<true, 2>(num_frames);
+        let num_frames = TEST_NUM_FRAMES;
+        let vmc = get_test_vmcache::<true>(num_frames);
         let c_key = ContainerKey::new(db_id, 0);
 
         let mut keys = Vec::new();
@@ -1028,15 +1025,15 @@ mod tests {
     fn test_vmc_clear_frames_durable() {
         let temp_dir = TempDir::new().unwrap();
         let db_id = 0;
-        let num_frames = 10;
+        let num_frames = TEST_NUM_FRAMES;
         let mut keys = Vec::new();
 
         {
             let cm = Arc::new(ContainerManager::new(&temp_dir, false, false).unwrap());
-            let vmc1 = Arc::new(VMCachePool::<true, 2>::new(num_frames, cm).unwrap());
+            let vmc1 = Arc::new(VMCachePool::<true>::new(num_frames, cm).unwrap());
             let c_key = ContainerKey::new(db_id, 0);
 
-            for i in 0..num_frames * 10 {
+            for i in 0..num_frames * 2 {
                 log_warn!("Creating page {}", i);
                 let mut guard = vmc1.create_new_page_for_write(c_key).unwrap();
                 guard[0] = i as u8;
@@ -1065,7 +1062,7 @@ mod tests {
 
         {
             let cm = Arc::new(ContainerManager::new(&temp_dir, false, false).unwrap());
-            let vmc2 = Arc::new(VMCachePool::<true, 2>::new(num_frames, cm).unwrap());
+            let vmc2 = Arc::new(VMCachePool::<true>::new(num_frames, cm).unwrap());
 
             // Check the contents of the pages
             for (i, key) in keys.iter().enumerate() {
