@@ -8,14 +8,13 @@ use super::{
     mem_pool_trait::{ContainerKey, MemPool, MemPoolStatus, MemoryStats, PageFrameKey, PageKey},
 };
 use crate::{
-    bp::frame_guards::box_as_mut_ptr,
     container::ContainerManager,
     log_debug, log_error, log_warn,
     page::{Page, PageId},
 };
 
 use std::{
-    cell::{RefCell, UnsafeCell},
+    cell::RefCell,
     collections::BTreeMap,
     sync::{
         atomic::{AtomicUsize, Ordering},
@@ -190,10 +189,10 @@ pub struct BufferPoolClock<const EVICTION_BATCH_SIZE: usize> {
     container_manager: Arc<ContainerManager>,
     eviction_hints: ConcurrentQueue<usize>, // A hint for quickly finding a clean frame or a frame to evict. Whenever a clean frame is found, it is pushed to this queue so that it can be quickly found.
     #[allow(clippy::vec_box)]
-    pages: UnsafeCell<Vec<Box<Page>>>, // Boxed to be able to use box::as_mut_ptr to have multiple mutable references to the same object
+    pages: Vec<Box<Page>>, // Boxed pages have stable addresses after initialization.
     #[allow(clippy::vec_box)]
-    metas: UnsafeCell<Vec<Box<FMeta>>>, // Boxed to be able to use box::as_mut_ptr to have multiple mutable references to the same object
-    page_to_frame: PageToFrame, // (c_key, page_id) -> frame_index
+    metas: Vec<Box<FMeta>>, // Boxed frame metadata has stable addresses after initialization.
+    page_to_frame: PageToFrame,             // (c_key, page_id) -> frame_index
     stats: BPStats,
 }
 
@@ -224,19 +223,15 @@ impl<const EVICTION_BATCH_SIZE: usize> BufferPoolClock<EVICTION_BATCH_SIZE> {
             eviction_hints.push(i).unwrap();
         }
 
-        let pages: UnsafeCell<Vec<Box<Page>>> = UnsafeCell::new(
-            (0..num_frames)
-                .into_par_iter()
-                .map(|_| Box::new(Page::new_empty()))
-                .collect(),
-        );
+        let pages = (0..num_frames)
+            .into_par_iter()
+            .map(|_| Box::new(Page::new_empty()))
+            .collect::<Vec<_>>();
 
-        let metas: UnsafeCell<Vec<Box<FMeta>>> = UnsafeCell::new(
-            (0..num_frames)
-                .into_par_iter()
-                .map(|i| Box::new(FMeta::new(i as u32)))
-                .collect(),
-        );
+        let metas = (0..num_frames)
+            .into_par_iter()
+            .map(|i| Box::new(FMeta::new(i as u32)))
+            .collect::<Vec<_>>();
 
         Ok(BufferPoolClock {
             num_frames,
@@ -288,6 +283,26 @@ impl<const EVICTION_BATCH_SIZE: usize> BufferPoolClock<EVICTION_BATCH_SIZE> {
                 Some(new_clock_start)
             })
             .expect("Should not fail because the func always returns Some")
+    }
+
+    #[inline]
+    fn frame_meta(&self, index: usize) -> &FMeta {
+        &self.metas[index]
+    }
+
+    #[inline]
+    fn frame_meta_ptr(&self, index: usize) -> *mut FMeta {
+        self.frame_meta(index) as *const FMeta as *mut FMeta
+    }
+
+    #[inline]
+    fn page_ptr(&self, index: usize) -> *mut Page {
+        self.pages[index].as_ref() as *const Page as *mut Page
+    }
+
+    #[inline]
+    fn frame_matches_key(&self, index: usize, key: PageKey) -> bool {
+        index < self.num_frames && self.frame_meta(index).key() == Some(key)
     }
 
     /// Evict up to `EVICTION_BATCH_SIZE` pages.
@@ -357,7 +372,7 @@ impl<const EVICTION_BATCH_SIZE: usize> BufferPoolClock<EVICTION_BATCH_SIZE> {
         clean: &mut Vec<(usize, *mut FMeta)>,
         dirty: &mut Vec<(usize, FRGuard)>,
     ) {
-        let meta = &mut unsafe { &mut *self.metas.get() }[index];
+        let meta = self.frame_meta(index);
 
         // Skip empty or latched frames immediately.
         if meta.key().is_none() || meta.latch.is_locked() {
@@ -373,17 +388,14 @@ impl<const EVICTION_BATCH_SIZE: usize> BufferPoolClock<EVICTION_BATCH_SIZE> {
         let is_dirty = meta.is_dirty.load(Ordering::Acquire);
         if is_dirty {
             // Try read‑latch on dirty page
-            if let Some(g) = FRGuard::try_new(
-                box_as_mut_ptr(meta),
-                box_as_mut_ptr(&mut unsafe { &mut *self.pages.get() }[index]),
-            ) {
+            if let Some(g) = FRGuard::try_new(self.frame_meta_ptr(index), self.page_ptr(index)) {
                 if g.page_key().is_some() {
                     dirty.push((index, g));
                 }
             }
         } else {
             // Clean and marked
-            clean.push((index, box_as_mut_ptr(meta)));
+            clean.push((index, self.frame_meta_ptr(index)));
         }
     }
 
@@ -401,11 +413,7 @@ impl<const EVICTION_BATCH_SIZE: usize> BufferPoolClock<EVICTION_BATCH_SIZE> {
         to_evict: &mut Vec<(usize, FWGuard)>,
     ) {
         for (index, meta) in clean_pages.drain(..) {
-            if let Some(g) = FWGuard::try_new(
-                meta,
-                box_as_mut_ptr(&mut unsafe { &mut *self.pages.get() }[index]),
-                false,
-            ) {
+            if let Some(g) = FWGuard::try_new(meta, self.page_ptr(index), false) {
                 if g.page_key().is_none() {
                     continue;
                 }
@@ -455,31 +463,15 @@ impl<const EVICTION_BATCH_SIZE: usize> BufferPoolClock<EVICTION_BATCH_SIZE> {
 
     #[allow(dead_code)]
     fn get_read_guard(&self, index: usize) -> FRGuard {
-        let metas = unsafe { &mut *self.metas.get() };
-        let pages = unsafe { &mut *self.pages.get() };
-        FRGuard::new(
-            box_as_mut_ptr(&mut metas[index]),
-            box_as_mut_ptr(&mut pages[index]),
-        )
+        FRGuard::new(self.frame_meta_ptr(index), self.page_ptr(index))
     }
 
     fn try_get_read_guard(&self, index: usize) -> Option<FRGuard> {
-        let metas = unsafe { &mut *self.metas.get() };
-        let pages = unsafe { &mut *self.pages.get() };
-        FRGuard::try_new(
-            box_as_mut_ptr(&mut metas[index]),
-            box_as_mut_ptr(&mut pages[index]),
-        )
+        FRGuard::try_new(self.frame_meta_ptr(index), self.page_ptr(index))
     }
 
     fn try_get_write_guard(&self, index: usize, make_dirty: bool) -> Option<FWGuard> {
-        let metas = unsafe { &mut *self.metas.get() };
-        let pages = unsafe { &mut *self.pages.get() };
-        FWGuard::try_new(
-            box_as_mut_ptr(&mut metas[index]),
-            box_as_mut_ptr(&mut pages[index]),
-            make_dirty,
-        )
+        FWGuard::try_new(self.frame_meta_ptr(index), self.page_ptr(index), make_dirty)
     }
 
     /// Choose a victim frame to be evicted.
@@ -606,9 +598,7 @@ impl<const EVICTION_BATCH_SIZE: usize> MemPool for BufferPoolClock<EVICTION_BATC
         {
             // Fast path access to the frame using frame_id
             let frame_id = key.frame_id();
-            if (frame_id as usize) < self.num_frames
-                && unsafe { &(*self.metas.get())[frame_id as usize] }.key() == Some(key.p_key())
-            {
+            if self.frame_matches_key(frame_id as usize, key.p_key()) {
                 return true;
             }
         }
@@ -633,7 +623,7 @@ impl<const EVICTION_BATCH_SIZE: usize> MemPool for BufferPoolClock<EVICTION_BATC
             let frame_id = key.frame_id();
             if (frame_id as usize) < self.num_frames {
                 // Check the page_key first to avoid acquiring the latch of a not-matching pageA
-                if unsafe { &(*self.metas.get())[frame_id as usize] }.key() == Some(key.p_key()) {
+                if self.frame_matches_key(frame_id as usize, key.p_key()) {
                     match self.try_get_write_guard(frame_id as usize, false) {
                         Some(g) if g.page_key().map(|k| k == key.p_key()).unwrap_or(false) => {
                             g.evict_info().update();
@@ -699,7 +689,7 @@ impl<const EVICTION_BATCH_SIZE: usize> MemPool for BufferPoolClock<EVICTION_BATC
             let frame_id = key.frame_id();
             if (frame_id as usize) < self.num_frames {
                 // Check the page_key first to avoid acquiring the latch of a not-matching page
-                if unsafe { &(*self.metas.get())[frame_id as usize] }.key() == Some(key.p_key()) {
+                if self.frame_matches_key(frame_id as usize, key.p_key()) {
                     let guard = self.try_get_read_guard(frame_id as usize);
                     match guard {
                         Some(g) if g.page_key().map(|k| k == key.p_key()).unwrap_or(false) => {
@@ -780,14 +770,14 @@ impl<const EVICTION_BATCH_SIZE: usize> MemPool for BufferPoolClock<EVICTION_BATC
     }
 
     // Just return the runtime stats
-    unsafe fn stats(&self) -> MemoryStats {
+    fn stats(&self) -> MemoryStats {
         let new_page = self.stats.new_page();
         let read_count = self.stats.read_count();
         let read_count_waiting_for_write = self.stats.read_request_waiting_for_write_count();
         let write_count = self.stats.write_count();
         let mut num_frames_per_container = BTreeMap::new();
         for i in 0..self.num_frames {
-            if let Some(key) = unsafe { &*self.metas.get() }[i].key() {
+            if let Some(key) = self.frame_meta(i).key() {
                 *num_frames_per_container.entry(key.c_key).or_insert(0) += 1;
             }
         }
@@ -822,7 +812,7 @@ impl<const EVICTION_BATCH_SIZE: usize> MemPool for BufferPoolClock<EVICTION_BATC
     }
 
     // Reset the runtime stats
-    unsafe fn reset_stats(&self) {
+    fn reset_stats(&self) {
         self.stats.clear();
     }
 
@@ -857,7 +847,7 @@ impl<const EVICTION_BATCH_SIZE: usize> MemPool for BufferPoolClock<EVICTION_BATC
 
     fn clear_dirty_flags(&self) -> Result<(), MemPoolStatus> {
         (0..self.num_frames).into_par_iter().for_each(|i| {
-            let meta = &mut unsafe { &mut *self.metas.get() }[i];
+            let meta = self.frame_meta(i);
             meta.is_dirty.store(false, Ordering::Release);
         });
 
@@ -921,8 +911,6 @@ impl<const EVICTION_BATCH_SIZE: usize> BufferPoolClock<EVICTION_BATCH_SIZE> {
         }
     }
 }
-
-unsafe impl<const EVICTION_BATCH_SIZE: usize> Sync for BufferPoolClock<EVICTION_BATCH_SIZE> {}
 
 #[cfg(test)]
 mod tests {

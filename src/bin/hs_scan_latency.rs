@@ -85,7 +85,7 @@ fn main() {
     println!("Loading table...");
     load_table(&params, &table);
 
-    println!("Buffer pool stats after load: {}", unsafe { bp.stats() });
+    println!("Buffer pool stats after load: {}", bp.stats());
 
     println!("--- Page stats ---\n{}", table.page_stats(false));
 

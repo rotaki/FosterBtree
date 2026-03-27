@@ -1,8 +1,4 @@
-use std::{
-    collections::BTreeMap,
-    fmt,
-    hash::{Hash, Hasher},
-};
+use std::{collections::BTreeMap, fmt};
 
 use super::{
     eviction_policy::EvictionPolicy,
@@ -14,96 +10,38 @@ use crate::page::PageId;
 pub type DatabaseId = u16;
 pub type ContainerId = u16;
 
-/*------------------ low-level representation (unchanged) ------------------*/
-
-#[repr(C)]
-#[derive(Copy, Clone)]
-struct Parts {
-    db_id: DatabaseId,
-    c_id: ContainerId,
-}
-
-#[repr(C)]
-#[derive(Copy, Clone)]
-union Repr {
-    parts: Parts,
-    packed: u32,
-}
-
-/*---------------------------- public newtype ------------------------------*/
-
 #[repr(transparent)]
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ContainerKey {
-    repr: Repr,
+    packed: u32,
 }
 
 impl ContainerKey {
     #[inline]
     pub const fn new(db_id: DatabaseId, c_id: ContainerId) -> Self {
         Self {
-            repr: Repr {
-                parts: Parts { db_id, c_id },
-            },
+            packed: ((db_id as u32) << 16) | (c_id as u32),
         }
     }
 
     #[inline]
     pub const fn from_u32(raw: u32) -> Self {
-        Self {
-            repr: Repr { packed: raw },
-        }
+        Self { packed: raw }
     }
 
-    /// Safe projection to the packed form.
     #[inline]
     pub const fn as_u32(self) -> u32 {
-        unsafe { self.repr.packed }
+        self.packed
     }
 
     #[inline]
     pub const fn db_id(self) -> DatabaseId {
-        unsafe { self.repr.parts.db_id }
+        (self.packed >> 16) as DatabaseId
     }
+
     #[inline]
     pub const fn c_id(self) -> ContainerId {
-        unsafe { self.repr.parts.c_id }
-    }
-}
-
-/*------------------ manual equality & ordering impls ----------------------*/
-
-impl PartialEq for ContainerKey {
-    #[inline]
-    fn eq(&self, other: &Self) -> bool {
-        // Either of the following is fine:
-        //   self.as_u32() == other.as_u32()
-        // or (endianness-independent):
-        (self.db_id(), self.c_id()) == (other.db_id(), other.c_id())
-    }
-}
-impl Eq for ContainerKey {}
-
-impl PartialOrd for ContainerKey {
-    #[inline]
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-impl Ord for ContainerKey {
-    #[inline]
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        // Lexicographic on (db_id, c_id); endian-safe.
-        (self.db_id(), self.c_id()).cmp(&(other.db_id(), other.c_id()))
-    }
-}
-
-/*---------------------- the rest of the boilerplate ------------------------*/
-
-impl Hash for ContainerKey {
-    #[inline]
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        state.write_u32(self.as_u32())
+        self.packed as ContainerId
     }
 }
 
@@ -458,16 +396,31 @@ pub trait MemPool: Sync + Send {
     // fn fast_evict(&self, frame_id: u32) -> Result<(), MemPoolStatus>;
 
     /// Return the runtime statistics of the memory pool.
-    ///
-    /// # Safety
-    ///
-    /// The caller must ensure that the memory pool is not in use when calling this function.
-    unsafe fn stats(&self) -> MemoryStats;
+    fn stats(&self) -> MemoryStats;
 
     /// Reset the runtime statistics of the memory pool.
-    ///
-    /// # Safety
-    ///
-    /// The caller must ensure that the memory pool is not in use when calling this function.
-    unsafe fn reset_stats(&self);
+    fn reset_stats(&self);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ContainerKey, PageFrameKey};
+
+    #[test]
+    fn container_key_round_trips_through_u32() {
+        let key = ContainerKey::new(0x1234, 0x5678);
+        let decoded = ContainerKey::from_u32(key.as_u32());
+
+        assert_eq!(decoded.db_id(), 0x1234);
+        assert_eq!(decoded.c_id(), 0x5678);
+        assert_eq!(decoded, key);
+    }
+
+    #[test]
+    fn page_frame_key_round_trips_through_bytes() {
+        let key = PageFrameKey::new_with_frame_id(ContainerKey::new(7, 11), 13, 17);
+        let decoded = PageFrameKey::from_bytes(&key.to_bytes());
+
+        assert_eq!(decoded, key);
+    }
 }

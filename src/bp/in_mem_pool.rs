@@ -258,8 +258,9 @@ impl MemPool for InMemPool {
         Ok(())
     }
 
-    unsafe fn stats(&self) -> MemoryStats {
-        let num_frames = (*self.pages.get()).len();
+    fn stats(&self) -> MemoryStats {
+        self.shared();
+        let num_frames = unsafe { (&*self.pages.get()).len() };
         let mut containers = BTreeMap::new();
         for i in 0..num_frames {
             let frame = unsafe { self.get_read_guard(i) };
@@ -267,7 +268,7 @@ impl MemPool for InMemPool {
                 *containers.entry(key.c_key).or_insert(0) += 1;
             }
         }
-        MemoryStats {
+        let stats = MemoryStats {
             bp_num_frames_in_mem: num_frames,
             bp_new_page: num_frames,
             bp_read_frame: num_frames,
@@ -278,10 +279,12 @@ impl MemPool for InMemPool {
             disk_read: 0,
             disk_write: 0,
             disk_io_per_container: BTreeMap::new(),
-        }
+        };
+        self.release_shared();
+        stats
     }
 
-    unsafe fn reset_stats(&self) {
+    fn reset_stats(&self) {
         // Do nothing
     }
 

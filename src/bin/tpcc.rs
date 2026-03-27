@@ -40,7 +40,7 @@ pub fn main() {
 
     let txn_storage = NoWaitTxnStorage::new(&bp);
     let tpcc_bench = TpccBenchmark::new(txn_storage, config.num_warehouses);
-    println!("BP stats after load: \n{}", unsafe { bp.stats() });
+    println!("BP stats after load: \n{}", bp.stats());
 
     let result = with_affinity(get_total_cpus() - 1, || {
         let current_cpu = get_current_cpu();
@@ -52,7 +52,7 @@ pub fn main() {
                 config.warmup_time,
                 !config.fixed_warehouse_per_thread,
             );
-            println!("BP stats after warmup: \n{}", unsafe { bp.stats() });
+            println!("BP stats after warmup: \n{}", bp.stats());
         } else {
             println!("No warmup time specified, skipping warmup");
         }
@@ -71,6 +71,6 @@ pub fn main() {
 
     result.print(true);
 
-    println!("BP stats: \n{}", unsafe { bp.stats() });
+    println!("BP stats: \n{}", bp.stats());
     bp.clear_dirty_flags().unwrap();
 }

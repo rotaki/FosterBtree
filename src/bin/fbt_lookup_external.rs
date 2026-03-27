@@ -170,7 +170,7 @@ pub fn main() {
         if config.warmup_time > 0 {
             println!("Running warmup for {} seconds", config.warmup_time);
             run_bench(true, &config, &fbt);
-            println!("BP stats after warmup: \n{}", unsafe { bp.stats() });
+            println!("BP stats after warmup: \n{}", bp.stats());
         } else {
             println!("Warm up skipped");
         }
@@ -185,6 +185,6 @@ pub fn main() {
     })
     .unwrap();
 
-    println!("BP stats: \n{}", unsafe { bp.stats() });
+    println!("BP stats: \n{}", bp.stats());
     bp.clear_dirty_flags().unwrap();
 }

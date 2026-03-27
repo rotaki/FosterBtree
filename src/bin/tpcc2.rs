@@ -73,7 +73,7 @@ pub fn main() {
     );
     let benchmark = TpccBenchmark::new(bp.clone(), config.num_warehouses);
 
-    println!("BP stats after load: \n{}", unsafe { bp.stats() });
+    println!("BP stats after load: \n{}", bp.stats());
 
     // Print thread affinity information
     for i in 0..config.num_threads {
@@ -93,7 +93,7 @@ pub fn main() {
                 "Warmup completed. Throughput: {:.2} txns/sec",
                 warmup_result.throughput
             );
-            println!("BP stats after warmup: \n{}", unsafe { bp.stats() });
+            println!("BP stats after warmup: \n{}", bp.stats());
         }
 
         if config.exec_time == 0 {
@@ -108,6 +108,6 @@ pub fn main() {
     // Print results
     result.print(true);
 
-    println!("\nFinal BP stats: \n{}", unsafe { bp.stats() });
+    println!("\nFinal BP stats: \n{}", bp.stats());
     bp.clear_dirty_flags().unwrap();
 }

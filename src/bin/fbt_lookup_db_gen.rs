@@ -93,7 +93,7 @@ pub fn main() {
         config.num_entries, elapsed
     );
 
-    println!("BP stats after load: \n{}", unsafe { bp.stats() });
+    println!("BP stats after load: \n{}", bp.stats());
     println!("Flushing all pages to disk...");
     let start = std::time::Instant::now();
     bp.flush_all().unwrap();

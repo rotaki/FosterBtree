@@ -79,7 +79,7 @@ pub fn main() {
                 config.warmup_time,
                 !config.fixed_warehouse_per_thread,
             );
-            println!("BP stats after warmup: \n{}", unsafe { bp.stats() });
+            println!("BP stats after warmup: \n{}", bp.stats());
         } else {
             println!("Warm up skipped");
         }
@@ -98,6 +98,6 @@ pub fn main() {
 
     result.print(true);
 
-    println!("BP stats: \n{}", unsafe { bp.stats() });
+    println!("BP stats: \n{}", bp.stats());
     bp.clear_dirty_flags().unwrap();
 }

@@ -60,7 +60,7 @@ pub fn main() {
     let tbl_info = tpcc_gen_all_tables(&txn_storage, config.num_warehouses);
     black_box(&tbl_info);
 
-    println!("BP stats after load: \n{}", unsafe { bp.stats() });
+    println!("BP stats after load: \n{}", bp.stats());
     let start = std::time::Instant::now();
     println!("Flushing all containers");
     bp.flush_all().unwrap();

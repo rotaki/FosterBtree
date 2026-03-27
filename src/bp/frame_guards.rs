@@ -147,11 +147,21 @@ unsafe impl<T: EvictionPolicy> Send for FrameReadGuard<T> {}
 // I don't think we need sync for FrameReadGuard, because it is not shared between threads.
 
 impl<T: EvictionPolicy> FrameReadGuard<T> {
+    #[inline]
+    fn meta_ref(&self) -> &FrameMeta<T> {
+        unsafe { self.meta.as_ref() }
+    }
+
+    #[inline]
+    fn page_ref(&self) -> &Page {
+        unsafe { self.page.as_ref() }
+    }
+
     pub fn new(meta: *mut FrameMeta<T>, page: *mut Page) -> Self {
         let upgraded = AtomicBool::new(false);
         let meta = NonNull::new(meta).expect("Meta pointer is null");
         let page = NonNull::new(page).expect("Page pointer is null");
-        unsafe { meta.as_ref().latch.shared() };
+        unsafe { meta.as_ref() }.latch.shared();
         FrameReadGuard {
             upgraded,
             meta,
@@ -164,7 +174,7 @@ impl<T: EvictionPolicy> FrameReadGuard<T> {
         let upgraded = AtomicBool::new(false);
         let meta = NonNull::new(meta).expect("Meta pointer is null");
         let page = NonNull::new(page).expect("Page pointer is null");
-        if unsafe { meta.as_ref().latch.try_shared() } {
+        if unsafe { meta.as_ref() }.latch.try_shared() {
             Some(FrameReadGuard {
                 upgraded,
                 meta,
@@ -177,28 +187,23 @@ impl<T: EvictionPolicy> FrameReadGuard<T> {
     }
 
     pub fn frame_id(&self) -> u32 {
-        // SAFETY: This is safe because frame meta must be a valid pointer and frame_id is not mutable.
-        unsafe { self.meta.as_ref().frame_id }
+        self.meta_ref().frame_id
     }
 
     pub fn latch(&self) -> &RwLatch {
-        // SAFETY: This is safe because frame meta must be a valid pointer.
-        unsafe { &self.meta.as_ref().latch }
+        &self.meta_ref().latch
     }
 
     pub fn dirty(&self) -> &AtomicBool {
-        // SAFETY: This is safe because frame meta must be a valid pointer.
-        unsafe { &self.meta.as_ref().is_dirty }
+        &self.meta_ref().is_dirty
     }
 
     pub fn evict_info(&self) -> &impl EvictionPolicy {
-        // SAFETY: This is safe because frame meta must be a valid pointer.
-        unsafe { &self.meta.as_ref().evict_info }
+        &self.meta_ref().evict_info
     }
 
     pub fn page_key(&self) -> Option<PageKey> {
-        // SAFETY: This is safe because frame meta must be a valid pointer.
-        unsafe { self.meta.as_ref().key() }
+        self.meta_ref().key()
     }
 
     pub fn page_frame_key(&self) -> Option<PageFrameKey> {
@@ -208,8 +213,7 @@ impl<T: EvictionPolicy> FrameReadGuard<T> {
     }
 
     pub fn page(&self) -> &Page {
-        // SAFETY: This is safe because frame meta must be a valid pointer and we have a shared latch.
-        unsafe { self.page.as_ref() }
+        self.page_ref()
     }
 
     pub fn try_upgrade(self, make_dirty: bool) -> Result<FrameWriteGuard<T>, FrameReadGuard<T>> {
@@ -267,15 +271,30 @@ where
 }
 
 impl<T: EvictionPolicy> FrameWriteGuard<T> {
+    #[inline]
+    fn meta_ref(&self) -> &FrameMeta<T> {
+        unsafe { self.meta.as_ref() }
+    }
+
+    #[inline]
+    fn page_ref(&self) -> &Page {
+        unsafe { self.page.as_ref() }
+    }
+
+    #[inline]
+    fn page_mut_ref(&mut self) -> &mut Page {
+        unsafe { self.page.as_mut() }
+    }
+
     pub fn new(meta: *mut FrameMeta<T>, page: *mut Page, make_dirty: bool) -> Self {
         let downgraded = AtomicBool::new(false);
         let meta = NonNull::new(meta).expect("Meta pointer is null");
         let page = NonNull::new(page).expect("Page pointer is null");
-        unsafe { meta.as_ref().latch.exclusive() };
+        unsafe { meta.as_ref() }.latch.exclusive();
         if make_dirty {
-            unsafe {
-                meta.as_ref().is_dirty.store(true, Ordering::Release);
-            }
+            unsafe { meta.as_ref() }
+                .is_dirty
+                .store(true, Ordering::Release);
         }
         FrameWriteGuard {
             downgraded,
@@ -289,11 +308,11 @@ impl<T: EvictionPolicy> FrameWriteGuard<T> {
         let downgraded = AtomicBool::new(false);
         let meta = NonNull::new(meta).expect("Meta pointer is null");
         let page = NonNull::new(page).expect("Page pointer is null");
-        if unsafe { meta.as_ref().latch.try_exclusive() } {
+        if unsafe { meta.as_ref() }.latch.try_exclusive() {
             if make_dirty {
-                unsafe {
-                    meta.as_ref().is_dirty.store(true, Ordering::Release);
-                }
+                unsafe { meta.as_ref() }
+                    .is_dirty
+                    .store(true, Ordering::Release);
             }
             Some(FrameWriteGuard {
                 downgraded,
@@ -307,33 +326,27 @@ impl<T: EvictionPolicy> FrameWriteGuard<T> {
     }
 
     pub fn frame_id(&self) -> u32 {
-        // SAFETY: This is safe because frame meta must be a valid pointer and frame_id is not mutable.
-        unsafe { self.meta.as_ref().frame_id }
+        self.meta_ref().frame_id
     }
 
     pub fn latch(&self) -> &RwLatch {
-        // SAFETY: This is safe because frame meta must be a valid pointer.
-        unsafe { &self.meta.as_ref().latch }
+        &self.meta_ref().latch
     }
 
     pub fn dirty(&self) -> &AtomicBool {
-        // SAFETY: This is safe because frame meta must be a valid pointer.
-        unsafe { &self.meta.as_ref().is_dirty }
+        &self.meta_ref().is_dirty
     }
 
     pub fn evict_info(&self) -> &impl EvictionPolicy {
-        // SAFETY: This is safe because frame meta must be a valid pointer.
-        unsafe { &self.meta.as_ref().evict_info }
+        &self.meta_ref().evict_info
     }
 
     pub fn page_key(&self) -> Option<PageKey> {
-        // SAFETY: This is safe because frame meta must be a valid pointer.
-        unsafe { self.meta.as_ref().key() }
+        self.meta_ref().key()
     }
 
     pub fn set_page_key(&self, page_key: Option<PageKey>) {
-        // SAFETY: This is safe because frame meta must be a valid pointer.
-        unsafe { self.meta.as_ref().set_key(page_key) }
+        self.meta_ref().set_key(page_key)
     }
 
     pub fn page_frame_key(&self) -> Option<PageFrameKey> {
@@ -343,13 +356,11 @@ impl<T: EvictionPolicy> FrameWriteGuard<T> {
     }
 
     pub fn page(&self) -> &Page {
-        // SAFETY: This is safe because frame meta must be a valid pointer and we have a shared latch.
-        unsafe { self.page.as_ref() }
+        self.page_ref()
     }
 
     pub fn page_mut(&mut self) -> &mut Page {
-        // SAFETY: This is safe because frame meta must be a valid pointer and we have a shared latch.
-        unsafe { &mut *self.page.as_ptr() }
+        self.page_mut_ref()
     }
 
     pub fn downgrade(self) -> FrameReadGuard<T> {

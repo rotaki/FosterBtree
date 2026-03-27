@@ -650,15 +650,16 @@ impl<const IS_SMALL: bool, const EVICTION_BATCH_SIZE: usize> MemPool
         Ok(())
     }
 
-    unsafe fn stats(&self) -> MemoryStats {
+    fn stats(&self) -> MemoryStats {
         let new_page = self.stats.new_page();
         let read_count = self.stats.read_count();
         let read_count_waiting_for_write = self.stats.read_request_waiting_for_write_count();
         let write_count = self.stats.write_count();
         let mut num_frames_per_container = BTreeMap::new();
+        let metas = unsafe { &*self.metas.get() };
         // Traverse the resident set to count the number of frames per container.
         for i in self.resident_set.clock_batch_iter(self.resident_set.len()) {
-            let meta = &mut unsafe { &mut *self.metas.get() }[i as usize];
+            let meta = &metas[i as usize];
             if let Some(key) = meta.key() {
                 *num_frames_per_container.entry(key.c_key).or_insert(0) += 1;
             }
@@ -693,7 +694,7 @@ impl<const IS_SMALL: bool, const EVICTION_BATCH_SIZE: usize> MemPool
         }
     }
 
-    unsafe fn reset_stats(&self) {
+    fn reset_stats(&self) {
         self.stats.clear();
     }
 
