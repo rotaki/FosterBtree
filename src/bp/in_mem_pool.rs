@@ -14,9 +14,6 @@ use super::{
     prelude::{ContainerKey, FrameReadGuard, FrameWriteGuard, MemPoolStatus, PageFrameKey},
 };
 
-type FWGuard = FrameWriteGuard;
-type FRGuard = FrameReadGuard;
-
 /// A simple in-memory page pool.
 /// All the pages are stored in a vector in memory.
 /// A latch is used to synchronize access to the pool.
@@ -65,7 +62,7 @@ impl InMemPool {
         self.latch.release_exclusive();
     }
 
-    unsafe fn alloc_frame(&self, c_key: ContainerKey, page_id: PageId) -> FWGuard {
+    unsafe fn alloc_frame(&self, c_key: ContainerKey, page_id: PageId) -> FrameWriteGuard {
         let pages = &mut *self.pages.get();
         let metas = &mut *self.metas.get();
         let page_to_frame = &mut *self.page_to_frame.get();
@@ -79,7 +76,7 @@ impl InMemPool {
         let page_key = PageKey::new(c_key, page_id);
         page_to_frame.insert(page_key, frame_index);
 
-        FWGuard::new(
+        FrameWriteGuard::new(
             box_as_mut_ptr(&mut metas[frame_index]),
             box_as_mut_ptr(&mut pages[frame_index]),
             true,
@@ -88,10 +85,10 @@ impl InMemPool {
 
     // Unsafe because a push to the vector may cause a reallocation
     // of the metas and pages vectors.
-    unsafe fn get_read_guard(&self, frame_index: usize) -> FRGuard {
+    unsafe fn get_read_guard(&self, frame_index: usize) -> FrameReadGuard {
         let metas = unsafe { &mut *self.metas.get() };
         let pages = unsafe { &mut *self.pages.get() };
-        FRGuard::new(
+        FrameReadGuard::new(
             box_as_mut_ptr(&mut metas[frame_index]),
             box_as_mut_ptr(&mut pages[frame_index]),
         )
@@ -99,10 +96,10 @@ impl InMemPool {
 
     // Unsafe because a push to the vector may cause a reallocation
     // of the metas and pages vectors.
-    unsafe fn try_get_read_guard(&self, frame_index: usize) -> Option<FRGuard> {
+    unsafe fn try_get_read_guard(&self, frame_index: usize) -> Option<FrameReadGuard> {
         let metas = unsafe { &mut *self.metas.get() };
         let pages = unsafe { &mut *self.pages.get() };
-        FRGuard::try_new(
+        FrameReadGuard::try_new(
             box_as_mut_ptr(&mut metas[frame_index]),
             box_as_mut_ptr(&mut pages[frame_index]),
         )
@@ -110,7 +107,7 @@ impl InMemPool {
 
     // Unsafe because a push to the vector may cause a reallocation
     // of the metas and pages vectors.
-    unsafe fn try_get_write_guard(&self, frame_index: usize) -> Option<FWGuard> {
+    unsafe fn try_get_write_guard(&self, frame_index: usize) -> Option<FrameWriteGuard> {
         let metas = unsafe { &mut *self.metas.get() };
         let pages = unsafe { &mut *self.pages.get() };
         FrameWriteGuard::try_new(
@@ -130,7 +127,7 @@ impl MemPool for InMemPool {
         Ok(())
     }
 
-    fn create_new_page_for_write(&self, c_key: ContainerKey) -> Result<FWGuard, MemPoolStatus> {
+    fn create_new_page_for_write(&self, c_key: ContainerKey) -> Result<FrameWriteGuard, MemPoolStatus> {
         self.exclusive();
         let container_page_count = unsafe { &mut *self.container_page_count.get() };
 
@@ -158,7 +155,7 @@ impl MemPool for InMemPool {
         &self,
         c_key: ContainerKey,
         num_pages: usize,
-    ) -> Result<Vec<FWGuard>, MemPoolStatus> {
+    ) -> Result<Vec<FrameWriteGuard>, MemPoolStatus> {
         self.exclusive();
         let container_page_count = unsafe { &mut *self.container_page_count.get() };
 
@@ -211,7 +208,7 @@ impl MemPool for InMemPool {
         keys
     }
 
-    fn get_page_for_write(&self, key: PageFrameKey) -> Result<FWGuard, MemPoolStatus> {
+    fn get_page_for_write(&self, key: PageFrameKey) -> Result<FrameWriteGuard, MemPoolStatus> {
         self.shared();
         let page_to_frame = unsafe { &*self.page_to_frame.get() };
         let frame_index = match page_to_frame.get(&key.p_key()) {
@@ -231,7 +228,7 @@ impl MemPool for InMemPool {
         }
     }
 
-    fn get_page_for_read(&self, key: PageFrameKey) -> Result<FRGuard, MemPoolStatus> {
+    fn get_page_for_read(&self, key: PageFrameKey) -> Result<FrameReadGuard, MemPoolStatus> {
         self.shared();
         let page_to_frame = unsafe { &*self.page_to_frame.get() };
         let frame_index = match page_to_frame.get(&key.p_key()) {

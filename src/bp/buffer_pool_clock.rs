@@ -21,10 +21,6 @@ use std::{
     },
 };
 
-type FMeta = FrameMeta;
-type FWGuard = FrameWriteGuard;
-type FRGuard = FrameReadGuard;
-
 use concurrent_queue::ConcurrentQueue;
 use dashmap::{mapref::entry, DashMap};
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
@@ -135,9 +131,9 @@ impl PageToFrame {
 
 /// Your scratch buffers
 struct EvictionScratchSpace {
-    pub clean_pages: Vec<(usize, *mut FMeta)>,
-    pub dirty_pages: Vec<(usize, FRGuard)>,
-    pub to_evict: Vec<(usize, FWGuard)>,
+    pub clean_pages: Vec<(usize, *mut FrameMeta)>,
+    pub dirty_pages: Vec<(usize, FrameReadGuard)>,
+    pub to_evict: Vec<(usize, FrameWriteGuard)>,
 }
 
 impl EvictionScratchSpace {
@@ -189,7 +185,7 @@ pub struct BufferPoolClock<const EVICTION_BATCH_SIZE: usize> {
     #[allow(clippy::vec_box)]
     pages: Vec<Box<Page>>, // Boxed pages have stable addresses after initialization.
     #[allow(clippy::vec_box)]
-    metas: Vec<Box<FMeta>>, // Boxed frame metadata has stable addresses after initialization.
+    metas: Vec<Box<FrameMeta>>, // Boxed frame metadata has stable addresses after initialization.
     page_to_frame: PageToFrame,             // (c_key, page_id) -> frame_index
     stats: BPStats,
 }
@@ -228,7 +224,7 @@ impl<const EVICTION_BATCH_SIZE: usize> BufferPoolClock<EVICTION_BATCH_SIZE> {
 
         let metas = (0..num_frames)
             .into_par_iter()
-            .map(|i| Box::new(FMeta::new(i as u32)))
+            .map(|i| Box::new(FrameMeta::new(i as u32)))
             .collect::<Vec<_>>();
 
         Ok(BufferPoolClock {
@@ -284,13 +280,13 @@ impl<const EVICTION_BATCH_SIZE: usize> BufferPoolClock<EVICTION_BATCH_SIZE> {
     }
 
     #[inline]
-    fn frame_meta(&self, index: usize) -> &FMeta {
+    fn frame_meta(&self, index: usize) -> &FrameMeta {
         &self.metas[index]
     }
 
     #[inline]
-    fn frame_meta_ptr(&self, index: usize) -> *mut FMeta {
-        self.frame_meta(index) as *const FMeta as *mut FMeta
+    fn frame_meta_ptr(&self, index: usize) -> *mut FrameMeta {
+        self.frame_meta(index) as *const FrameMeta as *mut FrameMeta
     }
 
     #[inline]
@@ -367,8 +363,8 @@ impl<const EVICTION_BATCH_SIZE: usize> BufferPoolClock<EVICTION_BATCH_SIZE> {
     fn classify_frame(
         &self,
         index: usize,
-        clean: &mut Vec<(usize, *mut FMeta)>,
-        dirty: &mut Vec<(usize, FRGuard)>,
+        clean: &mut Vec<(usize, *mut FrameMeta)>,
+        dirty: &mut Vec<(usize, FrameReadGuard)>,
     ) {
         let meta = self.frame_meta(index);
 
@@ -386,7 +382,7 @@ impl<const EVICTION_BATCH_SIZE: usize> BufferPoolClock<EVICTION_BATCH_SIZE> {
         let is_dirty = meta.is_dirty.load(Ordering::Acquire);
         if is_dirty {
             // Try read‑latch on dirty page
-            if let Some(g) = FRGuard::try_new(self.frame_meta_ptr(index), self.page_ptr(index)) {
+            if let Some(g) = FrameReadGuard::try_new(self.frame_meta_ptr(index), self.page_ptr(index)) {
                 if g.page_key().is_some() {
                     dirty.push((index, g));
                 }
@@ -398,7 +394,7 @@ impl<const EVICTION_BATCH_SIZE: usize> BufferPoolClock<EVICTION_BATCH_SIZE> {
     }
 
     /// Flush all dirty victims under read latches.
-    fn flush_dirty(&self, dirty_pages: &[(usize, FRGuard)]) {
+    fn flush_dirty(&self, dirty_pages: &[(usize, FrameReadGuard)]) {
         for (_, g) in dirty_pages {
             self.write_victim_to_disk_if_dirty_r(g).unwrap();
         }
@@ -407,11 +403,11 @@ impl<const EVICTION_BATCH_SIZE: usize> BufferPoolClock<EVICTION_BATCH_SIZE> {
     /// Acquire write latches on clean victims and move them to `to_evict`.
     fn latch_clean(
         &self,
-        clean_pages: &mut Vec<(usize, *mut FMeta)>,
-        to_evict: &mut Vec<(usize, FWGuard)>,
+        clean_pages: &mut Vec<(usize, *mut FrameMeta)>,
+        to_evict: &mut Vec<(usize, FrameWriteGuard)>,
     ) {
         for (index, meta) in clean_pages.drain(..) {
-            if let Some(g) = FWGuard::try_new(meta, self.page_ptr(index), false) {
+            if let Some(g) = FrameWriteGuard::try_new(meta, self.page_ptr(index), false) {
                 if g.page_key().is_none() {
                     continue;
                 }
@@ -424,8 +420,8 @@ impl<const EVICTION_BATCH_SIZE: usize> BufferPoolClock<EVICTION_BATCH_SIZE> {
     /// Upgrade read → write latches on dirty pages once they are flushed.
     fn upgrade_dirty(
         &self,
-        dirty_pages: &mut Vec<(usize, FRGuard)>,
-        to_evict: &mut Vec<(usize, FWGuard)>,
+        dirty_pages: &mut Vec<(usize, FrameReadGuard)>,
+        to_evict: &mut Vec<(usize, FrameWriteGuard)>,
     ) {
         for (index, g) in dirty_pages.drain(..) {
             // We already checked that the page key is not None for dirty pages
@@ -440,14 +436,14 @@ impl<const EVICTION_BATCH_SIZE: usize> BufferPoolClock<EVICTION_BATCH_SIZE> {
     }
 
     /// Remove pages from the page‑table in c_key order.
-    fn remove_from_page_table(&self, to_evict: &mut [(usize, FWGuard)]) {
+    fn remove_from_page_table(&self, to_evict: &mut [(usize, FrameWriteGuard)]) {
         to_evict.sort_unstable_by_key(|(_, g)| g.page_key().unwrap().c_key);
         self.page_to_frame
             .remove_batch_sorted(to_evict.iter().map(|(_, g)| g.page_key().unwrap()));
     }
 
     /// Reset frame metadata and recycle indices.
-    fn finalize_eviction(&self, to_evict: &mut Vec<(usize, FWGuard)>) {
+    fn finalize_eviction(&self, to_evict: &mut Vec<(usize, FrameWriteGuard)>) {
         let mut freed = 0;
         for (index, g) in to_evict.drain(..) {
             freed += 1;
@@ -460,21 +456,21 @@ impl<const EVICTION_BATCH_SIZE: usize> BufferPoolClock<EVICTION_BATCH_SIZE> {
     }
 
     #[allow(dead_code)]
-    fn get_read_guard(&self, index: usize) -> FRGuard {
-        FRGuard::new(self.frame_meta_ptr(index), self.page_ptr(index))
+    fn get_read_guard(&self, index: usize) -> FrameReadGuard {
+        FrameReadGuard::new(self.frame_meta_ptr(index), self.page_ptr(index))
     }
 
-    fn try_get_read_guard(&self, index: usize) -> Option<FRGuard> {
-        FRGuard::try_new(self.frame_meta_ptr(index), self.page_ptr(index))
+    fn try_get_read_guard(&self, index: usize) -> Option<FrameReadGuard> {
+        FrameReadGuard::try_new(self.frame_meta_ptr(index), self.page_ptr(index))
     }
 
-    fn try_get_write_guard(&self, index: usize, make_dirty: bool) -> Option<FWGuard> {
-        FWGuard::try_new(self.frame_meta_ptr(index), self.page_ptr(index), make_dirty)
+    fn try_get_write_guard(&self, index: usize, make_dirty: bool) -> Option<FrameWriteGuard> {
+        FrameWriteGuard::try_new(self.frame_meta_ptr(index), self.page_ptr(index), make_dirty)
     }
 
     /// Choose a victim frame to be evicted.
     /// If all the frames are latched, then return None.
-    fn choose_victim(&self) -> Option<FWGuard> {
+    fn choose_victim(&self) -> Option<FrameWriteGuard> {
         // First, try the eviction hints
         while let Ok(victim) = self.eviction_hints.pop() {
             let frame = self.try_get_write_guard(victim, false);
@@ -491,7 +487,7 @@ impl<const EVICTION_BATCH_SIZE: usize> BufferPoolClock<EVICTION_BATCH_SIZE> {
 
     // The exclusive latch is NOT NEEDED when calling this function
     // This function will write the victim page to disk if it is dirty, and set the dirty bit to false.
-    fn write_victim_to_disk_if_dirty_w(&self, victim: &FWGuard) -> Result<(), MemPoolStatus> {
+    fn write_victim_to_disk_if_dirty_w(&self, victim: &FrameWriteGuard) -> Result<(), MemPoolStatus> {
         if let Some(key) = victim.page_key() {
             if victim
                 .dirty()
@@ -508,7 +504,7 @@ impl<const EVICTION_BATCH_SIZE: usize> BufferPoolClock<EVICTION_BATCH_SIZE> {
 
     // The exclusive latch is NOT NEEDED when calling this function
     // This function will write the victim page to disk if it is dirty, and set the dirty bit to false.
-    fn write_victim_to_disk_if_dirty_r(&self, victim: &FRGuard) -> Result<(), MemPoolStatus> {
+    fn write_victim_to_disk_if_dirty_r(&self, victim: &FrameReadGuard) -> Result<(), MemPoolStatus> {
         if let Some(key) = victim.page_key() {
             // Compare and swap is_dirty because we don't want to write the page if it is already written by another thread.
             if victim
@@ -549,7 +545,7 @@ impl<const EVICTION_BATCH_SIZE: usize> MemPool for BufferPoolClock<EVICTION_BATC
     /// See more at `handle_page_fault(key, new_page=true)`
     /// The newly allocated page is not formatted except for the page id.
     /// The caller is responsible for initializing the page.
-    fn create_new_page_for_write(&self, c_key: ContainerKey) -> Result<FWGuard, MemPoolStatus> {
+    fn create_new_page_for_write(&self, c_key: ContainerKey) -> Result<FrameWriteGuard, MemPoolStatus> {
         self.stats.inc_new_page();
 
         self.ensure_free_frames()?;
@@ -586,7 +582,7 @@ impl<const EVICTION_BATCH_SIZE: usize> MemPool for BufferPoolClock<EVICTION_BATC
         &self,
         _c_key: ContainerKey,
         _num_pages: usize,
-    ) -> Result<Vec<FWGuard>, MemPoolStatus> {
+    ) -> Result<Vec<FrameWriteGuard>, MemPoolStatus> {
         unimplemented!("Create new pages for write is not implemented");
     }
 
@@ -609,7 +605,7 @@ impl<const EVICTION_BATCH_SIZE: usize> MemPool for BufferPoolClock<EVICTION_BATC
         self.page_to_frame.get_page_keys(c_key)
     }
 
-    fn get_page_for_write(&self, key: PageFrameKey) -> Result<FWGuard, MemPoolStatus> {
+    fn get_page_for_write(&self, key: PageFrameKey) -> Result<FrameWriteGuard, MemPoolStatus> {
         log_debug!("Page write: {}", key);
         self.stats.inc_write_count();
 
@@ -675,7 +671,7 @@ impl<const EVICTION_BATCH_SIZE: usize> MemPool for BufferPoolClock<EVICTION_BATC
         Ok(victim)
     }
 
-    fn get_page_for_read(&self, key: PageFrameKey) -> Result<FRGuard, MemPoolStatus> {
+    fn get_page_for_read(&self, key: PageFrameKey) -> Result<FrameReadGuard, MemPoolStatus> {
         log_debug!("Page read: {}", key);
         self.stats.inc_read_count();
 
