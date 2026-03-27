@@ -11,7 +11,7 @@ use std::{
 };
 
 use crate::{
-    bp::frame_guards::box_as_mut_ptr,
+    bp::box_as_mut_ptr,
     container::ContainerManager,
     log_warn,
     page::{Page, PageId, PAGE_SIZE},
@@ -24,11 +24,8 @@ use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use std::{io, ptr};
 
 use super::{
-    frame_guards::FrameMeta,
-    mem_pool_trait::{MemoryStats, PageAddr},
-    resident_set::ResidentPageSet,
-    BPStats, ContainerId, FrameId, FrameReadGuard, FrameWriteGuard, MemPool, MemPoolStatus,
-    PageRef,
+    resident_set::ResidentPageSet, BPStats, ContainerId, FrameId, FrameMeta, FrameReadGuard,
+    FrameWriteGuard, MemPool, MemPoolStatus, MemoryStats, PageAddr, PageRef,
 };
 
 const EVICTION_BATCH_SIZE: usize = 32;

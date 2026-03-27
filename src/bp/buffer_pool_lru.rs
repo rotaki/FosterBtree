@@ -2,8 +2,8 @@
 use crate::log;
 
 use super::{
-    frame_guards::{FrameMeta, FrameReadGuard, FrameWriteGuard},
-    mem_pool_trait::{ContainerId, MemPool, MemPoolStatus, MemoryStats, PageAddr, PageRef},
+    ContainerId, FrameMeta, FrameReadGuard, FrameWriteGuard, MemPool, MemPoolStatus, MemoryStats,
+    PageAddr, PageRef,
 };
 use crate::{
     bp::{BPStats, FrameId},
