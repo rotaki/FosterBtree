@@ -119,7 +119,7 @@ impl PageToFrame {
 }
 
 /// Buffer pool that manages the buffer frames.
-pub struct BufferPool {
+pub struct BufferPoolLRU {
     num_frames: usize,
     container_manager: Arc<ContainerManager>,
     latch: RwLatch,
@@ -132,7 +132,7 @@ pub struct BufferPool {
     stats: BPStats,
 }
 
-impl Drop for BufferPool {
+impl Drop for BufferPoolLRU {
     fn drop(&mut self) {
         if self.container_manager.remove_dir_on_drop() {
             // Do nothing. Directory will be removed when the container manager is dropped.
@@ -143,7 +143,7 @@ impl Drop for BufferPool {
     }
 }
 
-impl BufferPool {
+impl BufferPoolLRU {
     /// Create a new buffer pool with the given number of frames.
     pub fn new(
         num_frames: usize,
@@ -166,7 +166,7 @@ impl BufferPool {
             .map(|i| Box::new(FrameMeta::new(i as u32)))
             .collect::<Vec<_>>();
 
-        Ok(BufferPool {
+        Ok(BufferPoolLRU {
             num_frames,
             container_manager,
             latch: RwLatch::default(),
@@ -398,7 +398,7 @@ impl BufferPool {
     }
 }
 
-impl MemPool for BufferPool {
+impl MemPool for BufferPoolLRU {
     /// Create a new page for write in memory.
     /// NOTE: This function does not write the page to disk.
     /// See more at `handle_page_fault(key, new_page=true)`
@@ -897,7 +897,7 @@ impl MemPool for BufferPool {
 }
 
 #[cfg(test)]
-impl BufferPool {
+impl BufferPoolLRU {
     /// # Safety
     ///
     /// The caller must ensure that the buffer pool is not being used by any other thread.
@@ -952,7 +952,7 @@ impl BufferPool {
     }
 }
 
-unsafe impl Sync for BufferPool {}
+unsafe impl Sync for BufferPoolLRU {}
 
 #[cfg(test)]
 mod tests {
@@ -1206,7 +1206,7 @@ mod tests {
 
         {
             let cm = Arc::new(ContainerManager::new(&temp_dir, false, false).unwrap());
-            let bp1 = BufferPool::new(num_frames, cm).unwrap();
+            let bp1 = BufferPoolLRU::new(num_frames, cm).unwrap();
             let container_id = ContainerId::new(db_id, 0);
 
             for i in 0..num_frames * 10 {
@@ -1230,7 +1230,7 @@ mod tests {
 
         {
             let cm = Arc::new(ContainerManager::new(&temp_dir, false, false).unwrap());
-            let bp2 = BufferPool::new(num_frames, cm).unwrap();
+            let bp2 = BufferPoolLRU::new(num_frames, cm).unwrap();
 
             // Check the contents of the pages
             for (i, key) in keys.iter().enumerate() {

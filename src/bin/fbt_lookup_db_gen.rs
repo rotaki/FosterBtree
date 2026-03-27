@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use clap::Parser;
 use fbtree::{
-    bp::{BufferPool, ContainerId, MemPool},
+    bp::{BufferPoolLRU, ContainerId, MemPool},
     container::ContainerManager,
     prelude::{FosterBtree, PAGE_SIZE},
 };
@@ -40,7 +40,7 @@ pub fn get_val(num: usize, size: usize) -> Vec<u8> {
     val
 }
 
-pub fn insert_into_db(fbt: Arc<FosterBtree<BufferPool>>, num_entries: usize) {
+pub fn insert_into_db(fbt: Arc<FosterBtree<BufferPoolLRU>>, num_entries: usize) {
     // Parallel insertion using rayon
     (0..num_entries)
         .into_par_iter()
@@ -79,7 +79,7 @@ pub fn main() {
 
     let cm = Arc::new(ContainerManager::new(base_dir, true, false).unwrap());
     let start = std::time::Instant::now();
-    let bp = Arc::new(BufferPool::new(num_frames, cm).unwrap());
+    let bp = Arc::new(BufferPoolLRU::new(num_frames, cm).unwrap());
     let elapsed = start.elapsed();
     println!("Time taken to allocate buffer pool: {:?}", elapsed);
 

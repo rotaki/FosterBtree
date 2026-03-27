@@ -3,7 +3,7 @@ use std::sync::Arc;
 use clap::Parser;
 use criterion::black_box;
 use fbtree::{
-    bp::{BufferPool, MemPool},
+    bp::{BufferPoolLRU, MemPool},
     container::ContainerManager,
     prelude::{tpcc_gen_all_tables, PAGE_SIZE},
     txn_storage::NoWaitTxnStorage,
@@ -54,7 +54,7 @@ pub fn main() {
     println!("Writing to directory: {}", base_dir);
 
     let cm = Arc::new(ContainerManager::new(base_dir, true, false).unwrap());
-    let bp = Arc::new(BufferPool::new(num_frames, cm).unwrap());
+    let bp = Arc::new(BufferPoolLRU::new(num_frames, cm).unwrap());
 
     let txn_storage = NoWaitTxnStorage::new(&bp);
     let tbl_info = tpcc_gen_all_tables(&txn_storage, config.num_warehouses);

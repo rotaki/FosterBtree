@@ -534,7 +534,7 @@ pub mod iouring_sync {
             PerThreadRing::new().read_page(self.fileno, page_id, page)
         }
 
-        pub fn write_page(&self, page_id: PageId, page: &Page) -> Result<(), std::io::Error> {
+        fn write_page(&self, page_id: PageId, page: &Page) -> Result<(), std::io::Error> {
             self.stats.inc_write_count(self.direct);
             PerThreadRing::new().write_page(self.fileno, page_id, page)
         }
@@ -550,32 +550,113 @@ pub mod iouring_sync {
 }
 
 #[allow(dead_code)]
-pub mod inmemory_async_simulator {
-    use super::ContainerId;
+pub mod memory {
+    use super::{ContainerId, FileManagerTrait, FileStats};
     use crate::page::{Page, PageId};
-    use std::sync::Mutex;
-    const NUM_PAGE_BUFFER: usize = 128;
+    use std::{
+        collections::HashMap,
+        path::PathBuf,
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc, Mutex, OnceLock, RwLock, Weak,
+        },
+    };
+
+    struct MemoryStorage {
+        pages: RwLock<HashMap<PageId, Box<Page>>>,
+        page_count: AtomicUsize,
+    }
+
+    impl MemoryStorage {
+        fn new() -> Self {
+            Self {
+                pages: RwLock::new(HashMap::new()),
+                page_count: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    fn registry() -> &'static Mutex<HashMap<PathBuf, Weak<MemoryStorage>>> {
+        static REGISTRY: OnceLock<Mutex<HashMap<PathBuf, Weak<MemoryStorage>>>> = OnceLock::new();
+        REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
+    fn get_or_create_storage(path: PathBuf) -> Arc<MemoryStorage> {
+        let mut registry = registry().lock().unwrap();
+        if let Some(storage) = registry.get(&path).and_then(Weak::upgrade) {
+            return storage;
+        }
+
+        let storage = Arc::new(MemoryStorage::new());
+        registry.insert(path, Arc::downgrade(&storage));
+        storage
+    }
 
     pub struct FileManager {
-        temp_buffers: Vec<Mutex<Page>>,
+        stats: FileStats,
+        storage: Arc<MemoryStorage>,
     }
 
     impl FileManager {
         pub fn new<P: AsRef<std::path::Path>>(
-            _db_dir: P,
-            _c_id: ContainerId,
+            db_dir: P,
+            c_id: ContainerId,
         ) -> Result<Self, std::io::Error> {
+            let path = db_dir.as_ref().join(format!("{}", c_id));
             Ok(FileManager {
-                temp_buffers: (0..NUM_PAGE_BUFFER)
-                    .map(|_| Mutex::new(Page::new_empty()))
-                    .collect(),
+                stats: FileStats::new(),
+                storage: get_or_create_storage(path),
             })
         }
 
-        pub fn write_page(&self, page_id: PageId, page: &Page) -> Result<(), std::io::Error> {
-            let idx = page_id as usize % NUM_PAGE_BUFFER;
-            let mut temp_buffer = self.temp_buffers[idx].lock().unwrap();
-            temp_buffer.copy(page);
+        pub fn with_kpc<P: AsRef<std::path::Path>>(
+            db_dir: P,
+            c_id: ContainerId,
+        ) -> Result<Self, std::io::Error> {
+            Self::new(db_dir, c_id)
+        }
+    }
+
+    impl FileManagerTrait for FileManager {
+        fn num_pages(&self) -> usize {
+            self.storage.page_count.load(Ordering::Acquire)
+        }
+
+        fn get_stats(&self) -> FileStats {
+            self.stats.clone()
+        }
+
+        fn prefetch_page(&self, _page_id: PageId) -> Result<(), std::io::Error> {
+            Ok(())
+        }
+
+        fn read_page(&self, page_id: PageId, page: &mut Page) -> Result<(), std::io::Error> {
+            self.stats.inc_read_count(false);
+            let pages = self.storage.pages.read().unwrap();
+            let stored = pages.get(&page_id).ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!("page {} not found in memory file manager", page_id),
+                )
+            })?;
+            page.copy(stored);
+            Ok(())
+        }
+
+        fn write_page(&self, page_id: PageId, page: &Page) -> Result<(), std::io::Error> {
+            self.stats.inc_write_count(false);
+            let mut pages = self.storage.pages.write().unwrap();
+            pages
+                .entry(page_id)
+                .or_insert_with(|| Box::new(Page::new_empty()))
+                .copy(page);
+            self.storage
+                .page_count
+                .fetch_max(page_id as usize + 1, Ordering::AcqRel);
+            Ok(())
+        }
+
+        fn flush(&self) -> Result<(), std::io::Error> {
             Ok(())
         }
     }
@@ -1123,12 +1204,17 @@ mod tests {
         super::preadpwrite_sync::FileManager::new(db_dir, 0).unwrap()
     }
 
+    fn get_memory_fm(db_dir: &Path) -> impl FileManagerTrait {
+        super::memory::FileManager::new(db_dir, 0).unwrap()
+    }
+
     fn get_iouring_async_fm(db_dir: &Path) -> impl FileManagerTrait {
         let rings = Arc::new(super::iouring_async::GlobalRings::new(128));
         super::iouring_async::FileManager::new(db_dir, 0, rings).unwrap()
     }
 
     #[rstest]
+    #[case::memory(get_memory_fm)]
     #[case::preadpwrite(get_preadpwrite_sync_fm)]
     #[case::iouring_async(get_iouring_async_fm)]
     fn test_page_write_read<T: FileManagerTrait>(#[case] file_manager_gen: fn(&Path) -> T) {
@@ -1151,6 +1237,7 @@ mod tests {
     }
 
     #[rstest]
+    #[case::memory(get_memory_fm)]
     #[case::preadpwrite(get_preadpwrite_sync_fm)]
     #[case::iouring_async(get_iouring_async_fm)]
     fn test_prefetch_page<T: FileManagerTrait>(#[case] file_manager_gen: fn(&Path) -> T) {
@@ -1179,6 +1266,7 @@ mod tests {
     }
 
     #[rstest]
+    #[case::memory(get_memory_fm)]
     #[case::preadpwrite(get_preadpwrite_sync_fm)]
     #[case::iouring_async(get_iouring_async_fm)]
     fn test_page_write_read_sequential<T: FileManagerTrait>(
@@ -1209,6 +1297,7 @@ mod tests {
     }
 
     #[rstest]
+    #[case::memory(get_memory_fm)]
     #[case::preadpwrite(get_preadpwrite_sync_fm)]
     #[case::iouring_async(get_iouring_async_fm)]
     fn test_page_write_read_random<T: FileManagerTrait>(#[case] file_manager_gen: fn(&Path) -> T) {
@@ -1240,6 +1329,7 @@ mod tests {
     }
 
     #[rstest]
+    #[case::memory(get_memory_fm)]
     #[case::preadpwrite(get_preadpwrite_sync_fm)]
     #[case::iouring_async(get_iouring_async_fm)]
     fn test_page_write_read_interleave<T: FileManagerTrait>(
@@ -1269,6 +1359,7 @@ mod tests {
     }
 
     #[rstest]
+    #[case::memory(get_memory_fm)]
     #[case::preadpwrite(get_preadpwrite_sync_fm)]
     #[case::iouring_async(get_iouring_async_fm)]
     fn test_file_flush<T: FileManagerTrait>(#[case] file_manager_gen: fn(&Path) -> T) {
@@ -1307,6 +1398,7 @@ mod tests {
     }
 
     #[rstest]
+    #[case::memory(get_memory_fm)]
     #[case::preadpwrite(get_preadpwrite_sync_fm)]
     #[case::iouring_async(get_iouring_async_fm)]
     fn test_concurrent_read_write_file<T: FileManagerTrait>(

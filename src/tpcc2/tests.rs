@@ -9,7 +9,7 @@ use super::txn_utils::*;
 use super::*;
 
 use crate::{
-    bp::{get_test_bp_lru, BufferPool, DatabaseId},
+    bp::{get_test_bp_lru, BufferPoolLRU, DatabaseId},
     tpcc::record_definitions::Address,
     txn_storage2::{
         field::Field,
@@ -20,7 +20,7 @@ use crate::{
 };
 use std::sync::Arc;
 
-type TestBP = BufferPool;
+type TestBP = BufferPoolLRU;
 
 fn setup_test_warehouse(
     num_warehouses: u16,
@@ -31,7 +31,7 @@ fn setup_test_warehouse(
 ) {
     let bp = get_test_bp_lru(1000);
     let loader = TpccLoader::new(bp);
-    let storage: Arc<TransactionalStorage<BufferPool>> = loader.get_storage();
+    let storage: Arc<TransactionalStorage<BufferPoolLRU>> = loader.get_storage();
     let db_id = loader.get_db_id();
     let containers = loader.get_container_ids();
 

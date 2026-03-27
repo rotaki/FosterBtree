@@ -29,7 +29,7 @@ use fbtree::{
 use clap::Parser;
 use fbtree::{
     access_method::{AccessMethodError, UniqueKeyIndex},
-    bp::BufferPool,
+    bp::BufferPoolLRU,
     random::gen_random_byte_vec,
 };
 use rand::Rng;
@@ -354,7 +354,7 @@ impl Iterator for KeyValueGenerator {
 // Insert num_keys keys into the table
 pub fn load_table(
     params: &SecBenchParams,
-    table: &Arc<FosterBtree<BufferPool>>,
+    table: &Arc<FosterBtree<BufferPoolLRU>>,
     perm: Permutation,
 ) {
     for key in perm.into_iter() {

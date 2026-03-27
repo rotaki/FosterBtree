@@ -8,7 +8,7 @@ use fbtree::{
 use clap::Parser;
 use fbtree::{
     access_method::UniqueKeyIndex,
-    bp::{get_test_bp_lru, BufferPool},
+    bp::{get_test_bp_lru, BufferPoolLRU},
     random::gen_random_byte_vec,
 };
 use std::{process::Command, sync::Arc};
@@ -395,7 +395,7 @@ fn get_new_value(value_size: usize) -> Vec<u8> {
 // Insert num_keys keys into the table
 pub fn load_table(
     params: &SecBenchParams,
-    table: &Arc<FosterBtree<BufferPool>>,
+    table: &Arc<FosterBtree<BufferPoolLRU>>,
     iter: impl Iterator<Item = usize>,
 ) {
     for key in iter {

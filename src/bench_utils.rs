@@ -8,7 +8,7 @@ use crate::{
     bp::{
         get_in_mem_pool, get_test_bp_lru,
         prelude::{ContainerId, InMemPool, MemPool},
-        BufferPool,
+        BufferPoolLRU,
     },
     random::{RandomKVs, RandomOp},
 };
@@ -118,7 +118,7 @@ pub fn gen_foster_btree_in_mem() -> Arc<FosterBtree<InMemPool>> {
     Arc::new(btree)
 }
 
-pub fn gen_foster_btree_on_disk(bp_size: usize) -> Arc<FosterBtree<BufferPool>> {
+pub fn gen_foster_btree_on_disk(bp_size: usize) -> Arc<FosterBtree<BufferPoolLRU>> {
     let (db_id, c_id) = (0, 0);
     let container_id = ContainerId::new(db_id, c_id);
     let btree = FosterBtree::new(container_id, get_test_bp_lru(bp_size));
@@ -273,7 +273,7 @@ pub fn gen_paged_hash_map_in_mem() -> Arc<PagedHashMap<InMemPool>> {
     Arc::new(map)
 }
 
-pub fn gen_paged_hash_map_on_disk(bp_size: usize) -> Arc<PagedHashMap<BufferPool>> {
+pub fn gen_paged_hash_map_on_disk(bp_size: usize) -> Arc<PagedHashMap<BufferPoolLRU>> {
     // let func = Box::new(|old: &[u8], new: &[u8]| {
     //     old.iter().chain(new.iter()).copied().collect::<Vec<u8>>()
     // });

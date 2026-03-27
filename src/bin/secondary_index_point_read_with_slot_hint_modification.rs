@@ -660,8 +660,8 @@ pub fn get_bp(num_frames: usize, cm: Arc<ContainerManager>) -> Arc<impl MemPool>
     }
     #[cfg(not(any(feature = "vmcache", feature = "bp_clock")))]
     {
-        use fbtree::bp::BufferPool;
-        Arc::new(BufferPool::new(num_frames, cm).unwrap())
+        use fbtree::bp::BufferPoolLRU;
+        Arc::new(BufferPoolLRU::new(num_frames, cm).unwrap())
     }
 }
 

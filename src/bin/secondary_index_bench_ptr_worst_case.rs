@@ -27,7 +27,7 @@ use fbtree::{
 use clap::Parser;
 use fbtree::{
     access_method::{AccessMethodError, UniqueKeyIndex},
-    bp::{get_test_bp_lru, BufferPool},
+    bp::{get_test_bp_lru, BufferPoolLRU},
     random::gen_random_byte_vec,
 };
 use std::{process::Command, sync::Arc};
@@ -671,7 +671,7 @@ impl Iterator for KeyValueGenerator {
     }
 }
 
-pub fn load_table(params: &SecBenchParams, table: &Arc<FosterBtree<BufferPool>>) {
+pub fn load_table(params: &SecBenchParams, table: &Arc<FosterBtree<BufferPoolLRU>>) {
     let num_insertion_threads = 6;
 
     let mut gen = KeyValueGenerator::new(

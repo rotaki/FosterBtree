@@ -489,7 +489,7 @@ mod tests {
 
     use crate::{
         access_method::AccessMethodError,
-        bp::{get_in_mem_pool, get_test_bp_lru, BufferPool},
+        bp::{get_in_mem_pool, get_test_bp_lru, BufferPoolLRU},
         container::ContainerManager,
         log_info,
         random::{gen_random_permutation, RandomKVs},
@@ -1028,7 +1028,7 @@ mod tests {
         // Drop the store and buffer pool
         {
             let cm = Arc::new(ContainerManager::new(temp_dir.path(), false, false).unwrap());
-            let bp = Arc::new(BufferPool::new(100, cm).unwrap());
+            let bp = Arc::new(BufferPoolLRU::new(100, cm).unwrap());
             let container_id = ContainerId::new(0, 0);
             let store = Arc::new(HashFosterBtree::new(container_id, bp.clone(), 10));
 
@@ -1042,7 +1042,7 @@ mod tests {
 
         {
             let cm = Arc::new(ContainerManager::new(temp_dir.path(), false, false).unwrap());
-            let bp = Arc::new(BufferPool::new(100, cm).unwrap());
+            let bp = Arc::new(BufferPoolLRU::new(100, cm).unwrap());
 
             let container_id = ContainerId::new(0, 0);
             let store = Arc::new(HashFosterBtree::load(container_id, bp.clone(), 0));

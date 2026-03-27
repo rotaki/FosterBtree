@@ -1,5 +1,6 @@
 #[cfg(feature = "iouring_async")]
 use super::file_manager::iouring_async::GlobalRings;
+use super::file_manager::memory::FileManager as MemoryFileManager;
 use super::{FileManager, FileManagerTrait, FileStats};
 use crate::bp::prelude::{ContainerId, MemPoolStatus};
 use crate::page::{Page, PageId};
@@ -11,14 +12,19 @@ use std::sync::{
     Arc,
 };
 
+enum StorageBackend {
+    Disk,
+    Memory,
+}
+
 pub struct Container {
     page_count: AtomicUsize,
     is_temp: AtomicBool,
-    file_manager: FileManager,
+    file_manager: Box<dyn FileManagerTrait>,
 }
 
 impl Container {
-    pub fn new(file_manager: FileManager) -> Self {
+    pub fn new(file_manager: Box<dyn FileManagerTrait>) -> Self {
         Container {
             page_count: AtomicUsize::new(file_manager.num_pages()),
             is_temp: AtomicBool::new(false),
@@ -26,7 +32,7 @@ impl Container {
         }
     }
 
-    pub fn new_temp(file_manager: FileManager) -> Self {
+    pub fn new_temp(file_manager: Box<dyn FileManagerTrait>) -> Self {
         Container {
             page_count: AtomicUsize::new(file_manager.num_pages()),
             is_temp: AtomicBool::new(true),
@@ -98,12 +104,72 @@ pub struct ContainerManager {
     remove_dir_on_drop: bool,
     base_dir: PathBuf,
     containers: DashMap<ContainerId, Arc<Container>>, // (db_id, c_id) -> Container
+    storage_backend: StorageBackend,
     #[cfg(feature = "iouring_async")]
-    ring: Arc<GlobalRings>,
+    ring: Option<Arc<GlobalRings>>,
     direct: bool, // Direct IO
 }
 
 impl ContainerManager {
+    #[cfg(feature = "iouring_async")]
+    fn open_disk_file_manager(
+        direct: bool,
+        db_path: &Path,
+        c_id: super::file_manager::ContainerId,
+        ring: &Arc<GlobalRings>,
+    ) -> Box<dyn FileManagerTrait> {
+        if direct {
+            Box::new(FileManager::new(db_path, c_id, ring.clone()).unwrap())
+        } else {
+            Box::new(FileManager::with_kpc(db_path, c_id, ring.clone()).unwrap())
+        }
+    }
+
+    #[cfg(not(feature = "iouring_async"))]
+    fn open_disk_file_manager(
+        direct: bool,
+        db_path: &Path,
+        c_id: super::file_manager::ContainerId,
+    ) -> Box<dyn FileManagerTrait> {
+        if direct {
+            Box::new(FileManager::new(db_path, c_id).unwrap())
+        } else {
+            Box::new(FileManager::with_kpc(db_path, c_id).unwrap())
+        }
+    }
+
+    fn open_memory_file_manager(
+        db_path: &Path,
+        c_id: super::file_manager::ContainerId,
+    ) -> Box<dyn FileManagerTrait> {
+        Box::new(MemoryFileManager::new(db_path, c_id).unwrap())
+    }
+
+    fn open_file_manager(
+        &self,
+        db_path: &Path,
+        c_id: super::file_manager::ContainerId,
+    ) -> Box<dyn FileManagerTrait> {
+        match self.storage_backend {
+            StorageBackend::Disk => {
+                #[cfg(feature = "iouring_async")]
+                {
+                    Self::open_disk_file_manager(
+                        self.direct,
+                        db_path,
+                        c_id,
+                        self.ring.as_ref().unwrap(),
+                    )
+                }
+                #[cfg(not(feature = "iouring_async"))]
+                {
+                    Self::open_disk_file_manager(self.direct, db_path, c_id)
+                }
+            }
+            StorageBackend::Memory => Self::open_memory_file_manager(db_path, c_id),
+        }
+    }
+
     /// Directory structure
     /// * base_dir
     ///    * db_dir
@@ -150,17 +216,9 @@ impl ContainerManager {
                             .parse()
                             .unwrap();
                         #[cfg(feature = "iouring_async")]
-                        let fm = if direct {
-                            FileManager::new(&db_path, c_id, ring.clone()).unwrap()
-                        } else {
-                            FileManager::with_kpc(&db_path, c_id, ring.clone()).unwrap()
-                        };
+                        let fm = Self::open_disk_file_manager(direct, &db_path, c_id, &ring);
                         #[cfg(not(feature = "iouring_async"))]
-                        let fm = if direct {
-                            FileManager::new(&db_path, c_id).unwrap()
-                        } else {
-                            FileManager::with_kpc(&db_path, c_id).unwrap()
-                        };
+                        let fm = Self::open_disk_file_manager(direct, &db_path, c_id);
                         containers
                             .insert(ContainerId::new(db_id, c_id), Arc::new(Container::new(fm)));
                     }
@@ -172,10 +230,26 @@ impl ContainerManager {
             remove_dir_on_drop,
             base_dir: base_dir.as_ref().to_path_buf(),
             containers,
+            storage_backend: StorageBackend::Disk,
             #[cfg(feature = "iouring_async")]
-            ring,
+            ring: Some(ring),
             direct,
         })
+    }
+
+    pub fn new_in_memory() -> Self {
+        static NEXT_MEMORY_NAMESPACE: AtomicUsize = AtomicUsize::new(0);
+        let namespace = NEXT_MEMORY_NAMESPACE.fetch_add(1, Ordering::Relaxed);
+
+        ContainerManager {
+            remove_dir_on_drop: false,
+            base_dir: PathBuf::from(format!("__in_memory__/{}", namespace)),
+            containers: DashMap::new(),
+            storage_backend: StorageBackend::Memory,
+            #[cfg(feature = "iouring_async")]
+            ring: None,
+            direct: false,
+        }
     }
 
     pub fn remove_dir_on_drop(&self) -> bool {
@@ -186,28 +260,7 @@ impl ContainerManager {
     pub fn get_container(&self, container_id: ContainerId) -> Arc<Container> {
         let container = self.containers.entry(container_id).or_insert_with(|| {
             let db_path = self.base_dir.join(container_id.db_id().to_string());
-            #[cfg(feature = "iouring_async")]
-            let fm = if self.direct {
-                FileManager::new(
-                    &db_path,
-                    container_id.local_container_id(),
-                    self.ring.clone(),
-                )
-                .unwrap()
-            } else {
-                FileManager::with_kpc(
-                    &db_path,
-                    container_id.local_container_id(),
-                    self.ring.clone(),
-                )
-                .unwrap()
-            };
-            #[cfg(not(feature = "iouring_async"))]
-            let fm = if self.direct {
-                FileManager::new(&db_path, container_id.local_container_id()).unwrap()
-            } else {
-                FileManager::with_kpc(&db_path, container_id.local_container_id()).unwrap()
-            };
+            let fm = self.open_file_manager(&db_path, container_id.local_container_id());
             Arc::new(Container::new(fm))
         });
         container.value().clone()
@@ -216,28 +269,7 @@ impl ContainerManager {
     pub fn create_container(&self, container_id: ContainerId, is_temp: bool) {
         self.containers.entry(container_id).or_insert_with(|| {
             let db_path = self.base_dir.join(container_id.db_id().to_string());
-            #[cfg(feature = "iouring_async")]
-            let fm = if self.direct {
-                FileManager::new(
-                    &db_path,
-                    container_id.local_container_id(),
-                    self.ring.clone(),
-                )
-                .unwrap()
-            } else {
-                FileManager::with_kpc(
-                    &db_path,
-                    container_id.local_container_id(),
-                    self.ring.clone(),
-                )
-                .unwrap()
-            };
-            #[cfg(not(feature = "iouring_async"))]
-            let fm = if self.direct {
-                FileManager::new(&db_path, container_id.local_container_id()).unwrap()
-            } else {
-                FileManager::with_kpc(&db_path, container_id.local_container_id()).unwrap()
-            };
+            let fm = self.open_file_manager(&db_path, container_id.local_container_id());
             if is_temp {
                 Arc::new(Container::new_temp(fm))
             } else {
@@ -266,7 +298,7 @@ impl ContainerManager {
 
 impl Drop for ContainerManager {
     fn drop(&mut self) {
-        if self.remove_dir_on_drop {
+        if self.remove_dir_on_drop && matches!(self.storage_backend, StorageBackend::Disk) {
             std::fs::remove_dir_all(&self.base_dir).unwrap();
         }
     }

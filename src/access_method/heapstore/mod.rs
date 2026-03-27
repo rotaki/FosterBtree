@@ -544,7 +544,7 @@ impl PageVisitor for HeapStoreStats {
 
 #[cfg(test)]
 mod tests {
-    use crate::bp::{get_test_bp_lru, BufferPool};
+    use crate::bp::{get_test_bp_lru, BufferPoolLRU};
     use crate::container::ContainerManager;
     use crate::random::{gen_random_byte_vec, RandomKVs};
 
@@ -776,7 +776,7 @@ mod tests {
         // Drop the store and buffer pool
         {
             let cm = Arc::new(ContainerManager::new(temp_dir.path(), false, false).unwrap());
-            let bp = Arc::new(BufferPool::new(10, cm).unwrap());
+            let bp = Arc::new(BufferPoolLRU::new(10, cm).unwrap());
 
             let store = Arc::new(HeapStore::bulk_insert_create(
                 get_container_id(),
@@ -790,7 +790,7 @@ mod tests {
 
         {
             let cm = Arc::new(ContainerManager::new(temp_dir.path(), false, false).unwrap());
-            let bp = Arc::new(BufferPool::new(10, cm).unwrap());
+            let bp = Arc::new(BufferPoolLRU::new(10, cm).unwrap());
             let store = Arc::new(HeapStore::load(get_container_id(), bp.clone(), 0));
 
             let mut scanner = store.scan();

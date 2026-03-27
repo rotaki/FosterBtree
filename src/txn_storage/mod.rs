@@ -33,7 +33,7 @@ mod tests {
         bp::{
             get_test_bp_lru,
             prelude::{DatabaseId, LocalContainerId as ContainerId},
-            BufferPool, MemPool,
+            BufferPoolLRU, MemPool,
         },
         container::ContainerManager,
         random::RandomKVs,
@@ -231,7 +231,7 @@ mod tests {
 
         let (db_id, c_ids) = {
             let cm = Arc::new(ContainerManager::new(tempdir.path(), true, false).unwrap());
-            let bp1 = Arc::new(BufferPool::new(10, cm).unwrap());
+            let bp1 = Arc::new(BufferPoolLRU::new(10, cm).unwrap());
             let storage1 = OnDiskStorage::new(&bp1);
 
             let db_options = DBOptions::new("test_db");
@@ -272,7 +272,7 @@ mod tests {
         };
 
         let cm = Arc::new(ContainerManager::new(tempdir.path(), true, false).unwrap());
-        let bp2 = Arc::new(BufferPool::new(10, cm).unwrap());
+        let bp2 = Arc::new(BufferPoolLRU::new(10, cm).unwrap());
         let storage2 = OnDiskStorage::load(&bp2);
 
         // Check if the values are still present after restarting the storage
