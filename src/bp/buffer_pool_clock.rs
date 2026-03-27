@@ -2,10 +2,10 @@
 use crate::log;
 
 use super::{
-    buffer_pool::BPStats,
     eviction_policy::{ClockEvictionPolicy, EvictionPolicy},
     frame_guards::{FrameMeta, FrameReadGuard, FrameWriteGuard},
     mem_pool_trait::{ContainerKey, MemPool, MemPoolStatus, MemoryStats, PageFrameKey, PageKey},
+    BPStats,
 };
 use crate::{
     container::ContainerManager,

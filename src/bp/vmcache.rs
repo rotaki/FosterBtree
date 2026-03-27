@@ -24,12 +24,11 @@ use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use std::{io, ptr};
 
 use super::{
-    buffer_pool::BPStats,
     eviction_policy::ClockEvictionPolicy,
     frame_guards::FrameMeta,
     mem_pool_trait::{MemoryStats, PageKey},
     resident_set::ResidentPageSet,
-    ContainerKey, FrameReadGuard, FrameWriteGuard, MemPool, MemPoolStatus, PageFrameKey,
+    BPStats, ContainerKey, FrameReadGuard, FrameWriteGuard, MemPool, MemPoolStatus, PageFrameKey,
 };
 
 type FMeta = FrameMeta<ClockEvictionPolicy>;
