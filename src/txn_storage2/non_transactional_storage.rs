@@ -5,7 +5,10 @@ use crate::{
         fbt::{BTreeKey, FosterBtree, FosterBtreeRangeScanner},
         prelude::*,
     },
-    bp::{ContainerId, ContainerKey, DatabaseId, MemPool, PageFrameKey},
+    bp::{
+        ContainerId as PackedContainerId, DatabaseId, LocalContainerId as ContainerId, MemPool,
+        PageRef,
+    },
     txn_storage2::{
         field::{
             bytes_to_record, key_to_bytes, record_to_bytes, record_to_key_bytes, Field, Record,
@@ -134,7 +137,7 @@ impl<M: MemPool> FieldLeveLStorageTrait for NonTransactionalStorage<M> {
             *next_container_id += 1;
 
             // Create Foster B-tree
-            let container_key = ContainerKey::new(0, c_id); // Always use db_id = 0,
+            let container_key = PackedContainerId::new(0, c_id); // Always use db_id = 0,
             let btree = Arc::new(FosterBtree::new(container_key, self.mem_pool.clone()));
 
             let container_info = ContainerInfo {
@@ -298,7 +301,7 @@ impl<M: MemPool> FieldLeveLStorageTrait for NonTransactionalStorage<M> {
         let leaf_page = container.btree.traverse_to_leaf_for_read_with_hint(
             &key,
             hint.as_ref().map(|ptr| {
-                PageFrameKey::new_with_frame_id(container.btree.c_key, ptr.page_id, ptr.frame_id)
+                PageRef::new_with_frame_id(container.btree.container_id, ptr.page_id, ptr.frame_id)
             }),
         );
         let slot_id = leaf_page.upper_bound_slot_id(&BTreeKey::new(&key)) - 1;
@@ -361,7 +364,7 @@ impl<M: MemPool> FieldLeveLStorageTrait for NonTransactionalStorage<M> {
         let mut leaf_page = container.btree.traverse_to_leaf_for_write_with_hint(
             &key,
             hint.as_ref().map(|ptr| {
-                PageFrameKey::new_with_frame_id(container.btree.c_key, ptr.page_id, ptr.frame_id)
+                PageRef::new_with_frame_id(container.btree.container_id, ptr.page_id, ptr.frame_id)
             }),
         );
         let slot_id = leaf_page.upper_bound_slot_id(&BTreeKey::new(&key)) - 1;
@@ -413,7 +416,7 @@ impl<M: MemPool> FieldLeveLStorageTrait for NonTransactionalStorage<M> {
         let mut leaf_page = container.btree.traverse_to_leaf_for_write_with_hint(
             &key,
             hint.as_ref().map(|ptr| {
-                PageFrameKey::new_with_frame_id(container.btree.c_key, ptr.page_id, ptr.frame_id)
+                PageRef::new_with_frame_id(container.btree.container_id, ptr.page_id, ptr.frame_id)
             }),
         );
         let slot_id = leaf_page.upper_bound_slot_id(&BTreeKey::new(&key)) - 1;
@@ -466,7 +469,7 @@ impl<M: MemPool> FieldLeveLStorageTrait for NonTransactionalStorage<M> {
         let mut leaf_page = container.btree.traverse_to_leaf_for_write_with_hint(
             &key,
             hint.as_ref().map(|ptr| {
-                PageFrameKey::new_with_frame_id(container.btree.c_key, ptr.page_id, ptr.frame_id)
+                PageRef::new_with_frame_id(container.btree.container_id, ptr.page_id, ptr.frame_id)
             }),
         );
         let slot_id = leaf_page.upper_bound_slot_id(&BTreeKey::new(&key)) - 1;
@@ -537,7 +540,7 @@ impl<M: MemPool> FieldLeveLStorageTrait for NonTransactionalStorage<M> {
         let mut leaf_page = container.btree.traverse_to_leaf_for_write_with_hint(
             &key,
             hint.as_ref().map(|ptr| {
-                PageFrameKey::new_with_frame_id(container.btree.c_key, ptr.page_id, ptr.frame_id)
+                PageRef::new_with_frame_id(container.btree.container_id, ptr.page_id, ptr.frame_id)
             }),
         );
         let slot_id = leaf_page.upper_bound_slot_id(&BTreeKey::new(&key)) - 1;

@@ -9,8 +9,8 @@ use super::{
 };
 use crate::{
     access_method::fbt::FosterBtreeRangeScanner,
-    bp::prelude::{ContainerId, DatabaseId},
-    prelude::{ContainerKey, FosterBtree},
+    bp::prelude::{ContainerId as PackedContainerId, DatabaseId, LocalContainerId as ContainerId},
+    prelude::FosterBtree,
 };
 use crate::{
     access_method::prelude::{HeapStore, HeapStoreScanner},
@@ -32,11 +32,11 @@ impl<M: MemPool> Storage<M> {
                 unimplemented!("Hash container not implemented")
             }
             ContainerDS::BTree => Storage::BTreeMap(Arc::new(FosterBtree::<M>::new(
-                ContainerKey::new(db_id, c_id),
+                PackedContainerId::new(db_id, c_id),
                 bp,
             ))),
             ContainerDS::AppendOnly => Storage::AppendOnly(Arc::new(HeapStore::<M>::new(
-                ContainerKey::new(db_id, c_id),
+                PackedContainerId::new(db_id, c_id),
                 bp,
             ))),
         }
@@ -48,12 +48,12 @@ impl<M: MemPool> Storage<M> {
                 unimplemented!("Hash container not implemented")
             }
             ContainerDS::BTree => Storage::BTreeMap(Arc::new(FosterBtree::<M>::load(
-                ContainerKey::new(db_id, c_id),
+                PackedContainerId::new(db_id, c_id),
                 bp,
                 0,
             ))),
             ContainerDS::AppendOnly => Storage::AppendOnly(Arc::new(HeapStore::<M>::load(
-                ContainerKey::new(db_id, c_id),
+                PackedContainerId::new(db_id, c_id),
                 bp,
                 0,
             ))),
@@ -182,7 +182,7 @@ impl<M: MemPool> OnDiskStorage<M> {
         OnDiskStorage {
             bp: bp.clone(),
             metadata: Arc::new(FosterBtree::<M>::new(
-                ContainerKey::new(DatabaseId::MAX, 0),
+                PackedContainerId::new(DatabaseId::MAX, 0),
                 bp.clone(),
             )),
             container_lock: RwLock::new(()),
@@ -192,7 +192,7 @@ impl<M: MemPool> OnDiskStorage<M> {
 
     pub fn load(bp: &Arc<M>) -> Self {
         let metadata = Arc::new(FosterBtree::<M>::load(
-            ContainerKey::new(DatabaseId::MAX, 0),
+            PackedContainerId::new(DatabaseId::MAX, 0),
             bp.clone(),
             0,
         ));

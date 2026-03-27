@@ -645,11 +645,7 @@ fn should_root_descend(this: &Page, child: &Page) -> bool {
 
 /// Opportunistically try to fix the child page frame id
 #[inline]
-fn fix_frame_id(
-    this: FrameReadGuard,
-    _slot_id: u32,
-    _new_frame_key: &PageFrameKey,
-) -> FrameReadGuard {
+fn fix_frame_id(this: FrameReadGuard, _slot_id: u32, _new_frame_key: &PageRef) -> FrameReadGuard {
     #[cfg(feature = "no_bp_hint")]
     {
         this
@@ -659,7 +655,7 @@ fn fix_frame_id(
         match this.try_upgrade(false) {
             Ok(mut write_guard) => {
                 let val = InnerVal::new_with_frame_id(
-                    _new_frame_key.p_key().page_id,
+                    _new_frame_key.page_addr().page_id,
                     _new_frame_key.frame_id(),
                 );
                 let res = write_guard.update_at(_slot_id, None, &val.to_bytes());
@@ -1306,53 +1302,53 @@ fn print_page(p: &Page) {
 }
 
 pub struct FosterBtree<T: MemPool> {
-    pub c_key: ContainerKey,
-    pub root_key: PageFrameKey,
+    pub container_id: ContainerId,
+    pub root_key: PageRef,
     pub mem_pool: Arc<T>,
     unused_pages: ConcurrentQueue<PageId>,
 }
 
 impl<T: MemPool> FosterBtree<T> {
-    pub fn new(c_key: ContainerKey, mem_pool: Arc<T>) -> Self {
+    pub fn new(container_id: ContainerId, mem_pool: Arc<T>) -> Self {
         let root_key = {
-            let mut root = mem_pool.create_new_page_for_write(c_key).unwrap();
+            let mut root = mem_pool.create_new_page_for_write(container_id).unwrap();
             root.init_as_root();
-            root.page_frame_key().unwrap()
+            root.page_ref().unwrap()
         };
 
         FosterBtree {
-            c_key,
+            container_id,
             root_key,
             mem_pool: mem_pool.clone(),
             unused_pages: ConcurrentQueue::unbounded(),
         }
     }
 
-    pub fn load(c_key: ContainerKey, mem_pool: Arc<T>, root_page_id: PageId) -> Self {
+    pub fn load(container_id: ContainerId, mem_pool: Arc<T>, root_page_id: PageId) -> Self {
         // Assumes that the root page is the first page in this container.
         FosterBtree {
-            c_key,
-            root_key: PageFrameKey::new(c_key, root_page_id),
+            container_id,
+            root_key: PageRef::new(container_id, root_page_id),
             mem_pool: mem_pool.clone(),
             unused_pages: ConcurrentQueue::unbounded(),
         }
     }
 
     pub fn bulk_insert_create<K: AsRef<[u8]>, V: AsRef<[u8]>>(
-        c_key: ContainerKey,
+        container_id: ContainerId,
         mem_pool: Arc<T>,
         iter: impl Iterator<Item = (K, V)>,
     ) -> Self {
-        let mut root = mem_pool.create_new_page_for_write(c_key).unwrap();
+        let mut root = mem_pool.create_new_page_for_write(container_id).unwrap();
         root.init_as_root();
-        let root_key = root.page_frame_key().unwrap();
+        let root_key = root.page_ref().unwrap();
 
         // Keep iterating the iter and appending the key-value pairs to the root page.
         let mut current_page = root;
         for (key, value) in iter {
             if !current_page.insert(key.as_ref(), value.as_ref(), false) {
                 // Create a new page and split the current page.
-                let mut new_page = mem_pool.create_new_page_for_write(c_key).unwrap();
+                let mut new_page = mem_pool.create_new_page_for_write(container_id).unwrap();
                 let foster_key = split_min_move(&mut current_page, &mut new_page);
                 assert!(foster_key.as_slice() < key.as_ref());
                 // Insert it into new page. If it fails, panic.
@@ -1364,7 +1360,7 @@ impl<T: MemPool> FosterBtree<T> {
         }
 
         FosterBtree {
-            c_key,
+            container_id,
             root_key,
             mem_pool: mem_pool.clone(),
             unused_pages: ConcurrentQueue::unbounded(),
@@ -1418,7 +1414,7 @@ impl<T: MemPool> FosterBtree<T> {
         if let Ok(page_id) = self.unused_pages.pop() {
             let page = self
                 .mem_pool
-                .get_page_for_write(PageFrameKey::new(self.c_key, page_id));
+                .get_page_for_write(self.container_id, page_id, None);
             if let Ok(mut page) = page {
                 assert!(!page.is_valid());
                 page.init();
@@ -1426,7 +1422,7 @@ impl<T: MemPool> FosterBtree<T> {
             }
         }
         let mut new_page = loop {
-            let page = self.mem_pool.create_new_page_for_write(self.c_key);
+            let page = self.mem_pool.create_new_page_for_write(self.container_id);
             match page {
                 Ok(page) => break page,
                 Err(MemPoolStatus::FrameWriteLatchGrantFailed | MemPoolStatus::CannotEvictPage) => {
@@ -1441,12 +1437,16 @@ impl<T: MemPool> FosterBtree<T> {
         new_page
     }
 
-    fn read_page(&self, page_key: PageFrameKey) -> FrameReadGuard {
+    fn read_page(&self, page_key: PageRef) -> FrameReadGuard {
         let mut attempts = 0;
         loop {
             #[cfg(feature = "stat")]
             inc_shared_page_latch_count();
-            let page = self.mem_pool.get_page_for_read(page_key);
+            let page = self.mem_pool.get_page_for_read(
+                page_key.container_id(),
+                page_key.page_id(),
+                page_key.frame_hint(),
+            );
             match page {
                 Ok(page) => {
                     #[cfg(feature = "stat")]
@@ -1679,7 +1679,7 @@ impl<T: MemPool> FosterBtree<T> {
     pub fn traverse_to_leaf_for_read_with_hint(
         &self,
         key: &[u8],
-        _hint: Option<PageFrameKey>,
+        _hint: Option<PageRef>,
     ) -> FrameReadGuard {
         #[cfg(feature = "no_tree_hint")]
         {
@@ -1689,7 +1689,10 @@ impl<T: MemPool> FosterBtree<T> {
         {
             // Use the hint to speculatively find the page that contains the key.
             if let Some(hint) = &_hint {
-                if !self.mem_pool.is_in_mem(*hint) {
+                if !self
+                    .mem_pool
+                    .is_in_mem(hint.container_id(), hint.page_id(), hint.frame_hint())
+                {
                     // If the hinted page is not in the buffer pool, we fall back to the normal traversal
                     // to avoid reading unnecessary pages from the disk.
                     return self.traverse_to_leaf_for_read_from(key, self.root_key);
@@ -1718,11 +1721,7 @@ impl<T: MemPool> FosterBtree<T> {
         self.traverse_to_leaf_for_read_from(key, self.root_key)
     }
 
-    fn traverse_to_leaf_for_read_from(
-        &self,
-        key: &[u8],
-        start_key: PageFrameKey,
-    ) -> FrameReadGuard {
+    fn traverse_to_leaf_for_read_from(&self, key: &[u8], start_key: PageRef) -> FrameReadGuard {
         let mut current_page = {
             let start_page = self.read_page(start_key);
             if start_page.is_valid() && start_page.inside_range(&BTreeKey::Normal(key)) {
@@ -1740,7 +1739,7 @@ impl<T: MemPool> FosterBtree<T> {
                     // Check whether the foster child should be traversed.
                     let val = InnerVal::from_bytes(this_page.get_foster_val());
                     let foster_page_key =
-                        PageFrameKey::new_with_frame_id(self.c_key, val.page_id, val.frame_id);
+                        PageRef::new_with_frame_id(self.container_id, val.page_id, val.frame_id);
                     let foster_page = self.read_page(foster_page_key);
 
                     let this_page = if foster_page.frame_id() != val.frame_id {
@@ -1748,7 +1747,7 @@ impl<T: MemPool> FosterBtree<T> {
                         fix_frame_id(
                             this_page,
                             foster_child_slot_id,
-                            &foster_page.page_frame_key().unwrap(),
+                            &foster_page.page_ref().unwrap(),
                         )
                     } else {
                         this_page
@@ -1788,13 +1787,13 @@ impl<T: MemPool> FosterBtree<T> {
             let is_foster_relationship =
                 this_page.has_foster_child() && slot_id == this_page.foster_child_slot_id();
             let val = InnerVal::from_bytes(this_page.get_val(slot_id));
-            let page_key = PageFrameKey::new_with_frame_id(self.c_key, val.page_id, val.frame_id);
+            let page_key = PageRef::new_with_frame_id(self.container_id, val.page_id, val.frame_id);
 
             let next_page = self.read_page(page_key);
 
             // Check if the frame_id is the same
             let this_page = if next_page.frame_id() != val.frame_id {
-                fix_frame_id(this_page, slot_id, &next_page.page_frame_key().unwrap())
+                fix_frame_id(this_page, slot_id, &next_page.page_ref().unwrap())
             } else {
                 this_page
             };
@@ -1828,7 +1827,7 @@ impl<T: MemPool> FosterBtree<T> {
     pub fn traverse_to_leaf_for_write_with_hint(
         &self,
         key: &[u8],
-        _hint: Option<PageFrameKey>,
+        _hint: Option<PageRef>,
     ) -> FrameWriteGuard {
         #[cfg(feature = "no_tree_hint")]
         {
@@ -1881,7 +1880,7 @@ impl<T: MemPool> FosterBtree<T> {
     fn try_traverse_to_leaf_for_write_from(
         &self,
         key: &[u8],
-        start_key: PageFrameKey,
+        start_key: PageRef,
     ) -> Result<FrameWriteGuard, AccessMethodError> {
         let leaf_page = self.traverse_to_leaf_for_read_from(key, start_key);
         #[cfg(feature = "stat")]
@@ -1897,11 +1896,7 @@ impl<T: MemPool> FosterBtree<T> {
         }
     }
 
-    fn traverse_to_leaf_for_write_from(
-        &self,
-        key: &[u8],
-        start_key: PageFrameKey,
-    ) -> FrameWriteGuard {
+    fn traverse_to_leaf_for_write_from(&self, key: &[u8], start_key: PageRef) -> FrameWriteGuard {
         let mut attempts = 0;
 
         {
@@ -2158,7 +2153,7 @@ pub struct FosterBtreeCursor<T: MemPool> {
     current_leaf_page: Option<FrameReadGuard>,
     current_slot_id: u32,
     current_high_fence: Option<Vec<u8>>,
-    visited: Vec<PageFrameKey>,
+    visited: Vec<PageRef>,
     finished: bool,
 }
 
@@ -2179,8 +2174,8 @@ impl<T: MemPool> FosterBtreeCursor<T> {
         cursor
     }
 
-    pub fn c_key(&self) -> ContainerKey {
-        self.btree.c_key
+    pub fn container_id(&self) -> ContainerId {
+        self.btree.container_id
     }
 
     fn initialize(&mut self) {
@@ -2206,8 +2201,8 @@ impl<T: MemPool> FosterBtreeCursor<T> {
                 if this_page.has_foster_child() && this_page.foster_child_slot_id() <= slot {
                     // We need to traverse the foster child
                     let val = InnerVal::from_bytes(this_page.get_foster_val());
-                    let foster_page_key = PageFrameKey::new_with_frame_id(
-                        self.btree.c_key,
+                    let foster_page_key = PageRef::new_with_frame_id(
+                        self.btree.container_id,
                         val.page_id,
                         val.frame_id,
                     );
@@ -2252,19 +2247,23 @@ impl<T: MemPool> FosterBtreeCursor<T> {
             );
             let val = InnerVal::from_bytes(this_page.get_val(slot_id));
             let page_key =
-                PageFrameKey::new_with_frame_id(self.btree.c_key, val.page_id, val.frame_id);
+                PageRef::new_with_frame_id(self.btree.container_id, val.page_id, val.frame_id);
             let next_page = self.btree.read_page(page_key);
 
             // Do a prefetch for the next next page
             let prefetch_slot_id = slot_id + 1;
             if prefetch_slot_id < this_page.high_fence_slot_id() {
                 let prefetch_val = InnerVal::from_bytes(this_page.get_val(prefetch_slot_id));
-                let prefetch_page_key = PageFrameKey::new_with_frame_id(
-                    self.btree.c_key,
+                let prefetch_page_key = PageRef::new_with_frame_id(
+                    self.btree.container_id,
                     prefetch_val.page_id,
                     prefetch_val.frame_id,
                 );
-                let _ = self.btree.mem_pool.prefetch_page(prefetch_page_key);
+                let _ = self.btree.mem_pool.prefetch_page(
+                    prefetch_page_key.container_id(),
+                    prefetch_page_key.page_id(),
+                    prefetch_page_key.frame_hint(),
+                );
             }
 
             current_page = next_page;
@@ -2393,7 +2392,7 @@ impl<T: MemPool> FosterBtreeCursor<T> {
                 // Before releasing the current page, we need to get the read-latch of the foster child.
                 let val = InnerVal::from_bytes(leaf_page.get_foster_val());
                 let foster_page_key =
-                    PageFrameKey::new_with_frame_id(self.btree.c_key, val.page_id, val.frame_id);
+                    PageRef::new_with_frame_id(self.btree.container_id, val.page_id, val.frame_id);
                 let foster_page = self.btree.read_page(foster_page_key);
                 drop(leaf_page);
 
@@ -2439,8 +2438,8 @@ impl<T: MemPool> FosterBtreeCursor<T> {
                         if this_page.has_foster_child() && *this_page.get_foster_key() <= **key {
                             // Check whether the foster child should be traversed.
                             let val = InnerVal::from_bytes(this_page.get_foster_val());
-                            let foster_page_key = PageFrameKey::new_with_frame_id(
-                                self.btree.c_key,
+                            let foster_page_key = PageRef::new_with_frame_id(
+                                self.btree.container_id,
                                 val.page_id,
                                 val.frame_id,
                             );
@@ -2462,8 +2461,8 @@ impl<T: MemPool> FosterBtreeCursor<T> {
                     }
                     let slot_id = this_page.upper_bound_slot_id(&BTreeKey::new(key)) - 1;
                     let val = InnerVal::from_bytes(this_page.get_val(slot_id));
-                    let page_key = PageFrameKey::new_with_frame_id(
-                        self.btree.c_key,
+                    let page_key = PageRef::new_with_frame_id(
+                        self.btree.container_id,
                         val.page_id,
                         val.frame_id,
                     );
@@ -2475,12 +2474,16 @@ impl<T: MemPool> FosterBtreeCursor<T> {
                     if prefetch_slot_id < this_page.high_fence_slot_id() {
                         let prefetch_val =
                             InnerVal::from_bytes(this_page.get_val(prefetch_slot_id));
-                        let prefetch_page_key = PageFrameKey::new_with_frame_id(
-                            self.btree.c_key,
+                        let prefetch_page_key = PageRef::new_with_frame_id(
+                            self.btree.container_id,
                             prefetch_val.page_id,
                             prefetch_val.frame_id,
                         );
-                        let _ = self.btree.mem_pool.prefetch_page(prefetch_page_key);
+                        let _ = self.btree.mem_pool.prefetch_page(
+                            prefetch_page_key.container_id(),
+                            prefetch_page_key.page_id(),
+                            prefetch_page_key.frame_hint(),
+                        );
                     }
 
                     current_page = next_page;
@@ -2525,8 +2528,8 @@ impl<T: MemPool> FosterBtreeAppendOnlyCursor<T> {
         self.cursor.get_physical_address()
     }
 
-    pub fn c_key(&self) -> ContainerKey {
-        self.cursor.btree.c_key
+    pub fn container_id(&self) -> ContainerId {
+        self.cursor.btree.container_id
     }
 }
 /// Tree index for non-unique keys.
@@ -2550,15 +2553,15 @@ pub struct FosterBtreeAppendOnly<T: MemPool> {
 }
 
 impl<T: MemPool> FosterBtreeAppendOnly<T> {
-    pub fn new(c_key: ContainerKey, mem_pool: Arc<T>) -> Self {
+    pub fn new(container_id: ContainerId, mem_pool: Arc<T>) -> Self {
         FosterBtreeAppendOnly {
-            fbt: Arc::new(FosterBtree::new(c_key, mem_pool)),
+            fbt: Arc::new(FosterBtree::new(container_id, mem_pool)),
         }
     }
 
-    pub fn load(c_key: ContainerKey, mem_pool: Arc<T>, root_page_id: PageId) -> Self {
+    pub fn load(container_id: ContainerId, mem_pool: Arc<T>, root_page_id: PageId) -> Self {
         FosterBtreeAppendOnly {
-            fbt: Arc::new(FosterBtree::load(c_key, mem_pool, root_page_id)),
+            fbt: Arc::new(FosterBtree::load(container_id, mem_pool, root_page_id)),
         }
     }
 
@@ -2569,7 +2572,7 @@ impl<T: MemPool> FosterBtreeAppendOnly<T> {
     pub fn traverse_to_leaf_for_read_with_hint(
         &self,
         key: &[u8],
-        hint: Option<PageFrameKey>,
+        hint: Option<PageRef>,
     ) -> FrameReadGuard {
         let mut suffixed_key = key.to_vec();
         suffixed_key.extend(0_u32.to_be_bytes());
@@ -2580,7 +2583,7 @@ impl<T: MemPool> FosterBtreeAppendOnly<T> {
     pub fn traverse_to_leaf_for_write_with_hint(
         &self,
         key: &[u8],
-        hint: Option<PageFrameKey>,
+        hint: Option<PageRef>,
     ) -> FrameWriteGuard {
         let mut suffixed_key = key.to_vec();
         suffixed_key.extend(0_u32.to_be_bytes());
@@ -2682,15 +2685,15 @@ impl<T: MemPool> Iterator for FosterBtreeAppendOnlyRangeScanner<T> {
 /// This can used for debugging, visualization, and collecting statistics.
 pub struct FosterBTreePageTraversal<T: MemPool> {
     // BTree parameters
-    c_key: ContainerKey,
-    root_key: PageFrameKey,
+    container_id: ContainerId,
+    root_key: PageRef,
     mem_pool: Arc<T>,
 }
 
 impl<T: MemPool> FosterBTreePageTraversal<T> {
     pub fn new(tree: &FosterBtree<T>) -> Self {
         Self {
-            c_key: tree.c_key,
+            container_id: tree.container_id,
             root_key: tree.root_key,
             mem_pool: tree.mem_pool.clone(),
         }
@@ -2720,7 +2723,14 @@ impl<T: MemPool> FosterBTreePageTraversal<T> {
     {
         let mut stack = vec![(self.root_key, false)]; // (page_key, pre_visited)
         while let Some((next_key, pre_visited)) = stack.last_mut() {
-            let page = self.mem_pool.get_page_for_read(*next_key).unwrap();
+            let page = self
+                .mem_pool
+                .get_page_for_read(
+                    next_key.container_id(),
+                    next_key.page_id(),
+                    next_key.frame_hint(),
+                )
+                .unwrap();
             if *pre_visited {
                 visitor.visit_post(&page);
                 stack.pop();
@@ -2731,8 +2741,8 @@ impl<T: MemPool> FosterBTreePageTraversal<T> {
                 let children = self.get_children_page_ids(&page);
                 for child_key in children.into_iter().rev() {
                     stack.push((
-                        PageFrameKey::new_with_frame_id(
-                            self.c_key,
+                        PageRef::new_with_frame_id(
+                            self.container_id,
                             child_key.page_id,
                             child_key.frame_id,
                         ),
@@ -2914,7 +2924,7 @@ mod tests {
     };
 
     use super::{
-        ContainerKey, FosterBtree, FosterBtreeAppendOnly, FosterBtreePage, MemPool, PageFrameKey,
+        ContainerId, FosterBtree, FosterBtreeAppendOnly, FosterBtreePage, MemPool, PageRef,
         MAX_BYTES_USED,
     };
 
@@ -2934,8 +2944,8 @@ mod tests {
     #[case::in_mem(get_in_mem_pool())]
     #[case::vmc(get_test_vmcache::<true>(1))]
     fn test_page_setup<T: MemPool>(#[case] mp: Arc<T>) {
-        let c_key = ContainerKey::new(0, 0);
-        let mut p = mp.create_new_page_for_write(c_key).unwrap();
+        let container_id = ContainerId::new(0, 0);
+        let mut p = mp.create_new_page_for_write(container_id).unwrap();
         p.init();
         let low_fence = to_bytes(0);
         let high_fence = to_bytes(20);
@@ -2967,9 +2977,9 @@ mod tests {
             }
         }
         let (db_id, c_id) = (0, 0);
-        let c_key = ContainerKey::new(db_id, c_id);
-        let mut p0 = bp.create_new_page_for_write(c_key).unwrap();
-        let mut p1 = bp.create_new_page_for_write(c_key).unwrap();
+        let container_id = ContainerId::new(db_id, c_id);
+        let mut p0 = bp.create_new_page_for_write(container_id).unwrap();
+        let mut p1 = bp.create_new_page_for_write(container_id).unwrap();
 
         let k0 = to_bytes(k0);
         let k1 = to_bytes(k1);
@@ -3065,9 +3075,9 @@ mod tests {
             }
         }
         let (db_id, c_id) = (0, 0);
-        let c_key = ContainerKey::new(db_id, c_id);
-        let mut p0 = bp.create_new_page_for_write(c_key).unwrap();
-        let mut p1 = bp.create_new_page_for_write(c_key).unwrap();
+        let container_id = ContainerId::new(db_id, c_id);
+        let mut p0 = bp.create_new_page_for_write(container_id).unwrap();
+        let mut p1 = bp.create_new_page_for_write(container_id).unwrap();
 
         let k0 = to_bytes(k0);
         let k1 = to_bytes(k1);
@@ -3182,10 +3192,10 @@ mod tests {
             }
         }
         let (db_id, c_id) = (0, 0);
-        let c_key = ContainerKey::new(db_id, c_id);
-        let mut parent = bp.create_new_page_for_write(c_key).unwrap();
-        let mut child0 = bp.create_new_page_for_write(c_key).unwrap();
-        let mut child1 = bp.create_new_page_for_write(c_key).unwrap();
+        let container_id = ContainerId::new(db_id, c_id);
+        let mut parent = bp.create_new_page_for_write(container_id).unwrap();
+        let mut child0 = bp.create_new_page_for_write(container_id).unwrap();
+        let mut child1 = bp.create_new_page_for_write(container_id).unwrap();
 
         let k0 = to_bytes(k0);
         let k1 = to_bytes(k1);
@@ -3310,10 +3320,10 @@ mod tests {
             }
         }
         let (db_id, c_id) = (0, 0);
-        let c_key = ContainerKey::new(db_id, c_id);
-        let mut parent = bp.create_new_page_for_write(c_key).unwrap();
-        let mut child0 = bp.create_new_page_for_write(c_key).unwrap();
-        let mut child1 = bp.create_new_page_for_write(c_key).unwrap();
+        let container_id = ContainerId::new(db_id, c_id);
+        let mut parent = bp.create_new_page_for_write(container_id).unwrap();
+        let mut child0 = bp.create_new_page_for_write(container_id).unwrap();
+        let mut child1 = bp.create_new_page_for_write(container_id).unwrap();
 
         let k0 = to_bytes(k0);
         let k1 = to_bytes(k1);
@@ -3419,10 +3429,10 @@ mod tests {
     #[case::vmc(get_test_vmcache::<true>(3))]
     fn test_root_page_ascend<T: MemPool>(#[case] bp: Arc<T>) {
         let (db_id, c_id) = (0, 0);
-        let c_key = ContainerKey::new(db_id, c_id);
-        let mut root = bp.create_new_page_for_write(c_key).unwrap();
-        let mut foster_child = bp.create_new_page_for_write(c_key).unwrap();
-        let mut child = bp.create_new_page_for_write(c_key).unwrap();
+        let container_id = ContainerId::new(db_id, c_id);
+        let mut root = bp.create_new_page_for_write(container_id).unwrap();
+        let mut foster_child = bp.create_new_page_for_write(container_id).unwrap();
+        let mut child = bp.create_new_page_for_write(container_id).unwrap();
 
         // Before:
         // root [-inf, +inf) --> foster_child [k0, +inf)
@@ -3506,9 +3516,9 @@ mod tests {
     #[case::vmc(get_test_vmcache::<true>(3))]
     fn test_root_page_descend<T: MemPool>(#[case] bp: Arc<T>) {
         let (db_id, c_id) = (0, 0);
-        let c_key = ContainerKey::new(db_id, c_id);
-        let mut root = bp.create_new_page_for_write(c_key).unwrap();
-        let mut child = bp.create_new_page_for_write(c_key).unwrap();
+        let container_id = ContainerId::new(db_id, c_id);
+        let mut root = bp.create_new_page_for_write(container_id).unwrap();
+        let mut child = bp.create_new_page_for_write(container_id).unwrap();
 
         // Before:
         //   root [k0, k1)
@@ -3565,14 +3575,14 @@ mod tests {
         is_root: bool,
         this_size: usize,
         foster_size: usize,
-    ) -> (PageFrameKey, PageFrameKey) {
+    ) -> (PageRef, PageRef) {
         let this_size = this_size as u32;
         let foster_size = foster_size as u32;
         // Create a foster relationship between two pages.
         let (db_id, c_id) = (0, 0);
-        let c_key = ContainerKey::new(db_id, c_id);
-        let mut this = bp.create_new_page_for_write(c_key).unwrap();
-        let mut foster = bp.create_new_page_for_write(c_key).unwrap();
+        let container_id = ContainerId::new(db_id, c_id);
+        let mut this = bp.create_new_page_for_write(container_id).unwrap();
+        let mut foster = bp.create_new_page_for_write(container_id).unwrap();
 
         // This [k0, k2) --> Foster [k1, k2)
 
@@ -3616,8 +3626,8 @@ mod tests {
         this.run_consistency_checks(true);
         foster.run_consistency_checks(true);
 
-        let this_key = this.page_frame_key().unwrap();
-        let foster_key = foster.page_frame_key().unwrap();
+        let this_key = this.page_ref().unwrap();
+        let foster_key = foster.page_ref().unwrap();
 
         (this_key, foster_key)
     }
@@ -3644,8 +3654,20 @@ mod tests {
             {
                 let (this_id, foster_id) =
                     build_foster_relationship(bp.clone(), true, MIN_BYTES_USED - 1, MIN_BYTES_USED);
-                let this = bp.get_page_for_write(this_id).unwrap();
-                let foster = bp.get_page_for_write(foster_id).unwrap();
+                let this = bp
+                    .get_page_for_write(
+                        this_id.container_id(),
+                        this_id.page_id(),
+                        this_id.frame_hint(),
+                    )
+                    .unwrap();
+                let foster = bp
+                    .get_page_for_write(
+                        foster_id.container_id(),
+                        foster_id.page_id(),
+                        foster_id.frame_hint(),
+                    )
+                    .unwrap();
                 assert!(is_small(&this));
                 assert!(!is_large(&foster));
                 assert!(should_merge(&this, &foster));
@@ -3655,8 +3677,20 @@ mod tests {
             {
                 let (this_id, foster_id) =
                     build_foster_relationship(bp.clone(), true, MIN_BYTES_USED, MIN_BYTES_USED - 1);
-                let this = bp.get_page_for_write(this_id).unwrap();
-                let foster = bp.get_page_for_write(foster_id).unwrap();
+                let this = bp
+                    .get_page_for_write(
+                        this_id.container_id(),
+                        this_id.page_id(),
+                        this_id.frame_hint(),
+                    )
+                    .unwrap();
+                let foster = bp
+                    .get_page_for_write(
+                        foster_id.container_id(),
+                        foster_id.page_id(),
+                        foster_id.frame_hint(),
+                    )
+                    .unwrap();
                 assert!(!is_large(&this));
                 assert!(is_small(&foster));
                 assert!(should_merge(&this, &foster));
@@ -3670,8 +3704,20 @@ mod tests {
                     MIN_BYTES_USED - 1,
                     MIN_BYTES_USED - 1,
                 );
-                let this = bp.get_page_for_write(this_id).unwrap();
-                let foster = bp.get_page_for_write(foster_id).unwrap();
+                let this = bp
+                    .get_page_for_write(
+                        this_id.container_id(),
+                        this_id.page_id(),
+                        this_id.frame_hint(),
+                    )
+                    .unwrap();
+                let foster = bp
+                    .get_page_for_write(
+                        foster_id.container_id(),
+                        foster_id.page_id(),
+                        foster_id.frame_hint(),
+                    )
+                    .unwrap();
                 assert!(is_small(&this));
                 assert!(is_small(&foster));
                 assert!(should_merge(&this, &foster));
@@ -3689,8 +3735,20 @@ mod tests {
                     MIN_BYTES_USED - 1,
                     MAX_BYTES_USED,
                 );
-                let this = bp.get_page_for_write(this_id).unwrap();
-                let foster = bp.get_page_for_write(foster_id).unwrap();
+                let this = bp
+                    .get_page_for_write(
+                        this_id.container_id(),
+                        this_id.page_id(),
+                        this_id.frame_hint(),
+                    )
+                    .unwrap();
+                let foster = bp
+                    .get_page_for_write(
+                        foster_id.container_id(),
+                        foster_id.page_id(),
+                        foster_id.frame_hint(),
+                    )
+                    .unwrap();
                 assert!(is_small(&this));
                 assert!(is_large(&foster));
                 assert!(!should_merge(&this, &foster));
@@ -3704,8 +3762,20 @@ mod tests {
                     MAX_BYTES_USED,
                     MIN_BYTES_USED - 1,
                 );
-                let this = bp.get_page_for_write(this_id).unwrap();
-                let foster = bp.get_page_for_write(foster_id).unwrap();
+                let this = bp
+                    .get_page_for_write(
+                        this_id.container_id(),
+                        this_id.page_id(),
+                        this_id.frame_hint(),
+                    )
+                    .unwrap();
+                let foster = bp
+                    .get_page_for_write(
+                        foster_id.container_id(),
+                        foster_id.page_id(),
+                        foster_id.frame_hint(),
+                    )
+                    .unwrap();
                 assert!(is_large(&this));
                 assert!(is_small(&foster));
                 assert!(!should_merge(&this, &foster));
@@ -3718,8 +3788,20 @@ mod tests {
             {
                 let (this_id, foster_id) =
                     build_foster_relationship(bp.clone(), false, MAX_BYTES_USED, MAX_BYTES_USED);
-                let this = bp.get_page_for_write(this_id).unwrap();
-                let foster = bp.get_page_for_write(foster_id).unwrap();
+                let this = bp
+                    .get_page_for_write(
+                        this_id.container_id(),
+                        this_id.page_id(),
+                        this_id.frame_hint(),
+                    )
+                    .unwrap();
+                let foster = bp
+                    .get_page_for_write(
+                        foster_id.container_id(),
+                        foster_id.page_id(),
+                        foster_id.frame_hint(),
+                    )
+                    .unwrap();
                 assert!(is_large(&this));
                 assert!(is_large(&foster));
                 assert!(!should_merge(&this, &foster));
@@ -3729,8 +3811,20 @@ mod tests {
             {
                 let (this_id, foster_id) =
                     build_foster_relationship(bp.clone(), false, MIN_BYTES_USED, MIN_BYTES_USED);
-                let this = bp.get_page_for_write(this_id).unwrap();
-                let foster = bp.get_page_for_write(foster_id).unwrap();
+                let this = bp
+                    .get_page_for_write(
+                        this_id.container_id(),
+                        this_id.page_id(),
+                        this_id.frame_hint(),
+                    )
+                    .unwrap();
+                let foster = bp
+                    .get_page_for_write(
+                        foster_id.container_id(),
+                        foster_id.page_id(),
+                        foster_id.frame_hint(),
+                    )
+                    .unwrap();
                 assert!(!is_small(&this));
                 assert!(!is_small(&foster));
                 assert!(!should_merge(&this, &foster));
@@ -3740,18 +3834,15 @@ mod tests {
         }
     }
 
-    fn build_two_children_tree<T: MemPool>(
-        bp: Arc<T>,
-        child0_size: usize,
-    ) -> (PageFrameKey, PageFrameKey) {
+    fn build_two_children_tree<T: MemPool>(bp: Arc<T>, child0_size: usize) -> (PageRef, PageRef) {
         let child0_size = child0_size as u32;
 
         // Create a parent with two children.
         let (db_id, c_id) = (0, 0);
-        let c_key = ContainerKey::new(db_id, c_id);
-        let mut parent = bp.create_new_page_for_write(c_key).unwrap();
-        let mut child0 = bp.create_new_page_for_write(c_key).unwrap();
-        let mut child1 = bp.create_new_page_for_write(c_key).unwrap();
+        let container_id = ContainerId::new(db_id, c_id);
+        let mut parent = bp.create_new_page_for_write(container_id).unwrap();
+        let mut child0 = bp.create_new_page_for_write(container_id).unwrap();
+        let mut child1 = bp.create_new_page_for_write(container_id).unwrap();
 
         // Parent [k0, k2)
         //  +-------------------+
@@ -3794,8 +3885,8 @@ mod tests {
         child0.run_consistency_checks(true);
         child1.run_consistency_checks(true);
 
-        let parent_key = parent.page_frame_key().unwrap();
-        let child0_key = child0.page_frame_key().unwrap();
+        let parent_key = parent.page_ref().unwrap();
+        let child0_key = child0.page_ref().unwrap();
 
         (parent_key, child0_key)
     }
@@ -3803,15 +3894,15 @@ mod tests {
     fn build_single_child_with_foster_child_tree<T: MemPool>(
         bp: Arc<T>,
         child0_size: usize,
-    ) -> (PageFrameKey, PageFrameKey) {
+    ) -> (PageRef, PageRef) {
         let child0_size = child0_size as u32;
 
         // Create a parent with a child and a foster child.
         let (db_id, c_id) = (0, 0);
-        let c_key = ContainerKey::new(db_id, c_id);
-        let mut parent = bp.create_new_page_for_write(c_key).unwrap();
-        let mut child0 = bp.create_new_page_for_write(c_key).unwrap();
-        let mut child1 = bp.create_new_page_for_write(c_key).unwrap();
+        let container_id = ContainerId::new(db_id, c_id);
+        let mut parent = bp.create_new_page_for_write(container_id).unwrap();
+        let mut child0 = bp.create_new_page_for_write(container_id).unwrap();
+        let mut child1 = bp.create_new_page_for_write(container_id).unwrap();
 
         // Parent [k0, k2)
         //  |
@@ -3854,23 +3945,20 @@ mod tests {
         child0.run_consistency_checks(true);
         child1.run_consistency_checks(true);
 
-        let parent_key = parent.page_frame_key().unwrap();
-        let child0_key = child0.page_frame_key().unwrap();
+        let parent_key = parent.page_ref().unwrap();
+        let child0_key = child0.page_ref().unwrap();
 
         (parent_key, child0_key)
     }
 
-    fn build_single_child_tree<T: MemPool>(
-        bp: Arc<T>,
-        child0_size: usize,
-    ) -> (PageFrameKey, PageFrameKey) {
+    fn build_single_child_tree<T: MemPool>(bp: Arc<T>, child0_size: usize) -> (PageRef, PageRef) {
         let child0_size = child0_size as u32;
 
         // Create a parent with a child.
         let (db_id, c_id) = (0, 0);
-        let c_key = ContainerKey::new(db_id, c_id);
-        let mut parent = bp.create_new_page_for_write(c_key).unwrap();
-        let mut child0 = bp.create_new_page_for_write(c_key).unwrap();
+        let container_id = ContainerId::new(db_id, c_id);
+        let mut parent = bp.create_new_page_for_write(container_id).unwrap();
+        let mut child0 = bp.create_new_page_for_write(container_id).unwrap();
 
         // Parent [k0, k2)
         //  |
@@ -3906,8 +3994,8 @@ mod tests {
         parent.run_consistency_checks(true);
         child0.run_consistency_checks(true);
 
-        let parent_key = parent.page_frame_key().unwrap();
-        let child0_key = child0.page_frame_key().unwrap();
+        let parent_key = parent.page_ref().unwrap();
+        let child0_key = child0.page_ref().unwrap();
 
         (parent_key, child0_key)
     }
@@ -3940,8 +4028,20 @@ mod tests {
                 // Should not adopt, root descend
                 let (parent_id, child0_id) =
                     build_two_children_tree(bp.clone(), MIN_BYTES_USED - 1);
-                let parent = bp.get_page_for_write(parent_id).unwrap();
-                let child0 = bp.get_page_for_write(child0_id).unwrap();
+                let parent = bp
+                    .get_page_for_write(
+                        parent_id.container_id(),
+                        parent_id.page_id(),
+                        parent_id.frame_hint(),
+                    )
+                    .unwrap();
+                let child0 = bp
+                    .get_page_for_write(
+                        child0_id.container_id(),
+                        child0_id.page_id(),
+                        child0_id.frame_hint(),
+                    )
+                    .unwrap();
                 assert!(is_small(&child0));
                 assert!(should_antiadopt(&parent, &child0));
                 assert!(!should_adopt(&parent, &child0));
@@ -3950,8 +4050,20 @@ mod tests {
             {
                 // Should not adopt, anti_adopt, root_descend
                 let (parent_id, child0_id) = build_two_children_tree(bp.clone(), MIN_BYTES_USED);
-                let parent = bp.get_page_for_write(parent_id).unwrap();
-                let child0 = bp.get_page_for_write(child0_id).unwrap();
+                let parent = bp
+                    .get_page_for_write(
+                        parent_id.container_id(),
+                        parent_id.page_id(),
+                        parent_id.frame_hint(),
+                    )
+                    .unwrap();
+                let child0 = bp
+                    .get_page_for_write(
+                        child0_id.container_id(),
+                        child0_id.page_id(),
+                        child0_id.frame_hint(),
+                    )
+                    .unwrap();
                 assert!(!is_small(&child0));
                 assert!(!should_antiadopt(&parent, &child0));
                 assert!(!should_adopt(&parent, &child0));
@@ -3968,8 +4080,20 @@ mod tests {
                 // Should not anti_adopt, root_descend
                 let (parent_id, child0_id) =
                     build_single_child_with_foster_child_tree(bp.clone(), MIN_BYTES_USED);
-                let parent = bp.get_page_for_write(parent_id).unwrap();
-                let child0 = bp.get_page_for_write(child0_id).unwrap();
+                let parent = bp
+                    .get_page_for_write(
+                        parent_id.container_id(),
+                        parent_id.page_id(),
+                        parent_id.frame_hint(),
+                    )
+                    .unwrap();
+                let child0 = bp
+                    .get_page_for_write(
+                        child0_id.container_id(),
+                        child0_id.page_id(),
+                        child0_id.frame_hint(),
+                    )
+                    .unwrap();
                 assert!(!is_small(&child0));
                 assert!(should_adopt(&parent, &child0));
                 assert!(!should_antiadopt(&parent, &child0));
@@ -3979,8 +4103,20 @@ mod tests {
                 // Should not adopt, anti_adopt, root_descend
                 let (parent_id, child0_id) =
                     build_single_child_with_foster_child_tree(bp.clone(), MIN_BYTES_USED - 1);
-                let parent = bp.get_page_for_write(parent_id).unwrap();
-                let child0 = bp.get_page_for_write(child0_id).unwrap();
+                let parent = bp
+                    .get_page_for_write(
+                        parent_id.container_id(),
+                        parent_id.page_id(),
+                        parent_id.frame_hint(),
+                    )
+                    .unwrap();
+                let child0 = bp
+                    .get_page_for_write(
+                        child0_id.container_id(),
+                        child0_id.page_id(),
+                        child0_id.frame_hint(),
+                    )
+                    .unwrap();
                 assert!(is_small(&child0));
                 assert!(!should_adopt(&parent, &child0));
                 assert!(!should_antiadopt(&parent, &child0));
@@ -3996,8 +4132,20 @@ mod tests {
                 // Should not adopt, anti_adopt, root_descend
                 let (parent_id, child0_id) =
                     build_single_child_tree(bp.clone(), MIN_BYTES_USED - 1);
-                let parent = bp.get_page_for_write(parent_id).unwrap();
-                let child0 = bp.get_page_for_write(child0_id).unwrap();
+                let parent = bp
+                    .get_page_for_write(
+                        parent_id.container_id(),
+                        parent_id.page_id(),
+                        parent_id.frame_hint(),
+                    )
+                    .unwrap();
+                let child0 = bp
+                    .get_page_for_write(
+                        child0_id.container_id(),
+                        child0_id.page_id(),
+                        child0_id.frame_hint(),
+                    )
+                    .unwrap();
                 assert!(!should_adopt(&parent, &child0));
                 assert!(!should_antiadopt(&parent, &child0));
                 assert!(should_root_descend(&parent, &child0));
@@ -4007,9 +4155,9 @@ mod tests {
 
     fn setup_btree_empty<T: MemPool>(bp: Arc<T>) -> FosterBtree<T> {
         let (db_id, c_id) = (0, 0);
-        let c_key = ContainerKey::new(db_id, c_id);
+        let container_id = ContainerId::new(db_id, c_id);
 
-        FosterBtree::new(c_key, bp.clone())
+        FosterBtree::new(container_id, bp.clone())
     }
 
     #[rstest]
@@ -4855,7 +5003,7 @@ mod tests {
         let kvs = kvs.pop().unwrap();
 
         let btree = Arc::new(FosterBtree::bulk_insert_create(
-            ContainerKey::new(0, 0),
+            ContainerId::new(0, 0),
             bp.clone(),
             kvs.iter(),
         ));
@@ -4962,9 +5110,9 @@ mod tests {
 
     fn setup_btree_append_only_empty<T: MemPool>(bp: Arc<T>) -> FosterBtreeAppendOnly<T> {
         let (db_id, c_id) = (0, 0);
-        let c_key = ContainerKey::new(db_id, c_id);
+        let container_id = ContainerId::new(db_id, c_id);
 
-        FosterBtreeAppendOnly::new(c_key, bp.clone())
+        FosterBtreeAppendOnly::new(container_id, bp.clone())
     }
 
     #[rstest]

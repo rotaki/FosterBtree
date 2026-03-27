@@ -2,7 +2,7 @@ use clap::Parser;
 use core::panic;
 use fbtree::{
     access_method::prelude::*,
-    bp::{get_test_bp_clock, ContainerKey, MemPool},
+    bp::{get_test_bp_clock, ContainerId, MemPool},
     prelude::{FosterBtree, PAGE_SIZE},
     random::gen_random_byte_vec,
 };
@@ -59,7 +59,7 @@ pub fn execute_workload(
 }
 
 fn get_index<M: MemPool>(bp: Arc<M>, _params: &Params) -> Arc<FosterBtree<M>> {
-    Arc::new(FosterBtree::new(ContainerKey::new(0, 0), bp))
+    Arc::new(FosterBtree::new(ContainerId::new(0, 0), bp))
 }
 
 fn main() {

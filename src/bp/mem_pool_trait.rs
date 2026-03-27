@@ -5,19 +5,39 @@ use super::frame_guards::{FrameReadGuard, FrameWriteGuard};
 use crate::page::PageId;
 
 pub type DatabaseId = u16;
-pub type ContainerId = u16;
+pub type LocalContainerId = u16;
+pub type FrameId = u32;
+
+pub const INVALID_FRAME_ID: FrameId = FrameId::MAX;
+
+#[inline]
+pub const fn frame_hint_from_raw(raw: FrameId) -> Option<FrameId> {
+    if raw == INVALID_FRAME_ID {
+        None
+    } else {
+        Some(raw)
+    }
+}
+
+#[inline]
+pub const fn frame_hint_to_raw(hint: Option<FrameId>) -> FrameId {
+    match hint {
+        Some(frame_id) => frame_id,
+        None => INVALID_FRAME_ID,
+    }
+}
 
 #[repr(transparent)]
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ContainerKey {
+pub struct ContainerId {
     packed: u32,
 }
 
-impl ContainerKey {
+impl ContainerId {
     #[inline]
-    pub const fn new(db_id: DatabaseId, c_id: ContainerId) -> Self {
+    pub const fn new(db_id: DatabaseId, local_container_id: LocalContainerId) -> Self {
         Self {
-            packed: ((db_id as u32) << 16) | (c_id as u32),
+            packed: ((db_id as u32) << 16) | (local_container_id as u32),
         }
     }
 
@@ -37,102 +57,161 @@ impl ContainerKey {
     }
 
     #[inline]
-    pub const fn c_id(self) -> ContainerId {
-        self.packed as ContainerId
+    pub const fn local_container_id(self) -> LocalContainerId {
+        self.packed as LocalContainerId
     }
 }
 
-impl fmt::Debug for ContainerKey {
+impl fmt::Debug for ContainerId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_tuple("ContainerKey")
+        f.debug_tuple("ContainerId")
             .field(&self.db_id())
-            .field(&self.c_id())
+            .field(&self.local_container_id())
             .finish()
     }
 }
-impl fmt::Display for ContainerKey {
+
+impl fmt::Display for ContainerId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "(db:{}, c:{})", self.db_id(), self.c_id())
+        write!(f, "(db:{}, c:{})", self.db_id(), self.local_container_id())
     }
 }
-/// Page key is used to determine a specific page in a container in the database.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct PageKey {
-    pub c_key: ContainerKey,
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct PageAddr {
+    pub container_id: ContainerId,
     pub page_id: PageId,
 }
 
-impl PageKey {
-    pub fn new(c_key: ContainerKey, page_id: PageId) -> Self {
-        PageKey { c_key, page_id }
-    }
-}
-
-impl std::fmt::Display for PageKey {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "({}, p:{})", self.c_key, self.page_id)
-    }
-}
-
-/// Page frame key is used to access a page in the buffer pool.
-/// It contains not only the page key but also the frame id in the buffer pool.
-/// The frame id is used as a hint to access the page in O(1) time.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct PageFrameKey {
-    p_key: PageKey,
-    frame_id: u32, // Frame id in the buffer pool
-}
-
-impl PageFrameKey {
-    pub fn new(c_key: ContainerKey, page_id: PageId) -> Self {
-        PageFrameKey {
-            p_key: PageKey::new(c_key, page_id),
-            frame_id: u32::MAX,
+impl PageAddr {
+    #[inline]
+    pub const fn new(container_id: ContainerId, page_id: PageId) -> Self {
+        Self {
+            container_id,
+            page_id,
         }
     }
 
-    pub fn new_with_frame_id(c_key: ContainerKey, page_id: PageId, frame_id: u32) -> Self {
-        PageFrameKey {
-            p_key: PageKey::new(c_key, page_id),
+    #[inline]
+    pub const fn to_u64(self) -> u64 {
+        ((self.container_id.as_u32() as u64) << 32) | self.page_id as u64
+    }
+
+    #[inline]
+    pub const fn from_u64(raw: u64) -> Self {
+        Self {
+            container_id: ContainerId::from_u32((raw >> 32) as u32),
+            page_id: raw as PageId,
+        }
+    }
+}
+
+impl std::fmt::Display for PageAddr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "({}, p:{})", self.container_id, self.page_id)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct PageRef {
+    page_addr: PageAddr,
+    frame_id: Option<FrameId>,
+}
+
+impl PageRef {
+    #[inline]
+    pub const fn new(container_id: ContainerId, page_id: PageId) -> Self {
+        Self {
+            page_addr: PageAddr::new(container_id, page_id),
+            frame_id: None,
+        }
+    }
+
+    #[inline]
+    pub const fn new_with_frame_id(
+        container_id: ContainerId,
+        page_id: PageId,
+        frame_id: FrameId,
+    ) -> Self {
+        Self {
+            page_addr: PageAddr::new(container_id, page_id),
+            frame_id: Some(frame_id),
+        }
+    }
+
+    #[inline]
+    pub const fn new_with_hint(
+        container_id: ContainerId,
+        page_id: PageId,
+        frame_id: Option<FrameId>,
+    ) -> Self {
+        Self {
+            page_addr: PageAddr::new(container_id, page_id),
             frame_id,
         }
     }
 
-    pub fn p_key(&self) -> PageKey {
-        self.p_key
+    #[inline]
+    pub const fn from_raw(container_id: ContainerId, page_id: PageId, frame_id: FrameId) -> Self {
+        Self {
+            page_addr: PageAddr::new(container_id, page_id),
+            frame_id: frame_hint_from_raw(frame_id),
+        }
     }
 
-    pub fn frame_id(&self) -> u32 {
+    #[inline]
+    pub const fn page_addr(&self) -> PageAddr {
+        self.page_addr
+    }
+
+    #[inline]
+    pub const fn container_id(&self) -> ContainerId {
+        self.page_addr.container_id
+    }
+
+    #[inline]
+    pub const fn page_id(&self) -> PageId {
+        self.page_addr.page_id
+    }
+
+    #[inline]
+    pub const fn frame_hint(&self) -> Option<FrameId> {
         self.frame_id
     }
 
-    pub fn set_frame_id(&mut self, frame_id: u32) {
+    #[inline]
+    pub const fn frame_id(&self) -> FrameId {
+        frame_hint_to_raw(self.frame_id)
+    }
+
+    #[inline]
+    pub fn set_frame_id(&mut self, frame_id: FrameId) {
+        self.frame_id = frame_hint_from_raw(frame_id);
+    }
+
+    #[inline]
+    pub fn set_frame_hint(&mut self, frame_id: Option<FrameId>) {
         self.frame_id = frame_id;
     }
 
-    pub fn to_bytes(&self) -> Vec<u8> {
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(&self.p_key.c_key.as_u32().to_be_bytes()); // 4 bytes
-        bytes.extend_from_slice(&self.p_key.page_id.to_be_bytes()); // 4 bytes
-        bytes.extend_from_slice(&self.frame_id.to_be_bytes()); // 4 bytes
-        bytes
+    #[inline]
+    pub const fn frame_id_or_invalid(&self) -> FrameId {
+        frame_hint_to_raw(self.frame_id)
     }
 
-    pub fn from_bytes(bytes: &[u8]) -> Self {
-        let db_id = u16::from_be_bytes(bytes[0..2].try_into().unwrap());
-        let c_id = u16::from_be_bytes(bytes[2..4].try_into().unwrap());
-        let page_id = PageId::from_be_bytes(bytes[4..8].try_into().unwrap());
-        let frame_id = u32::from_be_bytes(bytes[8..12].try_into().unwrap());
-        PageFrameKey {
-            p_key: PageKey::new(ContainerKey::new(db_id, c_id), page_id),
-            frame_id,
-        }
+    #[inline]
+    pub const fn with_frame_id(mut self, frame_id: FrameId) -> Self {
+        self.frame_id = frame_hint_from_raw(frame_id);
+        self
     }
 }
 
-impl std::fmt::Display for PageFrameKey {
+impl std::fmt::Display for PageRef {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "({}, f:{})", self.p_key, self.frame_id)
+        match self.frame_id {
+            Some(frame_id) => write!(f, "({}, f:{})", self.page_addr, frame_id),
+            None => write!(f, "({}, f:none)", self.page_addr),
+        }
     }
 }
 
@@ -182,13 +261,13 @@ pub struct MemoryStats {
     pub bp_read_frame: usize,      // Total number of frames requested for read (BP)
     pub bp_read_frame_wait: usize, // Total number of frames requested for read but had to wait (BP)
     pub bp_write_frame: usize,     // Total number of frames requested for write (BP)
-    pub bp_num_frames_per_container: BTreeMap<ContainerKey, i64>, // Number of pages of each container in BP
+    pub bp_num_frames_per_container: BTreeMap<ContainerId, i64>, // Number of pages of each container in BP
 
     // Disk stats
     pub disk_created: usize, // Total number of pages created (DISK)
     pub disk_read: usize,    // Total number of pages read (DISK)
     pub disk_write: usize,   // Total number of pages written (DISK)
-    pub disk_io_per_container: BTreeMap<ContainerKey, (i64, i64, i64)>, // Number of pages created, read, and written for each container
+    pub disk_io_per_container: BTreeMap<ContainerId, (i64, i64, i64)>, // Number of pages created, read, and written for each container
 }
 
 impl Default for MemoryStats {
@@ -269,19 +348,19 @@ impl std::fmt::Display for MemoryStats {
             self.bp_write_frame
         )?;
         writeln!(f, "  Number of frames for each container:")?;
-        for (c_key, num_pages) in &self.bp_num_frames_per_container {
-            writeln!(f, "    {}: {}", c_key, num_pages)?;
+        for (container_id, num_pages) in &self.bp_num_frames_per_container {
+            writeln!(f, "    {}: {}", container_id, num_pages)?;
         }
         writeln!(f, "Disk stats:")?;
         writeln!(f, "  Number of pages created: {}", self.disk_created)?;
         writeln!(f, "  Number of pages read: {}", self.disk_read)?;
         writeln!(f, "  Number of pages written: {}", self.disk_write)?;
         writeln!(f, "  Number of pages read and written for each container:")?;
-        for (c_key, (num_created, num_read, num_write)) in &self.disk_io_per_container {
+        for (container_id, (num_created, num_read, num_write)) in &self.disk_io_per_container {
             writeln!(
                 f,
                 "    {}: created={}, read={}, written={}",
-                c_key, num_created, num_read, num_write
+                container_id, num_created, num_read, num_write
             )?;
         }
         Ok(())
@@ -298,7 +377,7 @@ pub trait MemPool: Sync + Send {
     /// The caller must initialize the page content before writing any data to disk.
     fn create_new_page_for_write(
         &self,
-        c_key: ContainerKey,
+        container_id: ContainerId,
     ) -> Result<FrameWriteGuard, MemPoolStatus>;
 
     /// Create new pages for write.
@@ -312,7 +391,7 @@ pub trait MemPool: Sync + Send {
     /// The caller must initialize the pages content before writing any data to disk.
     fn create_new_pages_for_write(
         &self,
-        c_key: ContainerKey,
+        container_id: ContainerId,
         num_pages: usize,
     ) -> Result<Vec<FrameWriteGuard>, MemPoolStatus>;
 
@@ -320,31 +399,52 @@ pub trait MemPool: Sync + Send {
     /// This function will return true if the page is in memory, false otherwise.
     /// There are no side effects of calling this function.
     /// That is, the page will not be loaded into memory.
-    fn is_in_mem(&self, key: PageFrameKey) -> bool;
+    fn is_in_mem(
+        &self,
+        container_id: ContainerId,
+        page_id: PageId,
+        frame_hint: Option<FrameId>,
+    ) -> bool;
 
     /// Get a page for write.
     /// This function will return a FrameWriteGuard.
     /// This function assumes that a page is already created and either in memory or on disk.
-    fn get_page_for_write(&self, key: PageFrameKey) -> Result<FrameWriteGuard, MemPoolStatus>;
+    fn get_page_for_write(
+        &self,
+        container_id: ContainerId,
+        page_id: PageId,
+        frame_hint: Option<FrameId>,
+    ) -> Result<FrameWriteGuard, MemPoolStatus>;
 
     /// Get a page for read.
     /// This function will return a FrameReadGuard.
     /// This function assumes that a page is already created and either in memory or on disk.
-    fn get_page_for_read(&self, key: PageFrameKey) -> Result<FrameReadGuard, MemPoolStatus>;
+    fn get_page_for_read(
+        &self,
+        container_id: ContainerId,
+        page_id: PageId,
+        frame_hint: Option<FrameId>,
+    ) -> Result<FrameReadGuard, MemPoolStatus>;
 
-    /// Prefetch page
+    /// Prefetch page.
     /// Load the page into memory so that read access will be faster.
-    fn prefetch_page(&self, key: PageFrameKey) -> Result<(), MemPoolStatus>;
+    fn prefetch_page(
+        &self,
+        container_id: ContainerId,
+        page_id: PageId,
+        frame_hint: Option<FrameId>,
+    ) -> Result<(), MemPoolStatus>;
 
     /// Persist all the dirty pages to disk.
     /// This function will not deallocate the memory pool.
     /// This does not clear out the frames in the memory pool.
     fn flush_all(&self) -> Result<(), MemPoolStatus>;
 
-    /// This function will not deallocate the memory pool but
-    /// clears out all the frames in the memory pool.
+    /// This function clears out all the frames in the memory pool.
+    /// This will NOT deallocate the memory pool.
     /// After calling this function, pages will be read from disk when requested.
     /// Dirty pages will not be written to disk and the changes will be lost.
+    /// Call flush_all before calling this function if you want to persist the dirty pages to disk.
     fn clear_all(&self) -> Result<(), MemPoolStatus>;
 
     /// Return the runtime statistics of the memory pool.
@@ -356,23 +456,46 @@ pub trait MemPool: Sync + Send {
 
 #[cfg(test)]
 mod tests {
-    use super::{ContainerKey, PageFrameKey};
+    use super::{
+        frame_hint_from_raw, frame_hint_to_raw, ContainerId, PageAddr, PageRef, INVALID_FRAME_ID,
+    };
 
     #[test]
-    fn container_key_round_trips_through_u32() {
-        let key = ContainerKey::new(0x1234, 0x5678);
-        let decoded = ContainerKey::from_u32(key.as_u32());
+    fn container_id_round_trips_through_u32() {
+        let container_id = ContainerId::new(0x1234, 0x5678);
+        let decoded = ContainerId::from_u32(container_id.as_u32());
 
         assert_eq!(decoded.db_id(), 0x1234);
-        assert_eq!(decoded.c_id(), 0x5678);
-        assert_eq!(decoded, key);
+        assert_eq!(decoded.local_container_id(), 0x5678);
+        assert_eq!(decoded, container_id);
     }
 
     #[test]
-    fn page_frame_key_round_trips_through_bytes() {
-        let key = PageFrameKey::new_with_frame_id(ContainerKey::new(7, 11), 13, 17);
-        let decoded = PageFrameKey::from_bytes(&key.to_bytes());
+    fn page_addr_round_trips_through_u64() {
+        let page_addr = PageAddr::new(ContainerId::new(7, 11), 13);
+        assert_eq!(PageAddr::from_u64(page_addr.to_u64()), page_addr);
+    }
 
-        assert_eq!(decoded, key);
+    #[test]
+    fn page_ref_round_trips_through_raw_frame_id() {
+        let page_ref = PageRef::new_with_frame_id(ContainerId::new(7, 11), 13, 17);
+        let decoded = PageRef::from_raw(
+            page_ref.container_id(),
+            page_ref.page_id(),
+            page_ref.frame_id_or_invalid(),
+        );
+
+        assert_eq!(decoded, page_ref);
+        assert_eq!(
+            PageRef::from_raw(ContainerId::new(7, 11), 13, INVALID_FRAME_ID),
+            PageRef::new(ContainerId::new(7, 11), 13)
+        );
+    }
+
+    #[test]
+    fn frame_hint_sentinel_round_trips() {
+        assert_eq!(frame_hint_to_raw(None), INVALID_FRAME_ID);
+        assert_eq!(frame_hint_from_raw(INVALID_FRAME_ID), None);
+        assert_eq!(frame_hint_from_raw(17), Some(17));
     }
 }

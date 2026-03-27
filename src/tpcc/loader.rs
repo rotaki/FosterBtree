@@ -3,7 +3,7 @@ use rayon::prelude::*;
 use std::{collections::HashMap, ops::Index};
 
 use crate::{
-    bp::ContainerId,
+    bp::LocalContainerId as ContainerId,
     prelude::{ContainerDS, ContainerOptions, DBOptions, ScanOptions, TxnOptions, TxnStorageTrait},
     utils::Permutation,
 };

@@ -25,15 +25,16 @@ use std::{io, ptr};
 
 use super::{
     frame_guards::FrameMeta,
-    mem_pool_trait::{MemoryStats, PageKey},
+    mem_pool_trait::{MemoryStats, PageAddr},
     resident_set::ResidentPageSet,
-    BPStats, ContainerKey, FrameReadGuard, FrameWriteGuard, MemPool, MemPoolStatus, PageFrameKey,
+    BPStats, ContainerId, FrameId, FrameReadGuard, FrameWriteGuard, MemPool, MemPoolStatus,
+    PageRef,
 };
 
 const EVICTION_BATCH_SIZE: usize = 32;
 
 pub const VMCACHE_LARGE_PAGE_ENTRIES: usize = 1 << 27; // 2^27 pages = 2 TiB with 16 KiB page size
-const fn page_key_to_offset_large(page_key: &PageKey) -> usize {
+const fn page_key_to_offset_large(page_key: &PageAddr) -> usize {
     // Layout (LSB→MSB):
     // bits  0-22 : page_id   (23 bits, 2^23 * 2^14 = 2^37 B = 128 GiB)
     // bits 23-26 : container (4 bits,  up to 15)
@@ -41,18 +42,18 @@ const fn page_key_to_offset_large(page_key: &PageKey) -> usize {
     //
     // With a 16 KiB page, addressable memory = 2^27 × 2^14 B = 2^41 B = 2 TiB.
 
-    assert!(page_key.c_key.db_id() == 0);
-    assert!(page_key.c_key.c_id() < (1 << 4)); // fits in 4 bits
+    assert!(page_key.container_id.db_id() == 0);
+    assert!(page_key.container_id.local_container_id() < (1 << 4)); // fits in 4 bits
     assert!(page_key.page_id < (1 << 23)); // fits in 23 bits
 
-    let container_part = (page_key.c_key.c_id() as usize) << 23;
+    let container_part = (page_key.container_id.local_container_id() as usize) << 23;
     let page_part = page_key.page_id as usize; // already < 2^23
 
     container_part | page_part
 }
 
 pub const VMCACHE_SMALL_PAGE_ENTRIES: usize = 1 << 10; // 2^10 pages = 16 MiB with 16 KiB page size
-const fn page_key_to_offset_small(page_key: &PageKey) -> usize {
+const fn page_key_to_offset_small(page_key: &PageAddr) -> usize {
     // Layout (LSB→MSB):
     // bits  0-8  : page_id   (9 bits, up to 511)
     // bits  9-9  : container (1 bit, up to      1)
@@ -60,11 +61,11 @@ const fn page_key_to_offset_small(page_key: &PageKey) -> usize {
     //
     // With a 16 KiB page, addressable memory = 2^10 × 2^14 B = 2^24 B = 16 MiB.
 
-    assert!(page_key.c_key.db_id() == 0);
-    assert!(page_key.c_key.c_id() < (1 << 1)); // fits in 1 bit
+    assert!(page_key.container_id.db_id() == 0);
+    assert!(page_key.container_id.local_container_id() < (1 << 1)); // fits in 1 bit
     assert!(page_key.page_id < (1 << 9)); // fits in 9 bits
 
-    let container_part = (page_key.c_key.c_id() as usize) << 9;
+    let container_part = (page_key.container_id.local_container_id() as usize) << 9;
     let page_part = page_key.page_id as usize; // already < 2^9
 
     container_part | page_part
@@ -166,7 +167,7 @@ impl<const IS_SMALL: bool> VMCachePool<IS_SMALL> {
     };
 
     #[inline]
-    const fn page_key_to_offset(&self, page_key: &PageKey) -> usize {
+    const fn page_key_to_offset(&self, page_key: &PageAddr) -> usize {
         if IS_SMALL {
             page_key_to_offset_small(page_key)
         } else {
@@ -216,13 +217,13 @@ impl<const IS_SMALL: bool> VMCachePool<IS_SMALL> {
         &self,
         victim: &FrameWriteGuard,
     ) -> Result<(), MemPoolStatus> {
-        if let Some(key) = victim.page_key() {
+        if let Some(key) = victim.page_addr() {
             if victim
                 .dirty()
                 .compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire)
                 .is_ok()
             {
-                let container = self.container_manager.get_container(key.c_key);
+                let container = self.container_manager.get_container(key.container_id);
                 container.write_page(key.page_id, victim)?;
             }
         }
@@ -235,14 +236,14 @@ impl<const IS_SMALL: bool> VMCachePool<IS_SMALL> {
         &self,
         victim: &FrameReadGuard,
     ) -> Result<(), MemPoolStatus> {
-        if let Some(key) = victim.page_key() {
+        if let Some(key) = victim.page_addr() {
             // Compare and swap is_dirty because we don't want to write the page if it is already written by another thread.
             if victim
                 .dirty()
                 .compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire)
                 .is_ok()
             {
-                let container = self.container_manager.get_container(key.c_key);
+                let container = self.container_manager.get_container(key.container_id);
                 container.write_page(key.page_id, victim)?;
             }
         }
@@ -252,7 +253,7 @@ impl<const IS_SMALL: bool> VMCachePool<IS_SMALL> {
 
     // A write guard is needed when calling this function because madvise will zero out the page.
     fn remove_page_entry(&self, guard: &FrameWriteGuard) -> Result<(), MemPoolStatus> {
-        if let Some(page_key) = guard.page_key() {
+        if let Some(page_key) = guard.page_addr() {
             let page_offset = self.page_key_to_offset(&page_key);
             assert!(
                 page_offset < Self::PAGE_ENTRIES,
@@ -398,7 +399,7 @@ impl<const IS_SMALL: bool> VMCachePool<IS_SMALL> {
             if let Some(g) =
                 FrameReadGuard::try_new(box_as_mut_ptr(meta), unsafe { self.pages.ptr.add(index) })
             {
-                if g.page_key().is_some() {
+                if g.page_addr().is_some() {
                     dirty.push((index, g));
                 }
             }
@@ -425,7 +426,7 @@ impl<const IS_SMALL: bool> VMCachePool<IS_SMALL> {
             if let Some(g) =
                 FrameWriteGuard::try_new(meta, unsafe { self.pages.ptr.add(index) }, false)
             {
-                if g.page_key().is_none() {
+                if g.page_addr().is_none() {
                     continue;
                 }
                 self.write_victim_to_disk_if_dirty_w(&g).unwrap();
@@ -443,7 +444,7 @@ impl<const IS_SMALL: bool> VMCachePool<IS_SMALL> {
         for (index, g) in dirty_pages.drain(..) {
             // We already checked that the page key is not None for dirty pages
             // in classify_frame, so we can skip the check here.
-            // if g.page_key().is_none() {
+            // if g.page_addr().is_none() {
             //     continue;
             // }
             if let Ok(gw) = g.try_upgrade(false) {
@@ -452,7 +453,7 @@ impl<const IS_SMALL: bool> VMCachePool<IS_SMALL> {
         }
     }
 
-    /// Remove pages from the page‑table in c_key order.
+    /// Remove pages from the page‑table in container_id order.
     fn remove_from_page_table(&self, to_evict: &mut [(usize, FrameWriteGuard)]) {
         for (index, _) in to_evict.iter() {
             let ret = unsafe {
@@ -477,7 +478,7 @@ impl<const IS_SMALL: bool> VMCachePool<IS_SMALL> {
         for (index, g) in to_evict.drain(..) {
             freed += 1;
             assert!(!g.dirty().load(Ordering::Acquire));
-            g.set_page_key(None);
+            g.set_page_addr(None);
             g.update_eviction_score(0);
             assert!(self.resident_set.remove(index as u64));
         }
@@ -488,17 +489,17 @@ impl<const IS_SMALL: bool> VMCachePool<IS_SMALL> {
 impl<const IS_SMALL: bool> MemPool for VMCachePool<IS_SMALL> {
     fn create_new_page_for_write(
         &self,
-        c_key: ContainerKey,
+        container_id: ContainerId,
     ) -> Result<FrameWriteGuard, MemPoolStatus> {
         self.stats.inc_new_page();
 
         self.ensure_free_pages()?;
 
-        let container = self.container_manager.get_container(c_key);
+        let container = self.container_manager.get_container(container_id);
         let (mut guard, page_key) = loop {
             if let Some(res) = container.inc_page_count_if(1, |current| {
                 let page_id = current as PageId;
-                let page_key = PageKey::new(c_key, page_id);
+                let page_key = PageAddr::new(container_id, page_id);
                 let page_offset = self.page_key_to_offset(&page_key);
                 FrameWriteGuard::try_new(
                     box_as_mut_ptr(&mut unsafe { &mut *self.metas.get() }[page_offset]),
@@ -513,7 +514,7 @@ impl<const IS_SMALL: bool> MemPool for VMCachePool<IS_SMALL> {
             }
         };
         guard.set_id(page_key.page_id); // Initialize the page with the page id
-        guard.set_page_key(Some(page_key)); // Set the frame key to the new page key
+        guard.set_page_addr(Some(page_key)); // Set the frame key to the new page key
         guard.dirty().store(true, Ordering::Release);
         guard.update_eviction_score(0);
         self.resident_set
@@ -525,19 +526,32 @@ impl<const IS_SMALL: bool> MemPool for VMCachePool<IS_SMALL> {
 
     fn create_new_pages_for_write(
         &self,
-        _c_key: ContainerKey,
+        _c_key: ContainerId,
         _num_pages: usize,
     ) -> Result<Vec<FrameWriteGuard>, MemPoolStatus> {
         unimplemented!()
     }
 
-    fn is_in_mem(&self, key: PageFrameKey) -> bool {
-        let meta = &mut unsafe { &mut *self.metas.get() }[self.page_key_to_offset(&key.p_key())];
+    fn is_in_mem(
+        &self,
+        container_id: ContainerId,
+        page_id: PageId,
+        frame_hint: Option<FrameId>,
+    ) -> bool {
+        let key = PageRef::new_with_hint(container_id, page_id, frame_hint);
+        let meta =
+            &mut unsafe { &mut *self.metas.get() }[self.page_key_to_offset(&key.page_addr())];
         meta.key().is_some()
     }
 
-    fn get_page_for_write(&self, key: PageFrameKey) -> Result<FrameWriteGuard, MemPoolStatus> {
-        let page_offset = self.page_key_to_offset(&key.p_key());
+    fn get_page_for_write(
+        &self,
+        container_id: ContainerId,
+        page_id: PageId,
+        frame_hint: Option<FrameId>,
+    ) -> Result<FrameWriteGuard, MemPoolStatus> {
+        let key = PageRef::new_with_hint(container_id, page_id, frame_hint);
+        let page_offset = self.page_key_to_offset(&key.page_addr());
         assert!(
             page_offset < Self::PAGE_ENTRIES,
             "Page offset out of bounds {}/{}",
@@ -550,10 +564,10 @@ impl<const IS_SMALL: bool> MemPool for VMCachePool<IS_SMALL> {
         let mut guard = FrameWriteGuard::try_new(box_as_mut_ptr(meta), page, true)
             .ok_or(MemPoolStatus::FrameWriteLatchGrantFailed)?;
 
-        match guard.page_key() {
+        match guard.page_addr() {
             Some(k) => {
                 // Page is already in memory
-                assert!(k == key.p_key(), "Page key mismatch");
+                assert!(k == key.page_addr(), "Page key mismatch");
                 guard.update_eviction_score(0); // Reset unmarks the page
                 Ok(guard)
             }
@@ -561,11 +575,13 @@ impl<const IS_SMALL: bool> MemPool for VMCachePool<IS_SMALL> {
                 // The page is not in memory. Load it from disk.
                 self.ensure_free_pages()?;
 
-                let container = self.container_manager.get_container(key.p_key().c_key);
+                let container = self
+                    .container_manager
+                    .get_container(key.page_addr().container_id);
                 container
-                    .read_page(key.p_key().page_id, &mut guard)
+                    .read_page(key.page_addr().page_id, &mut guard)
                     .map(|()| {
-                        guard.set_page_key(Some(key.p_key()));
+                        guard.set_page_addr(Some(key.page_addr()));
                         guard.update_eviction_score(0); // Reset unmarks the page
                     })?;
 
@@ -576,8 +592,14 @@ impl<const IS_SMALL: bool> MemPool for VMCachePool<IS_SMALL> {
         }
     }
 
-    fn get_page_for_read(&self, key: PageFrameKey) -> Result<FrameReadGuard, MemPoolStatus> {
-        let page_offset = self.page_key_to_offset(&key.p_key());
+    fn get_page_for_read(
+        &self,
+        container_id: ContainerId,
+        page_id: PageId,
+        frame_hint: Option<FrameId>,
+    ) -> Result<FrameReadGuard, MemPoolStatus> {
+        let key = PageRef::new_with_hint(container_id, page_id, frame_hint);
+        let page_offset = self.page_key_to_offset(&key.page_addr());
         assert!(
             page_offset < Self::PAGE_ENTRIES,
             "Page offset out of bounds {}/{}",
@@ -590,10 +612,10 @@ impl<const IS_SMALL: bool> MemPool for VMCachePool<IS_SMALL> {
         let guard = FrameReadGuard::try_new(box_as_mut_ptr(meta), page)
             .ok_or(MemPoolStatus::FrameReadLatchGrantFailed)?;
 
-        match guard.page_key() {
+        match guard.page_addr() {
             Some(k) => {
                 // Page is already in memory
-                assert!(k == key.p_key(), "Page key mismatch");
+                assert!(k == key.page_addr(), "Page key mismatch");
                 guard.update_eviction_score(0); // Reset unmarks the page
                 Ok(guard)
             }
@@ -607,11 +629,13 @@ impl<const IS_SMALL: bool> MemPool for VMCachePool<IS_SMALL> {
                 let mut guard = guard
                     .try_upgrade(false)
                     .map_err(|_| MemPoolStatus::FrameWriteLatchGrantFailed)?; // Write latch is needed to read the page into the frame
-                let container = self.container_manager.get_container(key.p_key().c_key);
+                let container = self
+                    .container_manager
+                    .get_container(key.page_addr().container_id);
                 container
-                    .read_page(key.p_key().page_id, &mut guard)
+                    .read_page(key.page_addr().page_id, &mut guard)
                     .map(|()| {
-                        guard.set_page_key(Some(key.p_key()));
+                        guard.set_page_addr(Some(key.page_addr()));
                         guard.update_eviction_score(0);
                     })?;
                 self.resident_set.insert(page_offset as u64);
@@ -622,7 +646,12 @@ impl<const IS_SMALL: bool> MemPool for VMCachePool<IS_SMALL> {
         }
     }
 
-    fn prefetch_page(&self, _key: PageFrameKey) -> Result<(), MemPoolStatus> {
+    fn prefetch_page(
+        &self,
+        _container_id: ContainerId,
+        _page_id: PageId,
+        _frame_hint: Option<FrameId>,
+    ) -> Result<(), MemPoolStatus> {
         Ok(())
     }
 
@@ -651,13 +680,15 @@ impl<const IS_SMALL: bool> MemPool for VMCachePool<IS_SMALL> {
         for i in self.resident_set.clock_batch_iter(self.resident_set.len()) {
             let meta = &metas[i as usize];
             if let Some(key) = meta.key() {
-                *num_frames_per_container.entry(key.c_key).or_insert(0) += 1;
+                *num_frames_per_container
+                    .entry(key.container_id)
+                    .or_insert(0) += 1;
             }
         }
         let mut disk_io_per_container = BTreeMap::new();
-        for (c_key, (count, file_stats)) in &self.container_manager.get_stats() {
+        for (container_id, (count, file_stats)) in &self.container_manager.get_stats() {
             disk_io_per_container.insert(
-                *c_key,
+                *container_id,
                 (
                     *count as i64,
                     file_stats.read_count() as i64,
@@ -698,7 +729,7 @@ impl<const IS_SMALL: bool> MemPool for VMCachePool<IS_SMALL> {
             )
             .ok_or(MemPoolStatus::FrameWriteLatchGrantFailed)?;
             self.remove_page_entry(&guard)?;
-            guard.set_page_key(None);
+            guard.set_page_addr(None);
         }
 
         self.resident_set.clear();
@@ -762,7 +793,7 @@ impl<const IS_SMALL: bool> VMCachePool<IS_SMALL> {
     /// Return `true` if the page is present in OS page table.
     ///
     /// This is a direct Rust translation of the C helper that uses `mincore(2)`.
-    unsafe fn page_resident(&self, page_key: &PageKey) -> bool {
+    unsafe fn page_resident(&self, page_key: &PageAddr) -> bool {
         use libc::{c_int, c_uchar, c_void, mincore, size_t, sysconf, _SC_PAGESIZE};
         // 1. Get the page address.
         let i = self.page_key_to_offset(page_key);
@@ -823,10 +854,10 @@ mod tests {
     #[test]
     fn test_vmc_frame_latch() {
         let vmc = get_test_vmcache::<true>(TEST_NUM_FRAMES);
-        let c_key = ContainerKey::new(0, 0);
+        let container_id = ContainerId::new(0, 0);
 
-        let frame = vmc.create_new_page_for_write(c_key).unwrap();
-        let page_key = frame.page_frame_key().unwrap();
+        let frame = vmc.create_new_page_for_write(container_id).unwrap();
+        let page_key = frame.page_ref().unwrap();
         drop(frame);
 
         let num_threads = 3;
@@ -836,7 +867,11 @@ mod tests {
                 s.spawn(|| {
                     for _ in 0..num_iterations {
                         loop {
-                            if let Ok(mut guard) = vmc.get_page_for_write(page_key) {
+                            if let Ok(mut guard) = vmc.get_page_for_write(
+                                (page_key).container_id(),
+                                (page_key).page_id(),
+                                (page_key).frame_hint(),
+                            ) {
                                 guard[0] += 1;
                                 break;
                             } else {
@@ -853,8 +888,18 @@ mod tests {
         unsafe { vmc.run_checks() };
 
         {
-            assert!(vmc.is_in_mem(page_key));
-            let guard = vmc.get_page_for_read(page_key).unwrap();
+            assert!(vmc.is_in_mem(
+                (page_key).container_id(),
+                (page_key).page_id(),
+                (page_key).frame_hint()
+            ));
+            let guard = vmc
+                .get_page_for_read(
+                    (page_key).container_id(),
+                    (page_key).page_id(),
+                    (page_key).frame_hint(),
+                )
+                .unwrap();
             assert_eq!(guard[0], num_threads * num_iterations);
         }
 
@@ -865,24 +910,36 @@ mod tests {
     fn test_vmc_write_back_simple() {
         let num_frames = TEST_NUM_FRAMES;
         let vmc = get_test_vmcache::<true>(num_frames);
-        let c_key = ContainerKey::new(0, 0);
+        let container_id = ContainerId::new(0, 0);
 
         let total_pages = num_frames + 2;
         let mut keys = Vec::with_capacity(total_pages);
         for i in 0..total_pages {
-            let mut guard = vmc.create_new_page_for_write(c_key).unwrap();
+            let mut guard = vmc.create_new_page_for_write(container_id).unwrap();
             guard[0] = i as u8;
-            keys.push(guard.page_frame_key().unwrap());
+            keys.push(guard.page_ref().unwrap());
         }
         unsafe {
             vmc.run_checks();
         }
         {
-            let guard = vmc.get_page_for_read(keys[0]).unwrap();
+            let guard = vmc
+                .get_page_for_read(
+                    (keys[0]).container_id(),
+                    (keys[0]).page_id(),
+                    (keys[0]).frame_hint(),
+                )
+                .unwrap();
             assert_eq!(guard[0], 0);
         }
         {
-            let guard = vmc.get_page_for_read(keys[total_pages - 1]).unwrap();
+            let guard = vmc
+                .get_page_for_read(
+                    (keys[total_pages - 1]).container_id(),
+                    (keys[total_pages - 1]).page_id(),
+                    (keys[total_pages - 1]).frame_hint(),
+                )
+                .unwrap();
             assert_eq!(guard[0], (total_pages - 1) as u8);
         }
         unsafe {
@@ -895,18 +952,20 @@ mod tests {
         let mut keys = Vec::new();
         let num_frames = TEST_NUM_FRAMES;
         let vmc = get_test_vmcache::<true>(num_frames);
-        let c_key = ContainerKey::new(0, 0);
+        let container_id = ContainerId::new(0, 0);
 
         for i in 0..num_frames * 3 {
-            let mut guard = vmc.create_new_page_for_write(c_key).unwrap();
+            let mut guard = vmc.create_new_page_for_write(container_id).unwrap();
             guard[0] = i as u8;
-            keys.push(guard.page_frame_key().unwrap());
+            keys.push(guard.page_ref().unwrap());
         }
         unsafe {
             vmc.run_checks();
         }
         for (i, key) in keys.iter().enumerate() {
-            let guard = vmc.get_page_for_read(*key).unwrap();
+            let guard = vmc
+                .get_page_for_read((*key).container_id(), (*key).page_id(), (*key).frame_hint())
+                .unwrap();
             assert_eq!(guard[0], i as u8);
         }
         unsafe {
@@ -920,7 +979,7 @@ mod tests {
 
         let num_frames = TEST_NUM_FRAMES;
         let bp = get_test_vmcache::<true>(num_frames);
-        let c_key = ContainerKey::new(db_id, 0);
+        let container_id = ContainerId::new(db_id, 0);
 
         let num_traversal = num_frames;
 
@@ -928,15 +987,15 @@ mod tests {
         let mut keys = Vec::new();
 
         for _i in 0..num_traversal {
-            let mut guard1 = bp.create_new_page_for_write(c_key).unwrap();
+            let mut guard1 = bp.create_new_page_for_write(container_id).unwrap();
             guard1[0] = count;
             count += 1;
-            keys.push(guard1.page_frame_key().unwrap());
+            keys.push(guard1.page_ref().unwrap());
 
-            let mut guard2 = bp.create_new_page_for_write(c_key).unwrap();
+            let mut guard2 = bp.create_new_page_for_write(container_id).unwrap();
             guard2[0] = count;
             count += 1;
-            keys.push(guard2.page_frame_key().unwrap());
+            keys.push(guard2.page_ref().unwrap());
         }
 
         unsafe {
@@ -945,9 +1004,21 @@ mod tests {
 
         // Traverse by 2 pages at a time
         for i in 0..num_traversal {
-            let guard1 = bp.get_page_for_read(keys[i * 2]).unwrap();
+            let guard1 = bp
+                .get_page_for_read(
+                    (keys[i * 2]).container_id(),
+                    (keys[i * 2]).page_id(),
+                    (keys[i * 2]).frame_hint(),
+                )
+                .unwrap();
             assert_eq!(guard1[0], i as u8 * 2);
-            let guard2 = bp.get_page_for_read(keys[i * 2 + 1]).unwrap();
+            let guard2 = bp
+                .get_page_for_read(
+                    (keys[i * 2 + 1]).container_id(),
+                    (keys[i * 2 + 1]).page_id(),
+                    (keys[i * 2 + 1]).frame_hint(),
+                )
+                .unwrap();
             assert_eq!(guard2[0], i as u8 * 2 + 1);
         }
 
@@ -962,24 +1033,24 @@ mod tests {
 
         let num_frames = TEST_NUM_FRAMES;
         let vmc = get_test_vmcache::<true>(num_frames);
-        let c_key = ContainerKey::new(db_id, 0);
+        let container_id = ContainerId::new(db_id, 0);
 
         let latched_frames = num_frames * 19 / 20 + 1;
         let mut guards = Vec::with_capacity(latched_frames);
         for i in 0..latched_frames {
-            let mut guard = vmc.create_new_page_for_write(c_key).unwrap();
+            let mut guard = vmc.create_new_page_for_write(container_id).unwrap();
             guard[0] = i as u8;
             guards.push(guard);
         }
 
         // Once the pool wants to evict, it should fail because every resident frame is latched.
-        let res = vmc.create_new_page_for_write(c_key);
+        let res = vmc.create_new_page_for_write(container_id);
         assert_eq!(res.unwrap_err(), MemPoolStatus::CannotEvictPage);
 
         drop(guards);
 
         // Now, we should be able to get a new page for write.
-        let guard2 = vmc.create_new_page_for_write(c_key).unwrap();
+        let guard2 = vmc.create_new_page_for_write(container_id).unwrap();
         drop(guard2);
     }
 
@@ -989,13 +1060,13 @@ mod tests {
 
         let num_frames = TEST_NUM_FRAMES;
         let vmc = get_test_vmcache::<true>(num_frames);
-        let c_key = ContainerKey::new(db_id, 0);
+        let container_id = ContainerId::new(db_id, 0);
 
         let mut keys = Vec::new();
         for i in 0..num_frames * 2 {
-            let mut guard = vmc.create_new_page_for_write(c_key).unwrap();
+            let mut guard = vmc.create_new_page_for_write(container_id).unwrap();
             guard[0] = i as u8;
-            keys.push(guard.page_frame_key().unwrap());
+            keys.push(guard.page_ref().unwrap());
         }
 
         unsafe {
@@ -1012,7 +1083,9 @@ mod tests {
 
         // Check the contents of the pages
         for (i, key) in keys.iter().enumerate() {
-            let guard = vmc.get_page_for_read(*key).unwrap();
+            let guard = vmc
+                .get_page_for_read((*key).container_id(), (*key).page_id(), (*key).frame_hint())
+                .unwrap();
             assert_eq!(guard[0], i as u8);
         }
 
@@ -1031,13 +1104,13 @@ mod tests {
         {
             let cm = Arc::new(ContainerManager::new(&temp_dir, false, false).unwrap());
             let vmc1 = Arc::new(VMCachePool::<true>::new(num_frames, cm).unwrap());
-            let c_key = ContainerKey::new(db_id, 0);
+            let container_id = ContainerId::new(db_id, 0);
 
             for i in 0..num_frames * 2 {
                 log_warn!("Creating page {}", i);
-                let mut guard = vmc1.create_new_page_for_write(c_key).unwrap();
+                let mut guard = vmc1.create_new_page_for_write(container_id).unwrap();
                 guard[0] = i as u8;
-                keys.push(guard.page_frame_key().unwrap());
+                keys.push(guard.page_ref().unwrap());
             }
 
             log_warn!("Created {} pages", keys.len());
@@ -1066,7 +1139,9 @@ mod tests {
 
             // Check the contents of the pages
             for (i, key) in keys.iter().enumerate() {
-                let guard = vmc2.get_page_for_read(*key).unwrap();
+                let guard = vmc2
+                    .get_page_for_read((*key).container_id(), (*key).page_id(), (*key).frame_hint())
+                    .unwrap();
                 assert_eq!(guard[0], i as u8);
             }
 

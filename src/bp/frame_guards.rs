@@ -1,6 +1,5 @@
-use super::mem_pool_trait::PageFrameKey;
-use super::mem_pool_trait::PageKey;
-use super::ContainerKey;
+use super::mem_pool_trait::{PageAddr, PageRef};
+use super::ContainerId;
 #[allow(unused_imports)]
 use crate::log;
 use crate::page::{Page, PageId};
@@ -17,26 +16,26 @@ use std::{
 const EMPTY: u64 = u64::MAX; // 0xFFFF_FFFF_FFFF_FFFF  ⇔  None
 
 #[inline(always)]
-fn pack(key: PageKey) -> u64 {
-    //  ⟨c_key : u32⟩  ⟨page_id : u32⟩
-    let raw = ((key.c_key.as_u32() as u64) << 32) | key.page_id as u64;
+fn pack(key: PageAddr) -> u64 {
+    //  ⟨container_id : u32⟩  ⟨page_id : u32⟩
+    let raw = ((key.container_id.as_u32() as u64) << 32) | key.page_id as u64;
     debug_assert!(raw != EMPTY, "reserved for sentinel");
     raw
 }
 
 #[inline(always)]
-fn unpack(raw: u64) -> Option<PageKey> {
+fn unpack(raw: u64) -> Option<PageAddr> {
     if raw == EMPTY {
         None
     } else {
-        Some(PageKey {
-            c_key: ContainerKey::from_u32((raw >> 32) as u32),
+        Some(PageAddr {
+            container_id: ContainerId::from_u32((raw >> 32) as u32),
             page_id: (raw & 0xFFFF_FFFF) as PageId,
         })
     }
 }
 
-/// Lock-free `Option<PageKey>` slot.
+/// Lock-free `Option<PageAddr>` slot.
 #[repr(transparent)]
 struct AtomicOptionKey(AtomicU64);
 
@@ -45,12 +44,12 @@ impl AtomicOptionKey {
         Self(AtomicU64::new(EMPTY))
     }
     #[allow(dead_code)]
-    pub fn new_some(k: PageKey) -> Self {
+    pub fn new_some(k: PageAddr) -> Self {
         Self(AtomicU64::new(pack(k)))
     }
 
     #[inline]
-    pub fn get(&self) -> Option<PageKey> {
+    pub fn get(&self) -> Option<PageAddr> {
         unpack(self.0.load(Ordering::Acquire))
     }
     #[allow(dead_code)]
@@ -67,20 +66,20 @@ impl AtomicOptionKey {
     /// `take()` – fetch-and-clear
     #[allow(dead_code)]
     #[inline]
-    pub fn take(&self) -> Option<PageKey> {
+    pub fn take(&self) -> Option<PageAddr> {
         unpack(self.0.swap(EMPTY, Ordering::AcqRel))
     }
 
     /// `replace(new)` – swap, returning the old value
     #[inline]
-    pub fn replace(&self, new: Option<PageKey>) -> Option<PageKey> {
+    pub fn replace(&self, new: Option<PageAddr>) -> Option<PageAddr> {
         let raw = new.map_or(EMPTY, pack);
         unpack(self.0.swap(raw, Ordering::AcqRel))
     }
 
     /// CAS: claim the slot only if it is currently empty.
     #[allow(dead_code)]
-    pub fn try_claim_empty(&self, key: PageKey) -> Result<(), Option<PageKey>> {
+    pub fn try_claim_empty(&self, key: PageAddr) -> Result<(), Option<PageAddr>> {
         let wanted = pack(key);
         match self
             .0
@@ -113,10 +112,10 @@ impl FrameMeta {
     }
 
     /// Public façade matching the old UnsafeCell<Option<…>> API
-    pub fn key(&self) -> Option<PageKey> {
+    pub fn key(&self) -> Option<PageAddr> {
         self.key.get()
     }
-    pub fn set_key(&self, k: Option<PageKey>) {
+    pub fn set_key(&self, k: Option<PageAddr>) {
         self.key.replace(k);
     }
 
@@ -149,7 +148,7 @@ impl FrameReadGuard {
     }
 
     #[inline]
-    fn page_ref(&self) -> &Page {
+    fn page_ptr_ref(&self) -> &Page {
         unsafe { self.page.as_ref() }
     }
 
@@ -194,18 +193,18 @@ impl FrameReadGuard {
         &self.meta_ref().is_dirty
     }
 
-    pub fn page_key(&self) -> Option<PageKey> {
+    pub fn page_addr(&self) -> Option<PageAddr> {
         self.meta_ref().key()
     }
 
-    pub fn page_frame_key(&self) -> Option<PageFrameKey> {
-        self.page_key().map(|p_key| {
-            PageFrameKey::new_with_frame_id(p_key.c_key, p_key.page_id, self.frame_id())
+    pub fn page_ref(&self) -> Option<PageRef> {
+        self.page_addr().map(|page_addr| {
+            PageRef::new_with_frame_id(page_addr.container_id, page_addr.page_id, self.frame_id())
         })
     }
 
     pub fn page(&self) -> &Page {
-        self.page_ref()
+        self.page_ptr_ref()
     }
 
     pub fn eviction_score(&self) -> u64 {
@@ -253,7 +252,7 @@ impl Deref for FrameReadGuard {
 impl Debug for FrameReadGuard {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("FrameReadGuard")
-            .field("key", &self.page_key())
+            .field("page_addr", &self.page_addr())
             .field("dirty", &self.dirty().load(Ordering::Relaxed))
             .finish()
     }
@@ -273,7 +272,7 @@ impl FrameWriteGuard {
     }
 
     #[inline]
-    fn page_ref(&self) -> &Page {
+    fn page_ptr_ref(&self) -> &Page {
         unsafe { self.page.as_ref() }
     }
 
@@ -343,22 +342,22 @@ impl FrameWriteGuard {
             .store(new_score, Ordering::Release);
     }
 
-    pub fn page_key(&self) -> Option<PageKey> {
+    pub fn page_addr(&self) -> Option<PageAddr> {
         self.meta_ref().key()
     }
 
-    pub fn set_page_key(&self, page_key: Option<PageKey>) {
-        self.meta_ref().set_key(page_key)
+    pub fn set_page_addr(&self, page_addr: Option<PageAddr>) {
+        self.meta_ref().set_key(page_addr)
     }
 
-    pub fn page_frame_key(&self) -> Option<PageFrameKey> {
-        self.page_key().map(|p_key| {
-            PageFrameKey::new_with_frame_id(p_key.c_key, p_key.page_id, self.frame_id())
+    pub fn page_ref(&self) -> Option<PageRef> {
+        self.page_addr().map(|page_addr| {
+            PageRef::new_with_frame_id(page_addr.container_id, page_addr.page_id, self.frame_id())
         })
     }
 
     pub fn page(&self) -> &Page {
-        self.page_ref()
+        self.page_ptr_ref()
     }
 
     pub fn page_mut(&mut self) -> &mut Page {
@@ -379,7 +378,7 @@ impl FrameWriteGuard {
     pub fn clear(&mut self) {
         self.dirty().store(false, Ordering::Release);
         self.update_eviction_score(0);
-        self.set_page_key(None);
+        self.set_page_addr(None);
     }
 }
 
@@ -410,7 +409,7 @@ impl DerefMut for FrameWriteGuard {
 impl Debug for FrameWriteGuard {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("FrameWriteGuard")
-            .field("key", &self.page_key())
+            .field("page_addr", &self.page_addr())
             .field("dirty", &self.dirty().load(Ordering::Relaxed))
             .finish()
     }
@@ -442,14 +441,14 @@ mod tests {
         let (mut meta, mut page) = make_meta_and_page(0);
         let guard = FrameReadGuard::new(box_as_mut_ptr(&mut meta), box_as_mut_ptr(&mut page));
         assert!(!guard.dirty().load(Ordering::Relaxed));
-        assert!(guard.page_key().is_none());
+        assert!(guard.page_addr().is_none());
     }
 
     #[test]
     fn test_read_access() {
         let (mut meta, mut page) = make_meta_and_page(0);
         let guard = FrameReadGuard::new(box_as_mut_ptr(&mut meta), box_as_mut_ptr(&mut page));
-        assert_eq!(guard.page_key(), None);
+        assert_eq!(guard.page_addr(), None);
         assert!(!guard.dirty().load(Ordering::Relaxed));
         guard.iter().all(|&x| x == 0);
         assert!(!guard.dirty().load(Ordering::Relaxed));
@@ -460,7 +459,7 @@ mod tests {
         let (mut meta, mut page) = make_meta_and_page(0);
         let mut guard =
             FrameWriteGuard::new(box_as_mut_ptr(&mut meta), box_as_mut_ptr(&mut page), true);
-        assert_eq!(guard.page_key(), None);
+        assert_eq!(guard.page_addr(), None);
         assert!(guard.dirty().load(Ordering::Relaxed));
         guard.iter().all(|&x| x == 0);
         guard[0] = 1;
@@ -473,8 +472,8 @@ mod tests {
         let (mut meta, mut page) = make_meta_and_page(0);
         let guard1 = FrameReadGuard::new(box_as_mut_ptr(&mut meta), box_as_mut_ptr(&mut page));
         let guard2 = FrameReadGuard::new(box_as_mut_ptr(&mut meta), box_as_mut_ptr(&mut page));
-        assert_eq!(guard1.page_key(), None);
-        assert_eq!(guard2.page_key(), None);
+        assert_eq!(guard1.page_addr(), None);
+        assert_eq!(guard2.page_addr(), None);
         assert!(!guard1.dirty().load(Ordering::Relaxed));
         assert!(!guard2.dirty().load(Ordering::Relaxed));
         guard1.iter().all(|&x| x == 0);
@@ -550,7 +549,7 @@ mod tests {
             // Upgrade read guard to write guard and modify the first element
             let guard = FrameReadGuard::new(box_as_mut_ptr(&mut meta), box_as_mut_ptr(&mut page));
             let mut guard = guard.try_upgrade(true).unwrap();
-            assert_eq!(guard.page_key(), None);
+            assert_eq!(guard.page_addr(), None);
             assert!(guard.dirty().load(Ordering::Relaxed));
             guard.iter().all(|&x| x == 0);
             guard[0] = 1;

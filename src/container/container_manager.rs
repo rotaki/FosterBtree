@@ -1,7 +1,7 @@
 #[cfg(feature = "iouring_async")]
 use super::file_manager::iouring_async::GlobalRings;
 use super::{FileManager, FileManagerTrait, FileStats};
-use crate::bp::prelude::{ContainerKey, MemPoolStatus};
+use crate::bp::prelude::{ContainerId, MemPoolStatus};
 use crate::page::{Page, PageId};
 use dashmap::DashMap;
 use std::fs::create_dir_all;
@@ -97,7 +97,7 @@ impl Container {
 pub struct ContainerManager {
     remove_dir_on_drop: bool,
     base_dir: PathBuf,
-    containers: DashMap<ContainerKey, Arc<Container>>, // (db_id, c_id) -> Container
+    containers: DashMap<ContainerId, Arc<Container>>, // (db_id, c_id) -> Container
     #[cfg(feature = "iouring_async")]
     ring: Arc<GlobalRings>,
     direct: bool, // Direct IO
@@ -162,7 +162,7 @@ impl ContainerManager {
                             FileManager::with_kpc(&db_path, c_id).unwrap()
                         };
                         containers
-                            .insert(ContainerKey::new(db_id, c_id), Arc::new(Container::new(fm)));
+                            .insert(ContainerId::new(db_id, c_id), Arc::new(Container::new(fm)));
                     }
                 }
             }
@@ -182,41 +182,61 @@ impl ContainerManager {
         self.remove_dir_on_drop
     }
 
-    // Return the file manager for the given container key with a counter for the number of pages.
-    pub fn get_container(&self, c_key: ContainerKey) -> Arc<Container> {
-        let container = self.containers.entry(c_key).or_insert_with(|| {
-            let db_path = self.base_dir.join(c_key.db_id().to_string());
+    // Return the file manager for the given container id with a counter for the number of pages.
+    pub fn get_container(&self, container_id: ContainerId) -> Arc<Container> {
+        let container = self.containers.entry(container_id).or_insert_with(|| {
+            let db_path = self.base_dir.join(container_id.db_id().to_string());
             #[cfg(feature = "iouring_async")]
             let fm = if self.direct {
-                FileManager::new(&db_path, c_key.c_id(), self.ring.clone()).unwrap()
+                FileManager::new(
+                    &db_path,
+                    container_id.local_container_id(),
+                    self.ring.clone(),
+                )
+                .unwrap()
             } else {
-                FileManager::with_kpc(&db_path, c_key.c_id(), self.ring.clone()).unwrap()
+                FileManager::with_kpc(
+                    &db_path,
+                    container_id.local_container_id(),
+                    self.ring.clone(),
+                )
+                .unwrap()
             };
             #[cfg(not(feature = "iouring_async"))]
             let fm = if self.direct {
-                FileManager::new(&db_path, c_key.c_id()).unwrap()
+                FileManager::new(&db_path, container_id.local_container_id()).unwrap()
             } else {
-                FileManager::with_kpc(&db_path, c_key.c_id()).unwrap()
+                FileManager::with_kpc(&db_path, container_id.local_container_id()).unwrap()
             };
             Arc::new(Container::new(fm))
         });
         container.value().clone()
     }
 
-    pub fn create_container(&self, c_key: ContainerKey, is_temp: bool) {
-        self.containers.entry(c_key).or_insert_with(|| {
-            let db_path = self.base_dir.join(c_key.db_id().to_string());
+    pub fn create_container(&self, container_id: ContainerId, is_temp: bool) {
+        self.containers.entry(container_id).or_insert_with(|| {
+            let db_path = self.base_dir.join(container_id.db_id().to_string());
             #[cfg(feature = "iouring_async")]
             let fm = if self.direct {
-                FileManager::new(&db_path, c_key.c_id(), self.ring.clone()).unwrap()
+                FileManager::new(
+                    &db_path,
+                    container_id.local_container_id(),
+                    self.ring.clone(),
+                )
+                .unwrap()
             } else {
-                FileManager::with_kpc(&db_path, c_key.c_id(), self.ring.clone()).unwrap()
+                FileManager::with_kpc(
+                    &db_path,
+                    container_id.local_container_id(),
+                    self.ring.clone(),
+                )
+                .unwrap()
             };
             #[cfg(not(feature = "iouring_async"))]
             let fm = if self.direct {
-                FileManager::new(&db_path, c_key.c_id()).unwrap()
+                FileManager::new(&db_path, container_id.local_container_id()).unwrap()
             } else {
-                FileManager::with_kpc(&db_path, c_key.c_id()).unwrap()
+                FileManager::with_kpc(&db_path, container_id.local_container_id()).unwrap()
             };
             if is_temp {
                 Arc::new(Container::new_temp(fm))
@@ -226,7 +246,7 @@ impl ContainerManager {
         });
     }
 
-    pub fn get_stats(&self) -> Vec<(ContainerKey, (usize, FileStats))> {
+    pub fn get_stats(&self) -> Vec<(ContainerId, (usize, FileStats))> {
         let mut vec = Vec::new();
         for container in self.containers.iter() {
             let count = container.num_pages();

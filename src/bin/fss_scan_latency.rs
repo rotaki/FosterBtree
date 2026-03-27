@@ -2,7 +2,7 @@ use clap::Parser;
 use core::panic;
 use fbtree::{
     access_method::{fixed_size_store::FixedSizeStore, prelude::*},
-    bp::{get_test_bp_clock, ContainerKey, MemPool},
+    bp::{get_test_bp_clock, ContainerId, MemPool},
     prelude::PAGE_SIZE,
     random::gen_random_byte_vec,
 };
@@ -59,7 +59,7 @@ pub fn execute_workload(
 
 fn get_index<M: MemPool>(bp: Arc<M>, params: &Params) -> Arc<FixedSizeStore<M>> {
     Arc::new(FixedSizeStore::new(
-        ContainerKey::new(0, 0),
+        ContainerId::new(0, 0),
         bp,
         params.key_size,
         params.record_size,

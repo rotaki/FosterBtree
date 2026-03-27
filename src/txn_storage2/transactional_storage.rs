@@ -9,7 +9,10 @@ use crate::{
         fbt::{BTreeKey, FosterBtree, FosterBtreeCursor, FosterBtreePage},
         prelude::*,
     },
-    bp::{ContainerId, ContainerKey, DatabaseId, MemPool, PageFrameKey},
+    bp::{
+        ContainerId as PackedContainerId, DatabaseId, LocalContainerId as ContainerId, MemPool,
+        PageRef,
+    },
     txn_storage::locktable::ConcurrentLockTable as LockTable,
     txn_storage2::{
         field::{
@@ -185,19 +188,19 @@ struct ContainerInfo<M: MemPool> {
     options: ContainerOptions,
     btree: Arc<FosterBtree<M>>,
     locktable: Arc<LockTable>,
-    c_key: ContainerKey,
+    container_id: PackedContainerId,
 }
 
 impl<M: MemPool> ContainerInfo<M> {
-    fn hint_to_page_frame_key(&self, hint: Option<RecordPointer>) -> Option<PageFrameKey> {
-        hint.map(|h| PageFrameKey::new_with_frame_id(self.c_key, h.page_id, h.frame_id))
+    fn hint_to_page_ref(&self, hint: Option<RecordPointer>) -> Option<PageRef> {
+        hint.map(|h| PageRef::new_with_frame_id(self.container_id, h.page_id, h.frame_id))
     }
 
     #[allow(dead_code)]
     fn print_locks(&self) {
         println!(
             "==========================\nContainer ({}) Locks:\n==========================\n{}",
-            self.c_key, self.locktable,
+            self.container_id, self.locktable,
         );
     }
 
@@ -209,7 +212,7 @@ impl<M: MemPool> ContainerInfo<M> {
     ) -> Result<RecordPointer, AccessMethodError> {
         let mut page = self
             .btree
-            .traverse_to_leaf_for_write_with_hint(key, self.hint_to_page_frame_key(hint));
+            .traverse_to_leaf_for_write_with_hint(key, self.hint_to_page_ref(hint));
         let slot_id = page.upper_bound_slot_id(&BTreeKey::new(key)) - 1;
 
         if slot_id > 0 && page.get_raw_key(slot_id) == key {
@@ -229,7 +232,7 @@ impl<M: MemPool> ContainerInfo<M> {
     ) -> Result<RecordPointer, AccessMethodError> {
         let mut page = self
             .btree
-            .traverse_to_leaf_for_write_with_hint(key, self.hint_to_page_frame_key(hint));
+            .traverse_to_leaf_for_write_with_hint(key, self.hint_to_page_ref(hint));
         let slot_id = page.upper_bound_slot_id(&BTreeKey::new(key)) - 1;
 
         if slot_id > 0 && page.get_raw_key(slot_id) == key {
@@ -265,13 +268,13 @@ impl<M: MemPool> ContainerInfo<M> {
                 RWEntry::Update(record, ptr, ghost) => {
                     let mut page = self.btree.traverse_to_leaf_for_write_with_hint(
                         key,
-                        self.hint_to_page_frame_key(Some(*ptr)),
+                        self.hint_to_page_ref(Some(*ptr)),
                     );
                     let slot_id = page.upper_bound_slot_id(&BTreeKey::new(key)) - 1;
                     if slot_id == 0 || page.get_raw_key(slot_id) != key {
                         panic!(
                             "Key: {:?} of container {} not found for update",
-                            key, self.c_key
+                            key, self.container_id
                         );
                     } else {
                         // Update the record
@@ -290,14 +293,14 @@ impl<M: MemPool> ContainerInfo<M> {
                     assert!(ghost, "Insert entry should be ghost");
                     let mut page = self.btree.traverse_to_leaf_for_write_with_hint(
                         key,
-                        self.hint_to_page_frame_key(Some(*ptr)),
+                        self.hint_to_page_ref(Some(*ptr)),
                     );
                     let slot_id = page.upper_bound_slot_id(&BTreeKey::new(key)) - 1;
 
                     if slot_id == 0 || page.get_raw_key(slot_id) != key {
                         panic!(
                             "Key: {:?} of container {} not found for insert",
-                            key, self.c_key
+                            key, self.container_id
                         );
                     } else {
                         // Insert the record
@@ -307,14 +310,14 @@ impl<M: MemPool> ContainerInfo<M> {
                 RWEntry::Delete(ptr, _) => {
                     let mut page = self.btree.traverse_to_leaf_for_write_with_hint(
                         key,
-                        self.hint_to_page_frame_key(Some(*ptr)),
+                        self.hint_to_page_ref(Some(*ptr)),
                     );
                     let slot_id = page.upper_bound_slot_id(&BTreeKey::new(key)) - 1;
 
                     if slot_id == 0 || page.get_raw_key(slot_id) != key {
                         panic!(
                             "Key: {:?} of container {} not found for delete",
-                            key, self.c_key
+                            key, self.container_id
                         );
                     } else {
                         // Delete the record
@@ -467,7 +470,7 @@ impl<M: MemPool> FieldLeveLStorageTrait for TransactionalStorage<M> {
             *self.next_container_id.get() += 1;
 
             // Create Foster B-tree
-            let container_key = ContainerKey::new(0, c_id); // Always use db_id 0
+            let container_key = PackedContainerId::new(0, c_id); // Always use db_id 0
             let btree = Arc::new(FosterBtree::new(container_key, self.mem_pool.clone()));
             let locktable = Arc::new(LockTable::new());
 
@@ -475,7 +478,7 @@ impl<M: MemPool> FieldLeveLStorageTrait for TransactionalStorage<M> {
                 options: options.clone(),
                 btree,
                 locktable,
-                c_key: container_key,
+                container_id: container_key,
             };
 
             (*self.containers.get()).insert(c_id, container_info);
@@ -677,7 +680,7 @@ impl<M: MemPool> FieldLeveLStorageTrait for TransactionalStorage<M> {
                 RWEntry::Read(ptr, _) => {
                     let page = container.btree.traverse_to_leaf_for_read_with_hint(
                         &key_bytes,
-                        container.hint_to_page_frame_key(Some(*ptr)),
+                        container.hint_to_page_ref(Some(*ptr)),
                     );
                     let slot_id = page.upper_bound_slot_id(&BTreeKey::new(&key_bytes)) - 1;
                     if slot_id == 0 || page.get_raw_key(slot_id) != key_bytes {
@@ -698,10 +701,9 @@ impl<M: MemPool> FieldLeveLStorageTrait for TransactionalStorage<M> {
         } else {
             // Find from index
             let locktable = &container.locktable;
-            let page = container.btree.traverse_to_leaf_for_read_with_hint(
-                &key_bytes,
-                container.hint_to_page_frame_key(hint),
-            );
+            let page = container
+                .btree
+                .traverse_to_leaf_for_read_with_hint(&key_bytes, container.hint_to_page_ref(hint));
             let slot_id = page.upper_bound_slot_id(&BTreeKey::new(&key_bytes)) - 1;
             if slot_id == 0 || page.get_raw_key(slot_id) != key_bytes {
                 Err(TxnStorageStatus::KeyNotFound)
@@ -755,7 +757,7 @@ impl<M: MemPool> FieldLeveLStorageTrait for TransactionalStorage<M> {
                 RWEntry::Read(ptr, ghost) => {
                     let page = container.btree.traverse_to_leaf_for_read_with_hint(
                         &key_bytes,
-                        container.hint_to_page_frame_key(Some(*ptr)),
+                        container.hint_to_page_ref(Some(*ptr)),
                     );
                     let slot_id = page.upper_bound_slot_id(&BTreeKey::new(&key_bytes)) - 1;
                     if slot_id == 0 || page.get_raw_key(slot_id) != key_bytes {
@@ -795,10 +797,9 @@ impl<M: MemPool> FieldLeveLStorageTrait for TransactionalStorage<M> {
         } else {
             // Abort if not found in index
             let locktable = &container.locktable;
-            let page = container.btree.traverse_to_leaf_for_read_with_hint(
-                &key_bytes,
-                container.hint_to_page_frame_key(hint),
-            );
+            let page = container
+                .btree
+                .traverse_to_leaf_for_read_with_hint(&key_bytes, container.hint_to_page_ref(hint));
             let slot_id = page.upper_bound_slot_id(&BTreeKey::new(&key_bytes)) - 1;
             if slot_id == 0 || page.get_raw_key(slot_id) != key_bytes {
                 Err(TxnStorageStatus::KeyNotFound)
@@ -843,7 +844,7 @@ impl<M: MemPool> FieldLeveLStorageTrait for TransactionalStorage<M> {
                 RWEntry::Read(ptr, ghost) => {
                     let page = container.btree.traverse_to_leaf_for_read_with_hint(
                         &key_bytes,
-                        container.hint_to_page_frame_key(Some(*ptr)),
+                        container.hint_to_page_ref(Some(*ptr)),
                     );
                     let slot_id = page.upper_bound_slot_id(&BTreeKey::new(&key_bytes)) - 1;
                     if slot_id == 0 || page.get_raw_key(slot_id) != key_bytes {
@@ -875,10 +876,9 @@ impl<M: MemPool> FieldLeveLStorageTrait for TransactionalStorage<M> {
         } else {
             // Abort if not found in index
             let locktable = &container.locktable;
-            let page = container.btree.traverse_to_leaf_for_read_with_hint(
-                &key_bytes,
-                container.hint_to_page_frame_key(hint),
-            );
+            let page = container
+                .btree
+                .traverse_to_leaf_for_read_with_hint(&key_bytes, container.hint_to_page_ref(hint));
             let slot_id = page.upper_bound_slot_id(&BTreeKey::new(&key_bytes)) - 1;
             if slot_id == 0 || page.get_raw_key(slot_id) != key_bytes {
                 Err(TxnStorageStatus::KeyNotFound)
@@ -930,10 +930,9 @@ impl<M: MemPool> FieldLeveLStorageTrait for TransactionalStorage<M> {
         } else {
             // Not in rwset, check storage
             let locktable = &container.locktable;
-            let mut page = container.btree.traverse_to_leaf_for_write_with_hint(
-                &key_bytes,
-                container.hint_to_page_frame_key(hint),
-            );
+            let mut page = container
+                .btree
+                .traverse_to_leaf_for_write_with_hint(&key_bytes, container.hint_to_page_ref(hint));
             let slot_id = page.upper_bound_slot_id(&BTreeKey::new(&key_bytes)) - 1;
             if slot_id == 0 || page.get_raw_key(slot_id) != key_bytes {
                 // Lower fence or non-existent key
@@ -1072,10 +1071,9 @@ impl<M: MemPool> FieldLeveLStorageTrait for TransactionalStorage<M> {
         } else {
             // Not in rwset, need to check storage
             let locktable = &container.locktable;
-            let page = container.btree.traverse_to_leaf_for_read_with_hint(
-                &key_bytes,
-                container.hint_to_page_frame_key(hint),
-            );
+            let page = container
+                .btree
+                .traverse_to_leaf_for_read_with_hint(&key_bytes, container.hint_to_page_ref(hint));
             let slot_id = page.upper_bound_slot_id(&BTreeKey::new(&key_bytes)) - 1;
             if slot_id == 0 || page.get_raw_key(slot_id) != key_bytes {
                 Err(TxnStorageStatus::KeyNotFound)

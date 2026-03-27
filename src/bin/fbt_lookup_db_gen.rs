@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use clap::Parser;
 use fbtree::{
-    bp::{BufferPool, ContainerKey, MemPool},
+    bp::{BufferPool, ContainerId, MemPool},
     container::ContainerManager,
     prelude::{FosterBtree, PAGE_SIZE},
 };
@@ -83,7 +83,7 @@ pub fn main() {
     let elapsed = start.elapsed();
     println!("Time taken to allocate buffer pool: {:?}", elapsed);
 
-    let fbt = Arc::new(FosterBtree::new(ContainerKey::new(0, 0), bp.clone()));
+    let fbt = Arc::new(FosterBtree::new(ContainerId::new(0, 0), bp.clone()));
 
     let start = std::time::Instant::now();
     insert_into_db(fbt, config.num_entries);

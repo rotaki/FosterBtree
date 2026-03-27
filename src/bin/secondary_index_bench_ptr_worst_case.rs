@@ -18,7 +18,7 @@
 use criterion::black_box;
 use fbtree::{
     access_method::fbt::{BTreeKey, FosterBtreeCursor},
-    bp::{ContainerId, ContainerKey, MemPool, PageFrameKey},
+    bp::{ContainerId as PackedContainerId, LocalContainerId as ContainerId, MemPool, PageRef},
     prelude::FosterBtreePage,
     prelude::{FosterBtree, PageId},
     utils::Permutation,
@@ -47,7 +47,7 @@ impl<T: MemPool> SecondaryNoHint<T> {
         // Iterate through the table to create the secondary index.
         let mut iter = FosterBtreeCursor::new(primary, &[], &[]);
         let secondary = Arc::new(FosterBtree::new(
-            ContainerKey::new(0, c_id),
+            PackedContainerId::new(0, c_id),
             primary.mem_pool.clone(),
         ));
         while let Some((p_key, _)) = iter.get_kv() {
@@ -116,7 +116,7 @@ impl<T: MemPool> SecondaryLeafPageHint<T> {
         // Iterate through the table to create the secondary index.
         let mut iter = FosterBtreeCursor::new(primary, &[], &[]);
         let secondary = Arc::new(FosterBtree::new(
-            ContainerKey::new(0, c_id),
+            PackedContainerId::new(0, c_id),
             primary.mem_pool.clone(),
         ));
         while let Some((p_key, _)) = iter.get_kv() {
@@ -152,7 +152,7 @@ impl<T: MemPool> SecondaryIndex<T> for SecondaryLeafPageHint<T> {
             // Split the value into logical_id and physical_address
             let (p_key, expected_phys_addr) = val.split_at(val.len() - 4);
             let expected_page_id = PageId::from_be_bytes(expected_phys_addr.try_into().unwrap());
-            let expected_page_frame_key = PageFrameKey::new(self.primary.c_key, expected_page_id);
+            let expected_page_frame_key = PageRef::new(self.primary.container_id, expected_page_id);
 
             // Traverse the primary FBT with the hint
             let pri_page = self
@@ -217,7 +217,7 @@ impl<T: MemPool> SecondaryLeafPageFrameHint<T> {
         // Iterate through the table to create the secondary index.
         let mut iter = FosterBtreeCursor::new(primary, &[], &[]);
         let secondary = Arc::new(FosterBtree::new(
-            ContainerKey::new(0, c_id),
+            PackedContainerId::new(0, c_id),
             primary.mem_pool.clone(),
         ));
         while let Some((p_key, _)) = iter.get_kv() {
@@ -257,8 +257,8 @@ impl<T: MemPool> SecondaryIndex<T> for SecondaryLeafPageFrameHint<T> {
             let (expected_page_id, expected_frame_id) = expected_phys_addr.split_at(4);
             let expected_page_id = PageId::from_be_bytes(expected_page_id.try_into().unwrap());
             let expected_frame_id = u32::from_be_bytes(expected_frame_id.try_into().unwrap());
-            let expected_page_frame_key = PageFrameKey::new_with_frame_id(
-                self.primary.c_key,
+            let expected_page_frame_key = PageRef::new_with_frame_id(
+                self.primary.container_id,
                 expected_page_id,
                 expected_frame_id,
             );
@@ -334,7 +334,7 @@ impl<T: MemPool> SecondaryPageSlotHint<T> {
         // Iterate through the table to create the secondary index.
         let mut iter = FosterBtreeCursor::new(primary, &[], &[]);
         let secondary = Arc::new(FosterBtree::new(
-            ContainerKey::new(0, c_id),
+            PackedContainerId::new(0, c_id),
             primary.mem_pool.clone(),
         ));
         while let Some((p_key, _)) = iter.get_kv() {
@@ -374,7 +374,7 @@ impl<T: MemPool> SecondaryIndex<T> for SecondaryPageSlotHint<T> {
             let (expected_page_id, expected_slot_id) = expected_phys_addr.split_at(4);
             let expected_page_id = PageId::from_be_bytes(expected_page_id.try_into().unwrap());
             let expected_slot_id = u32::from_be_bytes(expected_slot_id.try_into().unwrap());
-            let expected_page_key = PageFrameKey::new(self.primary.c_key, expected_page_id);
+            let expected_page_key = PageRef::new(self.primary.container_id, expected_page_id);
 
             // Traverse the primary FBT with the hint
             let pri_page = self
@@ -456,7 +456,7 @@ impl<T: MemPool> SecondaryPageFrameSlotHint<T> {
         // Iterate through the table to create the secondary index.
         let mut iter = FosterBtreeCursor::new(primary, &[], &[]);
         let secondary = Arc::new(FosterBtree::new(
-            ContainerKey::new(0, c_id),
+            PackedContainerId::new(0, c_id),
             primary.mem_pool.clone(),
         ));
         while let Some((p_key, _)) = iter.get_kv() {
@@ -501,8 +501,8 @@ impl<T: MemPool> SecondaryIndex<T> for SecondaryPageFrameSlotHint<T> {
             let expected_frame_id = u32::from_be_bytes(expected_frame_id.try_into().unwrap());
             let expected_slot_id = u32::from_be_bytes(expected_slot_id.try_into().unwrap());
 
-            let expected_page_frame_key = PageFrameKey::new_with_frame_id(
-                self.primary.c_key,
+            let expected_page_frame_key = PageRef::new_with_frame_id(
+                self.primary.container_id,
                 expected_page_id,
                 expected_frame_id,
             );
@@ -763,7 +763,10 @@ fn main() {
         flush_internal_cache_and_everything();
         println!("=========================================================================================");
         let bp = get_test_bp_lru(params.bp_size);
-        let primary = Arc::new(FosterBtree::new(ContainerKey::new(0, 0), Arc::clone(&bp)));
+        let primary = Arc::new(FosterBtree::new(
+            PackedContainerId::new(0, 0),
+            Arc::clone(&bp),
+        ));
         load_table(&params, &primary);
         // Print the page stats
         println!("BP stats: \n{}", bp.stats());
@@ -785,7 +788,10 @@ fn main() {
         flush_internal_cache_and_everything();
         println!("=========================================================================================");
         let bp = get_test_bp_lru(params.bp_size);
-        let primary = Arc::new(FosterBtree::new(ContainerKey::new(0, 0), Arc::clone(&bp)));
+        let primary = Arc::new(FosterBtree::new(
+            PackedContainerId::new(0, 0),
+            Arc::clone(&bp),
+        ));
         load_table(&params, &primary);
         // Print the page stats
         println!("BP stats: \n{}", bp.stats());
@@ -807,7 +813,10 @@ fn main() {
         flush_internal_cache_and_everything();
         println!("=========================================================================================");
         let bp = get_test_bp_lru(params.bp_size);
-        let primary = Arc::new(FosterBtree::new(ContainerKey::new(0, 0), Arc::clone(&bp)));
+        let primary = Arc::new(FosterBtree::new(
+            PackedContainerId::new(0, 0),
+            Arc::clone(&bp),
+        ));
         load_table(&params, &primary);
         // Print the page stats
         println!("BP stats: \n{}", bp.stats());
@@ -828,7 +837,10 @@ fn main() {
     {
         println!("=========================================================================================");
         let bp = get_test_bp_lru(params.bp_size);
-        let primary = Arc::new(FosterBtree::new(ContainerKey::new(0, 0), Arc::clone(&bp)));
+        let primary = Arc::new(FosterBtree::new(
+            PackedContainerId::new(0, 0),
+            Arc::clone(&bp),
+        ));
         load_table(&params, &primary);
         // Print the page stats
         println!("BP stats: \n{}", bp.stats());
@@ -851,7 +863,10 @@ fn main() {
         flush_internal_cache_and_everything();
         println!("=========================================================================================");
         let bp = get_test_bp_lru(params.bp_size);
-        let primary = Arc::new(FosterBtree::new(ContainerKey::new(0, 0), Arc::clone(&bp)));
+        let primary = Arc::new(FosterBtree::new(
+            PackedContainerId::new(0, 0),
+            Arc::clone(&bp),
+        ));
         load_table(&params, &primary);
         // Print the page stats
         println!("BP stats: \n{}", bp.stats());

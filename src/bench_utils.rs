@@ -7,7 +7,7 @@ use crate::{
     access_method::{fbt::FosterBtree, hashindex::prelude::*},
     bp::{
         get_in_mem_pool, get_test_bp_lru,
-        prelude::{ContainerKey, InMemPool, MemPool},
+        prelude::{ContainerId, InMemPool, MemPool},
         BufferPool,
     },
     random::{RandomKVs, RandomOp},
@@ -113,15 +113,15 @@ impl std::fmt::Display for BenchParams {
 
 pub fn gen_foster_btree_in_mem() -> Arc<FosterBtree<InMemPool>> {
     let (db_id, c_id) = (0, 0);
-    let c_key = ContainerKey::new(db_id, c_id);
-    let btree = FosterBtree::new(c_key, get_in_mem_pool());
+    let container_id = ContainerId::new(db_id, c_id);
+    let btree = FosterBtree::new(container_id, get_in_mem_pool());
     Arc::new(btree)
 }
 
 pub fn gen_foster_btree_on_disk(bp_size: usize) -> Arc<FosterBtree<BufferPool>> {
     let (db_id, c_id) = (0, 0);
-    let c_key = ContainerKey::new(db_id, c_id);
-    let btree = FosterBtree::new(c_key, get_test_bp_lru(bp_size));
+    let container_id = ContainerId::new(db_id, c_id);
+    let btree = FosterBtree::new(container_id, get_test_bp_lru(bp_size));
     Arc::new(btree)
 }
 
@@ -267,9 +267,9 @@ pub fn gen_paged_hash_map_in_mem() -> Arc<PagedHashMap<InMemPool>> {
     //     old.iter().chain(new.iter()).copied().collect::<Vec<u8>>()
     // });
     // let func = Box::new(|old: &[u8], new: &[u8]| new.to_vec());
-    let c_key = ContainerKey::new(0, 0);
-    // let map = PagedHashMap::new(func, get_in_mem_pool(), c_key, false);
-    let map = PagedHashMap::new(get_in_mem_pool(), c_key, false);
+    let container_id = ContainerId::new(0, 0);
+    // let map = PagedHashMap::new(func, get_in_mem_pool(), container_id, false);
+    let map = PagedHashMap::new(get_in_mem_pool(), container_id, false);
     Arc::new(map)
 }
 
@@ -278,9 +278,9 @@ pub fn gen_paged_hash_map_on_disk(bp_size: usize) -> Arc<PagedHashMap<BufferPool
     //     old.iter().chain(new.iter()).copied().collect::<Vec<u8>>()
     // });
     // let func = Box::new(|old: &[u8], new: &[u8]| new.to_vec());
-    let c_key = ContainerKey::new(0, 0);
-    // let map = PagedHashMap::new(func, get_test_bp(bp_size), c_key, false);
-    let map = PagedHashMap::new(get_test_bp_lru(bp_size), c_key, false);
+    let container_id = ContainerId::new(0, 0);
+    // let map = PagedHashMap::new(func, get_test_bp(bp_size), container_id, false);
+    let map = PagedHashMap::new(get_test_bp_lru(bp_size), container_id, false);
     Arc::new(map)
 }
 

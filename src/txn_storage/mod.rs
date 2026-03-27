@@ -32,7 +32,7 @@ mod tests {
     use crate::{
         bp::{
             get_test_bp_lru,
-            prelude::{ContainerId, DatabaseId},
+            prelude::{DatabaseId, LocalContainerId as ContainerId},
             BufferPool, MemPool,
         },
         container::ContainerManager,

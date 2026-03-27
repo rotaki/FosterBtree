@@ -13,17 +13,14 @@ pub use buffer_pool_clock::BufferPoolClock;
 pub use frame_guards::{FrameReadGuard, FrameWriteGuard};
 pub use in_mem_pool::InMemPool;
 pub use mem_pool_trait::{
-    ContainerId, ContainerKey, DatabaseId, MemPool, MemPoolStatus, PageFrameKey,
+    frame_hint_from_raw, frame_hint_to_raw, ContainerId, DatabaseId, FrameId, LocalContainerId,
+    MemPool, MemPoolStatus, PageAddr, PageRef, INVALID_FRAME_ID,
 };
 pub use vmcache::VMCachePool;
 
 use crate::{container::ContainerManager, random::gen_random_pathname};
 
-use std::{
-    cell::{RefCell, UnsafeCell},
-    collections::{BTreeMap, HashMap},
-    sync::atomic::{AtomicUsize, Ordering},
-};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Statistics kept by the buffer pool.
 /// These statistics are used for decision making.
@@ -169,7 +166,8 @@ pub fn get_in_mem_pool() -> Arc<InMemPool> {
 }
 pub mod prelude {
     pub use super::{
-        get_in_mem_pool, get_test_bp_lru, BufferPool, ContainerId, ContainerKey, DatabaseId,
-        FrameReadGuard, FrameWriteGuard, InMemPool, MemPool, MemPoolStatus, PageFrameKey,
+        get_in_mem_pool, get_test_bp_lru, BufferPool, ContainerId, DatabaseId, FrameId,
+        FrameReadGuard, FrameWriteGuard, InMemPool, LocalContainerId, MemPool, MemPoolStatus,
+        PageAddr, PageRef, INVALID_FRAME_ID,
     };
 }

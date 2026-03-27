@@ -1,6 +1,6 @@
 use fbtree::{
     access_method::fbt::{BTreeKey, FosterBtreeCursor},
-    bp::{ContainerId, ContainerKey, MemPool, PageFrameKey},
+    bp::{ContainerId as PackedContainerId, LocalContainerId as ContainerId, MemPool, PageRef},
     prelude::{FosterBtree, FosterBtreePage, PageId},
     utils::Permutation,
 };
@@ -23,7 +23,7 @@ impl<T: MemPool> SecondaryIndex<T> {
         // Iterate through the table to create the secondary index.
         let mut iter = FosterBtreeCursor::new(primary, &[], &[]);
         let secondary = Arc::new(FosterBtree::new(
-            ContainerKey::new(0, c_id),
+            PackedContainerId::new(0, c_id),
             primary.mem_pool.clone(),
         ));
         while let Some((p_key, _)) = iter.get_kv() {
@@ -64,8 +64,8 @@ impl<T: MemPool> SecondaryIndex<T> {
             let expected_frame_id = u32::from_be_bytes(expected_frame_id.try_into().unwrap());
             let expected_slot_id = u32::from_be_bytes(expected_slot_id.try_into().unwrap());
 
-            let expected_page_frame_key = PageFrameKey::new_with_frame_id(
-                self.primary.c_key,
+            let expected_page_frame_key = PageRef::new_with_frame_id(
+                self.primary.container_id,
                 expected_page_id,
                 expected_frame_id,
             );
@@ -168,8 +168,8 @@ impl<T: MemPool> SecondaryIndex<T> {
             let expected_frame_id = u32::from_be_bytes(expected_frame_id.try_into().unwrap());
             let expected_slot_id = u32::from_be_bytes(expected_slot_id.try_into().unwrap());
 
-            let expected_page_frame_key = PageFrameKey::new_with_frame_id(
-                self.primary.c_key,
+            let expected_page_frame_key = PageRef::new_with_frame_id(
+                self.primary.container_id,
                 expected_page_id,
                 expected_frame_id,
             );
@@ -268,11 +268,11 @@ impl<T: MemPool> SecondaryIndex<T> {
             let actual_frame_id = self
                 .primary
                 .mem_pool
-                .get_page_for_read(PageFrameKey::new_with_frame_id(
-                    self.primary.c_key,
+                .get_page_for_read(
+                    self.primary.container_id,
                     expected_page_id,
-                    expected_frame_id,
-                ))
+                    Some(expected_frame_id),
+                )
                 .unwrap()
                 .frame_id();
             if actual_frame_id == expected_frame_id {
@@ -282,8 +282,8 @@ impl<T: MemPool> SecondaryIndex<T> {
             // Now, check if the page contains the expected key.
             let pri_page = self.primary.traverse_to_leaf_for_read_with_hint(
                 p_key,
-                Some(PageFrameKey::new_with_frame_id(
-                    self.primary.c_key,
+                Some(PageRef::new_with_frame_id(
+                    self.primary.container_id,
                     expected_page_id,
                     expected_frame_id,
                 )),
@@ -455,7 +455,10 @@ pub fn delete_from_tables<M: MemPool>(
 
 pub fn insert_experiment(params: SecBenchParams) {
     let bp = get_test_bp_lru(params.bp_size);
-    let primary = Arc::new(FosterBtree::new(ContainerKey::new(0, 0), Arc::clone(&bp)));
+    let primary = Arc::new(FosterBtree::new(
+        PackedContainerId::new(0, 0),
+        Arc::clone(&bp),
+    ));
     let total_num_keys = (params.num_keys as f64 * 2.0) as usize;
     let perm = Permutation::new(0, total_num_keys - 1);
     // Check uniqueness of the permutation
@@ -509,7 +512,10 @@ pub fn insert_experiment(params: SecBenchParams) {
 
 pub fn delete_experiment(params: SecBenchParams) {
     let bp = get_test_bp_lru(params.bp_size);
-    let primary = Arc::new(FosterBtree::new(ContainerKey::new(0, 0), Arc::clone(&bp)));
+    let primary = Arc::new(FosterBtree::new(
+        PackedContainerId::new(0, 0),
+        Arc::clone(&bp),
+    ));
     let total_num_keys = params.num_keys;
     let perm = Permutation::new(0, total_num_keys - 1);
     // Check uniqueness of the permutation

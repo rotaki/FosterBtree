@@ -1,5 +1,5 @@
 use crate::{
-    bp::{get_test_bp, ContainerId, DatabaseId, MemPool},
+    bp::{get_test_bp, DatabaseId, LocalContainerId as ContainerId, MemPool},
     schema,
     txn_storage2::{
         field::DataType,

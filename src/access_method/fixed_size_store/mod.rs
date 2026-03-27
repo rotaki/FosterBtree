@@ -11,7 +11,7 @@ use crate::{
     access_method::{fixed_size_store::fixed_size_page::FPS_PAGE_HEADER_SIZE, FilterType},
     bp::{FrameReadGuard, FrameWriteGuard, MemPoolStatus},
     page::{Page, PageId, PageVisitor, AVAILABLE_PAGE_SIZE},
-    prelude::{ContainerKey, MemPool, NonUniqueKeyIndex, PageFrameKey},
+    prelude::{ContainerId, MemPool, NonUniqueKeyIndex, PageRef},
     random::gen_truncated_randomized_exponential_backoff,
 };
 
@@ -60,9 +60,9 @@ impl RuntimeStats {
 ///      ----------------------------------------------------------
 ///
 pub struct FixedSizeStore<T: MemPool> {
-    pub c_key: ContainerKey,
-    pub root_key: PageFrameKey,        // Fixed.
-    pub last_key: Mutex<PageFrameKey>, // Variable
+    pub container_id: ContainerId,
+    pub root_key: PageRef,        // Fixed.
+    pub last_key: Mutex<PageRef>, // Variable
     pub mem_pool: Arc<T>,
     pub key_size: usize,
     pub value_size: usize,
@@ -88,26 +88,31 @@ impl<T: MemPool> NonUniqueKeyIndex for FixedSizeStore<T> {
 }
 
 impl<T: MemPool> FixedSizeStore<T> {
-    pub fn new(c_key: ContainerKey, mem_pool: Arc<T>, key_size: usize, value_size: usize) -> Self {
+    pub fn new(
+        container_id: ContainerId,
+        mem_pool: Arc<T>,
+        key_size: usize,
+        value_size: usize,
+    ) -> Self {
         // Root page contains the page id and frame id of the last page in the chain.
-        let mut root_page = mem_pool.create_new_page_for_write(c_key).unwrap();
+        let mut root_page = mem_pool.create_new_page_for_write(container_id).unwrap();
         root_page.init(key_size, value_size);
         assert_eq!(root_page.key_size() as usize, key_size);
         assert_eq!(root_page.val_size() as usize, value_size);
         let root_key = {
             let page_id = root_page.page_id();
             let frame_id = root_page.frame_id();
-            PageFrameKey::new_with_frame_id(c_key, page_id, frame_id)
+            PageRef::new_with_frame_id(container_id, page_id, frame_id)
         };
 
-        let mut data_page = mem_pool.create_new_page_for_write(c_key).unwrap();
+        let mut data_page = mem_pool.create_new_page_for_write(container_id).unwrap();
         data_page.init(key_size, value_size);
         assert_eq!(data_page.key_size() as usize, key_size);
         assert_eq!(data_page.val_size() as usize, value_size);
         let data_key = {
             let page_id = data_page.page_id();
             let frame_id = data_page.frame_id();
-            PageFrameKey::new_with_frame_id(c_key, page_id, frame_id)
+            PageRef::new_with_frame_id(container_id, page_id, frame_id)
         };
 
         // Set the next page of the root page to the data page.
@@ -123,7 +128,7 @@ impl<T: MemPool> FixedSizeStore<T> {
         root_page[FPS_PAGE_HEADER_SIZE..FPS_PAGE_HEADER_SIZE + 8].copy_from_slice(&data_key_bytes);
 
         FixedSizeStore {
-            c_key,
+            container_id,
             root_key,
             last_key: Mutex::new(data_key),
             mem_pool: mem_pool.clone(),
@@ -134,24 +139,30 @@ impl<T: MemPool> FixedSizeStore<T> {
     }
 
     pub fn load(
-        c_key: ContainerKey,
+        container_id: ContainerId,
         mem_pool: Arc<T>,
         root_id: PageId,
         key_size: usize,
         value_size: usize,
     ) -> Self {
         // Assumes that root page's page_id is 0.
-        let root_key = PageFrameKey::new(c_key, root_id);
+        let root_key = PageRef::new(container_id, root_id);
         let last_key = {
-            let root_page = mem_pool.get_page_for_read(root_key).unwrap();
+            let root_page = mem_pool
+                .get_page_for_read(
+                    root_key.container_id(),
+                    root_key.page_id(),
+                    root_key.frame_hint(),
+                )
+                .unwrap();
             let val = &root_page[FPS_PAGE_HEADER_SIZE..FPS_PAGE_HEADER_SIZE + 8];
             let page_id = u32::from_be_bytes(val[0..4].try_into().unwrap());
             let frame_id = u32::from_be_bytes(val[4..8].try_into().unwrap());
-            PageFrameKey::new_with_frame_id(c_key, page_id, frame_id)
+            PageRef::new_with_frame_id(container_id, page_id, frame_id)
         };
 
         FixedSizeStore {
-            c_key,
+            container_id,
             root_key,
             last_key: Mutex::new(last_key),
             mem_pool: mem_pool.clone(),
@@ -162,23 +173,27 @@ impl<T: MemPool> FixedSizeStore<T> {
     }
 
     pub fn bulk_insert_create<K: AsRef<[u8]>, V: AsRef<[u8]>>(
-        c_key: ContainerKey,
+        container_id: ContainerId,
         mem_pool: Arc<T>,
         key_size: usize,
         value_size: usize,
         iter: impl Iterator<Item = (K, V)>,
     ) -> Self {
-        let storage = Self::new(c_key, mem_pool, key_size, value_size);
+        let storage = Self::new(container_id, mem_pool, key_size, value_size);
         for (k, v) in iter {
             storage.append(k.as_ref(), v.as_ref()).unwrap();
         }
         storage
     }
 
-    fn write_page(&self, page_key: &PageFrameKey) -> FrameWriteGuard {
+    fn write_page(&self, page_key: &PageRef) -> FrameWriteGuard {
         let mut attempts = 0;
         loop {
-            match self.mem_pool.get_page_for_write(*page_key) {
+            match self.mem_pool.get_page_for_write(
+                page_key.container_id(),
+                page_key.page_id(),
+                page_key.frame_hint(),
+            ) {
                 Ok(page) => return page,
                 Err(MemPoolStatus::FrameWriteLatchGrantFailed) => {
                     std::thread::sleep(Duration::from_nanos(
@@ -191,10 +206,14 @@ impl<T: MemPool> FixedSizeStore<T> {
         }
     }
 
-    fn read_page(&self, page_key: PageFrameKey) -> FrameReadGuard {
+    fn read_page(&self, page_key: PageRef) -> FrameReadGuard {
         let mut attempts = 0;
         loop {
-            match self.mem_pool.get_page_for_read(page_key) {
+            match self.mem_pool.get_page_for_read(
+                page_key.container_id(),
+                page_key.page_id(),
+                page_key.frame_hint(),
+            ) {
                 Ok(page) => return page,
                 Err(MemPoolStatus::FrameReadLatchGrantFailed) => {
                     std::thread::sleep(Duration::from_nanos(
@@ -241,7 +260,10 @@ impl<T: MemPool> FixedSizeStore<T> {
         } else {
             // New page is created.
             // The new page's page_id and frame_id are written to last page and the root page.
-            let mut new_page = self.mem_pool.create_new_page_for_write(self.c_key).unwrap();
+            let mut new_page = self
+                .mem_pool
+                .create_new_page_for_write(self.container_id)
+                .unwrap();
             new_page.init(self.key_size, self.value_size);
 
             let page_id = new_page.page_id();
@@ -266,7 +288,7 @@ impl<T: MemPool> FixedSizeStore<T> {
             self.stats.inc_num_pages();
 
             // Set the in-memory last key to the new page.
-            let new_key = PageFrameKey::new_with_frame_id(self.c_key, page_id, frame_id);
+            let new_key = PageRef::new_with_frame_id(self.container_id, page_id, frame_id);
             *last_key = new_key;
 
             assert!(new_page.append(key, value));
@@ -326,7 +348,7 @@ impl<T: MemPool> FixedSizeStoreScanner<T> {
         // Read the first data page
         let (data_page_id, data_frame_id) = root_page.next_page().unwrap();
         let data_key =
-            PageFrameKey::new_with_frame_id(self.storage.c_key, data_page_id, data_frame_id);
+            PageRef::new_with_frame_id(self.storage.container_id, data_page_id, data_frame_id);
         let data_page = self.storage.read_page(data_key);
         self.current_page = Some(data_page);
         self.current_slot_id = 0;
@@ -336,8 +358,15 @@ impl<T: MemPool> FixedSizeStoreScanner<T> {
         if let Some(current_page) = &self.current_page {
             if let Some((page_id, frame_id)) = current_page.next_page() {
                 let next_key =
-                    PageFrameKey::new_with_frame_id(self.storage.c_key, page_id, frame_id);
-                self.storage.mem_pool.prefetch_page(next_key).unwrap();
+                    PageRef::new_with_frame_id(self.storage.container_id, page_id, frame_id);
+                self.storage
+                    .mem_pool
+                    .prefetch_page(
+                        next_key.container_id(),
+                        next_key.page_id(),
+                        next_key.frame_hint(),
+                    )
+                    .unwrap();
             }
         }
     }
@@ -392,7 +421,7 @@ impl<T: MemPool> Iterator for FixedSizeStoreScanner<T> {
             match next_page {
                 Some((page_id, frame_id)) => {
                     let next_key =
-                        PageFrameKey::new_with_frame_id(self.storage.c_key, page_id, frame_id);
+                        PageRef::new_with_frame_id(self.storage.container_id, page_id, frame_id);
                     let next_page = self.storage.read_page(next_key);
                     drop(current_page);
 
@@ -413,15 +442,15 @@ impl<T: MemPool> Iterator for FixedSizeStoreScanner<T> {
 }
 
 pub struct FixedSizeStorePageTraversal<T: MemPool> {
-    c_key: ContainerKey,
-    root_key: PageFrameKey,
+    container_id: ContainerId,
+    root_key: PageRef,
     mem_pool: Arc<T>,
 }
 
 impl<T: MemPool> FixedSizeStorePageTraversal<T> {
     pub fn new(aps: &FixedSizeStore<T>) -> Self {
         Self {
-            c_key: aps.c_key,
+            container_id: aps.container_id,
             mem_pool: aps.mem_pool.clone(),
             root_key: aps.root_key,
         }
@@ -433,7 +462,14 @@ impl<T: MemPool> FixedSizeStorePageTraversal<T> {
     {
         let mut stack = vec![(self.root_key, false)];
         while let Some((next_key, pre_visited)) = stack.last_mut() {
-            let page = self.mem_pool.get_page_for_read(*next_key).unwrap();
+            let page = self
+                .mem_pool
+                .get_page_for_read(
+                    next_key.container_id(),
+                    next_key.page_id(),
+                    next_key.frame_hint(),
+                )
+                .unwrap();
             if *pre_visited {
                 visitor.visit_post(&page);
                 stack.pop();
@@ -443,7 +479,7 @@ impl<T: MemPool> FixedSizeStorePageTraversal<T> {
                 visitor.visit_pre(&page);
                 if let Some((next_page_id, next_frame_id)) = page.next_page() {
                     let next_key =
-                        PageFrameKey::new_with_frame_id(self.c_key, next_page_id, next_frame_id);
+                        PageRef::new_with_frame_id(self.container_id, next_page_id, next_frame_id);
                     stack.push((next_key, false));
                 }
             }
@@ -558,15 +594,14 @@ mod tests {
     use std::sync::Arc;
     use std::thread;
 
-    fn get_c_key() -> ContainerKey {
-        // Implementation of the container key creation
-        ContainerKey::new(0, 0)
+    fn get_container_id() -> ContainerId {
+        ContainerId::new(0, 0)
     }
 
     #[test]
     fn test_small_append() {
         let mem_pool = get_test_bp_lru(10);
-        let container_key = get_c_key();
+        let container_key = get_container_id();
         let store = FixedSizeStore::new(container_key, mem_pool, 9, 11);
 
         let key = b"small key";
@@ -577,7 +612,7 @@ mod tests {
     #[test]
     fn test_page_overflow() {
         let mem_pool = get_test_bp_lru(10);
-        let container_key = get_c_key();
+        let container_key = get_container_id();
         let store = FixedSizeStore::new(container_key, mem_pool, 100, 100);
 
         let key = gen_random_byte_vec(100, 100);
@@ -593,7 +628,7 @@ mod tests {
     #[test]
     fn test_basic_scan() {
         let mem_pool = get_test_bp_lru(10);
-        let container_key = get_c_key();
+        let container_key = get_container_id();
         let store = Arc::new(FixedSizeStore::new(container_key, mem_pool.clone(), 11, 13));
 
         let key = b"scanned key";
@@ -622,7 +657,7 @@ mod tests {
             .unwrap();
 
         let store = Arc::new(FixedSizeStore::new(
-            get_c_key(),
+            get_container_id(),
             get_test_bp_lru(10),
             key_size,
             val_size,
@@ -666,7 +701,7 @@ mod tests {
         );
 
         let store = Arc::new(FixedSizeStore::new(
-            get_c_key(),
+            get_container_id(),
             get_test_bp_lru(10),
             key_size,
             val_size,
@@ -703,7 +738,7 @@ mod tests {
     #[test]
     fn test_scan_finish_condition() {
         let mem_pool = get_test_bp_lru(10);
-        let container_key = get_c_key();
+        let container_key = get_container_id();
         let store = Arc::new(FixedSizeStore::new(container_key, mem_pool.clone(), 10, 10));
 
         let mut scanner = store.scan();
@@ -720,7 +755,7 @@ mod tests {
             .unwrap();
 
         let store = Arc::new(FixedSizeStore::bulk_insert_create(
-            get_c_key(),
+            get_container_id(),
             get_test_bp_lru(10),
             key_size,
             val_size,
@@ -753,7 +788,7 @@ mod tests {
             let bp = Arc::new(BufferPool::new(10, cm).unwrap());
 
             let store = Arc::new(FixedSizeStore::bulk_insert_create(
-                get_c_key(),
+                get_container_id(),
                 bp.clone(),
                 key_size,
                 val_size,
@@ -768,7 +803,7 @@ mod tests {
             let cm = Arc::new(ContainerManager::new(temp_dir.path(), false, false).unwrap());
             let bp = Arc::new(BufferPool::new(10, cm).unwrap());
             let store = Arc::new(FixedSizeStore::load(
-                get_c_key(),
+                get_container_id(),
                 bp.clone(),
                 0,
                 key_size,

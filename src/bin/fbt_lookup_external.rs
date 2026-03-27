@@ -7,7 +7,7 @@ use clap::Parser;
 use criterion::black_box;
 use fbtree::{
     affinity::{get_current_cpu, get_total_cpus, with_affinity},
-    bp::{get_bp, ContainerKey, MemPool},
+    bp::{get_bp, ContainerId, MemPool},
     container::ContainerManager,
     event_tracer::trace_lookup,
     prelude::{urand_int, FosterBtree, PAGE_SIZE},
@@ -160,7 +160,7 @@ pub fn main() {
     let bp = get_bp(num_frames, cm.clone());
     println!("Buffer pool allocated in {:?}", start.elapsed());
 
-    let fbt = Arc::new(FosterBtree::load(ContainerKey::new(0, 0), bp.clone(), 0));
+    let fbt = Arc::new(FosterBtree::load(ContainerId::new(0, 0), bp.clone(), 0));
 
     with_affinity(get_total_cpus() - 1, || {
         let current_cpu = get_current_cpu();

@@ -5,14 +5,16 @@ use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::Arc;
 
 use crate::access_method::fbt::{BTreeKey, FosterBtreeCursor};
-use crate::bp::PageFrameKey;
+use crate::bp::PageRef;
 use crate::event_tracer::trace_secidx;
 use crate::page::PageId;
 use crate::prelude::{FosterBtreePage, ScanOptions, UniqueKeyIndex};
 use crate::txn_storage::TxnStorageStatus;
 use crate::{
-    bp::prelude::{ContainerId, DatabaseId, MemPool},
-    prelude::{ContainerKey, FosterBtree},
+    bp::prelude::{
+        ContainerId as PackedContainerId, DatabaseId, LocalContainerId as ContainerId, MemPool,
+    },
+    prelude::FosterBtree,
 };
 
 use super::locktable::ConcurrentLockTable as LockTable;
@@ -47,8 +49,8 @@ impl PhysicalAddress {
         PhysicalAddress { page_id, frame_id }
     }
 
-    pub fn to_pf_key(&self, c_id: ContainerId) -> PageFrameKey {
-        PageFrameKey::new_with_frame_id(ContainerKey::new(0, c_id), self.page_id, self.frame_id)
+    pub fn to_pf_key(&self, c_id: ContainerId) -> PageRef {
+        PageRef::new_with_frame_id(PackedContainerId::new(0, c_id), self.page_id, self.frame_id)
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Self {
@@ -243,7 +245,10 @@ impl<M: MemPool> PrimaryStorages<M> {
     pub fn create_new(&self, bp: &Arc<M>) -> ContainerId {
         let map: &mut HashMap<u16, Arc<PrimaryStorage<M>>> = unsafe { &mut *self.map.get() };
         let c_id = CONTAINER_ID_COUNTER.fetch_add(1, Ordering::AcqRel);
-        let btree = Arc::new(FosterBtree::new(ContainerKey::new(0, c_id), bp.clone()));
+        let btree = Arc::new(FosterBtree::new(
+            PackedContainerId::new(0, c_id),
+            bp.clone(),
+        ));
         let locktable = Arc::new(LockTable::new());
         map.insert(
             c_id,
@@ -258,7 +263,11 @@ impl<M: MemPool> PrimaryStorages<M> {
 
     pub fn load(&self, bp: &Arc<M>, c_id: ContainerId) {
         let map: &mut HashMap<u16, Arc<PrimaryStorage<M>>> = unsafe { &mut *self.map.get() };
-        let btree = Arc::new(FosterBtree::load(ContainerKey::new(0, c_id), bp.clone(), 0));
+        let btree = Arc::new(FosterBtree::load(
+            PackedContainerId::new(0, c_id),
+            bp.clone(),
+            0,
+        ));
         let locktable = Arc::new(LockTable::new());
         map.insert(
             c_id,
@@ -312,7 +321,10 @@ impl<M: MemPool> SecondaryStorages<M> {
     pub fn create_new(&self, bp: &Arc<M>, ps: &Arc<PrimaryStorage<M>>) -> ContainerId {
         let map: &mut HashMap<u16, Arc<SecondaryStorage<M>>> = unsafe { &mut *self.map.get() };
         let c_id = CONTAINER_ID_COUNTER.fetch_add(1, Ordering::AcqRel);
-        let btree = Arc::new(FosterBtree::new(ContainerKey::new(0, c_id), bp.clone()));
+        let btree = Arc::new(FosterBtree::new(
+            PackedContainerId::new(0, c_id),
+            bp.clone(),
+        ));
         let locktable = Arc::new(LockTable::new());
         map.insert(
             c_id,
@@ -328,7 +340,11 @@ impl<M: MemPool> SecondaryStorages<M> {
 
     pub fn load(&self, bp: &Arc<M>, c_id: ContainerId, ps: &Arc<PrimaryStorage<M>>) {
         let map: &mut HashMap<u16, Arc<SecondaryStorage<M>>> = unsafe { &mut *self.map.get() };
-        let btree = Arc::new(FosterBtree::load(ContainerKey::new(0, c_id), bp.clone(), 0));
+        let btree = Arc::new(FosterBtree::load(
+            PackedContainerId::new(0, c_id),
+            bp.clone(),
+            0,
+        ));
         let locktable = Arc::new(LockTable::new());
         map.insert(
             c_id,
@@ -1191,7 +1207,7 @@ impl<M: MemPool> SecondaryIterator<M> {
 impl<M: MemPool> Drop for SecondaryIterator<M> {
     fn drop(&mut self) {
         trace_secidx(
-            self.cursor.c_key().c_id() as u8,
+            self.cursor.container_id().local_container_id() as u8,
             self.hint_worked as u32,
             self.page_hint_failed as u32,
             self.frame_hint_failed as u32,
@@ -1210,7 +1226,7 @@ impl<M: MemPool> NoWaitTxnStorage<M> {
     pub fn new(bp: &Arc<M>) -> Self {
         NoWaitTxnStorage {
             metadata: Arc::new(FosterBtree::new(
-                ContainerKey::new(0, 0), // Metadata container id is 0
+                PackedContainerId::new(0, 0), // Metadata container id is 0
                 bp.clone(),
             )),
             bp: bp.clone(),
@@ -1228,7 +1244,7 @@ impl<M: MemPool> NoWaitTxnStorage<M> {
 
     pub fn load(bp: &Arc<M>) -> Self {
         let metadata = Arc::new(FosterBtree::<M>::load(
-            ContainerKey::new(0, 0),
+            PackedContainerId::new(0, 0),
             bp.clone(),
             0,
         ));

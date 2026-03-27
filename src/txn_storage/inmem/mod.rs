@@ -8,7 +8,7 @@ use super::{
     ContainerDS, ContainerOptions, DBOptions, ScanOptions, TxnOptions, TxnStorageStatus,
     TxnStorageTrait,
 };
-use crate::bp::prelude::{ContainerId, DatabaseId};
+use crate::bp::prelude::{DatabaseId, LocalContainerId as ContainerId};
 use crate::rwlatch::RwLatch;
 
 pub enum Storage {

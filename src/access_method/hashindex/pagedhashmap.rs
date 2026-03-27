@@ -26,7 +26,7 @@ const DEFAULT_BUCKET_NUM: usize = 1024 * 4;
 pub struct PagedHashMap<T: MemPool> {
     // func: Box<dyn Fn(&[u8], &[u8]) -> Vec<u8>>, // func(old_value, new_value) -> new_value
     pub bp: Arc<T>,
-    c_key: ContainerKey,
+    container_id: ContainerId,
 
     pub bucket_num: usize, // number of hash header pages
     frame_buckets: Vec<AtomicU32>, // vec of frame_id for each bucket
@@ -41,7 +41,7 @@ struct _BucketMeta {
 }
 
 /// Opportunistically try to fix the child page frame id
-fn fix_frame_id(this: FrameReadGuard, new_frame_key: &PageFrameKey) -> FrameReadGuard {
+fn fix_frame_id(this: FrameReadGuard, new_frame_key: &PageRef) -> FrameReadGuard {
     match this.try_upgrade(true) {
         Ok(mut write_guard) => {
             write_guard.set_next_frame_id(new_frame_key.frame_id());
@@ -55,7 +55,7 @@ impl<T: MemPool> PagedHashMap<T> {
     pub fn new(
         // func: Box<dyn Fn(&[u8], &[u8]) -> Vec<u8>>,
         bp: Arc<T>,
-        c_key: ContainerKey,
+        container_id: ContainerId,
         from_container: bool,
     ) -> Self {
         if from_container {
@@ -76,7 +76,7 @@ impl<T: MemPool> PagedHashMap<T> {
             //vec![AtomicU32::new(u32::MAX); DEFAULT_BUCKET_NUM + 1];
 
             // SET ROOT: Need to do something for the root page e.g. set n
-            let root_page = bp.create_new_page_for_write(c_key).unwrap();
+            let root_page = bp.create_new_page_for_write(container_id).unwrap();
             #[cfg(feature = "stat")]
             inc_local_stat_total_page_count();
             log_info!(
@@ -94,7 +94,7 @@ impl<T: MemPool> PagedHashMap<T> {
                 .skip(1)
                 .take(DEFAULT_BUCKET_NUM)
             {
-                let mut new_page = bp.create_new_page_for_write(c_key).unwrap();
+                let mut new_page = bp.create_new_page_for_write(container_id).unwrap();
                 #[cfg(feature = "stat")]
                 inc_local_stat_total_page_count();
                 frame_bucket.store(new_page.frame_id(), std::sync::atomic::Ordering::Release);
@@ -110,7 +110,7 @@ impl<T: MemPool> PagedHashMap<T> {
             PagedHashMap {
                 // func,
                 bp: bp.clone(),
-                c_key,
+                container_id,
                 bucket_num: DEFAULT_BUCKET_NUM,
                 frame_buckets,
             }
@@ -138,7 +138,7 @@ impl<T: MemPool> PagedHashMap<T> {
         let expect_frame_id =
             self.frame_buckets[hashed_key as usize].load(std::sync::atomic::Ordering::Acquire);
 
-        let page_key = PageFrameKey::new_with_frame_id(self.c_key, hashed_key, expect_frame_id);
+        let page_key = PageRef::new_with_frame_id(self.container_id, hashed_key, expect_frame_id);
 
         let mut last_page = self.insert_traverse_to_endofchain_for_write(page_key, key.as_ref())?;
         match last_page.insert(key.as_ref(), val.as_ref()) {
@@ -147,7 +147,10 @@ impl<T: MemPool> PagedHashMap<T> {
                 panic!("Key exists should detected in traverse_to_endofchain_for_write")
             }
             Err(ShortKeyPageError::OutOfSpace) => {
-                let mut new_page = self.bp.create_new_page_for_write(self.c_key).unwrap();
+                let mut new_page = self
+                    .bp
+                    .create_new_page_for_write(self.container_id)
+                    .unwrap();
                 #[cfg(feature = "stat")]
                 {
                     inc_local_stat_total_page_count();
@@ -168,7 +171,7 @@ impl<T: MemPool> PagedHashMap<T> {
 
     fn insert_traverse_to_endofchain_for_write(
         &self,
-        page_key: PageFrameKey,
+        page_key: PageRef,
         key: &[u8],
     ) -> Result<FrameWriteGuard, AccessMethodError> {
         let base = Duration::from_millis(1);
@@ -195,12 +198,12 @@ impl<T: MemPool> PagedHashMap<T> {
 
     fn try_insert_traverse_to_endofchain_for_write(
         &self,
-        page_key: PageFrameKey,
+        page_key: PageRef,
         key: &[u8],
     ) -> Result<FrameWriteGuard, AccessMethodError> {
         let mut current_page = self.read_page(page_key);
         if current_page.frame_id() != page_key.frame_id() {
-            self.frame_buckets[page_key.p_key().page_id as usize].store(
+            self.frame_buckets[page_key.page_addr().page_id as usize].store(
                 current_page.frame_id(),
                 std::sync::atomic::Ordering::Release,
             );
@@ -223,7 +226,7 @@ impl<T: MemPool> PagedHashMap<T> {
             }
             let next_frame_id = current_page.get_next_frame_id();
             let mut next_page_key =
-                PageFrameKey::new_with_frame_id(self.c_key, next_page_id, next_frame_id);
+                PageRef::new_with_frame_id(self.container_id, next_page_id, next_frame_id);
             let next_page = self.read_page(next_page_key);
             if next_frame_id != next_page.frame_id() {
                 next_page_key.set_frame_id(next_page.frame_id());
@@ -234,15 +237,19 @@ impl<T: MemPool> PagedHashMap<T> {
     }
 
     // read_page and update frame_buckets
-    fn read_page(&self, page_key: PageFrameKey) -> FrameReadGuard {
+    fn read_page(&self, page_key: PageRef) -> FrameReadGuard {
         loop {
-            let page = self.bp.get_page_for_read(page_key);
+            let page = self.bp.get_page_for_read(
+                page_key.container_id(),
+                page_key.page_id(),
+                page_key.frame_hint(),
+            );
             match page {
                 Ok(page) => {
-                    // if page_key.p_key().page_id <= DEFAULT_BUCKET_NUM as u32
+                    // if page_key.page_addr().page_id <= DEFAULT_BUCKET_NUM as u32
                     //     && page.frame_id() != page_key.frame_id()
                     // {
-                    //     self.frame_buckets[page_key.p_key().page_id as usize]
+                    //     self.frame_buckets[page_key.page_addr().page_id as usize]
                     //         .store(page.frame_id(), std::sync::atomic::Ordering::Release);
                     // }
                     return page;
@@ -260,9 +267,13 @@ impl<T: MemPool> PagedHashMap<T> {
         }
     }
 
-    fn write_page(&self, page_key: PageFrameKey) -> FrameWriteGuard {
+    fn write_page(&self, page_key: PageRef) -> FrameWriteGuard {
         loop {
-            let page = self.bp.get_page_for_write(page_key);
+            let page = self.bp.get_page_for_write(
+                page_key.container_id(),
+                page_key.page_id(),
+                page_key.frame_hint(),
+            );
             match page {
                 Ok(page) => {
                     return page;
@@ -290,7 +301,7 @@ impl<T: MemPool> PagedHashMap<T> {
         let expect_frame_id =
             self.frame_buckets[hashed_key as usize].load(std::sync::atomic::Ordering::Acquire);
 
-        let page_key = PageFrameKey::new_with_frame_id(self.c_key, hashed_key, expect_frame_id);
+        let page_key = PageRef::new_with_frame_id(self.container_id, hashed_key, expect_frame_id);
 
         let (mut updating_page, slot_id) =
             self.update_traverse_to_endofchain_for_write(page_key, key.as_ref())?;
@@ -304,7 +315,10 @@ impl<T: MemPool> PagedHashMap<T> {
                     let next_page_id = updating_page.get_next_page_id();
                     if next_page_id == 0 {
                         // create new page
-                        let mut new_page = self.bp.create_new_page_for_write(self.c_key).unwrap();
+                        let mut new_page = self
+                            .bp
+                            .create_new_page_for_write(self.container_id)
+                            .unwrap();
                         #[cfg(feature = "stat")]
                         inc_local_stat_total_page_count();
                         new_page.init();
@@ -317,7 +331,7 @@ impl<T: MemPool> PagedHashMap<T> {
                     }
                     let next_frame_id = updating_page.get_next_frame_id();
                     let next_page_key =
-                        PageFrameKey::new_with_frame_id(self.c_key, next_page_id, next_frame_id);
+                        PageRef::new_with_frame_id(self.container_id, next_page_id, next_frame_id);
                     let mut next_page = self.write_page(next_page_key);
                     if next_frame_id != next_page.frame_id() {
                         updating_page.set_next_frame_id(next_page.frame_id());
@@ -337,7 +351,7 @@ impl<T: MemPool> PagedHashMap<T> {
 
     fn update_traverse_to_endofchain_for_write(
         &self,
-        page_key: PageFrameKey,
+        page_key: PageRef,
         key: &[u8],
     ) -> Result<(FrameWriteGuard, u16), AccessMethodError> {
         let base = Duration::from_millis(1);
@@ -364,7 +378,7 @@ impl<T: MemPool> PagedHashMap<T> {
 
     fn try_update_traverse_to_endofchain_for_write(
         &self,
-        page_key: PageFrameKey,
+        page_key: PageRef,
         key: &[u8],
     ) -> Result<(FrameWriteGuard, u16), AccessMethodError> {
         let mut current_page = self.read_page(page_key);
@@ -388,7 +402,7 @@ impl<T: MemPool> PagedHashMap<T> {
                     }
                     let next_frame_id = current_page.get_next_frame_id();
                     let mut next_page_key =
-                        PageFrameKey::new_with_frame_id(self.c_key, next_page_id, next_frame_id);
+                        PageRef::new_with_frame_id(self.container_id, next_page_id, next_frame_id);
                     let next_page = self.read_page(next_page_key);
                     if next_frame_id != next_page.frame_id() {
                         next_page_key.set_frame_id(next_page.frame_id());
@@ -420,8 +434,16 @@ impl<T: MemPool> PagedHashMap<T> {
         let expect_frame_id =
             self.frame_buckets[hashed_key as usize].load(std::sync::atomic::Ordering::Acquire);
 
-        let mut page_key = PageFrameKey::new_with_frame_id(self.c_key, hashed_key, expect_frame_id);
-        let mut current_page = self.bp.get_page_for_write(page_key).unwrap();
+        let mut page_key =
+            PageRef::new_with_frame_id(self.container_id, hashed_key, expect_frame_id);
+        let mut current_page = self
+            .bp
+            .get_page_for_write(
+                page_key.container_id(),
+                page_key.page_id(),
+                page_key.frame_hint(),
+            )
+            .unwrap();
         if current_page.frame_id() != expect_frame_id {
             self.frame_buckets[hashed_key as usize].store(
                 current_page.frame_id(),
@@ -443,8 +465,15 @@ impl<T: MemPool> PagedHashMap<T> {
                         break;
                     }
                     page_key =
-                        PageFrameKey::new_with_frame_id(self.c_key, next_page_id, next_frame_id);
-                    let next_page = self.bp.get_page_for_write(page_key).unwrap();
+                        PageRef::new_with_frame_id(self.container_id, next_page_id, next_frame_id);
+                    let next_page = self
+                        .bp
+                        .get_page_for_write(
+                            page_key.container_id(),
+                            page_key.page_id(),
+                            page_key.frame_hint(),
+                        )
+                        .unwrap();
                     if next_frame_id != next_page.frame_id() {
                         current_page.set_next_frame_id(next_page.frame_id());
                     }
@@ -454,7 +483,10 @@ impl<T: MemPool> PagedHashMap<T> {
         }
 
         // If we reach here, we need to create a new page
-        let mut new_page = self.bp.create_new_page_for_write(self.c_key).unwrap();
+        let mut new_page = self
+            .bp
+            .create_new_page_for_write(self.container_id)
+            .unwrap();
         #[cfg(feature = "stat")]
         {
             inc_local_stat_chain_len(hashed_key as usize - 1);
@@ -491,8 +523,16 @@ impl<T: MemPool> PagedHashMap<T> {
         let expect_frame_id =
             self.frame_buckets[hashed_key as usize].load(std::sync::atomic::Ordering::Acquire);
 
-        let mut page_key = PageFrameKey::new_with_frame_id(self.c_key, hashed_key, expect_frame_id);
-        let mut current_page = self.bp.get_page_for_write(page_key).unwrap();
+        let mut page_key =
+            PageRef::new_with_frame_id(self.container_id, hashed_key, expect_frame_id);
+        let mut current_page = self
+            .bp
+            .get_page_for_write(
+                page_key.container_id(),
+                page_key.page_id(),
+                page_key.frame_hint(),
+            )
+            .unwrap();
         if current_page.frame_id() != expect_frame_id {
             self.frame_buckets[hashed_key as usize].store(
                 current_page.frame_id(),
@@ -522,8 +562,15 @@ impl<T: MemPool> PagedHashMap<T> {
             if current_value.is_some() {
                 break;
             }
-            page_key = PageFrameKey::new_with_frame_id(self.c_key, next_page_id, next_frame_id);
-            let next_page = self.bp.get_page_for_write(page_key).unwrap();
+            page_key = PageRef::new_with_frame_id(self.container_id, next_page_id, next_frame_id);
+            let next_page = self
+                .bp
+                .get_page_for_write(
+                    page_key.container_id(),
+                    page_key.page_id(),
+                    page_key.frame_hint(),
+                )
+                .unwrap();
             if next_frame_id != next_page.frame_id() {
                 current_page.set_next_frame_id(next_page.frame_id());
             }
@@ -546,8 +593,15 @@ impl<T: MemPool> PagedHashMap<T> {
         while next_page_id != 0 {
             let next_frame_id = current_page.get_next_frame_id();
 
-            page_key = PageFrameKey::new_with_frame_id(self.c_key, next_page_id, next_frame_id);
-            let next_page = self.bp.get_page_for_write(page_key).unwrap();
+            page_key = PageRef::new_with_frame_id(self.container_id, next_page_id, next_frame_id);
+            let next_page = self
+                .bp
+                .get_page_for_write(
+                    page_key.container_id(),
+                    page_key.page_id(),
+                    page_key.frame_hint(),
+                )
+                .unwrap();
             if next_frame_id != next_page.frame_id() {
                 current_page.set_next_frame_id(next_page.frame_id());
             }
@@ -561,7 +615,10 @@ impl<T: MemPool> PagedHashMap<T> {
         }
 
         // If we reach here, we need to create a new page
-        let mut new_page = self.bp.create_new_page_for_write(self.c_key).unwrap();
+        let mut new_page = self
+            .bp
+            .create_new_page_for_write(self.container_id)
+            .unwrap();
         #[cfg(feature = "stat")]
         {
             inc_local_stat_chain_len(hashed_key as usize - 1);
@@ -586,7 +643,8 @@ impl<T: MemPool> PagedHashMap<T> {
         let expect_frame_id =
             self.frame_buckets[hashed_key as usize].load(std::sync::atomic::Ordering::Acquire);
 
-        let mut page_key = PageFrameKey::new_with_frame_id(self.c_key, hashed_key, expect_frame_id);
+        let mut page_key =
+            PageRef::new_with_frame_id(self.container_id, hashed_key, expect_frame_id);
         let mut current_page = self.read_page(page_key);
         if current_page.frame_id() != expect_frame_id {
             self.frame_buckets[hashed_key as usize].store(
@@ -606,7 +664,7 @@ impl<T: MemPool> PagedHashMap<T> {
             if result.is_some() || next_page_id == 0 {
                 break;
             }
-            page_key = PageFrameKey::new_with_frame_id(self.c_key, next_page_id, next_frame_id);
+            page_key = PageRef::new_with_frame_id(self.container_id, next_page_id, next_frame_id);
             let next_page = self.read_page(page_key);
             if next_frame_id != next_page.frame_id() {
                 page_key.set_frame_id(next_page.frame_id());
@@ -626,16 +684,23 @@ impl<T: MemPool> PagedHashMap<T> {
             inc_local_stat_remove_count();
         }
 
-        let mut page_key = PageFrameKey::new(self.c_key, self.hash(&key));
+        let mut page_key = PageRef::new(self.container_id, self.hash(&key));
         let mut result;
 
         loop {
-            let mut current_page = self.bp.get_page_for_write(page_key).unwrap();
+            let mut current_page = self
+                .bp
+                .get_page_for_write(
+                    page_key.container_id(),
+                    page_key.page_id(),
+                    page_key.frame_hint(),
+                )
+                .unwrap();
             result = current_page.remove(key.as_ref());
             if result.is_some() || current_page.get_next_page_id() == 0 {
                 break;
             }
-            page_key = PageFrameKey::new(self.c_key, current_page.get_next_page_id());
+            page_key = PageRef::new(self.container_id, current_page.get_next_page_id());
         }
         result
     }
@@ -681,7 +746,7 @@ impl<T: MemPool> PagedHashMapIter<T> {
 
     fn initialize(&mut self) {
         assert!(!self.initialized);
-        let page_key = PageFrameKey::new(self.map.c_key, 1);
+        let page_key = PageRef::new(self.map.container_id, 1);
         let first_page = self.map.read_page(page_key);
         self.current_page = Some(first_page);
     }
@@ -720,7 +785,7 @@ impl<T: MemPool> Iterator for PagedHashMapIter<T> {
 
             // If end of current page, fetch next
             if next_page_id != 0 {
-                let nex_page_key = PageFrameKey::new(self.map.c_key, next_page_id);
+                let nex_page_key = PageRef::new(self.map.container_id, next_page_id);
                 let next_page = self.map.read_page(nex_page_key);
                 self.current_page = Some(next_page);
                 self.current_index = 0;
@@ -730,7 +795,7 @@ impl<T: MemPool> Iterator for PagedHashMapIter<T> {
             // No more pages in the current bucket, move to next bucket
             self.current_bucket += 1;
             if self.current_bucket <= self.map.bucket_num {
-                let next_page_key = PageFrameKey::new(self.map.c_key, self.current_bucket as u32);
+                let next_page_key = PageRef::new(self.map.container_id, self.current_bucket as u32);
                 let next_page = self.map.read_page(next_page_key);
                 self.current_page = Some(next_page);
                 self.current_index = 0;
@@ -1019,10 +1084,10 @@ mod tests {
     // Initialize the PagedHashMap for testing
     fn setup_paged_hash_map<T: MemPool>(bp: Arc<T>) -> PagedHashMap<T> {
         let (db_id, c_id) = (0, 0);
-        let c_key = ContainerKey::new(db_id, c_id);
+        let container_id = ContainerId::new(db_id, c_id);
         // let func = Box::new(simple_hash_func);
-        // PagedHashMap::new(func, bp, c_key, false)
-        PagedHashMap::new(bp, c_key, false)
+        // PagedHashMap::new(func, bp, container_id, false)
+        PagedHashMap::new(bp, container_id, false)
     }
 
     /// Helper function to generate random strings of a given length

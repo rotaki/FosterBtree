@@ -1,6 +1,6 @@
 use clap::{Parser, ValueEnum};
 use fbtree::{
-    bp::{get_test_bp_clock, get_test_bp_lru, get_test_vmcache, ContainerKey, MemPool},
+    bp::{get_test_bp_clock, get_test_bp_lru, get_test_vmcache, ContainerId, MemPool},
     prelude::{FosterBtree, UniqueKeyIndex},
     random::RandomKVs,
 };
@@ -63,12 +63,12 @@ fn main() {
         params.val_max_size,
     );
     let (db_id, c_id) = (0, 0);
-    let c_key = ContainerKey::new(db_id, c_id);
+    let container_id = ContainerId::new(db_id, c_id);
     let bp_size = 100000;
     match params.bp_type {
         BPType::BPLRU => {
             let bp = get_test_bp_lru(bp_size);
-            let btree = Arc::new(FosterBtree::new(c_key, bp.clone()));
+            let btree = Arc::new(FosterBtree::new(container_id, bp.clone()));
 
             let start = std::time::Instant::now();
             std::thread::scope(|s| {
@@ -91,7 +91,7 @@ fn main() {
         }
         BPType::BPClock => {
             let bp = get_test_bp_clock(bp_size);
-            let btree = Arc::new(FosterBtree::new(c_key, bp.clone()));
+            let btree = Arc::new(FosterBtree::new(container_id, bp.clone()));
 
             let start = std::time::Instant::now();
             std::thread::scope(|s| {
@@ -114,7 +114,7 @@ fn main() {
         }
         BPType::VMCache => {
             let bp = get_test_vmcache::<false>(bp_size);
-            let btree = Arc::new(FosterBtree::new(c_key, bp.clone()));
+            let btree = Arc::new(FosterBtree::new(container_id, bp.clone()));
 
             let start = std::time::Instant::now();
             std::thread::scope(|s| {

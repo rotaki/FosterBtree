@@ -3,10 +3,10 @@ use crate::log;
 
 use super::{
     frame_guards::{FrameMeta, FrameReadGuard, FrameWriteGuard},
-    mem_pool_trait::{ContainerKey, MemPool, MemPoolStatus, MemoryStats, PageFrameKey, PageKey},
+    mem_pool_trait::{ContainerId, MemPool, MemPoolStatus, MemoryStats, PageAddr, PageRef},
 };
 use crate::{
-    bp::BPStats,
+    bp::{BPStats, FrameId},
     container::ContainerManager,
     log_debug,
     page::{Page, PageId},
@@ -48,7 +48,7 @@ thread_local! {
 }
 
 pub struct PageToFrame {
-    map: HashMap<ContainerKey, HashMap<PageId, usize>>, // (c_key, page_id) -> frame_index
+    map: HashMap<ContainerId, HashMap<PageId, usize>>, // (container_id, page_id) -> frame_index
 }
 
 impl PageToFrame {
@@ -58,40 +58,40 @@ impl PageToFrame {
         }
     }
 
-    pub fn contains_key(&self, p_key: &PageKey) -> bool {
+    pub fn contains_key(&self, page_addr: &PageAddr) -> bool {
         self.map
-            .get(&p_key.c_key)
-            .is_some_and(|m| m.contains_key(&p_key.page_id))
+            .get(&page_addr.container_id)
+            .is_some_and(|m| m.contains_key(&page_addr.page_id))
     }
 
-    pub fn get(&self, p_key: &PageKey) -> Option<&usize> {
-        // Get by c_key and then page_id
+    pub fn get(&self, page_addr: &PageAddr) -> Option<&usize> {
+        // Get by container_id and then page_id
         self.map
-            .get(&p_key.c_key)
-            .and_then(|m| m.get(&p_key.page_id))
+            .get(&page_addr.container_id)
+            .and_then(|m| m.get(&page_addr.page_id))
     }
 
-    pub fn get_page_keys(&self, c_key: ContainerKey) -> Vec<PageFrameKey> {
-        self.map.get(&c_key).map_or(Vec::new(), |m| {
+    pub fn get_page_keys(&self, container_id: ContainerId) -> Vec<PageRef> {
+        self.map.get(&container_id).map_or(Vec::new(), |m| {
             m.iter()
                 .map(|(page_id, frame_index)| {
-                    PageFrameKey::new_with_frame_id(c_key, *page_id, *frame_index as u32)
+                    PageRef::new_with_frame_id(container_id, *page_id, *frame_index as u32)
                 })
                 .collect()
         })
     }
 
-    pub fn insert(&mut self, p_key: PageKey, frame_id: usize) {
+    pub fn insert(&mut self, page_addr: PageAddr, frame_id: usize) {
         self.map
-            .entry(p_key.c_key)
+            .entry(page_addr.container_id)
             .or_default()
-            .insert(p_key.page_id, frame_id);
+            .insert(page_addr.page_id, frame_id);
     }
 
-    pub fn remove(&mut self, p_key: &PageKey) -> Option<usize> {
+    pub fn remove(&mut self, page_addr: &PageAddr) -> Option<usize> {
         self.map
-            .get_mut(&p_key.c_key)
-            .and_then(|m| m.remove(&p_key.page_id))
+            .get_mut(&page_addr.container_id)
+            .and_then(|m| m.remove(&page_addr.page_id))
     }
 
     pub fn clear(&mut self) {
@@ -99,17 +99,20 @@ impl PageToFrame {
     }
 
     #[allow(dead_code)]
-    pub fn iter(&self) -> impl Iterator<Item = (&ContainerKey, &PageId, &usize)> {
-        self.map.iter().flat_map(|(c_key, page_map)| {
+    pub fn iter(&self) -> impl Iterator<Item = (&ContainerId, &PageId, &usize)> {
+        self.map.iter().flat_map(|(container_id, page_map)| {
             page_map
                 .iter()
-                .map(move |(page_id, frame_index)| (c_key, page_id, frame_index))
+                .map(move |(page_id, frame_index)| (container_id, page_id, frame_index))
         })
     }
 
-    pub fn iter_container(&self, c_key: ContainerKey) -> impl Iterator<Item = (&PageId, &usize)> {
+    pub fn iter_container(
+        &self,
+        container_id: ContainerId,
+    ) -> impl Iterator<Item = (&PageId, &usize)> {
         self.map
-            .get(&c_key)
+            .get(&container_id)
             .into_iter()
             .flat_map(|page_map| page_map.iter())
     }
@@ -125,7 +128,7 @@ pub struct BufferPool {
     pages: Vec<Box<Page>>, // Boxed pages have stable addresses after initialization.
     #[allow(clippy::vec_box)]
     metas: Vec<Box<FrameMeta>>, // Boxed frame metadata has stable addresses after initialization.
-    page_to_frame: UnsafeCell<PageToFrame>, // (c_key, page_id) -> frame_index
+    page_to_frame: UnsafeCell<PageToFrame>, // (container_id, page_id) -> frame_index
     stats: BPStats,
 }
 
@@ -215,7 +218,7 @@ impl BufferPool {
     }
 
     #[inline]
-    fn frame_matches_key(&self, index: usize, key: PageKey) -> bool {
+    fn frame_matches_key(&self, index: usize, key: PageAddr) -> bool {
         index < self.num_frames && self.frame_meta(index).key() == Some(key)
     }
 
@@ -359,13 +362,13 @@ impl BufferPool {
         &self,
         victim: &FrameWriteGuard,
     ) -> Result<(), MemPoolStatus> {
-        if let Some(key) = victim.page_key() {
+        if let Some(key) = victim.page_addr() {
             if victim
                 .dirty()
                 .compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire)
                 .is_ok()
             {
-                let container = self.container_manager.get_container(key.c_key);
+                let container = self.container_manager.get_container(key.container_id);
                 container.write_page(key.page_id, victim)?;
             }
         }
@@ -379,14 +382,14 @@ impl BufferPool {
         &self,
         victim: &FrameReadGuard,
     ) -> Result<(), MemPoolStatus> {
-        if let Some(key) = victim.page_key() {
+        if let Some(key) = victim.page_addr() {
             // Compare and swap is_dirty because we don't want to write the page if it is already written by another thread.
             if victim
                 .dirty()
                 .compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire)
                 .is_ok()
             {
-                let container = self.container_manager.get_container(key.c_key);
+                let container = self.container_manager.get_container(key.container_id);
                 container.write_page(key.page_id, victim)?;
             }
         }
@@ -403,9 +406,9 @@ impl MemPool for BufferPool {
     /// The caller is responsible for initializing the page.
     fn create_new_page_for_write(
         &self,
-        c_key: ContainerKey,
+        container_id: ContainerId,
     ) -> Result<FrameWriteGuard, MemPoolStatus> {
-        log_debug!("Page create: {}", c_key);
+        log_debug!("Page create: {}", container_id);
         self.stats.inc_new_page();
 
         // 1. Choose victim
@@ -421,14 +424,14 @@ impl MemPool for BufferPool {
                         self.exclusive();
                         let page_to_frame = unsafe { &mut *self.page_to_frame.get() };
                         // Remove the old mapping
-                        if let Some(old_key) = victim.page_key() {
+                        if let Some(old_key) = victim.page_addr() {
                             page_to_frame.remove(&old_key).unwrap(); // Unwrap is safe because victim's write latch is held. No other thread can remove the old key from page_to_frame before this thread.
                         }
                         // Insert the new mapping
-                        let container = self.container_manager.get_container(c_key);
+                        let container = self.container_manager.get_container(container_id);
                         let page_id = container.inc_page_count(1) as PageId;
                         let index = victim.frame_id();
-                        let key = PageKey::new(c_key, page_id);
+                        let key = PageAddr::new(container_id, page_id);
                         page_to_frame.insert(key, index as usize);
                         self.release_exclusive();
                         key
@@ -436,7 +439,7 @@ impl MemPool for BufferPool {
 
                     // 4. Initialize the page
                     victim.set_id(page_key.page_id); // Initialize the page with the page id
-                    victim.set_page_key(Some(page_key)); // Set the frame key to the new page key
+                    victim.set_page_addr(Some(page_key)); // Set the frame key to the new page key
                     victim.dirty().store(true, Ordering::Release);
                     if small_thread_rng().next_u64() % 10 == 0 {
                         victim.update_eviction_score(LRU_COUNTER.fetch_add(1, Ordering::AcqRel));
@@ -454,7 +457,7 @@ impl MemPool for BufferPool {
 
     fn create_new_pages_for_write(
         &self,
-        c_key: ContainerKey,
+        container_id: ContainerId,
         num_pages: usize,
     ) -> Result<Vec<FrameWriteGuard>, MemPoolStatus> {
         assert!(num_pages > 0);
@@ -476,17 +479,17 @@ impl MemPool for BufferPool {
 
                 // Remove the old mapping
                 for victim in victims.iter() {
-                    if let Some(old_key) = victim.page_key() {
+                    if let Some(old_key) = victim.page_addr() {
                         page_to_frame.remove(&old_key).unwrap(); // Unwrap is safe because victim's write latch is held. No other thread can remove the old key from page_to_frame before this thread.
                     }
                 }
 
                 // Insert the new mapping
-                let container = self.container_manager.get_container(c_key);
+                let container = self.container_manager.get_container(container_id);
                 let start_page_id = container.inc_page_count(num_pages) as PageId;
                 for (i, victim) in victims.iter_mut().enumerate().take(num_pages) {
                     let page_id = start_page_id + i as u32;
-                    let key = PageKey::new(c_key, page_id);
+                    let key = PageAddr::new(container_id, page_id);
                     page_to_frame.insert(key, victim.frame_id() as usize);
                 }
 
@@ -498,9 +501,9 @@ impl MemPool for BufferPool {
             // as the frame is already write-latched.
             for (i, victim) in victims.iter_mut().enumerate() {
                 let page_id = start_page_id + i as u32;
-                let key = PageKey::new(c_key, page_id);
+                let key = PageAddr::new(container_id, page_id);
                 victim.set_id(page_id);
-                victim.set_page_key(Some(key));
+                victim.set_page_addr(Some(key));
                 victim.dirty().store(true, Ordering::Release);
                 victim.update_eviction_score(get_lru_counter());
             }
@@ -512,11 +515,17 @@ impl MemPool for BufferPool {
         }
     }
 
-    fn is_in_mem(&self, key: PageFrameKey) -> bool {
+    fn is_in_mem(
+        &self,
+        container_id: ContainerId,
+        page_id: PageId,
+        frame_hint: Option<FrameId>,
+    ) -> bool {
+        let key = PageRef::new_with_hint(container_id, page_id, frame_hint);
         {
             // Fast path access to the frame using frame_id
             let frame_id = key.frame_id();
-            if self.frame_matches_key(frame_id as usize, key.p_key()) {
+            if self.frame_matches_key(frame_id as usize, key.page_addr()) {
                 return true;
             }
         }
@@ -525,13 +534,19 @@ impl MemPool for BufferPool {
         {
             self.shared();
             let page_to_frame = unsafe { &*self.page_to_frame.get() };
-            let res = page_to_frame.contains_key(&key.p_key());
+            let res = page_to_frame.contains_key(&key.page_addr());
             self.release_shared();
             res
         }
     }
 
-    fn get_page_for_write(&self, key: PageFrameKey) -> Result<FrameWriteGuard, MemPoolStatus> {
+    fn get_page_for_write(
+        &self,
+        container_id: ContainerId,
+        page_id: PageId,
+        frame_hint: Option<FrameId>,
+    ) -> Result<FrameWriteGuard, MemPoolStatus> {
+        let key = PageRef::new_with_hint(container_id, page_id, frame_hint);
         log_debug!("Page write: {}", key);
         self.stats.inc_write_count();
 
@@ -541,9 +556,9 @@ impl MemPool for BufferPool {
             let frame_id = key.frame_id();
             if (frame_id as usize) < self.num_frames {
                 // Check the page_key first to avoid acquiring the latch of a not-matching pageA
-                if self.frame_matches_key(frame_id as usize, key.p_key()) {
+                if self.frame_matches_key(frame_id as usize, key.page_addr()) {
                     match self.try_get_write_guard(frame_id as usize, false) {
-                        Some(g) if g.page_key().map(|k| k == key.p_key()).unwrap_or(false) => {
+                        Some(g) if g.page_addr().map(|k| k == key.page_addr()).unwrap_or(false) => {
                             g.update_eviction_score(get_lru_counter());
                             g.dirty().store(true, Ordering::Release);
                             log_debug!("Page fast path write: {}", key);
@@ -569,7 +584,7 @@ impl MemPool for BufferPool {
             self.shared();
             let page_to_frame = unsafe { &mut *self.page_to_frame.get() };
 
-            if let Some(&index) = page_to_frame.get(&key.p_key()) {
+            if let Some(&index) = page_to_frame.get(&key.page_addr()) {
                 let guard = self.try_get_write_guard(index, true);
                 self.release_shared(); // Critical section ends here
                 return guard
@@ -598,7 +613,7 @@ impl MemPool for BufferPool {
             self.exclusive();
 
             let page_to_frame = unsafe { &mut *self.page_to_frame.get() };
-            match page_to_frame.get(&key.p_key()) {
+            match page_to_frame.get(&key.page_addr()) {
                 Some(&index) => {
                     // Unlikely path as it is already checked in the critical section above with the shared latch.
                     let guard = self.try_get_write_guard(index, true);
@@ -616,21 +631,23 @@ impl MemPool for BufferPool {
                 None => {
                     // Likely path as the page has not been found in the page_to_frame mapping.
                     // Remove the victim from the page_to_frame mapping
-                    if let Some(old_key) = victim.page_key() {
+                    if let Some(old_key) = victim.page_addr() {
                         page_to_frame.remove(&old_key).unwrap();
                         // Unwrap is safe because victim's write latch is held. No other thread can remove the old key from page_to_frame before this thread.
                     }
                     // Insert the new mapping
-                    page_to_frame.insert(key.p_key(), victim.frame_id() as usize);
+                    page_to_frame.insert(key.page_addr(), victim.frame_id() as usize);
 
                     self.release_exclusive();
 
                     // Read the wanted page from disk.
-                    let container = self.container_manager.get_container(key.p_key().c_key);
+                    let container = self
+                        .container_manager
+                        .get_container(key.page_addr().container_id);
                     container
-                        .read_page(key.p_key().page_id, &mut victim)
+                        .read_page(key.page_addr().page_id, &mut victim)
                         .map(|()| {
-                            victim.set_page_key(Some(key.p_key()));
+                            victim.set_page_addr(Some(key.page_addr()));
                             victim.update_eviction_score(get_lru_counter());
                         })?;
                     victim.dirty().store(true, Ordering::Release); // Prepare the page for writing.
@@ -640,7 +657,13 @@ impl MemPool for BufferPool {
         }
     }
 
-    fn get_page_for_read(&self, key: PageFrameKey) -> Result<FrameReadGuard, MemPoolStatus> {
+    fn get_page_for_read(
+        &self,
+        container_id: ContainerId,
+        page_id: PageId,
+        frame_hint: Option<FrameId>,
+    ) -> Result<FrameReadGuard, MemPoolStatus> {
+        let key = PageRef::new_with_hint(container_id, page_id, frame_hint);
         log_debug!("Page read: {}", key);
         self.stats.inc_read_count();
 
@@ -650,10 +673,10 @@ impl MemPool for BufferPool {
             let frame_id = key.frame_id();
             if (frame_id as usize) < self.num_frames {
                 // Check the page_key first to avoid acquiring the latch of a not-matching page
-                if self.frame_matches_key(frame_id as usize, key.p_key()) {
+                if self.frame_matches_key(frame_id as usize, key.page_addr()) {
                     let guard = self.try_get_read_guard(frame_id as usize);
                     match guard {
-                        Some(g) if g.page_key().map(|k| k == key.p_key()).unwrap_or(false) => {
+                        Some(g) if g.page_addr().map(|k| k == key.page_addr()).unwrap_or(false) => {
                             // Update the eviction info
                             g.update_eviction_score(get_lru_counter());
                             log_debug!("Page fast path read: {}", key);
@@ -679,7 +702,7 @@ impl MemPool for BufferPool {
             self.shared();
             let page_to_frame = unsafe { &mut *self.page_to_frame.get() };
 
-            if let Some(&index) = page_to_frame.get(&key.p_key()) {
+            if let Some(&index) = page_to_frame.get(&key.page_addr()) {
                 let guard = self.try_get_read_guard(index);
                 self.release_shared();
                 return guard
@@ -711,7 +734,7 @@ impl MemPool for BufferPool {
             self.exclusive();
 
             let page_to_frame = unsafe { &mut *self.page_to_frame.get() };
-            match page_to_frame.get(&key.p_key()) {
+            match page_to_frame.get(&key.page_addr()) {
                 Some(&index) => {
                     // Unlikely path as it is already checked in the critical section above with the shared latch.
                     let guard = self.try_get_read_guard(index);
@@ -729,19 +752,21 @@ impl MemPool for BufferPool {
                 None => {
                     // Likely path as the page has not been found in the page_to_frame mapping.
                     // Remove the victim from the page_to_frame mapping
-                    if let Some(old_key) = victim.page_key() {
+                    if let Some(old_key) = victim.page_addr() {
                         page_to_frame.remove(&old_key).unwrap(); // Unwrap is safe because victim's write latch is held. No other thread can remove the old key from page_to_frame before this thread.
                     }
                     // Insert the new mapping
-                    page_to_frame.insert(key.p_key(), victim.frame_id() as usize);
+                    page_to_frame.insert(key.page_addr(), victim.frame_id() as usize);
 
                     self.release_exclusive();
 
-                    let container = self.container_manager.get_container(key.p_key().c_key);
+                    let container = self
+                        .container_manager
+                        .get_container(key.page_addr().container_id);
                     container
-                        .read_page(key.p_key().page_id, &mut victim)
+                        .read_page(key.page_addr().page_id, &mut victim)
                         .map(|()| {
-                            victim.set_page_key(Some(key.p_key()));
+                            victim.set_page_addr(Some(key.page_addr()));
                             victim.update_eviction_score(get_lru_counter());
                         })?;
                     Ok(victim.downgrade())
@@ -750,7 +775,12 @@ impl MemPool for BufferPool {
         }
     }
 
-    fn prefetch_page(&self, _key: PageFrameKey) -> Result<(), MemPoolStatus> {
+    fn prefetch_page(
+        &self,
+        _container_id: ContainerId,
+        _page_id: PageId,
+        _frame_hint: Option<FrameId>,
+    ) -> Result<(), MemPoolStatus> {
         Ok(())
     }
 
@@ -790,13 +820,15 @@ impl MemPool for BufferPool {
         let mut num_frames_per_container = BTreeMap::new();
         for i in 0..self.num_frames {
             if let Some(key) = self.frame_meta(i).key() {
-                *num_frames_per_container.entry(key.c_key).or_insert(0) += 1;
+                *num_frames_per_container
+                    .entry(key.container_id)
+                    .or_insert(0) += 1;
             }
         }
         let mut disk_io_per_container = BTreeMap::new();
-        for (c_key, (count, file_stats)) in &self.container_manager.get_stats() {
+        for (container_id, (count, file_stats)) in &self.container_manager.get_stats() {
             disk_io_per_container.insert(
-                *c_key,
+                *container_id,
                 (
                     *count as i64,
                     file_stats.read_count() as i64,
@@ -892,15 +924,15 @@ impl BufferPool {
         let page_to_frame = &*self.page_to_frame.get();
         let mut frame_to_page = HashMap::new();
         for (c, k, &v) in page_to_frame.iter() {
-            let p_key = PageKey::new(*c, *k);
-            frame_to_page.insert(v, p_key);
+            let page_addr = PageAddr::new(*c, *k);
+            frame_to_page.insert(v, page_addr);
         }
         for i in 0..self.num_frames {
             let frame = self.get_read_guard(i);
             if frame_to_page.contains_key(&i) {
-                assert_eq!(frame.page_key().unwrap(), frame_to_page[&i]);
+                assert_eq!(frame.page_addr().unwrap(), frame_to_page[&i]);
             } else {
-                assert_eq!(frame.page_key(), None);
+                assert_eq!(frame.page_addr(), None);
             }
         }
         // println!("page_to_frame: {:?}", page_to_frame);
@@ -912,7 +944,7 @@ impl BufferPool {
     unsafe fn check_frame_id_and_page_id_match(&self) {
         for i in 0..self.num_frames {
             let frame = self.get_read_guard(i);
-            if let Some(key) = frame.page_key() {
+            if let Some(key) = frame.page_addr() {
                 let page_id = frame.page_id();
                 assert_eq!(key.page_id, page_id);
             }
@@ -937,9 +969,9 @@ mod tests {
         let db_id = 0;
         let num_frames = 10;
         let bp = get_test_bp_lru(num_frames);
-        let c_key = ContainerKey::new(db_id, 0);
-        let frame = bp.create_new_page_for_write(c_key).unwrap();
-        let key = frame.page_frame_key().unwrap();
+        let container_id = ContainerId::new(db_id, 0);
+        let frame = bp.create_new_page_for_write(container_id).unwrap();
+        let key = frame.page_ref().unwrap();
         drop(frame);
 
         let num_threads = 3;
@@ -949,7 +981,11 @@ mod tests {
                 s.spawn(|| {
                     for _ in 0..num_iterations {
                         loop {
-                            if let Ok(mut guard) = bp.get_page_for_write(key) {
+                            if let Ok(mut guard) = bp.get_page_for_write(
+                                (key).container_id(),
+                                (key).page_id(),
+                                (key).frame_hint(),
+                            ) {
                                 guard[0] += 1;
                                 break;
                             } else {
@@ -966,8 +1002,10 @@ mod tests {
             bp.run_checks();
         }
         {
-            assert!(bp.is_in_mem(key));
-            let guard = bp.get_page_for_read(key).unwrap();
+            assert!(bp.is_in_mem((key).container_id(), (key).page_id(), (key).frame_hint()));
+            let guard = bp
+                .get_page_for_read((key).container_id(), (key).page_id(), (key).frame_hint())
+                .unwrap();
             assert_eq!(guard[0], num_threads * num_iterations);
         }
         unsafe {
@@ -980,31 +1018,35 @@ mod tests {
         let db_id = 0;
         let num_frames = 1;
         let bp = get_test_bp_lru(num_frames);
-        let c_key = ContainerKey::new(db_id, 0);
+        let container_id = ContainerId::new(db_id, 0);
 
         let key1 = {
-            let mut guard = bp.create_new_page_for_write(c_key).unwrap();
+            let mut guard = bp.create_new_page_for_write(container_id).unwrap();
             guard[0] = 1;
-            guard.page_frame_key().unwrap()
+            guard.page_ref().unwrap()
         };
         let key2 = {
-            let mut guard = bp.create_new_page_for_write(c_key).unwrap();
+            let mut guard = bp.create_new_page_for_write(container_id).unwrap();
             guard[0] = 2;
-            guard.page_frame_key().unwrap()
+            guard.page_ref().unwrap()
         };
         unsafe {
             bp.run_checks();
         }
         // check contents of evicted page
         {
-            assert!(!bp.is_in_mem(key1));
-            let guard = bp.get_page_for_read(key1).unwrap();
+            assert!(!bp.is_in_mem((key1).container_id(), (key1).page_id(), (key1).frame_hint()));
+            let guard = bp
+                .get_page_for_read((key1).container_id(), (key1).page_id(), (key1).frame_hint())
+                .unwrap();
             assert_eq!(guard[0], 1);
         }
         // check contents of the second page
         {
-            assert!(!bp.is_in_mem(key2));
-            let guard = bp.get_page_for_read(key2).unwrap();
+            assert!(!bp.is_in_mem((key2).container_id(), (key2).page_id(), (key2).frame_hint()));
+            let guard = bp
+                .get_page_for_read((key2).container_id(), (key2).page_id(), (key2).frame_hint())
+                .unwrap();
             assert_eq!(guard[0], 2);
         }
         unsafe {
@@ -1018,18 +1060,20 @@ mod tests {
         let mut keys = Vec::new();
         let num_frames = 1;
         let bp = get_test_bp_lru(num_frames);
-        let c_key = ContainerKey::new(db_id, 0);
+        let container_id = ContainerId::new(db_id, 0);
 
         for i in 0..100 {
-            let mut guard = bp.create_new_page_for_write(c_key).unwrap();
+            let mut guard = bp.create_new_page_for_write(container_id).unwrap();
             guard[0] = i;
-            keys.push(guard.page_frame_key().unwrap());
+            keys.push(guard.page_ref().unwrap());
         }
         unsafe {
             bp.run_checks();
         }
         for (i, key) in keys.iter().enumerate() {
-            let guard = bp.get_page_for_read(*key).unwrap();
+            let guard = bp
+                .get_page_for_read((*key).container_id(), (*key).page_id(), (*key).frame_hint())
+                .unwrap();
             assert_eq!(guard[0], i as u8);
         }
         unsafe {
@@ -1043,7 +1087,7 @@ mod tests {
 
         let num_frames = 2;
         let bp = get_test_bp_lru(num_frames);
-        let c_key = ContainerKey::new(db_id, 0);
+        let container_id = ContainerId::new(db_id, 0);
 
         let num_traversal = 100;
 
@@ -1051,15 +1095,15 @@ mod tests {
         let mut keys = Vec::new();
 
         for _ in 0..num_traversal {
-            let mut guard1 = bp.create_new_page_for_write(c_key).unwrap();
+            let mut guard1 = bp.create_new_page_for_write(container_id).unwrap();
             guard1[0] = count;
             count += 1;
-            keys.push(guard1.page_frame_key().unwrap());
+            keys.push(guard1.page_ref().unwrap());
 
-            let mut guard2 = bp.create_new_page_for_write(c_key).unwrap();
+            let mut guard2 = bp.create_new_page_for_write(container_id).unwrap();
             guard2[0] = count;
             count += 1;
-            keys.push(guard2.page_frame_key().unwrap());
+            keys.push(guard2.page_ref().unwrap());
         }
 
         unsafe {
@@ -1068,9 +1112,21 @@ mod tests {
 
         // Traverse by 2 pages at a time
         for i in 0..num_traversal {
-            let guard1 = bp.get_page_for_read(keys[i * 2]).unwrap();
+            let guard1 = bp
+                .get_page_for_read(
+                    (keys[i * 2]).container_id(),
+                    (keys[i * 2]).page_id(),
+                    (keys[i * 2]).frame_hint(),
+                )
+                .unwrap();
             assert_eq!(guard1[0], i as u8 * 2);
-            let guard2 = bp.get_page_for_read(keys[i * 2 + 1]).unwrap();
+            let guard2 = bp
+                .get_page_for_read(
+                    (keys[i * 2 + 1]).container_id(),
+                    (keys[i * 2 + 1]).page_id(),
+                    (keys[i * 2 + 1]).frame_hint(),
+                )
+                .unwrap();
             assert_eq!(guard2[0], i as u8 * 2 + 1);
         }
 
@@ -1085,19 +1141,19 @@ mod tests {
 
         let num_frames = 1;
         let bp = get_test_bp_lru(num_frames);
-        let c_key = ContainerKey::new(db_id, 0);
+        let container_id = ContainerId::new(db_id, 0);
 
-        let mut guard1 = bp.create_new_page_for_write(c_key).unwrap();
+        let mut guard1 = bp.create_new_page_for_write(container_id).unwrap();
         guard1[0] = 1;
 
         // Try to get a new page for write. This should fail because all the frames are latched.
-        let res = bp.create_new_page_for_write(c_key);
+        let res = bp.create_new_page_for_write(container_id);
         assert_eq!(res.unwrap_err(), MemPoolStatus::CannotEvictPage);
 
         drop(guard1);
 
         // Now, we should be able to get a new page for write.
-        let guard2 = bp.create_new_page_for_write(c_key).unwrap();
+        let guard2 = bp.create_new_page_for_write(container_id).unwrap();
         drop(guard2);
     }
 
@@ -1107,13 +1163,13 @@ mod tests {
 
         let num_frames = 10;
         let bp = get_test_bp_lru(num_frames);
-        let c_key = ContainerKey::new(db_id, 0);
+        let container_id = ContainerId::new(db_id, 0);
 
         let mut keys = Vec::new();
         for i in 0..num_frames * 2 {
-            let mut guard = bp.create_new_page_for_write(c_key).unwrap();
+            let mut guard = bp.create_new_page_for_write(container_id).unwrap();
             guard[0] = i as u8;
-            keys.push(guard.page_frame_key().unwrap());
+            keys.push(guard.page_ref().unwrap());
         }
 
         unsafe {
@@ -1130,7 +1186,9 @@ mod tests {
 
         // Check the contents of the pages
         for (i, key) in keys.iter().enumerate() {
-            let guard = bp.get_page_for_read(*key).unwrap();
+            let guard = bp
+                .get_page_for_read((*key).container_id(), (*key).page_id(), (*key).frame_hint())
+                .unwrap();
             assert_eq!(guard[0], i as u8);
         }
 
@@ -1149,12 +1207,12 @@ mod tests {
         {
             let cm = Arc::new(ContainerManager::new(&temp_dir, false, false).unwrap());
             let bp1 = BufferPool::new(num_frames, cm).unwrap();
-            let c_key = ContainerKey::new(db_id, 0);
+            let container_id = ContainerId::new(db_id, 0);
 
             for i in 0..num_frames * 10 {
-                let mut guard = bp1.create_new_page_for_write(c_key).unwrap();
+                let mut guard = bp1.create_new_page_for_write(container_id).unwrap();
                 guard[0] = i as u8;
-                keys.push(guard.page_frame_key().unwrap());
+                keys.push(guard.page_ref().unwrap());
             }
 
             unsafe {
@@ -1176,7 +1234,9 @@ mod tests {
 
             // Check the contents of the pages
             for (i, key) in keys.iter().enumerate() {
-                let guard = bp2.get_page_for_read(*key).unwrap();
+                let guard = bp2
+                    .get_page_for_read((*key).container_id(), (*key).page_id(), (*key).frame_hint())
+                    .unwrap();
                 assert_eq!(guard[0], i as u8);
             }
 
@@ -1192,28 +1252,34 @@ mod tests {
 
         let num_frames = 1;
         let bp = get_test_bp_lru(num_frames);
-        let c_key = ContainerKey::new(db_id, 0);
+        let container_id = ContainerId::new(db_id, 0);
 
         let key_1 = {
-            let mut guard = bp.create_new_page_for_write(c_key).unwrap();
+            let mut guard = bp.create_new_page_for_write(container_id).unwrap();
             guard[0] = 1;
-            guard.page_frame_key().unwrap()
+            guard.page_ref().unwrap()
         };
 
         let stats = bp.eviction_stats();
         println!("{}", stats);
 
         let key_2 = {
-            let mut guard = bp.create_new_page_for_write(c_key).unwrap();
+            let mut guard = bp.create_new_page_for_write(container_id).unwrap();
             guard[0] = 2;
-            guard.page_frame_key().unwrap()
+            guard.page_ref().unwrap()
         };
 
         let stats = bp.eviction_stats();
         println!("{}", stats);
 
         {
-            let guard = bp.get_page_for_read(key_1).unwrap();
+            let guard = bp
+                .get_page_for_read(
+                    (key_1).container_id(),
+                    (key_1).page_id(),
+                    (key_1).frame_hint(),
+                )
+                .unwrap();
             assert_eq!(guard[0], 1);
         }
 
@@ -1221,7 +1287,13 @@ mod tests {
         println!("{}", stats);
 
         {
-            let guard = bp.get_page_for_read(key_2).unwrap();
+            let guard = bp
+                .get_page_for_read(
+                    (key_2).container_id(),
+                    (key_2).page_id(),
+                    (key_2).frame_hint(),
+                )
+                .unwrap();
             assert_eq!(guard[0], 2);
         }
 

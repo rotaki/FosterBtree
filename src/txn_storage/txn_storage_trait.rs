@@ -1,6 +1,6 @@
 use crate::{
     access_method::AccessMethodError,
-    bp::prelude::{ContainerId, DatabaseId},
+    bp::prelude::{DatabaseId, LocalContainerId as ContainerId},
 };
 
 #[derive(Debug, PartialEq, Clone, Copy)]

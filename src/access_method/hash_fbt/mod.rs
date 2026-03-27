@@ -6,7 +6,7 @@ use std::{
 };
 
 use crate::{
-    bp::{ContainerKey, MemPool, PageFrameKey},
+    bp::{ContainerId, MemPool},
     page::{PageId, AVAILABLE_PAGE_SIZE},
     random::gen_random_int,
 };
@@ -27,14 +27,14 @@ pub mod prelude {
 
 pub struct HashFosterBtree<T: MemPool> {
     pub mem_pool: Arc<T>,
-    _c_key: ContainerKey,
+    _c_key: ContainerId,
     num_buckets: usize,
     _meta_page_id: PageId, // Stores the number of buckets and all the page ids of the root of the foster btrees
     buckets: Vec<Arc<FosterBtree<T>>>,
 }
 
 impl<T: MemPool> HashFosterBtree<T> {
-    pub fn new(c_key: ContainerKey, mem_pool: Arc<T>, num_buckets: usize) -> Self {
+    pub fn new(container_id: ContainerId, mem_pool: Arc<T>, num_buckets: usize) -> Self {
         if num_buckets == 0 {
             panic!("Number of buckets cannot be 0");
         }
@@ -45,7 +45,7 @@ impl<T: MemPool> HashFosterBtree<T> {
             panic!("Number of buckets too large to fit in the meta_page page");
         }
 
-        let mut meta_page = mem_pool.create_new_page_for_write(c_key).unwrap();
+        let mut meta_page = mem_pool.create_new_page_for_write(container_id).unwrap();
 
         let mut offset = 0;
         let num_buckets_bytes = num_buckets.to_be_bytes();
@@ -55,9 +55,9 @@ impl<T: MemPool> HashFosterBtree<T> {
         let mut buckets = Vec::with_capacity(num_buckets);
         for _ in 0..num_buckets {
             // Create a new foster btree
-            let tree = Arc::new(FosterBtree::new(c_key, mem_pool.clone()));
+            let tree = Arc::new(FosterBtree::new(container_id, mem_pool.clone()));
 
-            let root_p_id = tree.root_key.p_key().page_id.to_be_bytes();
+            let root_p_id = tree.root_key.page_addr().page_id.to_be_bytes();
             meta_page[offset..offset + root_p_id.len()].copy_from_slice(&root_p_id);
             offset += root_p_id.len();
 
@@ -68,16 +68,16 @@ impl<T: MemPool> HashFosterBtree<T> {
 
         Self {
             mem_pool: mem_pool.clone(),
-            _c_key: c_key,
+            _c_key: container_id,
             num_buckets,
             _meta_page_id: meta_page_id,
             buckets,
         }
     }
 
-    pub fn load(c_key: ContainerKey, mem_pool: Arc<T>, meta_page_id: PageId) -> Self {
+    pub fn load(container_id: ContainerId, mem_pool: Arc<T>, meta_page_id: PageId) -> Self {
         let meta_page = mem_pool
-            .get_page_for_read(PageFrameKey::new(c_key, meta_page_id))
+            .get_page_for_read(container_id, meta_page_id, None)
             .unwrap();
 
         let mut offset = 0;
@@ -90,13 +90,17 @@ impl<T: MemPool> HashFosterBtree<T> {
             let root_page_id_bytes = &meta_page[offset..offset + std::mem::size_of::<PageId>()];
             offset += root_page_id_bytes.len();
             let root_page_id = PageId::from_be_bytes(root_page_id_bytes.try_into().unwrap());
-            let tree = Arc::new(FosterBtree::load(c_key, mem_pool.clone(), root_page_id));
+            let tree = Arc::new(FosterBtree::load(
+                container_id,
+                mem_pool.clone(),
+                root_page_id,
+            ));
             buckets.push(tree);
         }
 
         Self {
             mem_pool: mem_pool.clone(),
-            _c_key: c_key,
+            _c_key: container_id,
             num_buckets,
             _meta_page_id: meta_page_id,
             buckets,
@@ -374,14 +378,14 @@ impl<T: Iterator<Item = (Vec<u8>, Vec<u8>)>> Iterator for HashFosterBtreeOrdered
 
 pub struct HashFosterBtreeAppendOnly<T: MemPool> {
     pub mem_pool: Arc<T>,
-    _c_key: ContainerKey,
+    _c_key: ContainerId,
     num_buckets: usize,
     _meta_page_id: PageId, // Stores the number of buckets and all the page ids of the root of the foster btrees
     buckets: Vec<Arc<FosterBtreeAppendOnly<T>>>,
 }
 
 impl<T: MemPool> HashFosterBtreeAppendOnly<T> {
-    pub fn new(c_key: ContainerKey, mem_pool: Arc<T>, num_buckets: usize) -> Self {
+    pub fn new(container_id: ContainerId, mem_pool: Arc<T>, num_buckets: usize) -> Self {
         if num_buckets == 0 {
             panic!("Number of buckets cannot be 0");
         }
@@ -392,7 +396,7 @@ impl<T: MemPool> HashFosterBtreeAppendOnly<T> {
             panic!("Number of buckets too large to fit in the meta_page page");
         }
 
-        let mut meta_page = mem_pool.create_new_page_for_write(c_key).unwrap();
+        let mut meta_page = mem_pool.create_new_page_for_write(container_id).unwrap();
 
         let mut offset = 0;
         let num_buckets_bytes = num_buckets.to_be_bytes();
@@ -402,9 +406,9 @@ impl<T: MemPool> HashFosterBtreeAppendOnly<T> {
         let mut buckets = Vec::with_capacity(num_buckets);
         for _ in 0..num_buckets {
             // Create a new foster btree
-            let tree = Arc::new(FosterBtreeAppendOnly::new(c_key, mem_pool.clone()));
+            let tree = Arc::new(FosterBtreeAppendOnly::new(container_id, mem_pool.clone()));
 
-            let root_p_id = tree.fbt.root_key.p_key().page_id.to_be_bytes();
+            let root_p_id = tree.fbt.root_key.page_addr().page_id.to_be_bytes();
             meta_page[offset..offset + root_p_id.len()].copy_from_slice(&root_p_id);
             offset += root_p_id.len();
 
@@ -415,16 +419,16 @@ impl<T: MemPool> HashFosterBtreeAppendOnly<T> {
 
         Self {
             mem_pool: mem_pool.clone(),
-            _c_key: c_key,
+            _c_key: container_id,
             num_buckets,
             _meta_page_id: meta_page_id,
             buckets,
         }
     }
 
-    pub fn load(c_key: ContainerKey, mem_pool: Arc<T>, meta_page_id: PageId) -> Self {
+    pub fn load(container_id: ContainerId, mem_pool: Arc<T>, meta_page_id: PageId) -> Self {
         let meta_page = mem_pool
-            .get_page_for_read(PageFrameKey::new(c_key, meta_page_id))
+            .get_page_for_read(container_id, meta_page_id, None)
             .unwrap();
 
         let mut offset = 0;
@@ -438,7 +442,7 @@ impl<T: MemPool> HashFosterBtreeAppendOnly<T> {
             offset += root_page_id_bytes.len();
             let root_page_id = PageId::from_be_bytes(root_page_id_bytes.try_into().unwrap());
             let tree = Arc::new(FosterBtreeAppendOnly::load(
-                c_key,
+                container_id,
                 mem_pool.clone(),
                 root_page_id,
             ));
@@ -447,7 +451,7 @@ impl<T: MemPool> HashFosterBtreeAppendOnly<T> {
 
         Self {
             mem_pool: mem_pool.clone(),
-            _c_key: c_key,
+            _c_key: container_id,
             num_buckets,
             _meta_page_id: meta_page_id,
             buckets,
@@ -491,7 +495,7 @@ mod tests {
         random::{gen_random_permutation, RandomKVs},
     };
 
-    use super::{ContainerKey, HashFosterBtree, MemPool, OrderedUniqueKeyIndex, UniqueKeyIndex};
+    use super::{ContainerId, HashFosterBtree, MemPool, OrderedUniqueKeyIndex, UniqueKeyIndex};
 
     fn to_bytes(num: usize) -> Vec<u8> {
         num.to_be_bytes().to_vec()
@@ -505,9 +509,9 @@ mod tests {
 
     fn setup_hashbtree_empty<T: MemPool>(bp: Arc<T>) -> HashFosterBtree<T> {
         let (db_id, c_id) = (0, 0);
-        let c_key = ContainerKey::new(db_id, c_id);
+        let container_id = ContainerId::new(db_id, c_id);
 
-        HashFosterBtree::new(c_key, bp.clone(), 10)
+        HashFosterBtree::new(container_id, bp.clone(), 10)
     }
 
     #[rstest]
@@ -1025,8 +1029,8 @@ mod tests {
         {
             let cm = Arc::new(ContainerManager::new(temp_dir.path(), false, false).unwrap());
             let bp = Arc::new(BufferPool::new(100, cm).unwrap());
-            let c_key = ContainerKey::new(0, 0);
-            let store = Arc::new(HashFosterBtree::new(c_key, bp.clone(), 10));
+            let container_id = ContainerId::new(0, 0);
+            let store = Arc::new(HashFosterBtree::new(container_id, bp.clone(), 10));
 
             for (key, val) in vals.iter() {
                 store.insert(key, val).unwrap();
@@ -1040,8 +1044,8 @@ mod tests {
             let cm = Arc::new(ContainerManager::new(temp_dir.path(), false, false).unwrap());
             let bp = Arc::new(BufferPool::new(100, cm).unwrap());
 
-            let c_key = ContainerKey::new(0, 0);
-            let store = Arc::new(HashFosterBtree::load(c_key, bp.clone(), 0));
+            let container_id = ContainerId::new(0, 0);
+            let store = Arc::new(HashFosterBtree::load(container_id, bp.clone(), 0));
 
             let scanner = store.scan();
             // Remove the keys from the expected_vals set as they are scanned.

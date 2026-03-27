@@ -16,7 +16,7 @@ use crate::{
 use super::read_optimized_page::ReadOptimizedPage;
 
 pub struct ReadOptimizedChain<T: MemPool> {
-    c_key: ContainerKey,
+    container_id: ContainerId,
     bp: Arc<T>,
 
     first_page_id: PageId,
@@ -24,20 +24,20 @@ pub struct ReadOptimizedChain<T: MemPool> {
 }
 
 impl<T: MemPool> ReadOptimizedChain<T> {
-    pub fn new(c_key: ContainerKey, bp: Arc<T>) -> Self {
-        let mut first_page = bp.create_new_page_for_write(c_key).unwrap();
+    pub fn new(container_id: ContainerId, bp: Arc<T>) -> Self {
+        let mut first_page = bp.create_new_page_for_write(container_id).unwrap();
         first_page.init();
         Self {
-            c_key,
+            container_id,
             bp: bp.clone(),
             first_page_id: first_page.page_id(),
             first_frame_id: AtomicU32::new(first_page.frame_id()),
         }
     }
 
-    pub fn load(c_key: ContainerKey, bp: Arc<T>, first_page_id: PageId) -> Self {
+    pub fn load(container_id: ContainerId, bp: Arc<T>, first_page_id: PageId) -> Self {
         Self {
-            c_key,
+            container_id,
             bp: bp.clone(),
             first_page_id,
             first_frame_id: AtomicU32::new(u32::MAX),
@@ -51,11 +51,15 @@ impl<T: MemPool> ReadOptimizedChain<T> {
         generator.to_string()
     }
 
-    fn read_page(&self, page_key: PageFrameKey) -> FrameReadGuard {
+    fn read_page(&self, page_key: PageRef) -> FrameReadGuard {
         let base = 2;
         let mut attempts = 0;
         loop {
-            let page = self.bp.get_page_for_read(page_key);
+            let page = self.bp.get_page_for_read(
+                page_key.container_id(),
+                page_key.page_id(),
+                page_key.frame_hint(),
+            );
             match page {
                 Ok(page) => {
                     return page;
@@ -79,9 +83,9 @@ impl<T: MemPool> ReadOptimizedChain<T> {
         }
     }
 
-    pub fn first_key(&self) -> PageFrameKey {
-        PageFrameKey::new_with_frame_id(
-            self.c_key,
+    pub fn first_key(&self) -> PageRef {
+        PageRef::new_with_frame_id(
+            self.container_id,
             self.first_page_id,
             self.first_frame_id
                 .load(std::sync::atomic::Ordering::Acquire),
@@ -92,8 +96,8 @@ impl<T: MemPool> ReadOptimizedChain<T> {
         let first_frame_id = self
             .first_frame_id
             .load(std::sync::atomic::Ordering::Acquire);
-        let first_page = self.read_page(PageFrameKey::new_with_frame_id(
-            self.c_key,
+        let first_page = self.read_page(PageRef::new_with_frame_id(
+            self.container_id,
             self.first_page_id,
             first_frame_id,
         ));
@@ -118,7 +122,10 @@ impl<T: MemPool> ReadOptimizedChain<T> {
                     "Not enough space in page {}. Creating a new page.",
                     last_page.get_id()
                 );
-                let mut new_page = self.bp.create_new_page_for_write(self.c_key).unwrap();
+                let mut new_page = self
+                    .bp
+                    .create_new_page_for_write(self.container_id)
+                    .unwrap();
                 new_page.init();
                 last_page.set_next_page(new_page.page_id(), new_page.frame_id());
                 log_trace!(
@@ -137,7 +144,7 @@ impl<T: MemPool> ReadOptimizedChain<T> {
 
     fn traverse_until_endofchain_for_insert(
         &self,
-        page_key: PageFrameKey,
+        page_key: PageRef,
         key: &[u8],
     ) -> Result<FrameWriteGuard, AccessMethodError> {
         let base = 2;
@@ -169,7 +176,7 @@ impl<T: MemPool> ReadOptimizedChain<T> {
 
     fn try_traverse_until_endofchain_for_insert(
         &self,
-        page_key: PageFrameKey,
+        page_key: PageRef,
         key: &[u8],
     ) -> Result<FrameWriteGuard, AccessMethodError> {
         let mut current_page = self.read_page(page_key);
@@ -179,8 +186,8 @@ impl<T: MemPool> ReadOptimizedChain<T> {
                     return Err(AccessMethodError::KeyDuplicate);
                 }
                 // TODO: check free space may can insert here later.
-                let next_page = self.read_page(PageFrameKey::new_with_frame_id(
-                    self.c_key,
+                let next_page = self.read_page(PageRef::new_with_frame_id(
+                    self.container_id,
                     next_page_id,
                     next_frame_id,
                 ));
@@ -188,8 +195,8 @@ impl<T: MemPool> ReadOptimizedChain<T> {
                     log_debug!(
                         "Frame of the next page has been changed. Trying to fix the frame id"
                     );
-                    let new_frame_key = PageFrameKey::new_with_frame_id(
-                        self.c_key,
+                    let new_frame_key = PageRef::new_with_frame_id(
+                        self.container_id,
                         next_page_id,
                         next_page.frame_id(),
                     );
@@ -220,15 +227,15 @@ impl<T: MemPool> ReadOptimizedChain<T> {
                 }
                 Err(AccessMethodError::KeyNotFound) => {
                     if let Some((next_page_id, next_frame_id)) = current_page.next_page() {
-                        let next_page = self.read_page(PageFrameKey::new_with_frame_id(
-                            self.c_key,
+                        let next_page = self.read_page(PageRef::new_with_frame_id(
+                            self.container_id,
                             next_page_id,
                             next_frame_id,
                         ));
                         if next_page.frame_id() != next_frame_id {
                             log_debug!("Frame of the next page has been changed. Trying to fix the frame id");
-                            let new_frame_key = PageFrameKey::new_with_frame_id(
-                                self.c_key,
+                            let new_frame_key = PageRef::new_with_frame_id(
+                                self.container_id,
                                 next_page_id,
                                 next_page.frame_id(),
                             );
@@ -253,7 +260,7 @@ impl<T: MemPool> ReadOptimizedChain<T> {
 
     fn traverse_to_endofchain_for_update(
         &self,
-        page_key: PageFrameKey,
+        page_key: PageRef,
         key: &[u8],
         value: &[u8],
     ) -> Result<FrameWriteGuard, AccessMethodError> {
@@ -292,7 +299,7 @@ impl<T: MemPool> ReadOptimizedChain<T> {
 
     fn try_traverse_to_endofchain_for_update(
         &self,
-        page_key: PageFrameKey,
+        page_key: PageRef,
         key: &[u8],
         value: &[u8],
     ) -> Result<FrameWriteGuard, AccessMethodError> {
@@ -322,8 +329,8 @@ impl<T: MemPool> ReadOptimizedChain<T> {
                 }
             }
             if let Some((next_page_id, next_frame_id)) = current_page.next_page() {
-                let next_page = self.read_page(PageFrameKey::new_with_frame_id(
-                    self.c_key,
+                let next_page = self.read_page(PageRef::new_with_frame_id(
+                    self.container_id,
                     next_page_id,
                     next_frame_id,
                 ));
@@ -331,8 +338,8 @@ impl<T: MemPool> ReadOptimizedChain<T> {
                     log_debug!(
                         "Frame of the next page has been changed. Trying to fix the frame id"
                     );
-                    let new_frame_key = PageFrameKey::new_with_frame_id(
-                        self.c_key,
+                    let new_frame_key = PageRef::new_with_frame_id(
+                        self.container_id,
                         next_page_id,
                         next_page.frame_id(),
                     );
@@ -353,7 +360,7 @@ impl<T: MemPool> ReadOptimizedChain<T> {
 
     fn traverse_to_endofchain_for_upsert(
         &self,
-        page_key: PageFrameKey,
+        page_key: PageRef,
         key: &[u8],
         value: &[u8],
     ) -> Result<FrameWriteGuard, AccessMethodError> {
@@ -392,7 +399,7 @@ impl<T: MemPool> ReadOptimizedChain<T> {
 
     fn try_traverse_to_endofchain_for_upsert(
         &self,
-        page_key: PageFrameKey,
+        page_key: PageRef,
         key: &[u8],
         value: &[u8],
     ) -> Result<FrameWriteGuard, AccessMethodError> {
@@ -422,8 +429,8 @@ impl<T: MemPool> ReadOptimizedChain<T> {
                 }
             }
             if let Some((next_page_id, next_frame_id)) = current_page.next_page() {
-                let next_page = self.read_page(PageFrameKey::new_with_frame_id(
-                    self.c_key,
+                let next_page = self.read_page(PageRef::new_with_frame_id(
+                    self.container_id,
                     next_page_id,
                     next_frame_id,
                 ));
@@ -431,8 +438,8 @@ impl<T: MemPool> ReadOptimizedChain<T> {
                     log_debug!(
                         "Frame of the next page has been changed. Trying to fix the frame id"
                     );
-                    let new_frame_key = PageFrameKey::new_with_frame_id(
-                        self.c_key,
+                    let new_frame_key = PageRef::new_with_frame_id(
+                        self.container_id,
                         next_page_id,
                         next_page.frame_id(),
                     );
@@ -454,8 +461,10 @@ impl<T: MemPool> ReadOptimizedChain<T> {
                                     "Not enough space in page {}. Creating a new page.",
                                     upgraded_page.get_id()
                                 );
-                                let mut new_page =
-                                    self.bp.create_new_page_for_write(self.c_key).unwrap();
+                                let mut new_page = self
+                                    .bp
+                                    .create_new_page_for_write(self.container_id)
+                                    .unwrap();
                                 new_page.init();
                                 upgraded_page
                                     .set_next_page(new_page.page_id(), new_page.frame_id());
@@ -506,10 +515,10 @@ impl<T: MemPool> ReadOptimizedChain<T> {
 }
 
 /// Opportunistically try to fix the next page frame id
-fn fix_frame_id(this: FrameReadGuard, new_frame_key: &PageFrameKey) -> FrameReadGuard {
+fn fix_frame_id(this: FrameReadGuard, new_frame_key: &PageRef) -> FrameReadGuard {
     match this.try_upgrade(true) {
         Ok(mut write_guard) => {
-            write_guard.set_next_page(new_frame_key.p_key().page_id, new_frame_key.frame_id());
+            write_guard.set_next_page(new_frame_key.page_addr().page_id, new_frame_key.frame_id());
             log_debug!("Fixed frame id of the next page");
             write_guard.downgrade()
         }
@@ -628,8 +637,8 @@ impl<T: MemPool> Iterator for ReadOptimizedChainRangeScanner<T> {
                 if !self.r_key.is_empty() && key >= self.r_key {
                     if let Some((next_page_id, next_frame_id)) = current_page.next_page() {
                         // Move to the next page in the chain
-                        let next_page = self.chain.read_page(PageFrameKey::new_with_frame_id(
-                            self.chain.c_key,
+                        let next_page = self.chain.read_page(PageRef::new_with_frame_id(
+                            self.chain.container_id,
                             next_page_id,
                             next_frame_id,
                         ));
@@ -649,8 +658,8 @@ impl<T: MemPool> Iterator for ReadOptimizedChainRangeScanner<T> {
                 continue;
             } else if let Some((next_page_id, next_frame_id)) = current_page.next_page() {
                 // Move to the next page in the chain
-                let next_page = self.chain.read_page(PageFrameKey::new_with_frame_id(
-                    self.chain.c_key,
+                let next_page = self.chain.read_page(PageRef::new_with_frame_id(
+                    self.chain.container_id,
                     next_page_id,
                     next_frame_id,
                 ));
@@ -666,15 +675,15 @@ impl<T: MemPool> Iterator for ReadOptimizedChainRangeScanner<T> {
 }
 
 pub struct ReadOptimizedChainPageTraversal<T: MemPool> {
-    c_key: ContainerKey,
-    first_page: PageFrameKey,
+    container_id: ContainerId,
+    first_page: PageRef,
     mem_pool: Arc<T>,
 }
 
 impl<T: MemPool> ReadOptimizedChainPageTraversal<T> {
     pub fn new(chain: &ReadOptimizedChain<T>) -> Self {
         Self {
-            c_key: chain.c_key,
+            container_id: chain.container_id,
             first_page: chain.first_key(),
             mem_pool: chain.bp.clone(),
         }
@@ -693,7 +702,14 @@ impl<T: MemPool> ReadOptimizedChainPageTraversal<T> {
     {
         let mut stack = vec![(self.first_page, false)]; // (page_key, pre_visited)
         while let Some((next_key, pre_visited)) = stack.last_mut() {
-            let page = self.mem_pool.get_page_for_read(*next_key).unwrap();
+            let page = self
+                .mem_pool
+                .get_page_for_read(
+                    next_key.container_id(),
+                    next_key.page_id(),
+                    next_key.frame_hint(),
+                )
+                .unwrap();
             if *pre_visited {
                 visitor.visit_post(&page);
                 stack.pop();
@@ -703,7 +719,7 @@ impl<T: MemPool> ReadOptimizedChainPageTraversal<T> {
                 visitor.visit_pre(&page);
                 if let Some((next_page_id, next_frame_id)) = page.next_page() {
                     stack.push((
-                        PageFrameKey::new_with_frame_id(self.c_key, next_page_id, next_frame_id),
+                        PageRef::new_with_frame_id(self.container_id, next_page_id, next_frame_id),
                         false,
                     ));
                 }
