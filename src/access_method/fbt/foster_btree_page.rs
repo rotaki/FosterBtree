@@ -224,6 +224,77 @@ impl AsRef<[u8]> for BTreeKey<'_> {
     }
 }
 
+fn compare_slot_key_with_normal_key(page: &Page, slot_id: u32, key: &[u8]) -> std::cmp::Ordering {
+    if slot_id == page.low_fence_slot_id() {
+        if page.is_left_most() {
+            std::cmp::Ordering::Less
+        } else {
+            page.get_raw_key(slot_id).cmp(key)
+        }
+    } else if slot_id == page.high_fence_slot_id() {
+        if page.is_right_most() {
+            std::cmp::Ordering::Greater
+        } else {
+            page.get_raw_key(slot_id).cmp(key)
+        }
+    } else {
+        let slot_key = page.get_raw_key(slot_id);
+        if slot_key.is_empty() {
+            std::cmp::Ordering::Less
+        } else {
+            slot_key.cmp(key)
+        }
+    }
+}
+
+fn lower_bound_slot_id_for_normal_key(page: &Page, key: &[u8]) -> u32 {
+    let low_slot_id = page.low_fence_slot_id();
+    if compare_slot_key_with_normal_key(page, low_slot_id, key) != std::cmp::Ordering::Less {
+        return low_slot_id;
+    }
+
+    let high_slot_id = page.high_fence_slot_id();
+    if compare_slot_key_with_normal_key(page, high_slot_id, key) == std::cmp::Ordering::Less {
+        return high_slot_id + 1;
+    }
+
+    let mut ng = low_slot_id;
+    let mut ok = high_slot_id;
+    while ok - ng > 1 {
+        let mid = ng + (ok - ng) / 2;
+        if compare_slot_key_with_normal_key(page, mid, key) != std::cmp::Ordering::Less {
+            ok = mid;
+        } else {
+            ng = mid;
+        }
+    }
+    ok
+}
+
+fn upper_bound_slot_id_for_normal_key(page: &Page, key: &[u8]) -> u32 {
+    let low_slot_id = page.low_fence_slot_id();
+    if compare_slot_key_with_normal_key(page, low_slot_id, key) == std::cmp::Ordering::Greater {
+        return low_slot_id;
+    }
+
+    let high_slot_id = page.high_fence_slot_id();
+    if compare_slot_key_with_normal_key(page, high_slot_id, key) != std::cmp::Ordering::Greater {
+        return high_slot_id + 1;
+    }
+
+    let mut ng = low_slot_id;
+    let mut ok = high_slot_id;
+    while ok - ng > 1 {
+        let mid = ng + (ok - ng) / 2;
+        if compare_slot_key_with_normal_key(page, mid, key) == std::cmp::Ordering::Greater {
+            ok = mid;
+        } else {
+            ng = mid;
+        }
+    }
+    ok
+}
+
 pub trait FosterBtreePage {
     // Helper functions
     fn page_size(&self) -> usize;
@@ -302,6 +373,7 @@ pub trait FosterBtreePage {
     fn remove(&mut self, key: &[u8]);
     fn append_sorted<K: AsRef<[u8]>, V: AsRef<[u8]>>(&mut self, recs: &[(bool, K, V)]) -> bool;
     fn append_range_from(&mut self, src: &Page, range: std::ops::Range<u32>) -> bool;
+    fn prepend_range_from(&mut self, src: &Page, range: std::ops::Range<u32>) -> bool;
     fn prepend_sorted<K: AsRef<[u8]>, V: AsRef<[u8]>>(&mut self, recs: &[(bool, K, V)]) -> bool;
     fn remove_range(&mut self, start: u32, end: u32);
 
@@ -786,8 +858,10 @@ impl FosterBtreePage for Page {
             self.inside_range(key),
             "key is out of the range of the page"
         );
-        // Binary search returns the left-most slot_id where the key is greater or equal to the given key.
-        let slot_id = self.binary_search(|slot_key| *key <= slot_key);
+        let slot_id = match key {
+            BTreeKey::Normal(raw_key) => lower_bound_slot_id_for_normal_key(self, raw_key),
+            _ => self.binary_search(|slot_key| *key <= slot_key),
+        };
         debug_assert!(self.low_fence_slot_id() <= slot_id && slot_id <= self.high_fence_slot_id());
         slot_id
     }
@@ -812,8 +886,10 @@ impl FosterBtreePage for Page {
             self.inside_range(key),
             "key is out of the range of the page"
         );
-        // Binary search returns the left-most slot_id where the key is greater than the given key.
-        let slot_id = self.binary_search(|slot_key| *key < slot_key);
+        let slot_id = match key {
+            BTreeKey::Normal(raw_key) => upper_bound_slot_id_for_normal_key(self, raw_key),
+            _ => self.binary_search(|slot_key| *key < slot_key),
+        };
         debug_assert!(self.low_fence_slot_id() < slot_id && slot_id <= self.high_fence_slot_id());
         slot_id
     }
@@ -827,10 +903,14 @@ impl FosterBtreePage for Page {
         let slot_id = self.upper_bound_slot_id(key);
         // The right-most slot_id where the key is less than or equal to the given key.
         let slot_id = slot_id - 1;
-        if slot_id != self.low_fence_slot_id() && self.get_btree_key(slot_id) == *key {
-            Some(slot_id)
-        } else {
-            None
+        if slot_id == self.low_fence_slot_id() {
+            return None;
+        }
+        match key {
+            BTreeKey::Normal(raw_key) => (compare_slot_key_with_normal_key(self, slot_id, raw_key)
+                == std::cmp::Ordering::Equal)
+                .then_some(slot_id),
+            _ => (self.get_btree_key(slot_id) == *key).then_some(slot_id),
         }
     }
 
@@ -1154,38 +1234,125 @@ impl FosterBtreePage for Page {
             }
         }
 
-        let inserting_size = src.bytes_used(range.clone()) as usize;
-        if inserting_size > self.contiguous_free_space() as usize {
-            if inserting_size > self.total_free_space() as usize {
-                return false;
+        let mut compacted = false;
+        'retry: loop {
+            let mut offset = self.rec_start_offset();
+            let base_slot_id = self.high_fence_slot_id();
+            let high_fence_slot = self.slot(base_slot_id).unwrap();
+            let final_slot_end = self.slot_offset(base_slot_id + count + 1) as u32;
+            let base_high_fence_so = self.slot_offset(base_slot_id);
+            let mut record_bytes = 0u32;
+
+            for (idx, slot_id) in (range.start..range.end).enumerate() {
+                let mut slot = src.slot(slot_id).unwrap();
+                let rec_size = slot.key_size() + slot.value_size();
+                if offset < final_slot_end + rec_size {
+                    high_fence_slot
+                        .write_to(&mut self[base_high_fence_so..base_high_fence_so + SLOT_SIZE]);
+                    if compacted {
+                        return false;
+                    }
+                    self.compact_space();
+                    compacted = true;
+                    continue 'retry;
+                }
+
+                let next_offset = offset - rec_size;
+                let src_offset = slot.offset() as usize;
+                self[next_offset as usize..next_offset as usize + rec_size as usize]
+                    .copy_from_slice(&src[src_offset..src_offset + rec_size as usize]);
+                slot.set_offset(next_offset);
+                let so = self.slot_offset(base_slot_id + idx as u32);
+                slot.write_to(&mut self[so..so + SLOT_SIZE]);
+                offset = next_offset;
+                record_bytes += rec_size;
             }
-            self.compact_space();
+
+            let high_fence_so = self.slot_offset(base_slot_id + count);
+            high_fence_slot.write_to(&mut self[high_fence_so..high_fence_so + SLOT_SIZE]);
+            self.set_slot_count(base_slot_id + count + 1);
+            self.set_rec_start_offset(offset);
+            self.set_total_bytes_used(
+                self.total_bytes_used() + record_bytes + count * SLOT_SIZE as u32,
+            );
+            return true;
+        }
+    }
+
+    /// Prepend a sorted slot range from another page without re-inserting each
+    /// key/value pair through binary search.
+    fn prepend_range_from(&mut self, src: &Page, range: std::ops::Range<u32>) -> bool {
+        if range.is_empty() {
+            return true;
+        }
+        if range.end > src.high_fence_slot_id() {
+            panic!("Invalid prepend range");
+        }
+        let count = range.end - range.start;
+
+        #[cfg(any(test, debug_assertions))]
+        {
+            let low_fence = self.get_low_fence();
+            let first_slot_key = if self.low_fence_slot_id() + 1 == self.high_fence_slot_id() {
+                self.get_high_fence()
+            } else {
+                self.get_btree_key(self.low_fence_slot_id() + 1)
+            };
+            let first_src_key = BTreeKey::Normal(src.get_raw_key(range.start));
+            let last_src_key = BTreeKey::Normal(src.get_raw_key(range.end - 1));
+            debug_assert!(low_fence <= first_src_key);
+            debug_assert!(last_src_key < first_slot_key);
+            for slot_id in range.start + 1..range.end {
+                debug_assert!(src.get_raw_key(slot_id - 1) < src.get_raw_key(slot_id));
+            }
         }
 
-        let mut offset = self.rec_start_offset();
-        let high_fence_slot = self.slot(self.high_fence_slot_id()).unwrap();
-        let base_slot_id = self.high_fence_slot_id();
+        let mut compacted = false;
+        'retry: loop {
+            let final_slot_end = self.slot_offset(self.slot_count() + count) as u32;
+            let mut offset = self.rec_start_offset();
+            let mut record_bytes = 0u32;
+            let mut moved_slots = Vec::with_capacity(count as usize);
 
-        for (idx, slot_id) in (range.start..range.end).enumerate() {
-            let mut slot = src.slot(slot_id).unwrap();
-            let rec_size = (slot.key_size() + slot.value_size()) as usize;
-            let src_offset = slot.offset() as usize;
-            offset -= rec_size as u32;
-            self[offset as usize..offset as usize + rec_size]
-                .copy_from_slice(&src[src_offset..src_offset + rec_size]);
-            slot.set_offset(offset);
-            let so = self.slot_offset(base_slot_id + idx as u32);
-            slot.write_to(&mut self[so..so + SLOT_SIZE]);
+            for slot_id in range.clone() {
+                let mut slot = src.slot(slot_id).unwrap();
+                let rec_size = slot.key_size() + slot.value_size();
+                if offset < final_slot_end + rec_size {
+                    if compacted {
+                        return false;
+                    }
+                    self.compact_space();
+                    compacted = true;
+                    continue 'retry;
+                }
+
+                let next_offset = offset - rec_size;
+                let src_offset = slot.offset() as usize;
+                self[next_offset as usize..next_offset as usize + rec_size as usize]
+                    .copy_from_slice(&src[src_offset..src_offset + rec_size as usize]);
+                slot.set_offset(next_offset);
+                moved_slots.push(slot);
+                offset = next_offset;
+                record_bytes += rec_size;
+            }
+
+            let shift_src_start = self.slot_offset(1);
+            let shift_src_end = self.slot_offset(self.slot_count());
+            let shift_dst = self.slot_offset(1 + count);
+            self.copy_within(shift_src_start..shift_src_end, shift_dst);
+
+            for (idx, slot) in moved_slots.iter().enumerate() {
+                let so = self.slot_offset(1 + idx as u32);
+                slot.write_to(&mut self[so..so + SLOT_SIZE]);
+            }
+
+            self.set_slot_count(self.slot_count() + count);
+            self.set_rec_start_offset(offset);
+            self.set_total_bytes_used(
+                self.total_bytes_used() + record_bytes + count * SLOT_SIZE as u32,
+            );
+            return true;
         }
-
-        let high_fence_so = self.slot_offset(base_slot_id + count);
-        high_fence_slot.write_to(&mut self[high_fence_so..high_fence_so + SLOT_SIZE]);
-
-        self.set_slot_count(base_slot_id + count + 1);
-        self.set_rec_start_offset(offset);
-        self.set_total_bytes_used(self.total_bytes_used() + inserting_size as u32);
-
-        true
     }
 
     /// Prepend a sorted list of key-value pairs to the page, inserting them between

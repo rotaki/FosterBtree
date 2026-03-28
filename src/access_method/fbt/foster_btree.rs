@@ -947,16 +947,9 @@ fn merge(this: &mut FrameWriteGuard, foster_child: &mut FrameWriteGuard) {
     debug_assert!(is_parent_and_child(this, foster_child));
     debug_assert!(is_foster_relationship(this, foster_child));
 
-    let mut kvs = Vec::new();
-    for i in 1..=foster_child.active_slot_count() {
-        let is_ghost = foster_child.is_ghost(i);
-        let key = foster_child.get_raw_key(i);
-        let val = foster_child.get_val(i);
-        kvs.push((is_ghost, key, val));
-    }
     let foster_child_slot_id = this.foster_child_slot_id();
     this.remove_at(foster_child_slot_id);
-    let res = this.append_sorted(&kvs);
+    let res = this.append_range_from(foster_child, 1..foster_child.high_fence_slot_id());
     assert!(res);
     this.set_has_foster_child(foster_child.has_foster_child());
     this.set_right_most(foster_child.is_right_most());
@@ -994,44 +987,37 @@ fn balance(this: &mut FrameWriteGuard, foster_child: &mut FrameWriteGuard) {
         std::cmp::Ordering::Greater => {
             // Move some slots from this to foster child.
             let mut diff = (this_total - foster_child_total) / 2;
-            let mut moving_slot_ids = Vec::new();
-            let mut moving_kvs: Vec<(bool, &[u8], &[u8])> = Vec::new();
+            let mut moving_start_slot_id = None;
             for i in (1..this.foster_child_slot_id()).rev() {
-                let is_ghost = this.is_ghost(i);
                 let key = this.get_raw_key(i);
                 let val = this.get_val(i);
                 let bytes_needed = this.bytes_needed(key, val);
                 if diff >= bytes_needed {
                     diff -= bytes_needed;
-                    moving_slot_ids.push(i);
-                    moving_kvs.push((is_ghost, key, val));
+                    moving_start_slot_id = Some(i);
                 } else {
                     break;
                 }
             }
-            if moving_kvs.is_empty() {
+            let Some(moving_start_slot_id) = moving_start_slot_id else {
                 // No slots to move
                 return;
-            }
-            // Reverse the moving slots
-            moving_kvs.reverse();
-            moving_slot_ids.reverse();
+            };
             // Before:
             // this [l, k0, k1, k2, ..., f(kN), h) --> foster_child [l(kN), kN, kN+1, ..., h)
             // After:
             // this [l, k0, k1, ..., f(kN-m), h) --> foster_child [l(kN-m), kN-m, kN-m+1, ..., h)
-            foster_child.set_low_fence(moving_kvs[0].1);
-            for (is_ghost, key, val) in moving_kvs {
-                // Pushes the key-value pair to the front. We cannot use append_sorted because
-                // we push the key-value pair to the front.
-                let res = foster_child.insert(key, val, is_ghost);
-                assert!(res);
-            }
+            let moving_end_slot_id = this.foster_child_slot_id();
+            let foster_key = this.get_raw_key(moving_start_slot_id).to_vec();
+            foster_child.set_low_fence(&foster_key);
+            let res =
+                foster_child.prepend_range_from(this, moving_start_slot_id..moving_end_slot_id);
+            assert!(res);
             // Remove the moved slots from this
             let high_fence_slot_id = this.high_fence_slot_id();
-            this.remove_range(moving_slot_ids[0], high_fence_slot_id);
+            this.remove_range(moving_start_slot_id, high_fence_slot_id);
             let res = this.insert(
-                foster_child.get_raw_key(0),
+                &foster_key,
                 &InnerVal::new_with_frame_id(foster_child.page_id(), foster_child.frame_id())
                     .to_bytes(),
                 false,
@@ -1041,28 +1027,25 @@ fn balance(this: &mut FrameWriteGuard, foster_child: &mut FrameWriteGuard) {
         std::cmp::Ordering::Less => {
             // Move some slots from foster child to this.
             let mut diff = (foster_child_total - this_total) / 2;
-            let mut moving_slot_ids = Vec::new();
-            let mut moving_kvs = Vec::new();
             let end = if foster_child.has_foster_child() {
                 // We do not move the foster key
                 foster_child.foster_child_slot_id()
             } else {
                 foster_child.high_fence_slot_id()
             };
+            let mut moving_end_slot_id = 1;
             for i in 1..end {
-                let is_ghost = foster_child.is_ghost(i);
                 let key = foster_child.get_raw_key(i);
                 let val = foster_child.get_val(i);
                 let bytes_needed = foster_child.bytes_needed(key, val);
                 if diff >= bytes_needed {
                     diff -= bytes_needed;
-                    moving_slot_ids.push(i);
-                    moving_kvs.push((is_ghost, key, val));
+                    moving_end_slot_id = i + 1;
                 } else {
                     break;
                 }
             }
-            if moving_kvs.is_empty() {
+            if moving_end_slot_id == 1 {
                 // No slots to move
                 return;
             }
@@ -1072,15 +1055,10 @@ fn balance(this: &mut FrameWriteGuard, foster_child: &mut FrameWriteGuard) {
             // this [l, k0, k1, ..., f(kN+m), h) --> foster_child [l(kN+m), kN+m, kN+m+1, ..., h)
             let foster_child_slot_id = this.foster_child_slot_id();
             this.remove_at(foster_child_slot_id);
-            for (is_ghost, key, val) in moving_kvs {
-                let res = this.insert(key, val, is_ghost);
-                assert!(res);
-            }
+            let res = this.append_range_from(foster_child, 1..moving_end_slot_id);
+            assert!(res);
             // Remove the moved slots from foster child
-            foster_child.remove_range(
-                moving_slot_ids[0],
-                moving_slot_ids[moving_slot_ids.len() - 1] + 1,
-            );
+            foster_child.remove_range(1, moving_end_slot_id);
             let foster_key = foster_child.get_raw_key(1).to_vec();
             foster_child.set_low_fence(&foster_key);
             let foster_child_id =
