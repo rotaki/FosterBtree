@@ -309,9 +309,9 @@ pub trait FosterBtreePage {
     fn binary_search<F>(&self, f: F) -> u32
     where
         F: Fn(BTreeKey) -> bool;
-    fn get_low_fence(&self) -> BTreeKey;
-    fn get_high_fence(&self) -> BTreeKey;
-    fn range(&self) -> (BTreeKey, BTreeKey);
+    fn get_low_fence(&self) -> BTreeKey<'_>;
+    fn get_high_fence(&self) -> BTreeKey<'_>;
+    fn range(&self) -> (BTreeKey<'_>, BTreeKey<'_>);
     fn low_fence_slot_id(&self) -> u32;
     fn high_fence_slot_id(&self) -> u32;
     fn foster_child_slot_id(&self) -> u32;
@@ -353,7 +353,7 @@ pub trait FosterBtreePage {
     fn init_as_root(&mut self);
     fn empty(&self) -> bool;
     fn get_raw_key(&self, slot_id: u32) -> &[u8];
-    fn get_btree_key(&self, slot_id: u32) -> BTreeKey;
+    fn get_btree_key(&self, slot_id: u32) -> BTreeKey<'_>;
     fn get_foster_key(&self) -> &[u8];
     fn get_foster_val(&self) -> &[u8];
     fn get_val(&self, slot_id: u32) -> &[u8];
@@ -662,7 +662,7 @@ impl FosterBtreePage for Page {
         ok
     }
 
-    fn get_low_fence(&self) -> BTreeKey {
+    fn get_low_fence(&self) -> BTreeKey<'_> {
         if self.is_left_most() {
             BTreeKey::MinusInfty
         } else {
@@ -673,7 +673,7 @@ impl FosterBtreePage for Page {
         }
     }
 
-    fn get_high_fence(&self) -> BTreeKey {
+    fn get_high_fence(&self) -> BTreeKey<'_> {
         if self.is_right_most() {
             BTreeKey::PlusInfty
         } else {
@@ -684,7 +684,7 @@ impl FosterBtreePage for Page {
         }
     }
 
-    fn range(&self) -> (BTreeKey, BTreeKey) {
+    fn range(&self) -> (BTreeKey<'_>, BTreeKey<'_>) {
         let low_fence = self.get_low_fence();
         let high_fence = self.get_high_fence();
         (low_fence, high_fence)
@@ -798,7 +798,7 @@ impl FosterBtreePage for Page {
         &self[offset..offset + key_size]
     }
 
-    fn get_btree_key(&self, slot_id: u32) -> BTreeKey {
+    fn get_btree_key(&self, slot_id: u32) -> BTreeKey<'_> {
         if slot_id == self.low_fence_slot_id() {
             self.get_low_fence()
         } else if slot_id == self.high_fence_slot_id() {

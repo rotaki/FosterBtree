@@ -2276,7 +2276,7 @@ impl<T: MemPool> FosterBtreeCursor<T> {
         }
     }
 
-    fn l_key(&self) -> BTreeKey {
+    fn l_key(&self) -> BTreeKey<'_> {
         if self.l_key.is_empty() {
             BTreeKey::MinusInfty
         } else {
@@ -2284,7 +2284,7 @@ impl<T: MemPool> FosterBtreeCursor<T> {
         }
     }
 
-    fn r_key(&self) -> BTreeKey {
+    fn r_key(&self) -> BTreeKey<'_> {
         if self.r_key.is_empty() {
             BTreeKey::PlusInfty
         } else {
@@ -2292,7 +2292,7 @@ impl<T: MemPool> FosterBtreeCursor<T> {
         }
     }
 
-    fn current_high_fence(&self) -> BTreeKey {
+    fn current_high_fence(&self) -> BTreeKey<'_> {
         if self.current_high_fence.as_ref().unwrap().is_empty() {
             BTreeKey::PlusInfty
         } else {

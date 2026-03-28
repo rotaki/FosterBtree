@@ -71,6 +71,7 @@ impl PageToFrame {
             .and_then(|m| m.get(&page_addr.page_id))
     }
 
+    #[allow(dead_code)]
     pub fn get_page_keys(&self, container_id: ContainerId) -> Vec<PageRef> {
         self.map.get(&container_id).map_or(Vec::new(), |m| {
             m.iter()
@@ -107,6 +108,7 @@ impl PageToFrame {
         })
     }
 
+    #[allow(dead_code)]
     pub fn iter_container(
         &self,
         container_id: ContainerId,

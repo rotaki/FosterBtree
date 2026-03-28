@@ -49,6 +49,7 @@ impl PageToFrame {
         }
     }
 
+    #[allow(dead_code)]
     pub fn get_page_keys(&self, container_id: ContainerId) -> Vec<PageRef> {
         let cmap = self.get_cmap(&container_id);
         cmap.iter()

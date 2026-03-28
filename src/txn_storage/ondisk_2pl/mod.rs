@@ -197,7 +197,7 @@ impl ReadWriteSet {
         rwset.insert(key, value);
     }
 
-    pub fn iter(&self) -> std::collections::hash_map::Iter<Vec<u8>, RWEntry> {
+    pub fn iter(&self) -> std::collections::hash_map::Iter<'_, Vec<u8>, RWEntry> {
         let rwset = unsafe { &*self.rwset.get() };
         rwset.iter()
     }

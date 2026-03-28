@@ -5,7 +5,7 @@ use super::{
 use crate::{
     bp::box_as_mut_ptr,
     container::ContainerManager,
-    log, log_warn,
+    log_warn,
     page::{Page, PageId, PAGE_SIZE},
 };
 use libc::{

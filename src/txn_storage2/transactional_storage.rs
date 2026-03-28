@@ -93,7 +93,7 @@ impl ReadWriteSet {
         }
     }
 
-    pub fn iter(&self) -> std::collections::hash_map::Iter<Vec<u8>, RWEntry> {
+    pub fn iter(&self) -> std::collections::hash_map::Iter<'_, Vec<u8>, RWEntry> {
         unsafe { (*self.entries.get()).iter() }
     }
 }
@@ -125,7 +125,7 @@ impl TxnHandle {
         }
     }
 
-    fn rwsets(&self) -> std::collections::hash_map::Iter<ContainerId, ReadWriteSet> {
+    fn rwsets(&self) -> std::collections::hash_map::Iter<'_, ContainerId, ReadWriteSet> {
         unsafe { (*self.rwsets.get()).iter() }
     }
 }
