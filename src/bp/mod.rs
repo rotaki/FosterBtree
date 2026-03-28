@@ -1,11 +1,10 @@
 mod buffer_pool_clock;
 mod buffer_pool_lru;
-mod resident_set;
 mod vmcache;
 
-use std::sync::Arc;
 pub use buffer_pool_clock::BufferPoolClock;
 pub use buffer_pool_lru::BufferPoolLRU;
+use std::sync::Arc;
 pub use vmcache::VMCachePool;
 
 use crate::{container::ContainerManager, random::gen_random_pathname};
@@ -324,7 +323,6 @@ impl std::fmt::Display for PageRef {
         }
     }
 }
-
 
 #[cfg(test)]
 mod id_tests {
