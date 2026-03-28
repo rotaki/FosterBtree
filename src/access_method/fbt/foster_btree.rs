@@ -14,7 +14,7 @@ use crate::{
     random::gen_truncated_randomized_exponential_backoff,
 };
 
-use super::foster_btree_page::{BTreeKey, FosterBtreePage};
+use super::foster_btree_page::{BTreeKey, FosterBtreePage, PAGE_HEADER_SIZE};
 
 #[derive(Clone, Copy, Debug)]
 enum OpType {
@@ -395,7 +395,7 @@ use stat::*;
 // If the page has less than MIN_BYTES_USED, then we need to MERGE or LOADBALANCE.
 pub const MIN_BYTES_USED: usize = AVAILABLE_PAGE_SIZE / 5;
 // If the page has more than MAX_BYTES_USED, then we need to LOADBALANCE.
-pub const MAX_BYTES_USED: usize = AVAILABLE_PAGE_SIZE * 4 / 5;
+pub const MAX_BYTES_USED: usize = AVAILABLE_PAGE_SIZE * 7 / 8;
 
 #[inline]
 fn is_small(page: &Page) -> bool {
@@ -414,6 +414,8 @@ pub(crate) struct InnerVal {
 }
 
 impl InnerVal {
+    pub const BYTE_LEN: usize = 8;
+
     pub fn new_with_frame_id(page_id: PageId, frame_id: u32) -> Self {
         InnerVal { page_id, frame_id }
     }
@@ -671,6 +673,85 @@ fn fix_frame_id(this: FrameReadGuard, _slot_id: u32, _new_frame_key: &PageRef) -
     }
 }
 
+fn split_at(
+    this: &mut Page,
+    foster_child: &mut Page,
+    moving_start_slot_id: u32,
+    foster_child_val: &[u8],
+) -> Vec<u8> {
+    try_split_at(this, foster_child, moving_start_slot_id, foster_child_val)
+        .expect("split_at requires a valid split point")
+}
+
+fn try_split_at(
+    this: &mut Page,
+    foster_child: &mut Page,
+    moving_start_slot_id: u32,
+    foster_child_val: &[u8],
+) -> Option<Vec<u8>> {
+    debug_assert!(moving_start_slot_id > this.low_fence_slot_id());
+    debug_assert!(moving_start_slot_id < this.high_fence_slot_id());
+
+    let high_fence_slot_id = this.high_fence_slot_id();
+    let foster_key = this.get_raw_key(moving_start_slot_id).to_vec();
+
+    foster_child.init();
+    foster_child.set_level(this.level());
+    foster_child.set_low_fence(&foster_key);
+    foster_child.set_high_fence(this.get_raw_key(high_fence_slot_id));
+    foster_child.set_right_most(this.is_right_most());
+    if !foster_child.append_range_from(this, moving_start_slot_id..high_fence_slot_id) {
+        return None;
+    }
+    foster_child.set_has_foster_child(this.has_foster_child());
+
+    this.remove_range(moving_start_slot_id, high_fence_slot_id);
+    if !this.insert(&foster_key, foster_child_val, false) {
+        return None;
+    }
+    this.set_has_foster_child(true);
+
+    Some(foster_key)
+}
+
+fn choose_even_split_start_slot(this: &Page) -> Option<u32> {
+    let this_total = this.total_bytes_used();
+    let mut half_bytes = this_total / 2;
+    let high_fence_slot_id = this.high_fence_slot_id();
+    let high_fence_key = this.get_raw_key(high_fence_slot_id);
+    let foster_child_val_placeholder = [0_u8; InnerVal::BYTE_LEN];
+    let right_page_base = PAGE_HEADER_SIZE as u32 + this.bytes_needed(high_fence_key, &[]);
+
+    let mut right_records_bytes = 0u32;
+    let mut moving_start_slot_id = None;
+
+    for i in (1..high_fence_slot_id).rev() {
+        let key = this.get_raw_key(i);
+        let val = this.get_val(i);
+        let slot_bytes = this.bytes_needed(key, val);
+
+        if half_bytes < slot_bytes {
+            break;
+        }
+        half_bytes -= slot_bytes;
+        right_records_bytes += slot_bytes;
+
+        let foster_insert_bytes = this.bytes_needed(key, &foster_child_val_placeholder);
+        let left_bytes_after = this_total - right_records_bytes + foster_insert_bytes;
+        if left_bytes_after > AVAILABLE_PAGE_SIZE as u32 {
+            continue;
+        }
+
+        let right_bytes_total = right_page_base + this.bytes_needed(key, &[]) + right_records_bytes;
+        if right_bytes_total > AVAILABLE_PAGE_SIZE as u32 {
+            continue;
+        }
+
+        moving_start_slot_id = Some(i);
+    }
+    moving_start_slot_id
+}
+
 /// Split this page into two pages.
 /// The foster child will be the right page of this page after the split.
 /// Returns the foster key
@@ -678,55 +759,17 @@ fn split_even(this: &mut FrameWriteGuard, foster_child: &mut FrameWriteGuard) ->
     #[cfg(feature = "stat")]
     inc_local_stat_success(OpType::Split);
 
-    // The page is full and we need to split the page.
-    // First, we split the page into two pages with (almost) equal sizes.
-    let total_size = this.total_bytes_used();
-    let mut half_bytes = total_size / 2;
-    let mut moving_slot_ids = Vec::with_capacity((this.active_slot_count() as usize) / 2); // Roughly half of the slots will be moved to the foster child.
-    let mut moving_kvs = Vec::with_capacity((this.active_slot_count() as usize) / 2); // Roughly half of the slots will be moved to the foster child.
-    for i in (1..this.high_fence_slot_id()).rev() {
-        let is_ghost = this.is_ghost(i);
-        let key = this.get_raw_key(i);
-        let val = this.get_val(i);
-        let bytes_needed = this.bytes_needed(key, val);
-        if half_bytes >= bytes_needed {
-            half_bytes -= bytes_needed;
-            moving_slot_ids.push(i);
-            moving_kvs.push((is_ghost, key, val));
-        } else {
-            break;
-        }
-    }
-    if moving_kvs.is_empty() {
-        // Print this page
-        // panic!("Page is full but cannot split because the slots are too large");
+    let Some(moving_start_slot_id) = choose_even_split_start_slot(this) else {
         return split_min_move(this, foster_child);
-    }
-
-    // Reverse the moving slots
-    moving_kvs.reverse();
-    moving_slot_ids.reverse();
-
-    let foster_key = moving_kvs[0].1.to_vec();
-
-    foster_child.init();
-    foster_child.set_level(this.level());
-    foster_child.set_low_fence(&foster_key);
-    foster_child.set_high_fence(this.get_raw_key(this.high_fence_slot_id()));
-    foster_child.set_right_most(this.is_right_most());
-    let res = foster_child.append_sorted(&moving_kvs);
-    assert!(res);
-    foster_child.set_has_foster_child(this.has_foster_child());
-    // Remove the moved slots from this
-    let high_fence_slot_id = this.high_fence_slot_id();
-    this.remove_range(moving_slot_ids[0], high_fence_slot_id);
+    };
     let foster_child_id =
         InnerVal::new_with_frame_id(foster_child.page_id(), foster_child.frame_id());
-    let res = this.insert(&foster_key, &foster_child_id.to_bytes(), false);
-    assert!(res);
-    this.set_has_foster_child(true);
-
-    foster_key
+    split_at(
+        &mut *this,
+        &mut *foster_child,
+        moving_start_slot_id,
+        &foster_child_id.to_bytes(),
+    )
 }
 
 /// Split this page into two pages with minimum moving slots
@@ -741,30 +784,14 @@ fn split_min_move(this: &mut FrameWriteGuard, foster_child: &mut FrameWriteGuard
     }
 
     let moving_slot_id = this.high_fence_slot_id() - 1;
-    let is_ghost = this.is_ghost(moving_slot_id);
-    let moving_key = this.get_raw_key(moving_slot_id);
-    let moving_val = this.get_val(moving_slot_id);
-
-    foster_child.init();
-    foster_child.set_level(this.level());
-    foster_child.set_low_fence(moving_key);
-    foster_child.set_high_fence(this.get_raw_key(this.high_fence_slot_id()));
-    foster_child.set_right_most(this.is_right_most());
-    let res = foster_child.insert(moving_key, moving_val, is_ghost);
-    assert!(res);
-    foster_child.set_has_foster_child(this.has_foster_child());
-
-    let foster_key = moving_key.to_vec();
-    // Remove the moved slot from this
-    this.remove_at(moving_slot_id);
-
     let foster_child_id =
         InnerVal::new_with_frame_id(foster_child.page_id(), foster_child.frame_id());
-    let res = this.insert(&foster_key, &foster_child_id.to_bytes(), false);
-    assert!(res);
-    this.set_has_foster_child(true);
-
-    foster_key
+    split_at(
+        &mut *this,
+        &mut *foster_child,
+        moving_slot_id,
+        &foster_child_id.to_bytes(),
+    )
 }
 
 /// Splitting the page and insert the key-value pair in the appropriate page.

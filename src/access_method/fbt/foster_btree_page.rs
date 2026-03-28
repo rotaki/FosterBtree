@@ -130,6 +130,14 @@ mod slot {
         pub fn total_size(&self) -> u32 {
             self.key_size + self.value_size + SLOT_SIZE as u32
         }
+
+        /// Write the slot directly into a destination byte slice, avoiding an intermediate array.
+        pub fn write_to(&self, dest: &mut [u8]) {
+            dest[0] = self.ghost;
+            dest[1..5].copy_from_slice(&self.offset.to_be_bytes());
+            dest[5..9].copy_from_slice(&self.key_size.to_be_bytes());
+            dest[9..13].copy_from_slice(&self.value_size.to_be_bytes());
+        }
     }
 }
 
@@ -293,6 +301,8 @@ pub trait FosterBtreePage {
     fn insert(&mut self, key: &[u8], value: &[u8], is_ghost: bool) -> bool;
     fn remove(&mut self, key: &[u8]);
     fn append_sorted<K: AsRef<[u8]>, V: AsRef<[u8]>>(&mut self, recs: &[(bool, K, V)]) -> bool;
+    fn append_range_from(&mut self, src: &Page, range: std::ops::Range<u32>) -> bool;
+    fn prepend_sorted<K: AsRef<[u8]>, V: AsRef<[u8]>>(&mut self, recs: &[(bool, K, V)]) -> bool;
     fn remove_range(&mut self, start: u32, end: u32);
 
     fn run_consistency_checks(&self, include_no_garbage_checks: bool);
@@ -389,12 +399,7 @@ impl FosterBtreePage for Page {
     /// The low fence and high fence are always present.
     /// Therefore, the slot count should be at least 2 after the initialization.
     fn slot_count(&self) -> u32 {
-        let offset = 2;
-        u32::from_be_bytes(
-            self[offset..offset + std::mem::size_of::<u32>()]
-                .try_into()
-                .unwrap(),
-        )
+        u32::from_be_bytes([self[2], self[3], self[4], self[5]])
     }
 
     /// The number of active slots in the page.
@@ -405,9 +410,7 @@ impl FosterBtreePage for Page {
     }
 
     fn set_slot_count(&mut self, slot_count: u32) {
-        let bytes = slot_count.to_be_bytes();
-        let offset = 2;
-        self[offset..offset + std::mem::size_of::<u32>()].copy_from_slice(&bytes);
+        self[2..6].copy_from_slice(&slot_count.to_be_bytes());
     }
 
     fn increment_slot_count(&mut self) {
@@ -429,18 +432,11 @@ impl FosterBtreePage for Page {
     }
 
     fn total_bytes_used(&self) -> u32 {
-        let offset = 2 + 4;
-        u32::from_be_bytes(
-            self[offset..offset + std::mem::size_of::<u32>()]
-                .try_into()
-                .unwrap(),
-        )
+        u32::from_be_bytes([self[6], self[7], self[8], self[9]])
     }
 
     fn set_total_bytes_used(&mut self, total_bytes_used: u32) {
-        let bytes = total_bytes_used.to_be_bytes();
-        let offset = 2 + 4;
-        self[offset..offset + std::mem::size_of::<u32>()].copy_from_slice(&bytes);
+        self[6..10].copy_from_slice(&total_bytes_used.to_be_bytes());
     }
 
     fn bytes_used(&self, range: std::ops::Range<u32>) -> u32 {
@@ -462,18 +458,11 @@ impl FosterBtreePage for Page {
     }
 
     fn rec_start_offset(&self) -> u32 {
-        let offset = 2 + 4 + 4;
-        u32::from_be_bytes(
-            self[offset..offset + std::mem::size_of::<u32>()]
-                .try_into()
-                .unwrap(),
-        )
+        u32::from_be_bytes([self[10], self[11], self[12], self[13]])
     }
 
     fn set_rec_start_offset(&mut self, rec_start_offset: u32) {
-        let bytes = rec_start_offset.to_be_bytes();
-        let offset = 2 + 4 + 4;
-        self[offset..offset + std::mem::size_of::<u32>()].copy_from_slice(&bytes);
+        self[10..14].copy_from_slice(&rec_start_offset.to_be_bytes());
     }
 
     fn contiguous_free_space(&self) -> u32 {
@@ -493,7 +482,10 @@ impl FosterBtreePage for Page {
     fn slot(&self, slot_id: u32) -> Option<Slot> {
         if slot_id < self.slot_count() {
             let offset = self.slot_offset(slot_id);
-            let slot_bytes: [u8; SLOT_SIZE] = self[offset..offset + SLOT_SIZE].try_into().unwrap();
+            // SAFETY: offset is derived from a valid slot_id < slot_count, so
+            // offset..offset+SLOT_SIZE is within the page buffer.
+            let slot_bytes: [u8; SLOT_SIZE] =
+                unsafe { *self[offset..].as_ptr().cast::<[u8; SLOT_SIZE]>() };
             Some(Slot::from_bytes(slot_bytes))
         } else {
             None
@@ -501,40 +493,30 @@ impl FosterBtreePage for Page {
     }
 
     fn ghostify_at(&mut self, slot_id: u32) {
-        let mut slot = self.slot(slot_id).unwrap();
-        let slot_offset = self.slot_offset(slot_id);
-        slot.set_ghost(1);
-        self[slot_offset..slot_offset + SLOT_SIZE].copy_from_slice(&slot.to_bytes());
+        let offset = self.slot_offset(slot_id);
+        self[offset] = 1;
     }
 
     fn unghostify_at(&mut self, slot_id: u32) {
-        let mut slot = self.slot(slot_id).unwrap();
-        let slot_offset = self.slot_offset(slot_id);
-        slot.set_ghost(0);
-        self[slot_offset..slot_offset + SLOT_SIZE].copy_from_slice(&slot.to_bytes());
+        let offset = self.slot_offset(slot_id);
+        self[offset] = 0;
     }
 
     fn is_ghost(&self, slot_id: u32) -> bool {
-        let slot = self.slot(slot_id).unwrap();
-        slot.is_ghost()
+        self[self.slot_offset(slot_id)] == 1
     }
 
     /// Append a slot at the end of the slots.
     /// Increment the slot count.
     /// The header is also updated to set the rec_start_offset to the minimum of the current rec_start_offset and the slot's offset.
     fn append_slot(&mut self, slot: &Slot) {
-        // Increment the slot count and update the header
         let slot_id = self.slot_count();
-
         self.increment_slot_count();
-
-        // Update the slot
         let slot_offset = self.slot_offset(slot_id);
-        self[slot_offset..slot_offset + SLOT_SIZE].copy_from_slice(&slot.to_bytes());
-
-        // Update the header
-        let offset = self.rec_start_offset().min(slot.offset());
-        self.set_rec_start_offset(offset);
+        slot.write_to(&mut self[slot_offset..slot_offset + SLOT_SIZE]);
+        if slot.offset() < self.rec_start_offset() {
+            self.set_rec_start_offset(slot.offset());
+        }
     }
 
     /// Update the slot at slot_id.
@@ -544,13 +526,11 @@ impl FosterBtreePage for Page {
         if slot_id >= self.slot_count() {
             panic!("Slot does not exist");
         }
-        // Update the slot
         let slot_offset = self.slot_offset(slot_id);
-        self[slot_offset..slot_offset + SLOT_SIZE].copy_from_slice(&slot.to_bytes());
-
-        // Update the header
-        let offset = self.rec_start_offset().min(slot.offset());
-        self.set_rec_start_offset(offset);
+        slot.write_to(&mut self[slot_offset..slot_offset + SLOT_SIZE]);
+        if slot.offset() < self.rec_start_offset() {
+            self.set_rec_start_offset(slot.offset());
+        }
     }
 
     // Find the left-most key where f(key) = true.
@@ -669,42 +649,34 @@ impl FosterBtreePage for Page {
                 // No need to compact
             }
             std::cmp::Ordering::Less => {
-                let mut recs = vec![0; rec_mem_usage as usize];
-                let mut current_size = 0;
+                // Collect non-empty records sorted by offset descending, then
+                // process right-to-left in one pass. O(n log n) vs the previous O(n²).
+                let mut records: Vec<(u32, u32, u32)> = (0..self.slot_count())
+                    .filter_map(|i| {
+                        let slot = self.slot(i)?;
+                        let size = slot.key_size() + slot.value_size();
+                        (size > 0).then_some((i, slot.offset(), size))
+                    })
+                    .collect();
+                // Sort by offset descending so we process rightmost records first,
+                // ensuring each copy_within moves data into already-freed space.
+                records.sort_unstable_by(|a, b| b.1.cmp(&a.1));
 
-                // Copy the records into a temporary buffer and update the slots
-                for i in 0..self.slot_count() {
-                    if let Some(mut slot) = self.slot(i) {
-                        let offset = slot.offset() as usize;
-                        let key_size = slot.key_size() as usize;
-                        let value_size = slot.value_size() as usize;
-                        let size = key_size + value_size;
-                        current_size += size;
-
-                        // Page       [.....    [                Records                   ]]
-                        // Records              [[.............][key2][value2][key1][value1]]
-                        //                                       <-----------> size
-                        //                                       <-------------------------> current_size
-                        //                                      ^
-                        //                       <-------------> local_offset
-                        //             <-----------------------> global_offset
-                        //             <-------> ideal_start_offset
-
-                        let local_offset = rec_mem_usage as usize - current_size;
-                        recs[local_offset..local_offset + size]
-                            .copy_from_slice(&self[offset..offset + size]);
-
-                        // Update the slot
-                        let global_offset = (self.len() - current_size) as u32;
-                        slot.set_offset(global_offset);
-                        self.update_slot(i, &slot);
+                let mut next_end = self.len() as u32;
+                for (slot_id, old_off, size) in records {
+                    let new_off = next_end - size;
+                    if old_off != new_off {
+                        self.copy_within(
+                            old_off as usize..(old_off + size) as usize,
+                            new_off as usize,
+                        );
+                        // Update only the offset field (bytes 1..5) of the slot directly.
+                        let so = self.slot_offset(slot_id);
+                        self[so + 1..so + 5].copy_from_slice(&new_off.to_be_bytes());
                     }
+                    next_end = new_off;
                 }
-                // Copy the records back to the page
-                self[ideal_start_offset as usize..].copy_from_slice(&recs);
-
-                // Update the header
-                self.set_rec_start_offset(ideal_start_offset);
+                self.set_rec_start_offset(next_end);
             }
         }
     }
@@ -903,6 +875,13 @@ impl FosterBtreePage for Page {
                 return self.insert_at(slot_id, key, value, is_ghost);
             }
         }
+        // Write the key-value pair into record space — identical in both branches.
+        let offset = self.rec_start_offset() - rec_size as u32;
+        self[offset as usize..offset as usize + key.len()].copy_from_slice(key);
+        self[offset as usize + key.len()..offset as usize + rec_size].copy_from_slice(value);
+        let slot = Slot::new(is_ghost, offset, key.len() as u32, value.len() as u32);
+        let slot_total_size = slot.total_size();
+
         let start = self.slot_offset(slot_id);
         let end = self.slot_offset(self.slot_count());
         match start.cmp(&end) {
@@ -910,43 +889,18 @@ impl FosterBtreePage for Page {
                 panic!("Slot does not exist at the given slot_id");
             }
             std::cmp::Ordering::Equal => {
-                // No need to shift if start == end. Just add a new slot at the end.
-
-                // Insert the key-value pair
-                let current_offset = self.rec_start_offset();
-                let rec_size = key.len() + value.len();
-                let offset = current_offset - rec_size as u32;
-                self[offset as usize..offset as usize + key.len()].copy_from_slice(key);
-                self[offset as usize + key.len()..offset as usize + rec_size]
-                    .copy_from_slice(value);
-
-                // Insert the slot
-                let slot = Slot::new(is_ghost, offset, key.len() as u32, value.len() as u32);
+                // No need to shift — append slot at the end.
                 self.append_slot(&slot);
-                self.set_total_bytes_used(self.total_bytes_used() + slot.total_size());
+                self.set_total_bytes_used(self.total_bytes_used() + slot_total_size);
                 debug_assert!(self.slot_count() == slot_id + 1);
             }
             std::cmp::Ordering::Less => {
-                // Insert the key-value pair
-                let current_offset = self.rec_start_offset();
-                let rec_size = key.len() + value.len();
-                let offset = current_offset - rec_size as u32;
-                self[offset as usize..offset as usize + key.len()].copy_from_slice(key);
-                self[offset as usize + key.len()..offset as usize + rec_size]
-                    .copy_from_slice(value);
-
-                // Shift the slots to the right by 1
-                // Use copy within to avoid heap allocation
+                // Shift existing slots right by one to make room, then write the new slot.
                 self.copy_within(start..end, start + SLOT_SIZE);
-
-                // Update the slot
-                let slot = Slot::new(is_ghost, offset, key.len() as u32, value.len() as u32);
                 self.update_slot(slot_id, &slot);
-
-                // Update the header
                 self.set_rec_start_offset(offset);
                 self.increment_slot_count();
-                self.set_total_bytes_used(self.total_bytes_used() + slot.total_size());
+                self.set_total_bytes_used(self.total_bytes_used() + slot_total_size);
             }
         }
         true
@@ -1047,22 +1001,12 @@ impl FosterBtreePage for Page {
             panic!("Cannot shift slot to the left if start == 0");
         } else if start > end {
             panic!("Slot does not exist at the given slot_id");
-        } else if start == end {
-            self.set_total_bytes_used(
-                self.total_bytes_used() - self.slot(slot_id).unwrap().total_size(),
-            );
-            // No need to shift slots if start == end. Just decrement the slot_count of the page.
-            self.decrement_slot_count();
         } else {
-            self.set_total_bytes_used(
-                self.total_bytes_used() - self.slot(slot_id).unwrap().total_size(),
-            );
-
-            // Shift the slots to the left by 1
-            // Use copy_within to avoid heap allocation
-            self.copy_within(start..end, start - SLOT_SIZE);
-
-            // Update the slot_count of the page
+            let slot_size = self.slot(slot_id).unwrap().total_size();
+            self.set_total_bytes_used(self.total_bytes_used() - slot_size);
+            if start < end {
+                self.copy_within(start..end, start - SLOT_SIZE);
+            }
             self.decrement_slot_count();
         }
     }
@@ -1147,14 +1091,17 @@ impl FosterBtreePage for Page {
             }
         }
 
-        // Place the key-value pairs in the record space and create the slots.
+        // Place the key-value pairs in the record space and write slots directly,
+        // deferring all header updates to a single write at the end.
         let mut offset = self.rec_start_offset();
         let high_fence_slot = self.slot(self.high_fence_slot_id()).unwrap();
-        self.decrement_slot_count(); // Remove the high fence slot temporarily
+        // Base slot_id for new records: current high fence position (slot_count - 1).
+        let base_slot_id = self.high_fence_slot_id();
 
-        for (is_ghost, key, value) in recs
+        for (idx, (is_ghost, key, value)) in recs
             .iter()
             .map(|(is_ghost, k, v)| (is_ghost, k.as_ref(), v.as_ref()))
+            .enumerate()
         {
             let rec_size = key.len() + value.len();
             offset -= rec_size as u32;
@@ -1162,12 +1109,149 @@ impl FosterBtreePage for Page {
             // Copy the key-value pair to the record space
             self[offset as usize..offset as usize + key.len()].copy_from_slice(key);
             self[offset as usize + key.len()..offset as usize + rec_size].copy_from_slice(value);
-            self.append_slot(&slot);
+            // Write slot bytes directly — no header updates yet
+            let so = self.slot_offset(base_slot_id + idx as u32);
+            slot.write_to(&mut self[so..so + SLOT_SIZE]);
         }
 
-        self.append_slot(&high_fence_slot); // Restore the high fence slot
+        // Restore the high fence slot at its new position
+        let high_fence_so = self.slot_offset(base_slot_id + recs.len() as u32);
+        high_fence_slot.write_to(&mut self[high_fence_so..high_fence_so + SLOT_SIZE]);
 
-        // Update the header
+        // Batch all header updates: one write each
+        self.set_slot_count(base_slot_id + recs.len() as u32 + 1);
+        self.set_rec_start_offset(offset);
+        self.set_total_bytes_used(self.total_bytes_used() + inserting_size as u32);
+
+        true
+    }
+
+    /// Append a sorted slot range from another page without materializing an
+    /// intermediate vector of key/value tuples.
+    fn append_range_from(&mut self, src: &Page, range: std::ops::Range<u32>) -> bool {
+        if range.is_empty() {
+            return true;
+        }
+        if range.end > src.high_fence_slot_id() {
+            panic!("Invalid append range");
+        }
+        let count = range.end - range.start;
+
+        #[cfg(any(test, debug_assertions))]
+        {
+            let last_key = self.get_btree_key(self.high_fence_slot_id() - 1);
+            let high_fence = self.get_high_fence();
+            let first_src_key = BTreeKey::Normal(src.get_raw_key(range.start));
+            let last_src_key = BTreeKey::Normal(src.get_raw_key(range.end - 1));
+            if self.low_fence_slot_id() == self.high_fence_slot_id() - 1 {
+                debug_assert!(last_key <= first_src_key);
+            } else {
+                debug_assert!(last_key < first_src_key);
+            }
+            debug_assert!(last_src_key < high_fence);
+            for slot_id in range.start + 1..range.end {
+                debug_assert!(src.get_raw_key(slot_id - 1) < src.get_raw_key(slot_id));
+            }
+        }
+
+        let inserting_size = src.bytes_used(range.clone()) as usize;
+        if inserting_size > self.contiguous_free_space() as usize {
+            if inserting_size > self.total_free_space() as usize {
+                return false;
+            }
+            self.compact_space();
+        }
+
+        let mut offset = self.rec_start_offset();
+        let high_fence_slot = self.slot(self.high_fence_slot_id()).unwrap();
+        let base_slot_id = self.high_fence_slot_id();
+
+        for (idx, slot_id) in (range.start..range.end).enumerate() {
+            let mut slot = src.slot(slot_id).unwrap();
+            let rec_size = (slot.key_size() + slot.value_size()) as usize;
+            let src_offset = slot.offset() as usize;
+            offset -= rec_size as u32;
+            self[offset as usize..offset as usize + rec_size]
+                .copy_from_slice(&src[src_offset..src_offset + rec_size]);
+            slot.set_offset(offset);
+            let so = self.slot_offset(base_slot_id + idx as u32);
+            slot.write_to(&mut self[so..so + SLOT_SIZE]);
+        }
+
+        let high_fence_so = self.slot_offset(base_slot_id + count);
+        high_fence_slot.write_to(&mut self[high_fence_so..high_fence_so + SLOT_SIZE]);
+
+        self.set_slot_count(base_slot_id + count + 1);
+        self.set_rec_start_offset(offset);
+        self.set_total_bytes_used(self.total_bytes_used() + inserting_size as u32);
+
+        true
+    }
+
+    /// Prepend a sorted list of key-value pairs to the page, inserting them between
+    /// the low fence and the first active slot (i.e. at position 1 in the slot array).
+    /// The input `recs` must be sorted in ascending order, and all keys must lie in
+    /// `(low_fence, first_active_key)`.
+    ///
+    /// Returns `false` if the page does not have enough space.
+    fn prepend_sorted<K: AsRef<[u8]>, V: AsRef<[u8]>>(&mut self, recs: &[(bool, K, V)]) -> bool {
+        if recs.is_empty() {
+            return true;
+        }
+
+        #[cfg(any(test, debug_assertions))]
+        {
+            let low_fence = self.get_low_fence();
+            let first_slot_key = if self.low_fence_slot_id() + 1 == self.high_fence_slot_id() {
+                self.get_high_fence()
+            } else {
+                self.get_btree_key(self.low_fence_slot_id() + 1)
+            };
+            debug_assert!(low_fence <= BTreeKey::Normal(recs[0].1.as_ref()));
+            debug_assert!(BTreeKey::Normal(recs[recs.len() - 1].1.as_ref()) < first_slot_key);
+            for i in 1..recs.len() {
+                debug_assert!(recs[i - 1].1.as_ref() < recs[i].1.as_ref());
+            }
+        }
+
+        let m = recs.len() as u32;
+        let inserting_size = recs
+            .iter()
+            .map(|(_, k, v)| k.as_ref().len() + v.as_ref().len())
+            .sum::<usize>()
+            + m as usize * SLOT_SIZE;
+
+        if inserting_size > self.contiguous_free_space() as usize {
+            if inserting_size > self.total_free_space() as usize {
+                return false;
+            }
+            self.compact_space();
+        }
+
+        // Shift existing slots [1..slot_count] right by m positions to make room.
+        let shift_src_start = self.slot_offset(1);
+        let shift_src_end = self.slot_offset(self.slot_count());
+        let shift_dst = self.slot_offset(1 + m);
+        self.copy_within(shift_src_start..shift_src_end, shift_dst);
+
+        // Write record data and new slot entries in one pass.
+        let mut offset = self.rec_start_offset();
+        for (i, (is_ghost, key, value)) in recs
+            .iter()
+            .map(|(g, k, v)| (g, k.as_ref(), v.as_ref()))
+            .enumerate()
+        {
+            let rec_size = key.len() + value.len();
+            offset -= rec_size as u32;
+            self[offset as usize..offset as usize + key.len()].copy_from_slice(key);
+            self[offset as usize + key.len()..offset as usize + rec_size].copy_from_slice(value);
+            let slot = Slot::new(*is_ghost, offset, key.len() as u32, value.len() as u32);
+            let so = self.slot_offset(1 + i as u32);
+            slot.write_to(&mut self[so..so + SLOT_SIZE]);
+        }
+
+        // Single-pass header update.
+        self.set_slot_count(self.slot_count() + m);
         self.set_rec_start_offset(offset);
         self.set_total_bytes_used(self.total_bytes_used() + inserting_size as u32);
 
@@ -1202,19 +1286,15 @@ impl FosterBtreePage for Page {
         // [ [slot1][slot5][slot6] ]
         //
 
-        for i in from..to {
-            self.set_total_bytes_used(self.total_bytes_used() - self.slot(i).unwrap().total_size());
-        }
+        let total_removed: u32 = (from..to).map(|i| self.slot(i).unwrap().total_size()).sum();
+        self.set_total_bytes_used(self.total_bytes_used() - total_removed);
 
         let start = self.slot_offset(to);
         let end = self.slot_offset(self.slot_count());
         let new_start = start - (to - from) as usize * SLOT_SIZE;
         self.copy_within(start..end, new_start);
 
-        // Update the slot_count of the page
-        for _ in from..to {
-            self.decrement_slot_count();
-        }
+        self.set_slot_count(self.slot_count() - (to - from));
     }
 
     fn run_consistency_checks(&self, include_no_garbage_checks: bool) {
