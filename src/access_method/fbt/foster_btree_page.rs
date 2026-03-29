@@ -8,7 +8,7 @@ use crate::page::Page;
 // 4 byte: rec start offset (u32)
 pub const PAGE_HEADER_SIZE: usize = 1 + 1 + 4 + 4 + 4;
 // Slotted page layout:
-// * slot [ghost_bit: u8, offset: u32, key_size: u32, value_size: u32].
+// * slot [offset_with_ghost: u32, key_size: u32, value_size: u32].
 //  The slots are sorted based on the key.
 // * recs [key: [u8], value: [u8]] // value should be a page id if the page is a non-leaf page, otherwise it should be a value.
 // The first slot is the low fence and the last slot is the high fence.
@@ -24,119 +24,133 @@ pub const PAGE_HEADER_SIZE: usize = 1 + 1 + 4 + 4 + 4;
 // * A record refers to the key-value pair in the page.
 
 mod slot {
-    pub const SLOT_SIZE: usize = std::mem::size_of::<u8>()
-        + std::mem::size_of::<u32>()
-        + std::mem::size_of::<u32>()
-        + std::mem::size_of::<u32>();
+    const GHOST_MASK: u32 = 1 << 31;
+    const OFFSET_MASK: u32 = !GHOST_MASK;
+
+    pub const SLOT_SIZE: usize =
+        std::mem::size_of::<u32>() + std::mem::size_of::<u16>() + std::mem::size_of::<u16>();
 
     pub struct Slot {
-        ghost: u8,       // 0 if the slot is active, 1 if the slot is a ghost
-        offset: u32,     // The offset of the key-value pair in the page
-        key_size: u32,   // The size of the key
-        value_size: u32, // The size of the value
+        offset_with_ghost: u32, // High bit stores ghost state, remaining bits store record offset.
+        key_size: u16,          // The size of the key
+        value_size: u16,        // The size of the value
     }
 
     impl Slot {
         pub fn from_bytes(bytes: [u8; SLOT_SIZE]) -> Self {
             let mut current_pos = 0;
-            let ghost = bytes[current_pos];
-            current_pos += std::mem::size_of::<u8>();
-
-            let offset = u32::from_be_bytes(
+            let offset_with_ghost = u32::from_be_bytes(
                 bytes[current_pos..current_pos + std::mem::size_of::<u32>()]
                     .try_into()
                     .unwrap(),
             );
             current_pos += std::mem::size_of::<u32>();
-            let key_size = u32::from_be_bytes(
-                bytes[current_pos..current_pos + std::mem::size_of::<u32>()]
+            let key_size = u16::from_be_bytes(
+                bytes[current_pos..current_pos + std::mem::size_of::<u16>()]
                     .try_into()
                     .unwrap(),
             );
-            current_pos += std::mem::size_of::<u32>();
-            let value_size = u32::from_be_bytes(
-                bytes[current_pos..current_pos + std::mem::size_of::<u32>()]
+            current_pos += std::mem::size_of::<u16>();
+            let value_size = u16::from_be_bytes(
+                bytes[current_pos..current_pos + std::mem::size_of::<u16>()]
                     .try_into()
                     .unwrap(),
             );
             Slot {
-                ghost,
-                offset,
+                offset_with_ghost,
                 key_size,
                 value_size,
             }
         }
 
         pub fn to_bytes(&self) -> [u8; SLOT_SIZE] {
-            let offset_bytes = self.offset.to_be_bytes();
+            let offset_bytes = self.offset_with_ghost.to_be_bytes();
             let key_size_bytes = self.key_size.to_be_bytes();
             let value_size_bytes = self.value_size.to_be_bytes();
             let mut bytes = [0; SLOT_SIZE];
             let mut current_pos = 0;
-            bytes[current_pos] = self.ghost;
-            current_pos += std::mem::size_of::<u8>();
             bytes[current_pos..current_pos + std::mem::size_of::<u32>()]
                 .copy_from_slice(&offset_bytes);
             current_pos += std::mem::size_of::<u32>();
-            bytes[current_pos..current_pos + std::mem::size_of::<u32>()]
+            bytes[current_pos..current_pos + std::mem::size_of::<u16>()]
                 .copy_from_slice(&key_size_bytes);
-            current_pos += std::mem::size_of::<u32>();
-            bytes[current_pos..current_pos + std::mem::size_of::<u32>()]
+            current_pos += std::mem::size_of::<u16>();
+            bytes[current_pos..current_pos + std::mem::size_of::<u16>()]
                 .copy_from_slice(&value_size_bytes);
             bytes
         }
 
         pub fn new(is_ghost: bool, offset: u32, key_size: u32, value_size: u32) -> Self {
+            assert_eq!(
+                offset & GHOST_MASK,
+                0,
+                "record offset must leave the high bit free for the ghost flag"
+            );
+            assert!(
+                u16::try_from(key_size).is_ok(),
+                "key size must fit in u16, got {key_size}"
+            );
+            assert!(
+                u16::try_from(value_size).is_ok(),
+                "value size must fit in u16, got {value_size}"
+            );
             Slot {
-                ghost: is_ghost as u8,
-                offset,
-                key_size,
-                value_size,
+                offset_with_ghost: offset | if is_ghost { GHOST_MASK } else { 0 },
+                key_size: key_size as u16,
+                value_size: value_size as u16,
             }
         }
 
         pub fn is_ghost(&self) -> bool {
-            self.ghost == 1
+            self.offset_with_ghost & GHOST_MASK != 0
         }
 
         pub fn set_ghost(&mut self, ghost: u8) {
-            self.ghost = ghost;
+            if ghost == 0 {
+                self.offset_with_ghost &= OFFSET_MASK;
+            } else {
+                self.offset_with_ghost |= GHOST_MASK;
+            }
         }
 
         pub fn offset(&self) -> u32 {
-            self.offset
+            self.offset_with_ghost & OFFSET_MASK
         }
 
         pub fn set_offset(&mut self, offset: u32) {
-            self.offset = offset;
+            assert_eq!(
+                offset & GHOST_MASK,
+                0,
+                "record offset must leave the high bit free for the ghost flag"
+            );
+            self.offset_with_ghost = (self.offset_with_ghost & GHOST_MASK) | offset;
         }
 
         pub fn key_size(&self) -> u32 {
-            self.key_size
+            self.key_size as u32
         }
 
         pub fn set_key_size(&mut self, key_size: u32) {
-            self.key_size = key_size;
+            self.key_size = key_size.try_into().expect("key size must fit in u16");
         }
 
         pub fn value_size(&self) -> u32 {
-            self.value_size
+            self.value_size as u32
         }
 
         pub fn set_value_size(&mut self, value_size: u32) {
-            self.value_size = value_size;
+            self.value_size = value_size.try_into().expect("value size must fit in u16");
         }
 
         pub fn total_size(&self) -> u32 {
-            self.key_size + self.value_size + SLOT_SIZE as u32
+            self.key_size as u32 + self.value_size as u32 + SLOT_SIZE as u32
         }
 
         /// Write the slot directly into a destination byte slice, avoiding an intermediate array.
         pub fn write_to(&self, dest: &mut [u8]) {
-            dest[0] = self.ghost;
-            dest[1..5].copy_from_slice(&self.offset.to_be_bytes());
-            dest[5..9].copy_from_slice(&self.key_size.to_be_bytes());
-            dest[9..13].copy_from_slice(&self.value_size.to_be_bytes());
+            dest[0..4].copy_from_slice(&self.offset_with_ghost.to_be_bytes());
+            dest[4..6].copy_from_slice(&self.key_size.to_be_bytes());
+            dest[6..8].copy_from_slice(&self.value_size.to_be_bytes());
         }
     }
 }
@@ -566,16 +580,16 @@ impl FosterBtreePage for Page {
 
     fn ghostify_at(&mut self, slot_id: u32) {
         let offset = self.slot_offset(slot_id);
-        self[offset] = 1;
+        self[offset] |= 0b1000_0000;
     }
 
     fn unghostify_at(&mut self, slot_id: u32) {
         let offset = self.slot_offset(slot_id);
-        self[offset] = 0;
+        self[offset] &= 0b0111_1111;
     }
 
     fn is_ghost(&self, slot_id: u32) -> bool {
-        self[self.slot_offset(slot_id)] == 1
+        self[self.slot_offset(slot_id)] & 0b1000_0000 != 0
     }
 
     /// Append a slot at the end of the slots.
@@ -742,9 +756,12 @@ impl FosterBtreePage for Page {
                             old_off as usize..(old_off + size) as usize,
                             new_off as usize,
                         );
-                        // Update only the offset field (bytes 1..5) of the slot directly.
+                        // Update only the packed offset field (bytes 0..4) of the slot directly.
                         let so = self.slot_offset(slot_id);
-                        self[so + 1..so + 5].copy_from_slice(&new_off.to_be_bytes());
+                        let ghost_bit = self[so] & 0b1000_0000;
+                        let mut packed_offset = new_off.to_be_bytes();
+                        packed_offset[0] |= ghost_bit;
+                        self[so..so + 4].copy_from_slice(&packed_offset);
                     }
                     next_end = new_off;
                 }
