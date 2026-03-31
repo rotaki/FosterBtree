@@ -11,10 +11,11 @@ use crate::{
     },
 };
 
+use super::loader::PartitionMode;
 use super::loader::TpccContainerIds;
 use super::record_definitions::*;
 use super::txn_helper::{not_successful, AbortID, TPCCStatus, TxHelper, TxnTypeStats};
-use super::txn_utils::*;
+use super::txn_utils::{customer_cold_fields, customer_fields, customer_hot_fields, *};
 
 pub struct PaymentInput {
     pub w_id: u16,
@@ -254,124 +255,281 @@ pub fn run_payment_txn_with_stats<M: MemPool>(
         );
     };
 
-    // Get customer info
-    let res = storage.get_fields(
-        &txn,
-        containers.customer_cid,
-        c_key.clone(),
-        &[
-            customer_fields::C_FIRST,
-            customer_fields::C_MIDDLE,
-            customer_fields::C_LAST,
-            customer_fields::C_PHONE,
-            customer_fields::C_SINCE,
-            customer_fields::C_CREDIT,
-            customer_fields::C_CREDIT_LIM,
-            customer_fields::C_DISCOUNT,
-            customer_fields::C_BALANCE,
-            customer_fields::C_YTD_PAYMENT,
-            customer_fields::C_PAYMENT_CNT,
-            customer_fields::C_DATA,
-            customer_fields::C_ADDRESS,
-        ],
-        c_hint,
-    );
-    if not_successful(&res) {
-        return (helper.kill(&txn, &res, AbortID::PaymentGetCustomer), None);
-    }
-    let (c_all_fields, c_actual_hint) = res.unwrap();
+    // ---- Read and update customer (mode-dependent) ----
+    let (
+        c_first,
+        c_middle,
+        c_last,
+        c_phone,
+        c_since,
+        c_credit,
+        c_credit_lim,
+        c_discount,
+        c_address,
+        c_balance,
+        c_data_output,
+    ) = if containers.partition_mode == PartitionMode::HotCold {
+        // HotCold: read cold from customer_cid, hot from customer_hot_cid
+        let res = storage.get_fields(
+            &txn,
+            containers.customer_cid,
+            c_key.clone(),
+            &[
+                customer_cold_fields::C_FIRST,
+                customer_cold_fields::C_MIDDLE,
+                customer_cold_fields::C_LAST,
+                customer_cold_fields::C_PHONE,
+                customer_cold_fields::C_SINCE,
+                customer_cold_fields::C_CREDIT,
+                customer_cold_fields::C_CREDIT_LIM,
+                customer_cold_fields::C_DISCOUNT,
+                customer_cold_fields::C_ADDRESS,
+            ],
+            c_hint,
+        );
+        if not_successful(&res) {
+            return (helper.kill(&txn, &res, AbortID::PaymentGetCustomer), None);
+        }
+        let (c_cold, c_actual_hint) = res.unwrap();
 
-    // Check if hint from secondary index is stale and update if needed
-    if let (Some(c_hint), Some(c_secondary_key), Some(c_secondary_hint)) =
-        (c_hint, c_secondary_key, c_secondary_hint)
-    {
-        if c_hint != c_actual_hint {
-            // Hint is stale, update secondary index
-            let res = storage.update_field(
-                &txn,
-                containers.customer_secondary_cid,
-                c_secondary_key,
-                4, // Pointer is at index 4 in the secondary index schema
-                Field::Pointer(Some(c_actual_hint)),
-                Some(c_secondary_hint),
-            );
-            // Log but don't fail the transaction if secondary index update fails
-            if not_successful(&res) {
-                return (helper.kill(&txn, &res, AbortID::PaymentGetCustomer), None);
+        if let (Some(c_hint), Some(c_secondary_key), Some(c_secondary_hint)) =
+            (c_hint, c_secondary_key, c_secondary_hint)
+        {
+            if c_hint != c_actual_hint {
+                let res = storage.update_field(
+                    &txn,
+                    containers.customer_secondary_cid,
+                    c_secondary_key,
+                    4,
+                    Field::Pointer(Some(c_actual_hint)),
+                    Some(c_secondary_hint),
+                );
+                if not_successful(&res) {
+                    return (helper.kill(&txn, &res, AbortID::PaymentGetCustomer), None);
+                }
             }
         }
-    }
 
-    let c_first = get_string_field(&c_all_fields, 0);
-    let c_middle = get_string_field(&c_all_fields, 1);
-    let c_last = get_string_field(&c_all_fields, 2);
-    let c_phone = get_string_field(&c_all_fields, 3);
-    let c_since = get_u64_field(&c_all_fields, 4);
-    let c_credit = get_string_field(&c_all_fields, 5);
-    let c_credit_lim = get_f64_field(&c_all_fields, 6);
-    let c_discount = get_f64_field(&c_all_fields, 7);
-    let c_balance = get_f64_field(&c_all_fields, 8);
-    let c_ytd_payment = get_f64_field(&c_all_fields, 9);
-    let c_payment_cnt = get_u16_field(&c_all_fields, 10);
-    let c_data = get_string_field(&c_all_fields, 11);
-    let c_address = string_to_address(&get_string_field(&c_all_fields, 12));
+        let c_first = get_string_field(&c_cold, 0);
+        let c_middle = get_string_field(&c_cold, 1);
+        let c_last = get_string_field(&c_cold, 2);
+        let c_phone = get_string_field(&c_cold, 3);
+        let c_since = get_u64_field(&c_cold, 4);
+        let c_credit = get_string_field(&c_cold, 5);
+        let c_credit_lim = get_f64_field(&c_cold, 6);
+        let c_discount = get_f64_field(&c_cold, 7);
+        let c_address = string_to_address(&get_string_field(&c_cold, 8));
 
-    // Update customer payment info
-    let mut updates = vec![
-        (
-            customer_fields::C_BALANCE,
-            Field::Float64(Some(c_balance - input.h_amount)),
-        ),
-        (
-            customer_fields::C_YTD_PAYMENT,
-            Field::Float64(Some(c_ytd_payment + input.h_amount)),
-        ),
-        (
-            customer_fields::C_PAYMENT_CNT,
-            Field::Uint16(Some(c_payment_cnt + 1)),
-        ),
-    ];
-
-    // Handle bad credit customers
-    let c_data_output = if c_credit == "BC" {
-        // Construct new c_data
-        let new_data = format!(
-            "{} {} {} {} {} {} | {}",
-            c_id,
-            input.c_d_id,
-            input.c_w_id,
-            input.d_id,
-            input.w_id,
-            input.h_amount,
-            if c_data.len() > 450 {
-                &c_data[..450]
-            } else {
-                &c_data
-            }
-        );
-
-        updates.push((
-            customer_fields::C_DATA,
-            Field::String(Some(new_data.clone())),
-        ));
-        Some(new_data)
-    } else {
-        None
-    };
-
-    let res = storage.update_fields(
-        &txn,
-        containers.customer_cid,
-        c_key,
-        updates,
-        Some(c_actual_hint),
-    );
-    if not_successful(&res) {
-        return (
-            helper.kill(&txn, &res, AbortID::PaymentUpdateCustomer),
+        let res = storage.get_fields(
+            &txn,
+            containers.customer_hot_cid,
+            c_key.clone(),
+            &[
+                customer_hot_fields::C_BALANCE,
+                customer_hot_fields::C_YTD_PAYMENT,
+                customer_hot_fields::C_PAYMENT_CNT,
+                customer_hot_fields::C_DATA,
+            ],
             None,
         );
-    }
+        if not_successful(&res) {
+            return (helper.kill(&txn, &res, AbortID::PaymentGetCustomer), None);
+        }
+        let (c_hot, c_hot_hint) = res.unwrap();
+        let c_balance = get_f64_field(&c_hot, 0);
+        let c_ytd_payment = get_f64_field(&c_hot, 1);
+        let c_payment_cnt = get_u16_field(&c_hot, 2);
+        let c_data = get_string_field(&c_hot, 3);
+
+        let mut updates = vec![
+            (
+                customer_hot_fields::C_BALANCE,
+                Field::Float64(Some(c_balance - input.h_amount)),
+            ),
+            (
+                customer_hot_fields::C_YTD_PAYMENT,
+                Field::Float64(Some(c_ytd_payment + input.h_amount)),
+            ),
+            (
+                customer_hot_fields::C_PAYMENT_CNT,
+                Field::Uint16(Some(c_payment_cnt + 1)),
+            ),
+        ];
+        let c_data_output = if c_credit == "BC" {
+            let new_data = format!(
+                "{} {} {} {} {} {} | {}",
+                c_id,
+                input.c_d_id,
+                input.c_w_id,
+                input.d_id,
+                input.w_id,
+                input.h_amount,
+                if c_data.len() > 450 {
+                    &c_data[..450]
+                } else {
+                    &c_data
+                }
+            );
+            updates.push((
+                customer_hot_fields::C_DATA,
+                Field::String(Some(new_data.clone())),
+            ));
+            Some(new_data)
+        } else {
+            None
+        };
+
+        let res = storage.update_fields(
+            &txn,
+            containers.customer_hot_cid,
+            c_key,
+            updates,
+            Some(c_hot_hint),
+        );
+        if not_successful(&res) {
+            return (
+                helper.kill(&txn, &res, AbortID::PaymentUpdateCustomer),
+                None,
+            );
+        }
+        (
+            c_first,
+            c_middle,
+            c_last,
+            c_phone,
+            c_since,
+            c_credit,
+            c_credit_lim,
+            c_discount,
+            c_address,
+            c_balance - input.h_amount,
+            c_data_output,
+        )
+    } else {
+        // FullRow or FieldLevel: single container with original schema
+        let res = storage.get_fields(
+            &txn,
+            containers.customer_cid,
+            c_key.clone(),
+            &[
+                customer_fields::C_FIRST,
+                customer_fields::C_MIDDLE,
+                customer_fields::C_LAST,
+                customer_fields::C_PHONE,
+                customer_fields::C_SINCE,
+                customer_fields::C_CREDIT,
+                customer_fields::C_CREDIT_LIM,
+                customer_fields::C_DISCOUNT,
+                customer_fields::C_BALANCE,
+                customer_fields::C_YTD_PAYMENT,
+                customer_fields::C_PAYMENT_CNT,
+                customer_fields::C_DATA,
+                customer_fields::C_ADDRESS,
+            ],
+            c_hint,
+        );
+        if not_successful(&res) {
+            return (helper.kill(&txn, &res, AbortID::PaymentGetCustomer), None);
+        }
+        let (c_all, c_actual_hint) = res.unwrap();
+
+        if let (Some(c_hint), Some(c_secondary_key), Some(c_secondary_hint)) =
+            (c_hint, c_secondary_key, c_secondary_hint)
+        {
+            if c_hint != c_actual_hint {
+                let res = storage.update_field(
+                    &txn,
+                    containers.customer_secondary_cid,
+                    c_secondary_key,
+                    4,
+                    Field::Pointer(Some(c_actual_hint)),
+                    Some(c_secondary_hint),
+                );
+                if not_successful(&res) {
+                    return (helper.kill(&txn, &res, AbortID::PaymentGetCustomer), None);
+                }
+            }
+        }
+
+        let c_first = get_string_field(&c_all, 0);
+        let c_middle = get_string_field(&c_all, 1);
+        let c_last = get_string_field(&c_all, 2);
+        let c_phone = get_string_field(&c_all, 3);
+        let c_since = get_u64_field(&c_all, 4);
+        let c_credit = get_string_field(&c_all, 5);
+        let c_credit_lim = get_f64_field(&c_all, 6);
+        let c_discount = get_f64_field(&c_all, 7);
+        let c_balance = get_f64_field(&c_all, 8);
+        let c_ytd_payment = get_f64_field(&c_all, 9);
+        let c_payment_cnt = get_u16_field(&c_all, 10);
+        let c_data = get_string_field(&c_all, 11);
+        let c_address = string_to_address(&get_string_field(&c_all, 12));
+
+        let mut updates = vec![
+            (
+                customer_fields::C_BALANCE,
+                Field::Float64(Some(c_balance - input.h_amount)),
+            ),
+            (
+                customer_fields::C_YTD_PAYMENT,
+                Field::Float64(Some(c_ytd_payment + input.h_amount)),
+            ),
+            (
+                customer_fields::C_PAYMENT_CNT,
+                Field::Uint16(Some(c_payment_cnt + 1)),
+            ),
+        ];
+        let c_data_output = if c_credit == "BC" {
+            let new_data = format!(
+                "{} {} {} {} {} {} | {}",
+                c_id,
+                input.c_d_id,
+                input.c_w_id,
+                input.d_id,
+                input.w_id,
+                input.h_amount,
+                if c_data.len() > 450 {
+                    &c_data[..450]
+                } else {
+                    &c_data
+                }
+            );
+            updates.push((
+                customer_fields::C_DATA,
+                Field::String(Some(new_data.clone())),
+            ));
+            Some(new_data)
+        } else {
+            None
+        };
+
+        let res = storage.update_fields(
+            &txn,
+            containers.customer_cid,
+            c_key,
+            updates,
+            Some(c_actual_hint),
+        );
+        if not_successful(&res) {
+            return (
+                helper.kill(&txn, &res, AbortID::PaymentUpdateCustomer),
+                None,
+            );
+        }
+        (
+            c_first,
+            c_middle,
+            c_last,
+            c_phone,
+            c_since,
+            c_credit,
+            c_credit_lim,
+            c_discount,
+            c_address,
+            c_balance - input.h_amount,
+            c_data_output,
+        )
+    };
 
     // Commit transaction
     let status = helper.commit(&txn, AbortID::PaymentCommit);
@@ -406,7 +564,7 @@ pub fn run_payment_txn_with_stats<M: MemPool>(
             c_credit,
             c_credit_lim,
             c_discount,
-            c_balance: c_balance - input.h_amount,
+            c_balance,
             c_data: c_data_output,
         }),
     )

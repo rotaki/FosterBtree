@@ -174,6 +174,34 @@ pub mod customer_fields {
     pub const C_ADDRESS: usize = 16;
 }
 
+// Field indices for customer cold container (keys + stable descriptors)
+pub mod customer_cold_fields {
+    pub const C_W_ID: usize = 0;
+    pub const C_D_ID: usize = 1;
+    pub const C_ID: usize = 2;
+    pub const C_SINCE: usize = 3;
+    pub const C_CREDIT_LIM: usize = 4;
+    pub const C_DISCOUNT: usize = 5;
+    pub const C_FIRST: usize = 6;
+    pub const C_MIDDLE: usize = 7;
+    pub const C_LAST: usize = 8;
+    pub const C_PHONE: usize = 9;
+    pub const C_CREDIT: usize = 10;
+    pub const C_ADDRESS: usize = 11;
+}
+
+// Field indices for customer hot container (keys + frequently updated fields)
+pub mod customer_hot_fields {
+    pub const C_W_ID: usize = 0;
+    pub const C_D_ID: usize = 1;
+    pub const C_ID: usize = 2;
+    pub const C_BALANCE: usize = 3;
+    pub const C_YTD_PAYMENT: usize = 4;
+    pub const C_PAYMENT_CNT: usize = 5;
+    pub const C_DELIVERY_CNT: usize = 6;
+    pub const C_DATA: usize = 7;
+}
+
 pub mod customer_secondary_fields {
     pub const C_W_ID: usize = 0;
     pub const C_D_ID: usize = 1;

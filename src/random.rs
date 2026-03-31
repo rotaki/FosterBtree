@@ -49,7 +49,7 @@ pub fn gen_random_pathname(prefix: Option<&str>) -> String {
 
 /// Generates a delay in nano seconds using a randomized exponential backoff algorithm.
 pub fn gen_truncated_randomized_exponential_backoff(attempts: usize) -> u64 {
-    let max_backoff_ns = 1_000; // 1ms
+    let max_backoff_ns = 1_000; // 1μs
     let exp = 1_u64 << attempts.min(60);
     let delay_ns = gen_random_int(0, exp);
     delay_ns.min(max_backoff_ns)

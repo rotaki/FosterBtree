@@ -11,9 +11,12 @@ use crate::{
     },
 };
 
+use super::loader::PartitionMode;
 use super::loader::TpccContainerIds;
 use super::txn_helper::{not_successful, AbortID, TPCCStatus, TxHelper, TxnTypeStats};
-use super::txn_utils::{customer_fields, order_fields, order_line_fields, *};
+use super::txn_utils::{
+    customer_cold_fields, customer_fields, customer_hot_fields, order_fields, order_line_fields, *,
+};
 
 pub struct OrderStatusInput {
     pub w_id: u16,
@@ -171,40 +174,19 @@ pub fn run_orderstatus_txn_with_stats<M: MemPool>(
         );
     };
 
-    // Get customer info
-    let res = storage.get_fields(
-        &txn,
-        containers.customer_cid,
-        c_key,
-        &[
-            customer_fields::C_FIRST,
-            customer_fields::C_MIDDLE,
-            customer_fields::C_LAST,
-            customer_fields::C_BALANCE,
-        ],
-        c_hint,
-    );
-    if not_successful(&res) {
-        return (
-            helper.kill(&txn, &res, AbortID::OrderStatusGetCustomer),
-            None,
-        );
-    }
-    let (c_fields, c_actual_hint) = res.unwrap();
-
-    // Check if hint from secondary index is stale and update if needed
-    if let (Some(c_secondary_key), Some(c_hint), Some(c_secondary_hint)) =
-        (c_secondary_key, c_hint, c_secondary_hint)
-    {
-        if c_hint != c_actual_hint {
-            // Hint is stale, update secondary index
-            let res = storage.update_field(
+    // Get customer info (mode-dependent)
+    let (c_first, c_middle, c_last, c_balance) =
+        if containers.partition_mode == PartitionMode::HotCold {
+            let res = storage.get_fields(
                 &txn,
-                containers.customer_secondary_cid,
-                c_secondary_key,
-                4, // Pointer is at index 4 in the secondary index schema
-                Field::Pointer(Some(c_actual_hint)),
-                Some(c_secondary_hint),
+                containers.customer_cid,
+                c_key.clone(),
+                &[
+                    customer_cold_fields::C_FIRST,
+                    customer_cold_fields::C_MIDDLE,
+                    customer_cold_fields::C_LAST,
+                ],
+                c_hint,
             );
             if not_successful(&res) {
                 return (
@@ -212,13 +194,99 @@ pub fn run_orderstatus_txn_with_stats<M: MemPool>(
                     None,
                 );
             }
-        }
-    }
+            let (c_cold, c_actual_hint) = res.unwrap();
 
-    let c_first = get_string_field(&c_fields, 0);
-    let c_middle = get_string_field(&c_fields, 1);
-    let c_last = get_string_field(&c_fields, 2);
-    let c_balance = get_f64_field(&c_fields, 3);
+            if let (Some(c_secondary_key), Some(c_hint), Some(c_secondary_hint)) =
+                (c_secondary_key, c_hint, c_secondary_hint)
+            {
+                if c_hint != c_actual_hint {
+                    let res = storage.update_field(
+                        &txn,
+                        containers.customer_secondary_cid,
+                        c_secondary_key,
+                        4,
+                        Field::Pointer(Some(c_actual_hint)),
+                        Some(c_secondary_hint),
+                    );
+                    if not_successful(&res) {
+                        return (
+                            helper.kill(&txn, &res, AbortID::OrderStatusGetCustomer),
+                            None,
+                        );
+                    }
+                }
+            }
+
+            let res = storage.get_fields(
+                &txn,
+                containers.customer_hot_cid,
+                c_key,
+                &[customer_hot_fields::C_BALANCE],
+                None,
+            );
+            if not_successful(&res) {
+                return (
+                    helper.kill(&txn, &res, AbortID::OrderStatusGetCustomer),
+                    None,
+                );
+            }
+            let (c_hot, _) = res.unwrap();
+
+            (
+                get_string_field(&c_cold, 0),
+                get_string_field(&c_cold, 1),
+                get_string_field(&c_cold, 2),
+                get_f64_field(&c_hot, 0),
+            )
+        } else {
+            let res = storage.get_fields(
+                &txn,
+                containers.customer_cid,
+                c_key,
+                &[
+                    customer_fields::C_FIRST,
+                    customer_fields::C_MIDDLE,
+                    customer_fields::C_LAST,
+                    customer_fields::C_BALANCE,
+                ],
+                c_hint,
+            );
+            if not_successful(&res) {
+                return (
+                    helper.kill(&txn, &res, AbortID::OrderStatusGetCustomer),
+                    None,
+                );
+            }
+            let (c_all, c_actual_hint) = res.unwrap();
+
+            if let (Some(c_secondary_key), Some(c_hint), Some(c_secondary_hint)) =
+                (c_secondary_key, c_hint, c_secondary_hint)
+            {
+                if c_hint != c_actual_hint {
+                    let res = storage.update_field(
+                        &txn,
+                        containers.customer_secondary_cid,
+                        c_secondary_key,
+                        4,
+                        Field::Pointer(Some(c_actual_hint)),
+                        Some(c_secondary_hint),
+                    );
+                    if not_successful(&res) {
+                        return (
+                            helper.kill(&txn, &res, AbortID::OrderStatusGetCustomer),
+                            None,
+                        );
+                    }
+                }
+            }
+
+            (
+                get_string_field(&c_all, 0),
+                get_string_field(&c_all, 1),
+                get_string_field(&c_all, 2),
+                get_f64_field(&c_all, 3),
+            )
+        };
 
     // Find the latest order for this customer using secondary index
     let scan_start = vec![

@@ -10,10 +10,12 @@ use crate::{
     },
 };
 
+use super::loader::PartitionMode;
 use super::loader::TpccContainerIds;
 use super::txn_helper::{not_successful, AbortID, TPCCStatus, TxHelper, TxnTypeStats};
 use super::txn_utils::{
-    customer_fields, district_fields, item_fields, stock_fields, warehouse_fields, *,
+    customer_cold_fields, customer_fields, district_fields, item_fields, stock_fields,
+    warehouse_fields, *,
 };
 
 pub struct NewOrderInput {
@@ -97,12 +99,22 @@ pub fn run_neworder_txn_with_stats<M: MemPool>(
         Field::Uint8(Some(input.d_id)),
     ];
 
-    // Read district fields
-    let res = storage.get_fields(
+    // Atomically read and increment d_next_o_id (acquires exclusive lock directly,
+    // avoiding the shared→upgrade livelock with field-level locking)
+    let mut d_next_o_id = 0u32;
+    let res = storage.update_field_with_func(
         &txn,
         containers.district_cid,
         d_key.clone(),
-        &[district_fields::D_NEXT_O_ID, district_fields::D_TAX],
+        district_fields::D_NEXT_O_ID,
+        |field| {
+            if let Field::Uint32(Some(v)) = field {
+                d_next_o_id = *v;
+                *v += 1;
+            } else {
+                panic!("Expected Uint32 for D_NEXT_O_ID");
+            }
+        },
         None,
     );
     if not_successful(&res) {
@@ -111,20 +123,16 @@ pub fn run_neworder_txn_with_stats<M: MemPool>(
             None,
         );
     }
-    let (d_fields, d_hint) = res.unwrap();
-
-    let d_next_o_id = get_u32_field(&d_fields, 0);
-    let d_tax = get_f64_field(&d_fields, 1);
     let o_id = d_next_o_id;
 
-    // Update district next order id
-    let res = storage.update_field(
+    // Read d_tax separately (shared lock on a different field — no conflict with
+    // other NewOrders' exclusive on D_NEXT_O_ID under field-level locking)
+    let res = storage.get_fields(
         &txn,
         containers.district_cid,
         d_key,
-        district_fields::D_NEXT_O_ID,
-        Field::Uint32(Some(d_next_o_id + 1)),
-        Some(d_hint),
+        &[district_fields::D_TAX],
+        None,
     );
     if not_successful(&res) {
         return (
@@ -132,6 +140,8 @@ pub fn run_neworder_txn_with_stats<M: MemPool>(
             None,
         );
     }
+    let (d_fields, _d_hint) = res.unwrap();
+    let d_tax = get_f64_field(&d_fields, 0);
 
     // Get customer info
     let c_key = vec![
@@ -140,15 +150,25 @@ pub fn run_neworder_txn_with_stats<M: MemPool>(
         Field::Uint32(Some(input.c_id)),
     ];
 
+    // NewOrder only needs stable customer fields (cold in all modes)
+    let (disc_idx, last_idx, credit_idx) = if containers.partition_mode == PartitionMode::HotCold {
+        (
+            customer_cold_fields::C_DISCOUNT,
+            customer_cold_fields::C_LAST,
+            customer_cold_fields::C_CREDIT,
+        )
+    } else {
+        (
+            customer_fields::C_DISCOUNT,
+            customer_fields::C_LAST,
+            customer_fields::C_CREDIT,
+        )
+    };
     let res = storage.get_fields(
         &txn,
         containers.customer_cid,
         c_key,
-        &[
-            customer_fields::C_DISCOUNT,
-            customer_fields::C_LAST,
-            customer_fields::C_CREDIT,
-        ],
+        &[disc_idx, last_idx, credit_idx],
         None,
     );
     if not_successful(&res) {
@@ -181,7 +201,6 @@ pub fn run_neworder_txn_with_stats<M: MemPool>(
     };
     let res = storage.insert_record(&txn, containers.order_cid, order_record, None);
     if not_successful(&res) {
-        println!("Failed to insert order record: {:?}", res);
         return (helper.kill(&txn, &res, AbortID::NewOrderInsertOrder), None);
     }
     let order_hint = res.unwrap();
@@ -203,7 +222,6 @@ pub fn run_neworder_txn_with_stats<M: MemPool>(
         None,
     );
     if not_successful(&res) {
-        println!("Failed to insert order secondary record: {:?}", res);
         return (
             helper.kill(&txn, &res, AbortID::NewOrderInsertOrderSecondary),
             None,

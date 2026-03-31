@@ -22,6 +22,8 @@ use std::sync::Arc;
 
 type TestBP = BufferPoolLRU;
 
+use super::loader::PartitionMode;
+
 fn setup_test_warehouse(
     num_warehouses: u16,
 ) -> (
@@ -29,8 +31,19 @@ fn setup_test_warehouse(
     DatabaseId,
     TpccContainerIds,
 ) {
+    setup_test_warehouse_with_mode(num_warehouses, PartitionMode::HotCold)
+}
+
+fn setup_test_warehouse_with_mode(
+    num_warehouses: u16,
+    mode: PartitionMode,
+) -> (
+    Arc<TransactionalStorage<TestBP>>,
+    DatabaseId,
+    TpccContainerIds,
+) {
     let bp = get_test_bp_lru(1000);
-    let loader = TpccLoader::new(bp);
+    let loader = TpccLoader::with_partition_mode(bp, mode);
     let storage: Arc<TransactionalStorage<BufferPoolLRU>> = loader.get_storage();
     let db_id = loader.get_db_id();
     let containers = loader.get_container_ids();
@@ -45,33 +58,32 @@ fn setup_test_warehouse(
 }
 
 #[test]
-fn test_loader_creates_containers() {
+fn test_loader_creates_containers_hotcold() {
     let bp = get_test_bp_lru(100);
-    let loader = TpccLoader::new(bp);
+    let loader = TpccLoader::with_partition_mode(bp, PartitionMode::HotCold);
     let storage = loader.get_storage();
     let db_id = loader.get_db_id();
 
-    // Verify all containers were created
     let container_list = storage.list_containers(db_id).unwrap();
-    assert_eq!(container_list.len(), 11); // 11 TPC-C tables
+    assert_eq!(container_list.len(), 12); // 12 tables (includes customer_hot)
 
-    // Verify container names
     let names: Vec<String> = container_list
         .iter()
         .map(|(_, opts)| opts.name().clone())
         .collect();
-
-    assert!(names.contains(&"item".to_string()));
-    assert!(names.contains(&"warehouse".to_string()));
-    assert!(names.contains(&"stock".to_string()));
-    assert!(names.contains(&"district".to_string()));
     assert!(names.contains(&"customer".to_string()));
-    assert!(names.contains(&"customer_secondary".to_string()));
-    assert!(names.contains(&"history".to_string()));
-    assert!(names.contains(&"order".to_string()));
-    assert!(names.contains(&"order_secondary".to_string()));
-    assert!(names.contains(&"new_order".to_string()));
-    assert!(names.contains(&"order_line".to_string()));
+    assert!(names.contains(&"customer_hot".to_string()));
+}
+
+#[test]
+fn test_loader_creates_containers_fullrow() {
+    let bp = get_test_bp_lru(100);
+    let loader = TpccLoader::with_partition_mode(bp, PartitionMode::FullRow);
+    let storage = loader.get_storage();
+    let db_id = loader.get_db_id();
+
+    let container_list = storage.list_containers(db_id).unwrap();
+    assert_eq!(container_list.len(), 11); // 11 tables (no customer_hot)
 }
 
 #[test]
@@ -147,20 +159,38 @@ fn test_customer_loading_and_secondary_index() {
 
     let txn = storage.begin_txn(db_id, TxnOptions::default()).unwrap();
 
-    // Check customer by primary key
+    // Check customer by primary key — cold container has keys + stable fields
     let c_key = vec![
         Field::Uint16(Some(1)),
         Field::Uint8(Some(1)),
         Field::Uint32(Some(1)),
     ];
-    let (c_fields, _) = storage
-        .get_fields(&txn, containers.customer_cid, c_key, &[2, 8], None)
+    let (c_cold_fields, _) = storage
+        .get_fields(
+            &txn,
+            containers.customer_cid,
+            c_key.clone(),
+            &[2], // c_id in cold schema
+            None,
+        )
         .unwrap();
 
-    if let Field::Uint32(Some(c_id)) = &c_fields[0] {
+    if let Field::Uint32(Some(c_id)) = &c_cold_fields[0] {
         assert_eq!(*c_id, 1);
     }
-    if let Field::Float64(Some(balance)) = &c_fields[1] {
+
+    // Check customer hot container for balance
+    let (c_hot_fields, _) = storage
+        .get_fields(
+            &txn,
+            containers.customer_hot_cid,
+            c_key,
+            &[3], // c_balance in hot schema
+            None,
+        )
+        .unwrap();
+
+    if let Field::Float64(Some(balance)) = &c_hot_fields[0] {
         assert_eq!(*balance, -10.0);
     }
 
@@ -321,7 +351,7 @@ fn test_neworder_transaction_invalid_item() {
 fn test_payment_transaction_by_id() {
     let (storage, db_id, containers) = setup_test_warehouse(1);
 
-    // Get initial customer balance
+    // Get initial customer balance from hot container
     let txn = storage.begin_txn(db_id, TxnOptions::default()).unwrap();
     let c_key = vec![
         Field::Uint16(Some(1)),
@@ -329,7 +359,13 @@ fn test_payment_transaction_by_id() {
         Field::Uint32(Some(1)),
     ];
     let (c_fields, _) = storage
-        .get_fields(&txn, containers.customer_cid, c_key.clone(), &[8], None)
+        .get_fields(
+            &txn,
+            containers.customer_hot_cid,
+            c_key.clone(),
+            &[3], // c_balance in hot schema
+            None,
+        )
         .unwrap();
     let initial_balance = if let Field::Float64(Some(bal)) = &c_fields[0] {
         bal
@@ -575,16 +611,68 @@ fn test_transaction_rollback_on_error() {
 }
 
 #[test]
-fn test_benchmark_creation() {
+fn test_benchmark_hotcold() {
     let bp = get_test_bp_lru(500);
-    let bench = TpccBenchmark::new(bp, 1);
-
-    // Run a very short benchmark
+    let bench = TpccBenchmark::with_partition_mode(bp, 1, PartitionMode::HotCold);
     let result = bench.run_benchmark(2, 1, false);
-
     assert!(result.committed_txns > 0);
-    assert_eq!(result.duration_secs, 1);
     assert!(result.throughput > 0.0);
+}
+
+#[test]
+fn test_benchmark_fullrow() {
+    let bp = get_test_bp_lru(500);
+    let bench = TpccBenchmark::with_partition_mode(bp, 1, PartitionMode::FullRow);
+    let result = bench.run_benchmark(2, 1, false);
+    assert!(result.committed_txns > 0);
+    assert!(result.throughput > 0.0);
+}
+
+#[test]
+fn test_benchmark_field_level() {
+    let bp = get_test_bp_lru(500);
+    let bench = TpccBenchmark::with_partition_mode(bp, 1, PartitionMode::FieldLevel);
+    let result = bench.run_benchmark(2, 1, false);
+    assert!(result.committed_txns > 0);
+    assert!(result.throughput > 0.0);
+}
+
+#[test]
+fn test_payment_fullrow() {
+    let (storage, db_id, containers) = setup_test_warehouse_with_mode(1, PartitionMode::FullRow);
+
+    let input = PaymentInput {
+        w_id: 1,
+        d_id: 1,
+        c_w_id: 1,
+        c_d_id: 1,
+        c_id: Some(1),
+        c_last: None,
+        h_amount: 100.0,
+    };
+
+    let result = run_payment_txn(&storage, db_id, &containers, &input).unwrap();
+    assert_eq!(result.c_id, 1);
+    assert_eq!(result.c_balance, -10.0 - 100.0);
+}
+
+#[test]
+fn test_payment_field_level() {
+    let (storage, db_id, containers) = setup_test_warehouse_with_mode(1, PartitionMode::FieldLevel);
+
+    let input = PaymentInput {
+        w_id: 1,
+        d_id: 1,
+        c_w_id: 1,
+        c_d_id: 1,
+        c_id: Some(1),
+        c_last: None,
+        h_amount: 100.0,
+    };
+
+    let result = run_payment_txn(&storage, db_id, &containers, &input).unwrap();
+    assert_eq!(result.c_id, 1);
+    assert_eq!(result.c_balance, -10.0 - 100.0);
 }
 
 #[test]

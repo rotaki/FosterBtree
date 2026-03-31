@@ -108,6 +108,7 @@ pub struct ContainerOptions {
     name: String,
     c_ds: ContainerDS,
     schema: Schema,
+    field_level_locking: bool,
 }
 
 impl ContainerOptions {
@@ -116,7 +117,17 @@ impl ContainerOptions {
             name: String::from(name),
             c_ds,
             schema,
+            field_level_locking: false,
         }
+    }
+
+    pub fn with_field_level_locking(mut self) -> Self {
+        self.field_level_locking = true;
+        self
+    }
+
+    pub fn field_level_locking(&self) -> bool {
+        self.field_level_locking
     }
 
     pub fn name(&self) -> &String {
@@ -143,7 +154,12 @@ impl ContainerOptions {
         let name = String::from_utf8(bytes[1..].to_vec()).expect("Invalid container name");
         let schema_bytes = &bytes[1 + name.len()..];
         let schema = Schema::from_bytes(schema_bytes);
-        ContainerOptions { name, c_ds, schema }
+        ContainerOptions {
+            name,
+            c_ds,
+            schema,
+            field_level_locking: false,
+        }
     }
 }
 

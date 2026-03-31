@@ -10,7 +10,7 @@ use fbtree::{
     bp::{get_test_bp_clock, MemPool},
     prelude::PAGE_SIZE,
     print_cfg_flags,
-    tpcc2::TpccBenchmark,
+    tpcc2::{PartitionMode, TpccBenchmark},
 };
 
 /// Configuration settings parsed from command-line arguments for TPC-C2.
@@ -36,6 +36,10 @@ pub struct TpccConfig {
     /// Test duration in seconds.
     #[arg(short = 'D', long, default_value_t = 10)]
     pub exec_time: u64,
+
+    /// Customer partition mode: fullrow, hotcold, fieldlevel
+    #[arg(short = 'p', long, default_value = "hotcold")]
+    pub partition_mode: String,
 }
 
 pub fn main() {
@@ -66,12 +70,23 @@ pub fn main() {
 
     let bp = get_test_bp_clock(num_frames);
 
+    let partition_mode = match config.partition_mode.as_str() {
+        "fullrow" => PartitionMode::FullRow,
+        "hotcold" => PartitionMode::HotCold,
+        "fieldlevel" => PartitionMode::FieldLevel,
+        other => panic!(
+            "Unknown partition mode: {}. Use fullrow, hotcold, or fieldlevel",
+            other
+        ),
+    };
+
     // Create the TPC-C2 benchmark
     println!(
-        "Initializing TPC-C2 benchmark with {} warehouses...",
-        config.num_warehouses
+        "Initializing TPC-C2 benchmark with {} warehouses, partition mode: {:?}...",
+        config.num_warehouses, partition_mode
     );
-    let benchmark = TpccBenchmark::new(bp.clone(), config.num_warehouses);
+    let benchmark =
+        TpccBenchmark::with_partition_mode(bp.clone(), config.num_warehouses, partition_mode);
 
     println!("BP stats after load: \n{}", bp.stats());
 

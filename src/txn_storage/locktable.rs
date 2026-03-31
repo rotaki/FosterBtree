@@ -132,6 +132,206 @@ impl ConcurrentLockTable {
     }
 }
 
+// ============================================================================
+// Field-Level Lock Table
+// ============================================================================
+// One DashMap entry per record key, containing a Vec<RwLatch> with one latch
+// per column. Accessing N fields of the same record = 1 DashMap lookup + N
+// atomic ops instead of N DashMap lookups + N allocations.
+
+pub struct FieldLockTable {
+    hashmap: DashMap<Vec<u8>, Vec<RwLatch>>,
+    num_fields: usize,
+}
+
+impl FieldLockTable {
+    pub fn new(num_fields: usize) -> Self {
+        FieldLockTable {
+            hashmap: DashMap::new(),
+            num_fields,
+        }
+    }
+
+    fn new_latches(&self) -> Vec<RwLatch> {
+        (0..self.num_fields).map(|_| RwLatch::default()).collect()
+    }
+
+    // --- Single-field operations ---
+
+    pub fn try_shared(&self, key: &[u8], col: usize) -> bool {
+        match self.hashmap.entry(key.to_vec()) {
+            dashmap::Entry::Occupied(entry) => entry.get()[col].try_shared(),
+            dashmap::Entry::Vacant(entry) => {
+                let latches = self.new_latches();
+                assert!(latches[col].try_shared());
+                entry.insert(latches);
+                true
+            }
+        }
+    }
+
+    pub fn try_exclusive(&self, key: &[u8], col: usize) -> bool {
+        match self.hashmap.entry(key.to_vec()) {
+            dashmap::Entry::Occupied(entry) => entry.get()[col].try_exclusive(),
+            dashmap::Entry::Vacant(entry) => {
+                let latches = self.new_latches();
+                assert!(latches[col].try_exclusive());
+                entry.insert(latches);
+                true
+            }
+        }
+    }
+
+    pub fn try_upgrade(&self, key: &[u8], col: usize) -> bool {
+        match self.hashmap.entry(key.to_vec()) {
+            dashmap::Entry::Occupied(entry) => entry.get()[col].try_upgrade(),
+            dashmap::Entry::Vacant(_) => false,
+        }
+    }
+
+    pub fn release_shared(&self, key: &[u8], col: usize) {
+        match self.hashmap.entry(key.to_vec()) {
+            dashmap::Entry::Occupied(entry) => {
+                entry.get()[col].release_shared();
+                if entry.get().iter().all(|l| !l.is_locked()) {
+                    entry.remove();
+                }
+            }
+            dashmap::Entry::Vacant(_) => panic!("Field lock not found"),
+        }
+    }
+
+    pub fn release_exclusive(&self, key: &[u8], col: usize) {
+        match self.hashmap.entry(key.to_vec()) {
+            dashmap::Entry::Occupied(entry) => {
+                entry.get()[col].release_exclusive();
+                if entry.get().iter().all(|l| !l.is_locked()) {
+                    entry.remove();
+                }
+            }
+            dashmap::Entry::Vacant(_) => panic!("Field lock not found"),
+        }
+    }
+
+    // --- Batch operations (single DashMap lookup for multiple fields) ---
+
+    /// Acquire shared locks on multiple columns. Returns true if all succeed.
+    /// On failure, releases any already-acquired locks and returns false.
+    pub fn try_shared_multi(&self, key: &[u8], cols: &[usize]) -> bool {
+        match self.hashmap.entry(key.to_vec()) {
+            dashmap::Entry::Occupied(entry) => {
+                let latches = entry.get();
+                for (i, &col) in cols.iter().enumerate() {
+                    if !latches[col].try_shared() {
+                        // Rollback
+                        for &c in &cols[..i] {
+                            latches[c].release_shared();
+                        }
+                        return false;
+                    }
+                }
+                true
+            }
+            dashmap::Entry::Vacant(entry) => {
+                let latches = self.new_latches();
+                for &col in cols {
+                    assert!(latches[col].try_shared());
+                }
+                entry.insert(latches);
+                true
+            }
+        }
+    }
+
+    /// Acquire exclusive locks on multiple columns. Returns true if all succeed.
+    /// On failure, releases any already-acquired locks and returns false.
+    pub fn try_exclusive_multi(&self, key: &[u8], cols: &[usize]) -> bool {
+        match self.hashmap.entry(key.to_vec()) {
+            dashmap::Entry::Occupied(entry) => {
+                let latches = entry.get();
+                for (i, &col) in cols.iter().enumerate() {
+                    if !latches[col].try_exclusive() {
+                        for &c in &cols[..i] {
+                            latches[c].release_exclusive();
+                        }
+                        return false;
+                    }
+                }
+                true
+            }
+            dashmap::Entry::Vacant(entry) => {
+                let latches = self.new_latches();
+                for &col in cols {
+                    assert!(latches[col].try_exclusive());
+                }
+                entry.insert(latches);
+                true
+            }
+        }
+    }
+
+    /// Release shared locks on multiple columns (single DashMap lookup).
+    pub fn release_shared_multi(&self, key: &[u8], cols: &[usize]) {
+        match self.hashmap.entry(key.to_vec()) {
+            dashmap::Entry::Occupied(entry) => {
+                let latches = entry.get();
+                for &col in cols {
+                    latches[col].release_shared();
+                }
+                if latches.iter().all(|l| !l.is_locked()) {
+                    entry.remove();
+                }
+            }
+            dashmap::Entry::Vacant(_) => panic!("Field lock not found"),
+        }
+    }
+
+    /// Release exclusive locks on multiple columns (single DashMap lookup).
+    pub fn release_exclusive_multi(&self, key: &[u8], cols: &[usize]) {
+        match self.hashmap.entry(key.to_vec()) {
+            dashmap::Entry::Occupied(entry) => {
+                let latches = entry.get();
+                for &col in cols {
+                    latches[col].release_exclusive();
+                }
+                if latches.iter().all(|l| !l.is_locked()) {
+                    entry.remove();
+                }
+            }
+            dashmap::Entry::Vacant(_) => panic!("Field lock not found"),
+        }
+    }
+
+    /// Release a mix of shared and exclusive locks (single DashMap lookup).
+    /// `locks`: (col_idx, is_exclusive)
+    pub fn release_all(&self, key: &[u8], locks: &[(usize, bool)]) {
+        match self.hashmap.entry(key.to_vec()) {
+            dashmap::Entry::Occupied(entry) => {
+                let latches = entry.get();
+                for &(col, is_excl) in locks {
+                    if is_excl {
+                        latches[col].release_exclusive();
+                    } else {
+                        latches[col].release_shared();
+                    }
+                }
+                if latches.iter().all(|l| !l.is_locked()) {
+                    entry.remove();
+                }
+            }
+            dashmap::Entry::Vacant(_) => panic!("Field lock not found"),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.hashmap.is_empty()
+    }
+
+    pub fn lock_count(&self) -> usize {
+        self.hashmap.len()
+    }
+}
+
 #[allow(dead_code)]
 pub struct SingleThreadLockTable {
     hashmap: Mutex<HashMap<Vec<u8>, RwLatch>>,

@@ -19,15 +19,28 @@ use crate::{
 
 use super::record_definitions::*;
 
+/// Controls how the CUSTOMER table is partitioned and locked.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PartitionMode {
+    /// Single customer container, record-level locking (baseline)
+    FullRow,
+    /// Two containers (cold + hot), record-level locking per container
+    HotCold,
+    /// Single customer container, field-level locking
+    FieldLevel,
+}
+
 pub struct TpccLoader<M: MemPool> {
     storage: Arc<TransactionalStorage<M>>,
     db_id: DatabaseId,
+    partition_mode: PartitionMode,
     // Container IDs
     item_cid: u16,
     warehouse_cid: u16,
     stock_cid: u16,
     district_cid: u16,
-    customer_cid: u16,
+    customer_cid: u16, // Primary customer container (full-row or cold, depending on mode)
+    customer_hot_cid: u16, // Hot container (only used in HotCold mode, 0 otherwise)
     customer_secondary_cid: u16,
     history_cid: u16,
     order_cid: u16,
@@ -41,6 +54,10 @@ pub struct TpccLoader<M: MemPool> {
 
 impl<M: MemPool> TpccLoader<M> {
     pub fn new(mem_pool: Arc<M>) -> Self {
+        Self::with_partition_mode(mem_pool, PartitionMode::HotCold)
+    }
+
+    pub fn with_partition_mode(mem_pool: Arc<M>, partition_mode: PartitionMode) -> Self {
         let storage = Arc::new(TransactionalStorage::new(mem_pool));
         let db_id = storage.open_db(DBOptions::new("tpcc")).unwrap();
 
@@ -52,10 +69,16 @@ impl<M: MemPool> TpccLoader<M> {
             )
             .unwrap();
 
+        let warehouse_opts =
+            ContainerOptions::new(WAREHOUSE_TABLE, ContainerDS::BTree, warehouse_schema());
         let warehouse_cid = storage
             .create_container(
                 db_id,
-                ContainerOptions::new(WAREHOUSE_TABLE, ContainerDS::BTree, warehouse_schema()),
+                if partition_mode == PartitionMode::FieldLevel {
+                    warehouse_opts.with_field_level_locking()
+                } else {
+                    warehouse_opts
+                },
             )
             .unwrap();
 
@@ -66,19 +89,72 @@ impl<M: MemPool> TpccLoader<M> {
             )
             .unwrap();
 
+        let district_opts =
+            ContainerOptions::new(DISTRICT_TABLE, ContainerDS::BTree, district_schema());
         let district_cid = storage
             .create_container(
                 db_id,
-                ContainerOptions::new(DISTRICT_TABLE, ContainerDS::BTree, district_schema()),
+                if partition_mode == PartitionMode::FieldLevel {
+                    district_opts.with_field_level_locking()
+                } else {
+                    district_opts
+                },
             )
             .unwrap();
 
-        let customer_cid = storage
-            .create_container(
-                db_id,
-                ContainerOptions::new(CUSTOMER_TABLE, ContainerDS::BTree, customer_schema()),
-            )
-            .unwrap();
+        // Customer container(s) depend on partition mode
+        let (customer_cid, customer_hot_cid) = match partition_mode {
+            PartitionMode::FullRow => {
+                let cid = storage
+                    .create_container(
+                        db_id,
+                        ContainerOptions::new(
+                            CUSTOMER_TABLE,
+                            ContainerDS::BTree,
+                            customer_schema(),
+                        ),
+                    )
+                    .unwrap();
+                (cid, 0) // hot_cid unused
+            }
+            PartitionMode::HotCold => {
+                let cold_cid = storage
+                    .create_container(
+                        db_id,
+                        ContainerOptions::new(
+                            CUSTOMER_TABLE,
+                            ContainerDS::BTree,
+                            customer_cold_schema(),
+                        ),
+                    )
+                    .unwrap();
+                let hot_cid = storage
+                    .create_container(
+                        db_id,
+                        ContainerOptions::new(
+                            CUSTOMER_HOT_TABLE,
+                            ContainerDS::BTree,
+                            customer_hot_schema(),
+                        ),
+                    )
+                    .unwrap();
+                (cold_cid, hot_cid)
+            }
+            PartitionMode::FieldLevel => {
+                let cid = storage
+                    .create_container(
+                        db_id,
+                        ContainerOptions::new(
+                            CUSTOMER_TABLE,
+                            ContainerDS::BTree,
+                            customer_schema(),
+                        )
+                        .with_field_level_locking(),
+                    )
+                    .unwrap();
+                (cid, 0) // hot_cid unused
+            }
+        };
 
         let customer_secondary_cid = storage
             .create_container(
@@ -133,11 +209,13 @@ impl<M: MemPool> TpccLoader<M> {
         Self {
             storage,
             db_id,
+            partition_mode,
             item_cid,
             warehouse_cid,
             stock_cid,
             district_cid,
             customer_cid,
+            customer_hot_cid,
             customer_secondary_cid,
             history_cid,
             order_cid,
@@ -158,11 +236,13 @@ impl<M: MemPool> TpccLoader<M> {
 
     pub fn get_container_ids(&self) -> TpccContainerIds {
         TpccContainerIds {
+            partition_mode: self.partition_mode,
             item_cid: self.item_cid,
             warehouse_cid: self.warehouse_cid,
             stock_cid: self.stock_cid,
             district_cid: self.district_cid,
             customer_cid: self.customer_cid,
+            customer_hot_cid: self.customer_hot_cid,
             customer_secondary_cid: self.customer_secondary_cid,
             history_cid: self.history_cid,
             order_cid: self.order_cid,
@@ -251,10 +331,38 @@ impl<M: MemPool> TpccLoader<M> {
                 let customer =
                     crate::tpcc::Customer::generate(w_id, d_id, c_id as u32, get_timestamp());
 
-                let customer_ptr = self
-                    .storage
-                    .raw_insert_record(self.db_id, self.customer_cid, customer_to_record(&customer))
-                    .unwrap();
+                let customer_ptr = match self.partition_mode {
+                    PartitionMode::HotCold => {
+                        // Insert cold fields into primary (cold) container
+                        let ptr = self
+                            .storage
+                            .raw_insert_record(
+                                self.db_id,
+                                self.customer_cid,
+                                customer_cold_to_record(&customer),
+                            )
+                            .unwrap();
+                        // Insert hot fields into hot container
+                        self.storage
+                            .raw_insert_record(
+                                self.db_id,
+                                self.customer_hot_cid,
+                                customer_hot_to_record(&customer),
+                            )
+                            .unwrap();
+                        ptr
+                    }
+                    PartitionMode::FullRow | PartitionMode::FieldLevel => {
+                        // Insert full row into single container
+                        self.storage
+                            .raw_insert_record(
+                                self.db_id,
+                                self.customer_cid,
+                                customer_to_record(&customer),
+                            )
+                            .unwrap()
+                    }
+                };
 
                 let secondary_key = Record {
                     fields: vec![
@@ -361,11 +469,13 @@ impl<M: MemPool> TpccLoader<M> {
 // Container IDs struct for passing to transactions
 #[derive(Clone, Copy, Debug)]
 pub struct TpccContainerIds {
+    pub partition_mode: PartitionMode,
     pub item_cid: u16,
     pub warehouse_cid: u16,
     pub stock_cid: u16,
     pub district_cid: u16,
-    pub customer_cid: u16,
+    pub customer_cid: u16, // Primary customer container (full-row, cold, or field-level)
+    pub customer_hot_cid: u16, // Hot container (only used in HotCold mode)
     pub customer_secondary_cid: u16,
     pub history_cid: u16,
     pub order_cid: u16,

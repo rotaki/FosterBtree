@@ -13,7 +13,7 @@ use crate::{
         ContainerId as PackedContainerId, DatabaseId, LocalContainerId as ContainerId, MemPool,
         PageRef,
     },
-    txn_storage::locktable::ConcurrentLockTable as LockTable,
+    txn_storage::locktable::{ConcurrentLockTable as LockTable, FieldLockTable},
     txn_storage2::{
         field::{
             bytes_to_record, key_to_bytes, record_to_bytes, record_to_key_bytes, Field, Record,
@@ -64,6 +64,9 @@ impl RWEntry {
 
 pub struct ReadWriteSet {
     entries: UnsafeCell<HashMap<Vec<u8>, RWEntry>>, // key_bytes -> entry
+    // Field-level lock tracking: key_bytes -> [(col_idx, is_exclusive)]
+    // Only populated when the container has field_level_locking enabled
+    field_locks: UnsafeCell<HashMap<Vec<u8>, Vec<(usize, bool)>>>,
 }
 
 impl Default for ReadWriteSet {
@@ -76,6 +79,7 @@ impl ReadWriteSet {
     pub fn new() -> Self {
         ReadWriteSet {
             entries: UnsafeCell::new(HashMap::new()),
+            field_locks: UnsafeCell::new(HashMap::new()),
         }
     }
 
@@ -95,6 +99,28 @@ impl ReadWriteSet {
 
     pub fn iter(&self) -> std::collections::hash_map::Iter<'_, Vec<u8>, RWEntry> {
         unsafe { (*self.entries.get()).iter() }
+    }
+
+    // Field-level lock tracking methods
+
+    pub fn get_field_locks(&self, key: &[u8]) -> Option<&Vec<(usize, bool)>> {
+        unsafe { (*self.field_locks.get()).get(key) }
+    }
+
+    pub fn get_field_locks_mut(&self, key: &[u8]) -> Option<&mut Vec<(usize, bool)>> {
+        unsafe { (*self.field_locks.get()).get_mut(key) }
+    }
+
+    pub fn set_field_locks(&self, key: Vec<u8>, locks: Vec<(usize, bool)>) {
+        unsafe {
+            (*self.field_locks.get()).insert(key, locks);
+        }
+    }
+
+    pub fn iter_field_locks(
+        &self,
+    ) -> std::collections::hash_map::Iter<'_, Vec<u8>, Vec<(usize, bool)>> {
+        unsafe { (*self.field_locks.get()).iter() }
     }
 }
 
@@ -188,6 +214,7 @@ struct ContainerInfo<M: MemPool> {
     options: ContainerOptions,
     btree: Arc<FosterBtree<M>>,
     locktable: Arc<LockTable>,
+    field_locktable: Option<Arc<FieldLockTable>>,
     container_id: PackedContainerId,
 }
 
@@ -251,11 +278,24 @@ impl<M: MemPool> ContainerInfo<M> {
     }
 
     fn release_shared_locks(&self, rwset: &ReadWriteSet) {
-        let locktable = &self.locktable;
-        for (key, entry) in rwset.iter() {
-            if let RWEntry::Read(..) = entry {
-                // Release shared lock
-                locktable.release_shared(key.clone());
+        if let Some(flt) = &self.field_locktable {
+            // Release per-field shared locks (batch per record)
+            for (key_bytes, field_lock_list) in rwset.iter_field_locks() {
+                let shared_cols: Vec<usize> = field_lock_list
+                    .iter()
+                    .filter(|&&(_, is_excl)| !is_excl)
+                    .map(|&(col, _)| col)
+                    .collect();
+                if !shared_cols.is_empty() {
+                    flt.release_shared_multi(key_bytes, &shared_cols);
+                }
+            }
+        } else {
+            let locktable = &self.locktable;
+            for (key, entry) in rwset.iter() {
+                if let RWEntry::Read(..) = entry {
+                    locktable.release_shared(key.clone());
+                }
             }
         }
     }
@@ -277,16 +317,35 @@ impl<M: MemPool> ContainerInfo<M> {
                             key, self.container_id
                         );
                     } else {
-                        // Update the record
                         if *ghost {
                             page.unghostify_at(slot_id);
                         }
-                        self.btree.update_at_slot_or_split(
-                            &mut page,
-                            slot_id,
-                            key,
-                            &record_to_bytes(record, self.options.schema()),
-                        );
+                        if self.options.field_level_locking() {
+                            // FLL: merge only exclusively-locked fields into the
+                            // current storage record to avoid lost updates.
+                            let mut current =
+                                bytes_to_record(page.get_val(slot_id), self.options.schema());
+                            if let Some(field_lock_list) = rwset.get_field_locks(key) {
+                                for &(col_idx, is_exclusive) in field_lock_list {
+                                    if is_exclusive {
+                                        current[col_idx] = record[col_idx].clone();
+                                    }
+                                }
+                            }
+                            self.btree.update_at_slot_or_split(
+                                &mut page,
+                                slot_id,
+                                key,
+                                &record_to_bytes(&current, self.options.schema()),
+                            );
+                        } else {
+                            self.btree.update_at_slot_or_split(
+                                &mut page,
+                                slot_id,
+                                key,
+                                &record_to_bytes(record, self.options.schema()),
+                            );
+                        }
                     }
                 }
                 RWEntry::Insert(_record, ptr, ghost) => {
@@ -325,28 +384,48 @@ impl<M: MemPool> ContainerInfo<M> {
                     }
                 }
             }
-            locktable.release_exclusive(key.clone());
+            if let Some(flt) = &self.field_locktable {
+                // Release per-field exclusive locks (batch)
+                if let Some(field_lock_list) = rwset.get_field_locks(key) {
+                    let excl_cols: Vec<usize> = field_lock_list
+                        .iter()
+                        .filter(|&&(_, is_excl)| is_excl)
+                        .map(|&(col, _)| col)
+                        .collect();
+                    if !excl_cols.is_empty() {
+                        flt.release_exclusive_multi(key, &excl_cols);
+                    }
+                }
+            } else {
+                locktable.release_exclusive(key.clone());
+            }
         }
     }
 
-    fn revert_failed_inserts_and_release_locks(&self, rwset: &ReadWriteSet) {
-        let locktable = &self.locktable;
+    /// Phase 1 of abort: delete all ghost inserts from storage while locks are still held.
+    fn revert_ghost_inserts(&self, rwset: &ReadWriteSet) {
         for (key, entry) in rwset.iter() {
             if entry.is_ghost_inserted() {
                 self.delete_with_hint(key, Some(*entry.get_pointer()))
                     .expect("Failed to revert ghost insert");
             }
         }
+    }
 
-        for (key, entry) in rwset.iter() {
-            match entry {
-                RWEntry::Read(..) => {
-                    // Release shared lock
-                    locktable.release_shared(key.clone());
-                }
-                RWEntry::Update(..) | RWEntry::Insert(..) | RWEntry::Delete(..) => {
-                    // Release exclusive lock
-                    locktable.release_exclusive(key.clone());
+    /// Phase 2 of abort: release all locks after all ghosts across all containers are cleaned up.
+    fn release_all_locks(&self, rwset: &ReadWriteSet) {
+        if let Some(flt) = &self.field_locktable {
+            for (key_bytes, field_lock_list) in rwset.iter_field_locks() {
+                flt.release_all(key_bytes, field_lock_list);
+            }
+        } else {
+            let locktable = &self.locktable;
+            for (key, entry) in rwset.iter() {
+                match entry {
+                    RWEntry::Read(..) => locktable.release_shared(key.clone()),
+                    RWEntry::Update(..) | RWEntry::Insert(..) | RWEntry::Delete(..) => {
+                        locktable.release_exclusive(key.clone());
+                    }
                 }
             }
         }
@@ -473,11 +552,17 @@ impl<M: MemPool> FieldLeveLStorageTrait for TransactionalStorage<M> {
             let container_key = PackedContainerId::new(0, c_id); // Always use db_id 0
             let btree = Arc::new(FosterBtree::new(container_key, self.mem_pool.clone()));
             let locktable = Arc::new(LockTable::new());
+            let field_locktable = if options.field_level_locking() {
+                Some(Arc::new(FieldLockTable::new(options.schema().cols().len())))
+            } else {
+                None
+            };
 
             let container_info = ContainerInfo {
                 options: options.clone(),
                 btree,
                 locktable,
+                field_locktable,
                 container_id: container_key,
             };
 
@@ -590,11 +675,20 @@ impl<M: MemPool> FieldLeveLStorageTrait for TransactionalStorage<M> {
             return Err(TxnStorageStatus::Aborted);
         }
 
-        // Abort all container changes
+        // Two-phase abort:
+        // Phase 1: Delete all ghost inserts across ALL containers while locks are still held.
+        //          This prevents other transactions from seeing ghost records after the
+        //          protecting lock on a different container is released.
         for (&c_id, rwset) in txn.rwsets() {
             if let Ok(container) = self.get_container(c_id) {
-                // Revert any ghost inserts and release locks
-                container.revert_failed_inserts_and_release_locks(rwset);
+                container.revert_ghost_inserts(rwset);
+            }
+        }
+
+        // Phase 2: Release all locks across ALL containers.
+        for (&c_id, rwset) in txn.rwsets() {
+            if let Ok(container) = self.get_container(c_id) {
+                container.release_all_locks(rwset);
             }
         }
 
@@ -674,10 +768,41 @@ impl<M: MemPool> FieldLeveLStorageTrait for TransactionalStorage<M> {
         let rwset = txn.get_or_create_rwset(c_id);
         let container = self.get_container(c_id)?;
         let key_bytes = key_to_bytes(&key);
+        let flt = container.field_locktable.as_ref();
+
+        // Helper: acquire shared field locks on columns not yet locked
+        let acquire_new_shared =
+            |key_bytes: &[u8], cols: &[usize], rwset: &ReadWriteSet, flt: &FieldLockTable| {
+                let existing = rwset.get_field_locks(key_bytes);
+                let new_cols: Vec<usize> = cols
+                    .iter()
+                    .filter(|&&col| {
+                        !existing
+                            .map(|locks| locks.iter().any(|&(c, _)| c == col))
+                            .unwrap_or(false)
+                    })
+                    .copied()
+                    .collect();
+                if new_cols.is_empty() {
+                    return Ok(());
+                }
+                if !flt.try_shared_multi(key_bytes, &new_cols) {
+                    return Err(TxnStorageStatus::TxnConflict);
+                }
+                if let Some(locks) = rwset.get_field_locks_mut(key_bytes) {
+                    for col in new_cols {
+                        locks.push((col, false));
+                    }
+                }
+                Ok(())
+            };
 
         if let Some(entry) = rwset.get_mut(&key_bytes) {
             match entry {
                 RWEntry::Read(ptr, _) => {
+                    if let Some(flt) = flt {
+                        acquire_new_shared(&key_bytes, col_indices, rwset, flt)?;
+                    }
                     let page = container.btree.traverse_to_leaf_for_read_with_hint(
                         &key_bytes,
                         container.hint_to_page_ref(Some(*ptr)),
@@ -692,7 +817,9 @@ impl<M: MemPool> FieldLeveLStorageTrait for TransactionalStorage<M> {
                     Ok((fields, *ptr))
                 }
                 RWEntry::Update(fields, ptr, _) | RWEntry::Insert(fields, ptr, _) => {
-                    // Return the fields directly from rwset
+                    if let Some(flt) = flt {
+                        acquire_new_shared(&key_bytes, col_indices, rwset, flt)?;
+                    }
                     let result = col_indices.iter().map(|&idx| fields[idx].clone()).collect();
                     Ok((result, *ptr))
                 }
@@ -700,19 +827,31 @@ impl<M: MemPool> FieldLeveLStorageTrait for TransactionalStorage<M> {
             }
         } else {
             // Find from index
-            let locktable = &container.locktable;
             let page = container
                 .btree
                 .traverse_to_leaf_for_read_with_hint(&key_bytes, container.hint_to_page_ref(hint));
             let slot_id = page.upper_bound_slot_id(&BTreeKey::new(&key_bytes)) - 1;
             if slot_id == 0 || page.get_raw_key(slot_id) != key_bytes {
                 Err(TxnStorageStatus::KeyNotFound)
-            } else {
-                // Lock the key
-                if !locktable.try_shared(key_bytes.clone()) {
+            } else if let Some(flt) = flt {
+                // Batch acquire per-field shared locks
+                if !flt.try_shared_multi(&key_bytes, col_indices) {
                     return Err(TxnStorageStatus::TxnConflict);
                 }
-                // Insert into rwset as a read entry
+                let ptr = RecordPointer::new(page.page_id(), page.frame_id());
+                let record = bytes_to_record(page.get_val(slot_id), container.options.schema());
+                rwset.insert(key_bytes.clone(), RWEntry::Read(ptr, false));
+                rwset.set_field_locks(
+                    key_bytes.clone(),
+                    col_indices.iter().map(|&c| (c, false)).collect(),
+                );
+                let fields = col_indices.iter().map(|&idx| record[idx].clone()).collect();
+                Ok((fields, ptr))
+            } else {
+                // Record-level shared lock
+                if !container.locktable.try_shared(key_bytes.clone()) {
+                    return Err(TxnStorageStatus::TxnConflict);
+                }
                 let ptr = RecordPointer::new(page.page_id(), page.frame_id());
                 let record = bytes_to_record(page.get_val(slot_id), container.options.schema());
                 rwset.insert(key_bytes.clone(), RWEntry::Read(ptr, false));
@@ -749,8 +888,43 @@ impl<M: MemPool> FieldLeveLStorageTrait for TransactionalStorage<M> {
         let rwset = txn.get_or_create_rwset(c_id);
         let container = self.get_container(c_id)?;
         let key_bytes = key_to_bytes(&key);
+        let flt = container.field_locktable.as_ref();
 
-        // Get current fields and pointer (either from rwset or storage)
+        // Helper: upgrade or acquire per-field exclusive locks
+        let acquire_field_exclusive = |key_bytes: &[u8],
+                                       updated_cols: &[(usize, Field)],
+                                       rwset: &ReadWriteSet,
+                                       flt: &FieldLockTable| {
+            for &(col_idx, _) in updated_cols {
+                let existing = rwset.get_field_locks(key_bytes);
+                let current_lock = existing
+                    .and_then(|locks| locks.iter().find(|&&(c, _)| c == col_idx))
+                    .map(|&(_, is_excl)| is_excl);
+                match current_lock {
+                    Some(true) => {}
+                    Some(false) => {
+                        if !flt.try_upgrade(key_bytes, col_idx) {
+                            return Err(TxnStorageStatus::TxnConflict);
+                        }
+                        if let Some(locks) = rwset.get_field_locks_mut(key_bytes) {
+                            if let Some(entry) = locks.iter_mut().find(|(c, _)| *c == col_idx) {
+                                entry.1 = true;
+                            }
+                        }
+                    }
+                    None => {
+                        if !flt.try_exclusive(key_bytes, col_idx) {
+                            return Err(TxnStorageStatus::TxnConflict);
+                        }
+                        if let Some(locks) = rwset.get_field_locks_mut(key_bytes) {
+                            locks.push((col_idx, true));
+                        }
+                    }
+                }
+            }
+            Ok(())
+        };
+
         if let Some(e) = rwset.get_mut(&key_bytes) {
             match e {
                 RWEntry::Delete(_, _) => Err(TxnStorageStatus::KeyNotFound),
@@ -763,62 +937,61 @@ impl<M: MemPool> FieldLeveLStorageTrait for TransactionalStorage<M> {
                     if slot_id == 0 || page.get_raw_key(slot_id) != key_bytes {
                         panic!("Key should exist in storage if in rwset");
                     }
-
-                    let locktable = &container.locktable;
-                    if !locktable.try_upgrade(key_bytes.clone()) {
+                    if let Some(flt) = flt {
+                        acquire_field_exclusive(&key_bytes, &fields, rwset, flt)?;
+                    } else if !container.locktable.try_upgrade(key_bytes.clone()) {
                         return Err(TxnStorageStatus::TxnConflict);
                     }
-
                     let mut record =
                         bytes_to_record(page.get_val(slot_id), container.options.schema());
-                    fields.into_iter().for_each(|(idx, new_field)| {
-                        record[idx] = new_field;
-                    });
-
+                    fields.into_iter().for_each(|(idx, f)| record[idx] = f);
                     let ptr = *ptr;
                     *e = RWEntry::Update(record, ptr, *ghost);
                     Ok(ptr)
                 }
                 RWEntry::Update(record, ptr, _) => {
-                    fields
-                        .into_iter()
-                        .for_each(|(idx, new_field)| record[idx] = new_field);
+                    if let Some(flt) = flt {
+                        acquire_field_exclusive(&key_bytes, &fields, rwset, flt)?;
+                    }
+                    fields.into_iter().for_each(|(idx, f)| record[idx] = f);
                     Ok(*ptr)
                 }
                 RWEntry::Insert(record, ptr, ghost) => {
+                    if let Some(flt) = flt {
+                        acquire_field_exclusive(&key_bytes, &fields, rwset, flt)?;
+                    }
                     let ptr = *ptr;
-                    fields
-                        .into_iter()
-                        .for_each(|(idx, new_field)| record[idx] = new_field);
+                    fields.into_iter().for_each(|(idx, f)| record[idx] = f);
                     *e = RWEntry::Update(record.clone(), ptr, *ghost);
                     Ok(ptr)
                 }
             }
         } else {
-            // Abort if not found in index
-            let locktable = &container.locktable;
             let page = container
                 .btree
                 .traverse_to_leaf_for_read_with_hint(&key_bytes, container.hint_to_page_ref(hint));
             let slot_id = page.upper_bound_slot_id(&BTreeKey::new(&key_bytes)) - 1;
             if slot_id == 0 || page.get_raw_key(slot_id) != key_bytes {
                 Err(TxnStorageStatus::KeyNotFound)
-            } else {
-                // Lock the key
-                if !locktable.try_exclusive(key_bytes.clone()) {
+            } else if let Some(flt) = flt {
+                let cols: Vec<usize> = fields.iter().map(|&(c, _)| c).collect();
+                if !flt.try_exclusive_multi(&key_bytes, &cols) {
                     return Err(TxnStorageStatus::TxnConflict);
                 }
-                // Insert into rwset
                 let ptr = RecordPointer::new(page.page_id(), page.frame_id());
                 let mut record = bytes_to_record(page.get_val(slot_id), container.options.schema());
-                // Update fields
-                fields.into_iter().for_each(|(idx, new_field)| {
-                    record[idx] = new_field;
-                });
-                rwset.insert(
-                    key_bytes.clone(),
-                    RWEntry::Update(record.clone(), ptr, false),
-                );
+                fields.into_iter().for_each(|(idx, f)| record[idx] = f);
+                rwset.insert(key_bytes.clone(), RWEntry::Update(record, ptr, false));
+                rwset.set_field_locks(key_bytes.clone(), cols.iter().map(|&c| (c, true)).collect());
+                Ok(ptr)
+            } else {
+                if !container.locktable.try_exclusive(key_bytes.clone()) {
+                    return Err(TxnStorageStatus::TxnConflict);
+                }
+                let ptr = RecordPointer::new(page.page_id(), page.frame_id());
+                let mut record = bytes_to_record(page.get_val(slot_id), container.options.schema());
+                fields.into_iter().for_each(|(idx, f)| record[idx] = f);
+                rwset.insert(key_bytes.clone(), RWEntry::Update(record, ptr, false));
                 Ok(ptr)
             }
         }
@@ -836,8 +1009,40 @@ impl<M: MemPool> FieldLeveLStorageTrait for TransactionalStorage<M> {
         let rwset = txn.get_or_create_rwset(c_id);
         let container = self.get_container(c_id)?;
         let key_bytes = key_to_bytes(&key);
+        let flt = container.field_locktable.as_ref();
 
-        // Get current fields and pointer (either from rwset or storage)
+        // Helper: upgrade or acquire exclusive lock on a single field
+        let acquire_single_excl =
+            |key_bytes: &[u8], col: usize, rwset: &ReadWriteSet, flt: &FieldLockTable| {
+                let existing = rwset.get_field_locks(key_bytes);
+                let current = existing
+                    .and_then(|locks| locks.iter().find(|&&(c, _)| c == col))
+                    .map(|&(_, is_excl)| is_excl);
+                match current {
+                    Some(true) => Ok(()),
+                    Some(false) => {
+                        if !flt.try_upgrade(key_bytes, col) {
+                            return Err(TxnStorageStatus::TxnConflict);
+                        }
+                        if let Some(locks) = rwset.get_field_locks_mut(key_bytes) {
+                            if let Some(e) = locks.iter_mut().find(|(c, _)| *c == col) {
+                                e.1 = true;
+                            }
+                        }
+                        Ok(())
+                    }
+                    None => {
+                        if !flt.try_exclusive(key_bytes, col) {
+                            return Err(TxnStorageStatus::TxnConflict);
+                        }
+                        if let Some(locks) = rwset.get_field_locks_mut(key_bytes) {
+                            locks.push((col, true));
+                        }
+                        Ok(())
+                    }
+                }
+            };
+
         if let Some(e) = rwset.get_mut(&key_bytes) {
             match e {
                 RWEntry::Delete(_, _) => Err(TxnStorageStatus::KeyNotFound),
@@ -850,10 +1055,10 @@ impl<M: MemPool> FieldLeveLStorageTrait for TransactionalStorage<M> {
                     if slot_id == 0 || page.get_raw_key(slot_id) != key_bytes {
                         panic!("Key should exist in storage if in rwset");
                     }
-
                     let ptr = *ptr;
-                    let locktable = &container.locktable;
-                    if !locktable.try_upgrade(key_bytes.clone()) {
+                    if let Some(flt) = flt {
+                        acquire_single_excl(&key_bytes, col_idx, rwset, flt)?;
+                    } else if !container.locktable.try_upgrade(key_bytes.clone()) {
                         return Err(TxnStorageStatus::TxnConflict);
                     }
                     let mut record =
@@ -863,10 +1068,16 @@ impl<M: MemPool> FieldLeveLStorageTrait for TransactionalStorage<M> {
                     Ok(ptr)
                 }
                 RWEntry::Update(record, ptr, _) => {
+                    if let Some(flt) = flt {
+                        acquire_single_excl(&key_bytes, col_idx, rwset, flt)?;
+                    }
                     func(&mut record[col_idx]);
                     Ok(*ptr)
                 }
                 RWEntry::Insert(record, ptr, ghost) => {
+                    if let Some(flt) = flt {
+                        acquire_single_excl(&key_bytes, col_idx, rwset, flt)?;
+                    }
                     let ptr = *ptr;
                     func(&mut record[col_idx]);
                     *e = RWEntry::Update(record.clone(), ptr, *ghost);
@@ -874,28 +1085,30 @@ impl<M: MemPool> FieldLeveLStorageTrait for TransactionalStorage<M> {
                 }
             }
         } else {
-            // Abort if not found in index
-            let locktable = &container.locktable;
             let page = container
                 .btree
                 .traverse_to_leaf_for_read_with_hint(&key_bytes, container.hint_to_page_ref(hint));
             let slot_id = page.upper_bound_slot_id(&BTreeKey::new(&key_bytes)) - 1;
             if slot_id == 0 || page.get_raw_key(slot_id) != key_bytes {
                 Err(TxnStorageStatus::KeyNotFound)
-            } else {
-                // Lock the key
-                if !locktable.try_exclusive(key_bytes.clone()) {
+            } else if let Some(flt) = flt {
+                if !flt.try_exclusive(&key_bytes, col_idx) {
                     return Err(TxnStorageStatus::TxnConflict);
                 }
-                // Insert into rwset
                 let ptr = RecordPointer::new(page.page_id(), page.frame_id());
                 let mut record = bytes_to_record(page.get_val(slot_id), container.options.schema());
-                // Update fields
                 func(&mut record[col_idx]);
-                rwset.insert(
-                    key_bytes.clone(),
-                    RWEntry::Update(record.clone(), ptr, false),
-                );
+                rwset.insert(key_bytes.clone(), RWEntry::Update(record, ptr, false));
+                rwset.set_field_locks(key_bytes.clone(), vec![(col_idx, true)]);
+                Ok(ptr)
+            } else {
+                if !container.locktable.try_exclusive(key_bytes.clone()) {
+                    return Err(TxnStorageStatus::TxnConflict);
+                }
+                let ptr = RecordPointer::new(page.page_id(), page.frame_id());
+                let mut record = bytes_to_record(page.get_val(slot_id), container.options.schema());
+                func(&mut record[col_idx]);
+                rwset.insert(key_bytes.clone(), RWEntry::Update(record, ptr, false));
                 Ok(ptr)
             }
         }
@@ -934,8 +1147,39 @@ impl<M: MemPool> FieldLeveLStorageTrait for TransactionalStorage<M> {
                 .btree
                 .traverse_to_leaf_for_write_with_hint(&key_bytes, container.hint_to_page_ref(hint));
             let slot_id = page.upper_bound_slot_id(&BTreeKey::new(&key_bytes)) - 1;
-            if slot_id == 0 || page.get_raw_key(slot_id) != key_bytes {
-                // Lower fence or non-existent key
+            let key_found = slot_id > 0 && page.get_raw_key(slot_id) == key_bytes;
+            let key_is_ghost = key_found && page.is_ghost(slot_id);
+
+            if key_found && !key_is_ghost {
+                #[cfg(test)]
+                crate::txn_storage2::transactional_storage::INSERT_KEY_EXISTS
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                return Err(TxnStorageStatus::KeyExists);
+            }
+
+            if key_is_ghost {
+                if !locktable.try_exclusive(key_bytes.clone()) {
+                    #[cfg(test)]
+                    crate::txn_storage2::transactional_storage::INSERT_GHOST_CONFLICT
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    return Err(TxnStorageStatus::TxnConflict);
+                }
+                // We now own the ghost slot. Update the value in place (keep ghost flag).
+                // On our commit, unghostify makes it permanent. On our abort, revert deletes it.
+                container.btree.update_at_slot_or_split(
+                    &mut page,
+                    slot_id,
+                    &key_bytes,
+                    &record_to_bytes(&record.fields, container.options.schema()),
+                );
+                let ptr = RecordPointer::new(page.page_id(), page.frame_id());
+                rwset.insert(key_bytes.clone(), RWEntry::Insert(record.fields, ptr, true));
+                return Ok(ptr);
+            }
+
+            {
+                // Key does not exist in storage — proceed with insert
+                let slot_id = page.upper_bound_slot_id(&BTreeKey::new(&key_bytes)) - 1;
                 let next_key_slot_id = slot_id + 1; // This exists because of the upper fence
                 let next_key = page.get_raw_key(next_key_slot_id).to_vec();
                 // Lock the next key and then this key. The next_key might be infty which will be mapped to [].
@@ -951,13 +1195,15 @@ impl<M: MemPool> FieldLeveLStorageTrait for TransactionalStorage<M> {
                 // => Lock the next key and then this key. Insert this key and then release the next-key lock.
                 match rwset.get(&next_key) {
                     Some(RWEntry::Read(..)) => {
-                        // Upgrade next-key lock to write lock
                         if !locktable.try_upgrade(next_key.to_vec()) {
+                            #[cfg(test)]
+                            crate::txn_storage2::transactional_storage::INSERT_NEXTKEY_UPGRADE
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             return Err(TxnStorageStatus::TxnConflict);
                         }
-                        // Lock this key
                         if !locktable.try_exclusive(key_bytes.clone()) {
-                            locktable.downgrade(&next_key); // Downgrade the next key lock
+                            locktable.downgrade(&next_key);
+                            #[cfg(test)] crate::txn_storage2::transactional_storage::INSERT_THISKEY_AFTER_UPGRADE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             return Err(TxnStorageStatus::TxnConflict);
                         }
                         // Insert the key-value as ghost record
@@ -973,9 +1219,10 @@ impl<M: MemPool> FieldLeveLStorageTrait for TransactionalStorage<M> {
                         locktable.downgrade(&next_key);
                     }
                     Some(_) => {
-                        // Exclusive lock on next key is already held.
-                        // Lock this key
                         if !locktable.try_exclusive(key_bytes.clone()) {
+                            #[cfg(test)]
+                            crate::txn_storage2::transactional_storage::INSERT_THISKEY_NEXT_HELD
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             return Err(TxnStorageStatus::TxnConflict);
                         }
                         // Insert the key-value as ghost record
@@ -988,14 +1235,17 @@ impl<M: MemPool> FieldLeveLStorageTrait for TransactionalStorage<M> {
                         );
                     }
                     None => {
-                        // Lock the next key
                         if !locktable.try_exclusive(next_key.to_vec()) {
-                            // println!("lock table: {}", locktable);
+                            #[cfg(test)]
+                            crate::txn_storage2::transactional_storage::INSERT_NEXTKEY_LOCK
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             return Err(TxnStorageStatus::TxnConflict);
                         }
-                        // Lock this key
                         if !locktable.try_exclusive(key_bytes.clone()) {
                             locktable.release_exclusive(next_key.to_vec());
+                            #[cfg(test)]
+                            crate::txn_storage2::transactional_storage::INSERT_THISKEY_LOCK
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             return Err(TxnStorageStatus::TxnConflict);
                         }
 
@@ -1019,8 +1269,6 @@ impl<M: MemPool> FieldLeveLStorageTrait for TransactionalStorage<M> {
                     RWEntry::Insert(record.fields, ptr, true), // Mark as ghost
                 );
                 Ok(ptr)
-            } else {
-                Err(TxnStorageStatus::KeyExists)
             }
         }
     }
@@ -1200,6 +1448,24 @@ impl<M: MemPool> FieldLeveLStorageTrait for TransactionalStorage<M> {
 // ============================================================================
 // Tests
 // ============================================================================
+
+// Global counters for insert_record abort path diagnosis (test-only)
+#[cfg(test)]
+static INSERT_GHOST_CONFLICT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+#[cfg(test)]
+static INSERT_NEXTKEY_UPGRADE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+#[cfg(test)]
+static INSERT_THISKEY_AFTER_UPGRADE: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+#[cfg(test)]
+static INSERT_THISKEY_NEXT_HELD: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+#[cfg(test)]
+static INSERT_NEXTKEY_LOCK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+#[cfg(test)]
+static INSERT_THISKEY_LOCK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+#[cfg(test)]
+static INSERT_KEY_EXISTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 #[cfg(test)]
 mod tests {
@@ -2887,5 +3153,562 @@ mod tests {
         );
 
         storage.close_db(db_id).unwrap();
+    }
+
+    #[test]
+    fn test_fll_concurrent_update_field_with_func() {
+        // Minimal repro: 2 threads both do update_field_with_func on the same
+        // field of the same record in a container with field_level_locking.
+        // This should NOT livelock.
+        use std::sync::{atomic::AtomicBool, Arc};
+        use std::thread;
+        use std::time::Duration;
+
+        let schema = schema!(pk: [0], cols: [
+            (false, DataType::Int32),  // id (pk)
+            (false, DataType::Int32),  // counter (updated concurrently)
+            (false, DataType::Int32),  // other field (read only)
+        ]);
+
+        let bp = get_test_bp(100);
+        let storage = Arc::new(TransactionalStorage::new(bp));
+
+        let db_id = storage.open_db(DBOptions::new("test_db")).unwrap();
+        let c_id = storage
+            .create_container(
+                db_id,
+                ContainerOptions::new("test", ContainerDS::BTree, schema)
+                    .with_field_level_locking(),
+            )
+            .unwrap();
+
+        // Insert a record
+        let txn = storage.begin_txn(db_id, TxnOptions::default()).unwrap();
+        storage
+            .insert_record(
+                &txn,
+                c_id,
+                record![field!(Int32 1), field!(Int32 0), field!(Int32 42)],
+                None,
+            )
+            .unwrap();
+        storage.commit_txn(&txn, false).unwrap();
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let mut handles = vec![];
+
+        for t_id in 0..2 {
+            let storage = storage.clone();
+            let stop = stop.clone();
+            handles.push(thread::spawn(move || {
+                let mut commits = 0u64;
+                let mut aborts = 0u64;
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    let txn = storage.begin_txn(db_id, TxnOptions::default()).unwrap();
+                    let key = vec![field!(Int32 1)];
+
+                    // update_field_with_func acquires exclusive directly
+                    let res = storage.update_field_with_func(
+                        &txn,
+                        c_id,
+                        key,
+                        1, // counter field
+                        |f| {
+                            if let Field::Int32(Some(v)) = f {
+                                *v += 1;
+                            }
+                        },
+                        None,
+                    );
+                    if res.is_err() {
+                        storage.abort_txn(&txn).ok();
+                        aborts += 1;
+                        continue;
+                    }
+                    if storage.commit_txn(&txn, false).is_ok() {
+                        commits += 1;
+                    } else {
+                        storage.abort_txn(&txn).ok();
+                        aborts += 1;
+                    }
+                }
+                eprintln!("thread {}: commits={}, aborts={}", t_id, commits, aborts);
+                commits
+            }));
+        }
+
+        thread::sleep(Duration::from_secs(2));
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+
+        let mut total = 0u64;
+        for h in handles {
+            total += h.join().unwrap();
+        }
+        eprintln!("total commits: {}", total);
+        assert!(total > 0, "should have committed at least some txns");
+    }
+
+    #[test]
+    fn test_fll_concurrent_read_then_upgrade() {
+        // Test the read-then-upgrade pattern: get_fields (shared) then
+        // update_field (upgrade to exclusive). This is the pattern that
+        // causes livelock if two threads both acquire shared before either upgrades.
+        use std::sync::{atomic::AtomicBool, Arc};
+        use std::thread;
+        use std::time::Duration;
+
+        let schema = schema!(pk: [0], cols: [
+            (false, DataType::Int32),  // id (pk)
+            (false, DataType::Int32),  // counter (read then upgrade)
+            (false, DataType::Int32),  // tax (read only)
+        ]);
+
+        let bp = get_test_bp(100);
+        let storage = Arc::new(TransactionalStorage::new(bp));
+
+        let db_id = storage.open_db(DBOptions::new("test_db")).unwrap();
+        let c_id = storage
+            .create_container(
+                db_id,
+                ContainerOptions::new("test", ContainerDS::BTree, schema)
+                    .with_field_level_locking(),
+            )
+            .unwrap();
+
+        // Insert a record
+        let txn = storage.begin_txn(db_id, TxnOptions::default()).unwrap();
+        storage
+            .insert_record(
+                &txn,
+                c_id,
+                record![field!(Int32 1), field!(Int32 0), field!(Int32 42)],
+                None,
+            )
+            .unwrap();
+        storage.commit_txn(&txn, false).unwrap();
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let mut handles = vec![];
+
+        for t_id in 0..2 {
+            let storage = storage.clone();
+            let stop = stop.clone();
+            handles.push(thread::spawn(move || {
+                let mut commits = 0u64;
+                let mut aborts = 0u64;
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    let txn = storage.begin_txn(db_id, TxnOptions::default()).unwrap();
+                    let key = vec![field!(Int32 1)];
+
+                    // Step 1: read both fields (shared locks on both)
+                    let res = storage.get_fields(&txn, c_id, key.clone(), &[1, 2], None);
+                    if res.is_err() {
+                        storage.abort_txn(&txn).ok();
+                        aborts += 1;
+                        continue;
+                    }
+
+                    // Step 2: update field 1 (upgrade shared -> exclusive)
+                    let res = storage.update_field(&txn, c_id, key, 1, field!(Int32 99), None);
+                    if res.is_err() {
+                        storage.abort_txn(&txn).ok();
+                        aborts += 1;
+                        continue;
+                    }
+
+                    if storage.commit_txn(&txn, false).is_ok() {
+                        commits += 1;
+                    } else {
+                        storage.abort_txn(&txn).ok();
+                        aborts += 1;
+                    }
+                }
+                eprintln!("thread {}: commits={}, aborts={}", t_id, commits, aborts);
+                commits
+            }));
+        }
+
+        thread::sleep(Duration::from_secs(2));
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+
+        let mut total = 0u64;
+        for h in handles {
+            total += h.join().unwrap();
+        }
+        eprintln!("total commits (read-then-upgrade): {}", total);
+        assert!(total > 0, "should have committed at least some txns");
+    }
+
+    #[test]
+    fn test_fll_concurrent_mixed_ops() {
+        // Simulate the real pattern: Thread A does exclusive on field 0,
+        // then shared on fields 1,2. Thread B does the same. Meanwhile
+        // Thread C does shared on field 3, then upgrade field 3 to exclusive.
+        // This mimics Payment (A,B) + NewOrder (C) on the same record.
+        use std::sync::{atomic::AtomicBool, Arc};
+        use std::thread;
+        use std::time::Duration;
+
+        let schema = schema!(pk: [0], cols: [
+            (false, DataType::Int32),  // id (pk)
+            (false, DataType::Int32),  // field 1: "w_ytd" (Payment exclusive)
+            (false, DataType::Int32),  // field 2: "w_name" (Payment shared read)
+            (false, DataType::Int32),  // field 3: "w_tax" (NewOrder shared read)
+        ]);
+
+        let bp = get_test_bp(100);
+        let storage = Arc::new(TransactionalStorage::new(bp));
+        let db_id = storage.open_db(DBOptions::new("test_db")).unwrap();
+        let c_id = storage
+            .create_container(
+                db_id,
+                ContainerOptions::new("test", ContainerDS::BTree, schema)
+                    .with_field_level_locking(),
+            )
+            .unwrap();
+
+        let txn = storage.begin_txn(db_id, TxnOptions::default()).unwrap();
+        storage
+            .insert_record(
+                &txn,
+                c_id,
+                record![
+                    field!(Int32 1),
+                    field!(Int32 0),
+                    field!(Int32 10),
+                    field!(Int32 20)
+                ],
+                None,
+            )
+            .unwrap();
+        storage.commit_txn(&txn, false).unwrap();
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let mut handles = vec![];
+
+        // 2 "Payment" threads: exclusive on field 1, then read fields 2,3
+        for t_id in 0..2 {
+            let storage = storage.clone();
+            let stop = stop.clone();
+            handles.push(thread::spawn(move || {
+                let mut commits = 0u64;
+                let mut aborts = 0u64;
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    let txn = storage.begin_txn(db_id, TxnOptions::default()).unwrap();
+                    let key = vec![field!(Int32 1)];
+                    // Exclusive on field 1
+                    let res = storage.update_field_with_func(
+                        &txn,
+                        c_id,
+                        key.clone(),
+                        1,
+                        |f| {
+                            if let Field::Int32(Some(v)) = f {
+                                *v += 1;
+                            }
+                        },
+                        None,
+                    );
+                    if res.is_err() {
+                        storage.abort_txn(&txn).ok();
+                        aborts += 1;
+                        continue;
+                    }
+                    // Shared on field 2
+                    let res = storage.get_fields(&txn, c_id, key, &[2], None);
+                    if res.is_err() {
+                        storage.abort_txn(&txn).ok();
+                        aborts += 1;
+                        continue;
+                    }
+                    if storage.commit_txn(&txn, false).is_ok() {
+                        commits += 1;
+                    } else {
+                        storage.abort_txn(&txn).ok();
+                        aborts += 1;
+                    }
+                }
+                eprintln!(
+                    "Payment thread {}: commits={}, aborts={}",
+                    t_id, commits, aborts
+                );
+                commits
+            }));
+        }
+
+        // 2 "NewOrder" threads: shared on field 3 only
+        for t_id in 2..4 {
+            let storage = storage.clone();
+            let stop = stop.clone();
+            handles.push(thread::spawn(move || {
+                let mut commits = 0u64;
+                let mut aborts = 0u64;
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    let txn = storage.begin_txn(db_id, TxnOptions::default()).unwrap();
+                    let key = vec![field!(Int32 1)];
+                    // Shared on field 3
+                    let res = storage.get_fields(&txn, c_id, key, &[3], None);
+                    if res.is_err() {
+                        storage.abort_txn(&txn).ok();
+                        aborts += 1;
+                        continue;
+                    }
+                    if storage.commit_txn(&txn, false).is_ok() {
+                        commits += 1;
+                    } else {
+                        storage.abort_txn(&txn).ok();
+                        aborts += 1;
+                    }
+                }
+                eprintln!(
+                    "NewOrder thread {}: commits={}, aborts={}",
+                    t_id, commits, aborts
+                );
+                commits
+            }));
+        }
+
+        thread::sleep(Duration::from_secs(2));
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+
+        let mut total = 0u64;
+        for h in handles {
+            total += h.join().unwrap();
+        }
+        eprintln!("total commits (mixed): {}", total);
+        assert!(total > 0, "should have committed at least some txns");
+    }
+}
+
+// Separate module for TPC-C integration tests with FLL
+#[cfg(test)]
+mod fll_tpcc_tests {
+    use crate::{
+        bp::{get_test_bp_lru, BufferPoolLRU},
+        tpcc::record_definitions::{nurand_int, urand_int},
+        tpcc2::{
+            loader::{PartitionMode, TpccLoader},
+            neworder_txn::{run_neworder_txn, NewOrderInput, NewOrderItem},
+            payment_txn::run_payment_txn,
+            payment_txn::PaymentInput,
+        },
+        txn_storage2::transactional_storage::TransactionalStorage,
+    };
+    use std::sync::{atomic::AtomicBool, Arc};
+    use std::thread;
+    use std::time::Duration;
+
+    #[test]
+    fn test_fll_tpcc_payment_concurrent() {
+        let bp = get_test_bp_lru(1000);
+        let loader = TpccLoader::with_partition_mode(bp, PartitionMode::FieldLevel);
+        let storage = loader.get_storage();
+        let db_id = loader.get_db_id();
+        let containers = loader.get_container_ids();
+        loader.load_items(100);
+        loader.load_warehouse(1);
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let mut handles = vec![];
+
+        for t_id in 0..3 {
+            let storage = storage.clone();
+            let stop = stop.clone();
+            handles.push(thread::spawn(move || {
+                let mut commits = 0u64;
+                let mut aborts = 0u64;
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    let input = PaymentInput {
+                        w_id: 1,
+                        d_id: urand_int(1, 10),
+                        c_w_id: 1,
+                        c_d_id: urand_int(1, 10),
+                        c_id: Some(urand_int(1, 30) as u32),
+                        c_last: None,
+                        h_amount: 100.0,
+                    };
+                    match run_payment_txn(&storage, db_id, &containers, &input) {
+                        Ok(_) => commits += 1,
+                        Err(_) => aborts += 1,
+                    }
+                }
+                eprintln!("Payment t{}: commits={}, aborts={}", t_id, commits, aborts);
+                commits
+            }));
+        }
+
+        thread::sleep(Duration::from_secs(3));
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        let mut total = 0u64;
+        for h in handles {
+            total += h.join().unwrap();
+        }
+        eprintln!("total payment commits: {}", total);
+        assert!(total > 0);
+    }
+
+    #[test]
+    fn test_fll_tpcc_neworder_concurrent() {
+        let bp = get_test_bp_lru(1000);
+        let loader = TpccLoader::with_partition_mode(bp, PartitionMode::FieldLevel);
+        let storage = loader.get_storage();
+        let db_id = loader.get_db_id();
+        let containers = loader.get_container_ids();
+        loader.load_items(100);
+        loader.load_warehouse(1);
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let mut handles = vec![];
+
+        for t_id in 0..3 {
+            let storage = storage.clone();
+            let stop = stop.clone();
+            handles.push(thread::spawn(move || {
+                let mut commits = 0u64;
+                let mut aborts = 0u64;
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    let input = NewOrderInput {
+                        w_id: 1,
+                        d_id: urand_int(1, 10),
+                        c_id: urand_int(1, 30) as u32,
+                        items: vec![NewOrderItem {
+                            i_id: urand_int(1, 100) as u32,
+                            supply_w_id: 1,
+                            quantity: 5,
+                        }],
+                        rollback: false,
+                    };
+                    match run_neworder_txn(&storage, db_id, &containers, &input) {
+                        Ok(_) => commits += 1,
+                        Err(_) => aborts += 1,
+                    }
+                }
+                eprintln!("NewOrder t{}: commits={}, aborts={}", t_id, commits, aborts);
+                commits
+            }));
+        }
+
+        thread::sleep(Duration::from_secs(3));
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        let mut total = 0u64;
+        for h in handles {
+            total += h.join().unwrap();
+        }
+        eprintln!("total neworder commits: {}", total);
+        assert!(total > 0);
+    }
+
+    #[test]
+    fn test_fll_tpcc_mixed_payment_neworder() {
+        use crate::tpcc2::neworder_txn::run_neworder_txn_with_stats;
+        use crate::tpcc2::txn_helper::print_abort_details;
+        use crate::tpcc2::txn_helper::TxnTypeStats;
+
+        let bp = get_test_bp_lru(1000);
+        let loader = TpccLoader::with_partition_mode(bp, PartitionMode::FieldLevel);
+        let storage = loader.get_storage();
+        let db_id = loader.get_db_id();
+        let containers = loader.get_container_ids();
+        loader.load_items(100);
+        loader.load_warehouse(1);
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let mut handles = vec![];
+
+        // 1 Payment thread
+        {
+            let storage = storage.clone();
+            let stop = stop.clone();
+            handles.push(thread::spawn(move || {
+                let mut commits = 0u64;
+                let mut aborts = 0u64;
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    let input = PaymentInput {
+                        w_id: 1,
+                        d_id: urand_int(1, 10),
+                        c_w_id: 1,
+                        c_d_id: urand_int(1, 10),
+                        c_id: Some(urand_int(1, 30) as u32),
+                        c_last: None,
+                        h_amount: 100.0,
+                    };
+                    match run_payment_txn(&storage, db_id, &containers, &input) {
+                        Ok(_) => commits += 1,
+                        Err(_) => aborts += 1,
+                    }
+                }
+                eprintln!("Payment: commits={}, aborts={}", commits, aborts);
+            }));
+        }
+
+        // 2 NewOrder threads with stats
+        for t_id in 0..2 {
+            let storage = storage.clone();
+            let stop = stop.clone();
+            handles.push(thread::spawn(move || {
+                let mut stats = TxnTypeStats::new();
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    let input = NewOrderInput {
+                        w_id: 1,
+                        d_id: urand_int(1, 10),
+                        c_id: urand_int(1, 30) as u32,
+                        items: vec![NewOrderItem {
+                            i_id: urand_int(1, 100) as u32,
+                            supply_w_id: 1,
+                            quantity: 5,
+                        }],
+                        rollback: false,
+                    };
+                    run_neworder_txn_with_stats(
+                        &storage,
+                        db_id,
+                        &containers,
+                        &input,
+                        Some(&mut stats),
+                    );
+                }
+                eprintln!(
+                    "NewOrder t{}: commits={}, sys_aborts={}",
+                    t_id, stats.num_commits, stats.num_system_aborts
+                );
+                print_abort_details("NewOrderTxn", &stats);
+            }));
+        }
+
+        thread::sleep(Duration::from_secs(3));
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        for h in handles {
+            h.join().unwrap();
+        }
+        use super::*;
+        eprintln!("--- insert_record abort breakdown ---");
+        eprintln!(
+            "  KEY_EXISTS:          {}",
+            INSERT_KEY_EXISTS.load(std::sync::atomic::Ordering::Relaxed)
+        );
+        eprintln!(
+            "  GHOST_CONFLICT:      {}",
+            INSERT_GHOST_CONFLICT.load(std::sync::atomic::Ordering::Relaxed)
+        );
+        eprintln!(
+            "  NEXTKEY_UPGRADE:     {}",
+            INSERT_NEXTKEY_UPGRADE.load(std::sync::atomic::Ordering::Relaxed)
+        );
+        eprintln!(
+            "  THISKEY_AFTER_UPG:   {}",
+            INSERT_THISKEY_AFTER_UPGRADE.load(std::sync::atomic::Ordering::Relaxed)
+        );
+        eprintln!(
+            "  THISKEY_NEXT_HELD:   {}",
+            INSERT_THISKEY_NEXT_HELD.load(std::sync::atomic::Ordering::Relaxed)
+        );
+        eprintln!(
+            "  NEXTKEY_LOCK:        {}",
+            INSERT_NEXTKEY_LOCK.load(std::sync::atomic::Ordering::Relaxed)
+        );
+        eprintln!(
+            "  THISKEY_LOCK:        {}",
+            INSERT_THISKEY_LOCK.load(std::sync::atomic::Ordering::Relaxed)
+        );
     }
 }

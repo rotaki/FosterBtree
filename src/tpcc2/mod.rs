@@ -29,7 +29,7 @@ use crate::{
 };
 
 pub use delivery_txn::{run_delivery_txn, run_delivery_txn_with_stats, DeliveryInput};
-pub use loader::{TpccContainerIds, TpccLoader};
+pub use loader::{PartitionMode, TpccContainerIds, TpccLoader};
 pub use neworder_txn::{
     run_neworder_txn, run_neworder_txn_with_stats, NewOrderInput, NewOrderItem,
 };
@@ -52,7 +52,15 @@ pub struct TpccBenchmark<M: MemPool + 'static> {
 
 impl<M: MemPool + 'static> TpccBenchmark<M> {
     pub fn new(mem_pool: Arc<M>, num_warehouses: u16) -> Self {
-        let loader = TpccLoader::new(mem_pool);
+        Self::with_partition_mode(mem_pool, num_warehouses, PartitionMode::HotCold)
+    }
+
+    pub fn with_partition_mode(
+        mem_pool: Arc<M>,
+        num_warehouses: u16,
+        partition_mode: PartitionMode,
+    ) -> Self {
+        let loader = TpccLoader::with_partition_mode(mem_pool, partition_mode);
         let storage = loader.get_storage();
         let db_id = loader.get_db_id();
         let containers = loader.get_container_ids();

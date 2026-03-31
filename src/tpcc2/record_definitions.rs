@@ -426,12 +426,112 @@ pub fn order_line_to_record(order_line: &crate::tpcc::OrderLine) -> Record {
     }
 }
 
+// Hot/cold vertical partitioning schemas for CUSTOMER table
+// Cold group: keys + stable descriptors (rarely updated)
+pub fn customer_cold_schema() -> Schema {
+    Schema::with_primary_key(
+        vec![
+            (false, DataType::Uint16),  // c_w_id (part of primary key)
+            (false, DataType::Uint8),   // c_d_id (part of primary key)
+            (false, DataType::Uint32),  // c_id (part of primary key)
+            (false, DataType::Uint64),  // c_since
+            (false, DataType::Float64), // c_credit_lim
+            (false, DataType::Float64), // c_discount
+            (false, DataType::String),  // c_first
+            (false, DataType::String),  // c_middle
+            (false, DataType::String),  // c_last
+            (false, DataType::String),  // c_phone
+            (false, DataType::String),  // c_credit
+            (false, DataType::String),  // c_address (serialized)
+        ],
+        vec![0, 1, 2], // (c_w_id, c_d_id, c_id) is primary key
+    )
+}
+
+// Hot group: keys + frequently updated fields
+pub fn customer_hot_schema() -> Schema {
+    Schema::with_primary_key(
+        vec![
+            (false, DataType::Uint16),  // c_w_id (part of primary key)
+            (false, DataType::Uint8),   // c_d_id (part of primary key)
+            (false, DataType::Uint32),  // c_id (part of primary key)
+            (false, DataType::Float64), // c_balance
+            (false, DataType::Float64), // c_ytd_payment
+            (false, DataType::Uint16),  // c_payment_cnt
+            (false, DataType::Uint16),  // c_delivery_cnt
+            (false, DataType::String),  // c_data
+        ],
+        vec![0, 1, 2], // (c_w_id, c_d_id, c_id) is primary key
+    )
+}
+
+// Conversion functions for Customer cold record
+pub fn customer_cold_to_record(customer: &crate::tpcc::Customer) -> Record {
+    Record {
+        fields: vec![
+            Field::Uint16(Some(customer.c_w_id)),
+            Field::Uint8(Some(customer.c_d_id)),
+            Field::Uint32(Some(customer.c_id)),
+            Field::Uint64(Some(customer.c_since)),
+            Field::Float64(Some(customer.c_credit_lim)),
+            Field::Float64(Some(customer.c_discount)),
+            Field::String(Some(
+                String::from_utf8_lossy(&customer.c_first)
+                    .trim_end_matches('\0')
+                    .to_string(),
+            )),
+            Field::String(Some(
+                String::from_utf8_lossy(&customer.c_middle)
+                    .trim_end_matches('\0')
+                    .to_string(),
+            )),
+            Field::String(Some(
+                String::from_utf8_lossy(&customer.c_last)
+                    .trim_end_matches('\0')
+                    .to_string(),
+            )),
+            Field::String(Some(
+                String::from_utf8_lossy(&customer.c_phone)
+                    .trim_end_matches('\0')
+                    .to_string(),
+            )),
+            Field::String(Some(
+                String::from_utf8_lossy(&customer.c_credit)
+                    .trim_end_matches('\0')
+                    .to_string(),
+            )),
+            Field::String(Some(address_to_string(&customer.c_address))),
+        ],
+    }
+}
+
+// Conversion functions for Customer hot record
+pub fn customer_hot_to_record(customer: &crate::tpcc::Customer) -> Record {
+    Record {
+        fields: vec![
+            Field::Uint16(Some(customer.c_w_id)),
+            Field::Uint8(Some(customer.c_d_id)),
+            Field::Uint32(Some(customer.c_id)),
+            Field::Float64(Some(customer.c_balance)),
+            Field::Float64(Some(customer.c_ytd_payment)),
+            Field::Uint16(Some(customer.c_payment_cnt)),
+            Field::Uint16(Some(customer.c_delivery_cnt)),
+            Field::String(Some(
+                String::from_utf8_lossy(&customer.c_data)
+                    .trim_end_matches('\0')
+                    .to_string(),
+            )),
+        ],
+    }
+}
+
 // Container names
 pub const ITEM_TABLE: &str = "item";
 pub const WAREHOUSE_TABLE: &str = "warehouse";
 pub const STOCK_TABLE: &str = "stock";
 pub const DISTRICT_TABLE: &str = "district";
 pub const CUSTOMER_TABLE: &str = "customer";
+pub const CUSTOMER_HOT_TABLE: &str = "customer_hot";
 pub const CUSTOMER_SECONDARY_TABLE: &str = "customer_secondary";
 pub const HISTORY_TABLE: &str = "history";
 pub const ORDER_TABLE: &str = "order";

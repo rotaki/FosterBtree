@@ -12,9 +12,10 @@ use crate::{
     },
 };
 
+use super::loader::PartitionMode;
 use super::loader::TpccContainerIds;
 use super::txn_helper::{not_successful, AbortID, TPCCStatus, TxHelper, TxnTypeStats};
-use super::txn_utils::{order_fields, order_line_fields, *};
+use super::txn_utils::{customer_fields, customer_hot_fields, order_fields, order_line_fields, *};
 
 pub struct DeliveryInput {
     pub w_id: u16,
@@ -235,11 +236,25 @@ pub fn run_delivery_txn_with_stats<M: MemPool>(
             Field::Uint32(Some(o_c_id)),
         ];
 
+        let (cust_cid, bal_idx, dcnt_idx) = if containers.partition_mode == PartitionMode::HotCold {
+            (
+                containers.customer_hot_cid,
+                customer_hot_fields::C_BALANCE,
+                customer_hot_fields::C_DELIVERY_CNT,
+            )
+        } else {
+            (
+                containers.customer_cid,
+                customer_fields::C_BALANCE,
+                customer_fields::C_DELIVERY_CNT,
+            )
+        };
+
         let res = storage.update_field_with_func(
             &txn,
-            containers.customer_cid,
+            cust_cid,
             c_key.clone(),
-            customer_fields::C_BALANCE,
+            bal_idx,
             |field| {
                 if let Field::Float64(Some(balance)) = field {
                     *balance += total_amount;
@@ -258,9 +273,9 @@ pub fn run_delivery_txn_with_stats<M: MemPool>(
 
         let res = storage.update_field_with_func(
             &txn,
-            containers.customer_cid,
+            cust_cid,
             c_key.clone(),
-            customer_fields::C_DELIVERY_CNT,
+            dcnt_idx,
             |field| {
                 if let Field::Uint16(Some(cnt)) = field {
                     *cnt += 1;
