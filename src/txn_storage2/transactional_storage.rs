@@ -16,8 +16,9 @@ use crate::{
     txn_storage::locktable::{ConcurrentLockTable as LockTable, FieldLockTable},
     txn_storage2::{
         field::{
-            bytes_to_record, key_to_bytes, record_to_bytes, record_to_key_bytes, Field, Record,
-            RecordPointer,
+            all_fixed_size, bytes_to_fields_selective, bytes_to_record, key_to_bytes,
+            merge_record_bytes_sparse, patch_record_fields_inplace_sparse, record_to_bytes,
+            record_to_key_bytes, Field, Record, RecordPointer,
         },
         field_level_storage_trait::{
             ContainerDS, ContainerOptions, DBOptions, FieldLeveLStorageTrait, ScanOptions,
@@ -27,33 +28,53 @@ use crate::{
 };
 
 // ============================================================================
-// Read-Write Set Entry
+// Read-Write Set Entry (per-field tracking)
 // ============================================================================
 
 #[derive(Clone, Debug)]
-pub enum RWEntry {
-    Read(RecordPointer, bool), // Physical address, inserted_as_ghost
-    Update(Vec<Field>, RecordPointer, bool), // Updated fields, physical address, inserted_as_ghost
-    Insert(Vec<Field>, RecordPointer, bool), // Inserted fields, physical address, inserted_as_ghost
-    Delete(RecordPointer, bool), // Deleted record, physical address, inserted_as_ghost
+pub enum KeyEntry {
+    /// Existing row with per-field tracking.
+    /// `read_set` is a bitset where bit i = shared lock on column i.
+    /// `writes` stores only exclusively-locked fields with their new values.
+    Active {
+        ptr: RecordPointer,
+        ghost: bool,
+        read_set: u64,
+        writes: Vec<(usize, Field)>,
+    },
+    /// Newly inserted row — full record (ghost slot has bytes on disk)
+    Insert {
+        ptr: RecordPointer,
+        record: Vec<Field>,
+    },
+    /// Deleted row
+    Delete {
+        ptr: RecordPointer,
+        ghost: bool,
+    },
 }
 
-impl RWEntry {
+impl KeyEntry {
     fn get_pointer(&self) -> &RecordPointer {
         match self {
-            RWEntry::Read(ptr, _)
-            | RWEntry::Update(_, ptr, _)
-            | RWEntry::Insert(_, ptr, _)
-            | RWEntry::Delete(ptr, _) => ptr,
+            KeyEntry::Active { ptr, .. }
+            | KeyEntry::Insert { ptr, .. }
+            | KeyEntry::Delete { ptr, .. } => ptr,
         }
     }
 
-    fn is_ghost_inserted(&self) -> bool {
+    fn is_ghost(&self) -> bool {
         match self {
-            RWEntry::Read(_, ghost)
-            | RWEntry::Update(_, _, ghost)
-            | RWEntry::Insert(_, _, ghost)
-            | RWEntry::Delete(_, ghost) => *ghost,
+            KeyEntry::Active { ghost, .. } => *ghost,
+            KeyEntry::Insert { .. } => true,
+            KeyEntry::Delete { ghost, .. } => *ghost,
+        }
+    }
+
+    fn has_writes(&self) -> bool {
+        match self {
+            KeyEntry::Active { writes, .. } => !writes.is_empty(),
+            _ => false,
         }
     }
 }
@@ -63,10 +84,7 @@ impl RWEntry {
 // ============================================================================
 
 pub struct ReadWriteSet {
-    entries: UnsafeCell<HashMap<Vec<u8>, RWEntry>>, // key_bytes -> entry
-    // Field-level lock tracking: key_bytes -> [(col_idx, is_exclusive)]
-    // Only populated when the container has field_level_locking enabled
-    field_locks: UnsafeCell<HashMap<Vec<u8>, Vec<(usize, bool)>>>,
+    entries: UnsafeCell<HashMap<Vec<u8>, KeyEntry>>, // key_bytes -> entry
 }
 
 impl Default for ReadWriteSet {
@@ -79,48 +97,25 @@ impl ReadWriteSet {
     pub fn new() -> Self {
         ReadWriteSet {
             entries: UnsafeCell::new(HashMap::new()),
-            field_locks: UnsafeCell::new(HashMap::new()),
         }
     }
 
-    pub fn get(&self, key: &[u8]) -> Option<&RWEntry> {
+    pub fn get(&self, key: &[u8]) -> Option<&KeyEntry> {
         unsafe { (*self.entries.get()).get(key) }
     }
 
-    pub fn get_mut(&self, key: &[u8]) -> Option<&mut RWEntry> {
+    pub fn get_mut(&self, key: &[u8]) -> Option<&mut KeyEntry> {
         unsafe { (*self.entries.get()).get_mut(key) }
     }
 
-    pub fn insert(&self, key: Vec<u8>, entry: RWEntry) {
+    pub fn insert(&self, key: Vec<u8>, entry: KeyEntry) {
         unsafe {
             (*self.entries.get()).insert(key, entry);
         }
     }
 
-    pub fn iter(&self) -> std::collections::hash_map::Iter<'_, Vec<u8>, RWEntry> {
+    pub fn iter(&self) -> std::collections::hash_map::Iter<'_, Vec<u8>, KeyEntry> {
         unsafe { (*self.entries.get()).iter() }
-    }
-
-    // Field-level lock tracking methods
-
-    pub fn get_field_locks(&self, key: &[u8]) -> Option<&Vec<(usize, bool)>> {
-        unsafe { (*self.field_locks.get()).get(key) }
-    }
-
-    pub fn get_field_locks_mut(&self, key: &[u8]) -> Option<&mut Vec<(usize, bool)>> {
-        unsafe { (*self.field_locks.get()).get_mut(key) }
-    }
-
-    pub fn set_field_locks(&self, key: Vec<u8>, locks: Vec<(usize, bool)>) {
-        unsafe {
-            (*self.field_locks.get()).insert(key, locks);
-        }
-    }
-
-    pub fn iter_field_locks(
-        &self,
-    ) -> std::collections::hash_map::Iter<'_, Vec<u8>, Vec<(usize, bool)>> {
-        unsafe { (*self.field_locks.get()).iter() }
     }
 }
 
@@ -279,22 +274,27 @@ impl<M: MemPool> ContainerInfo<M> {
 
     fn release_shared_locks(&self, rwset: &ReadWriteSet) {
         if let Some(flt) = &self.field_locktable {
-            // Release per-field shared locks (batch per record)
-            for (key_bytes, field_lock_list) in rwset.iter_field_locks() {
-                let shared_cols: Vec<usize> = field_lock_list
-                    .iter()
-                    .filter(|&&(_, is_excl)| !is_excl)
-                    .map(|&(col, _)| col)
-                    .collect();
-                if !shared_cols.is_empty() {
-                    flt.release_shared_multi(key_bytes, &shared_cols);
+            // Release per-field shared locks derived from read_set bitset
+            for (key_bytes, entry) in rwset.iter() {
+                if let KeyEntry::Active { read_set, .. } = entry {
+                    if *read_set != 0 {
+                        let shared_cols: Vec<usize> = (0..64)
+                            .filter(|&i| read_set & (1u64 << i) != 0)
+                            .collect();
+                        if !shared_cols.is_empty() {
+                            flt.release_shared_multi(key_bytes, &shared_cols);
+                        }
+                    }
                 }
             }
         } else {
             let locktable = &self.locktable;
             for (key, entry) in rwset.iter() {
-                if let RWEntry::Read(..) = entry {
-                    locktable.release_shared(key.clone());
+                if let KeyEntry::Active { writes, .. } = entry {
+                    if writes.is_empty() {
+                        // Read-only entry at record level
+                        locktable.release_shared(key.clone());
+                    }
                 }
             }
         }
@@ -304,8 +304,16 @@ impl<M: MemPool> ContainerInfo<M> {
         let locktable = &self.locktable;
         for (key, entry) in rwset.iter() {
             match entry {
-                RWEntry::Read(..) => continue,
-                RWEntry::Update(record, ptr, ghost) => {
+                KeyEntry::Active {
+                    ptr,
+                    ghost,
+                    writes,
+                    ..
+                } => {
+                    if writes.is_empty() {
+                        // Read-only, nothing to apply
+                        continue;
+                    }
                     let mut page = self.btree.traverse_to_leaf_for_write_with_hint(
                         key,
                         self.hint_to_page_ref(Some(*ptr)),
@@ -316,40 +324,32 @@ impl<M: MemPool> ContainerInfo<M> {
                             "Key: {:?} of container {} not found for update",
                             key, self.container_id
                         );
+                    }
+                    if *ghost {
+                        page.unghostify_at(slot_id);
+                    }
+                    // Build sparse updates map from writes vec
+                    let updates_map: HashMap<usize, &Field> =
+                        writes.iter().map(|(col, f)| (*col, f)).collect();
+                    let excl_cols: Vec<usize> = writes.iter().map(|&(col, _)| col).collect();
+                    if all_fixed_size(self.options.schema(), &excl_cols) {
+                        let val_bytes = page.get_val_mut(slot_id);
+                        patch_record_fields_inplace_sparse(
+                            val_bytes,
+                            &updates_map,
+                            self.options.schema(),
+                        );
                     } else {
-                        if *ghost {
-                            page.unghostify_at(slot_id);
-                        }
-                        if self.options.field_level_locking() {
-                            // FLL: merge only exclusively-locked fields into the
-                            // current storage record to avoid lost updates.
-                            let mut current =
-                                bytes_to_record(page.get_val(slot_id), self.options.schema());
-                            if let Some(field_lock_list) = rwset.get_field_locks(key) {
-                                for &(col_idx, is_exclusive) in field_lock_list {
-                                    if is_exclusive {
-                                        current[col_idx] = record[col_idx].clone();
-                                    }
-                                }
-                            }
-                            self.btree.update_at_slot_or_split(
-                                &mut page,
-                                slot_id,
-                                key,
-                                &record_to_bytes(&current, self.options.schema()),
-                            );
-                        } else {
-                            self.btree.update_at_slot_or_split(
-                                &mut page,
-                                slot_id,
-                                key,
-                                &record_to_bytes(record, self.options.schema()),
-                            );
-                        }
+                        let new_bytes = merge_record_bytes_sparse(
+                            page.get_val(slot_id),
+                            &updates_map,
+                            self.options.schema(),
+                        );
+                        self.btree
+                            .update_at_slot_or_split(&mut page, slot_id, key, &new_bytes);
                     }
                 }
-                RWEntry::Insert(_record, ptr, ghost) => {
-                    assert!(ghost, "Insert entry should be ghost");
+                KeyEntry::Insert { ptr, record } => {
                     let mut page = self.btree.traverse_to_leaf_for_write_with_hint(
                         key,
                         self.hint_to_page_ref(Some(*ptr)),
@@ -362,11 +362,14 @@ impl<M: MemPool> ContainerInfo<M> {
                             key, self.container_id
                         );
                     } else {
-                        // Insert the record
+                        // Update the on-disk record (it may have been mutated after insert)
+                        let new_bytes = record_to_bytes(record, self.options.schema());
+                        self.btree
+                            .update_at_slot_or_split(&mut page, slot_id, key, &new_bytes);
                         page.unghostify_at(slot_id);
                     }
                 }
-                RWEntry::Delete(ptr, _) => {
+                KeyEntry::Delete { ptr, .. } => {
                     let mut page = self.btree.traverse_to_leaf_for_write_with_hint(
                         key,
                         self.hint_to_page_ref(Some(*ptr)),
@@ -379,25 +382,34 @@ impl<M: MemPool> ContainerInfo<M> {
                             key, self.container_id
                         );
                     } else {
-                        // Delete the record
                         page.remove_at(slot_id);
                     }
                 }
             }
+            // Release exclusive locks
             if let Some(flt) = &self.field_locktable {
-                // Release per-field exclusive locks (batch)
-                if let Some(field_lock_list) = rwset.get_field_locks(key) {
-                    let excl_cols: Vec<usize> = field_lock_list
-                        .iter()
-                        .filter(|&&(_, is_excl)| is_excl)
-                        .map(|&(col, _)| col)
-                        .collect();
-                    if !excl_cols.is_empty() {
-                        flt.release_exclusive_multi(key, &excl_cols);
+                match entry {
+                    KeyEntry::Active { writes, .. } => {
+                        let excl_cols: Vec<usize> =
+                            writes.iter().map(|&(col, _)| col).collect();
+                        if !excl_cols.is_empty() {
+                            flt.release_exclusive_multi(key, &excl_cols);
+                        }
+                    }
+                    KeyEntry::Insert { .. } | KeyEntry::Delete { .. } => {
+                        // Record-level exclusive lock
+                        locktable.release_exclusive(key.clone());
                     }
                 }
             } else {
-                locktable.release_exclusive(key.clone());
+                match entry {
+                    KeyEntry::Active { writes, .. } if writes.is_empty() => {
+                        // Read-only, already released in release_shared_locks
+                    }
+                    _ => {
+                        locktable.release_exclusive(key.clone());
+                    }
+                }
             }
         }
     }
@@ -405,7 +417,7 @@ impl<M: MemPool> ContainerInfo<M> {
     /// Phase 1 of abort: delete all ghost inserts from storage while locks are still held.
     fn revert_ghost_inserts(&self, rwset: &ReadWriteSet) {
         for (key, entry) in rwset.iter() {
-            if entry.is_ghost_inserted() {
+            if entry.is_ghost() {
                 self.delete_with_hint(key, Some(*entry.get_pointer()))
                     .expect("Failed to revert ghost insert");
             }
@@ -415,15 +427,39 @@ impl<M: MemPool> ContainerInfo<M> {
     /// Phase 2 of abort: release all locks after all ghosts across all containers are cleaned up.
     fn release_all_locks(&self, rwset: &ReadWriteSet) {
         if let Some(flt) = &self.field_locktable {
-            for (key_bytes, field_lock_list) in rwset.iter_field_locks() {
-                flt.release_all(key_bytes, field_lock_list);
+            for (key, entry) in rwset.iter() {
+                match entry {
+                    KeyEntry::Active {
+                        read_set, writes, ..
+                    } => {
+                        // Build lock_list: read_set bits are (col, false), write cols are (col, true)
+                        let mut lock_list: Vec<(usize, bool)> = Vec::new();
+                        for i in 0..64 {
+                            if read_set & (1u64 << i) != 0 {
+                                lock_list.push((i, false));
+                            }
+                        }
+                        for &(col, _) in writes {
+                            lock_list.push((col, true));
+                        }
+                        if !lock_list.is_empty() {
+                            flt.release_all(key, &lock_list);
+                        }
+                    }
+                    KeyEntry::Insert { .. } | KeyEntry::Delete { .. } => {
+                        // Record-level exclusive lock
+                        self.locktable.release_exclusive(key.clone());
+                    }
+                }
             }
         } else {
             let locktable = &self.locktable;
             for (key, entry) in rwset.iter() {
                 match entry {
-                    RWEntry::Read(..) => locktable.release_shared(key.clone()),
-                    RWEntry::Update(..) | RWEntry::Insert(..) | RWEntry::Delete(..) => {
+                    KeyEntry::Active { writes, .. } if writes.is_empty() => {
+                        locktable.release_shared(key.clone());
+                    }
+                    _ => {
                         locktable.release_exclusive(key.clone());
                     }
                 }
@@ -732,8 +768,8 @@ impl<M: MemPool> FieldLeveLStorageTrait for TransactionalStorage<M> {
         let rwset = txn.get_or_create_rwset(c_id);
         for (_key, entry) in rwset.iter() {
             match entry {
-                RWEntry::Insert(_, _, _) => count += 1,
-                RWEntry::Delete(_, _) => count -= 1,
+                KeyEntry::Insert { .. } => count += 1,
+                KeyEntry::Delete { .. } => count -= 1,
                 _ => {}
             }
         }
@@ -770,60 +806,78 @@ impl<M: MemPool> FieldLeveLStorageTrait for TransactionalStorage<M> {
         let key_bytes = key_to_bytes(&key);
         let flt = container.field_locktable.as_ref();
 
-        // Helper: acquire shared field locks on columns not yet locked
-        let acquire_new_shared =
-            |key_bytes: &[u8], cols: &[usize], rwset: &ReadWriteSet, flt: &FieldLockTable| {
-                let existing = rwset.get_field_locks(key_bytes);
-                let new_cols: Vec<usize> = cols
-                    .iter()
-                    .filter(|&&col| {
-                        !existing
-                            .map(|locks| locks.iter().any(|&(c, _)| c == col))
-                            .unwrap_or(false)
-                    })
-                    .copied()
-                    .collect();
-                if new_cols.is_empty() {
-                    return Ok(());
-                }
-                if !flt.try_shared_multi(key_bytes, &new_cols) {
-                    return Err(TxnStorageStatus::TxnConflict);
-                }
-                if let Some(locks) = rwset.get_field_locks_mut(key_bytes) {
-                    for col in new_cols {
-                        locks.push((col, false));
-                    }
-                }
-                Ok(())
-            };
-
         if let Some(entry) = rwset.get_mut(&key_bytes) {
             match entry {
-                RWEntry::Read(ptr, _) => {
-                    if let Some(flt) = flt {
-                        acquire_new_shared(&key_bytes, col_indices, rwset, flt)?;
+                KeyEntry::Active {
+                    ptr,
+                    read_set,
+                    writes,
+                    ..
+                } => {
+                    // Collect results: check writes first, then read from disk for the rest
+                    let mut result_fields: Vec<Option<Field>> =
+                        vec![None; col_indices.len()];
+                    let mut need_disk: Vec<usize> = Vec::new(); // indices into col_indices
+                    for (i, &col) in col_indices.iter().enumerate() {
+                        // Check writes vec first
+                        if let Some((_, ref v)) = writes.iter().find(|&&(c, _)| c == col) {
+                            result_fields[i] = Some(v.clone());
+                        } else {
+                            need_disk.push(i);
+                        }
                     }
-                    let page = container.btree.traverse_to_leaf_for_read_with_hint(
-                        &key_bytes,
-                        container.hint_to_page_ref(Some(*ptr)),
-                    );
-                    let slot_id = page.upper_bound_slot_id(&BTreeKey::new(&key_bytes)) - 1;
-                    if slot_id == 0 || page.get_raw_key(slot_id) != key_bytes {
-                        panic!("Key should exist in storage if in rwset");
+
+                    if !need_disk.is_empty() {
+                        // Determine which columns need new shared locks
+                        let disk_cols: Vec<usize> =
+                            need_disk.iter().map(|&i| col_indices[i]).collect();
+                        if let Some(flt) = flt {
+                            let new_cols: Vec<usize> = disk_cols
+                                .iter()
+                                .filter(|&&col| *read_set & (1u64 << col) == 0)
+                                .copied()
+                                .collect();
+                            if !new_cols.is_empty() {
+                                if !flt.try_shared_multi(&key_bytes, &new_cols) {
+                                    return Err(TxnStorageStatus::TxnConflict);
+                                }
+                                for col in &new_cols {
+                                    *read_set |= 1u64 << col;
+                                }
+                            }
+                        }
+                        let page = container.btree.traverse_to_leaf_for_read_with_hint(
+                            &key_bytes,
+                            container.hint_to_page_ref(Some(*ptr)),
+                        );
+                        let slot_id =
+                            page.upper_bound_slot_id(&BTreeKey::new(&key_bytes)) - 1;
+                        if slot_id == 0 || page.get_raw_key(slot_id) != key_bytes {
+                            panic!("Key should exist in storage if in rwset");
+                        }
+                        *ptr = RecordPointer::new(page.page_id(), page.frame_id());
+                        let disk_fields = bytes_to_fields_selective(
+                            page.get_val(slot_id),
+                            container.options.schema(),
+                            &disk_cols,
+                        );
+                        for (j, &i) in need_disk.iter().enumerate() {
+                            result_fields[i] = Some(disk_fields[j].clone());
+                        }
                     }
-                    *ptr = RecordPointer::new(page.page_id(), page.frame_id());
-                    let record = bytes_to_record(page.get_val(slot_id), container.options.schema());
-                    let fields = col_indices.iter().map(|&idx| record[idx].clone()).collect();
-                    Ok((fields, *ptr))
+
+                    let ptr_val = *ptr;
+                    let fields = result_fields.into_iter().map(|f| f.unwrap()).collect();
+                    Ok((fields, ptr_val))
                 }
-                RWEntry::Update(fields, ptr, _) | RWEntry::Insert(fields, ptr, _) => {
-                    if let Some(flt) = flt {
-                        acquire_new_shared(&key_bytes, col_indices, rwset, flt)?;
-                    }
-                    let result = col_indices.iter().map(|&idx| fields[idx].clone()).collect();
+                KeyEntry::Insert { ptr, record } => {
+                    let result = col_indices
+                        .iter()
+                        .map(|&idx| record[idx].clone())
+                        .collect();
                     Ok((result, *ptr))
                 }
-                RWEntry::Delete(_, _) => Err(TxnStorageStatus::KeyNotFound),
+                KeyEntry::Delete { .. } => Err(TxnStorageStatus::KeyNotFound),
             }
         } else {
             // Find from index
@@ -839,13 +893,24 @@ impl<M: MemPool> FieldLeveLStorageTrait for TransactionalStorage<M> {
                     return Err(TxnStorageStatus::TxnConflict);
                 }
                 let ptr = RecordPointer::new(page.page_id(), page.frame_id());
-                let record = bytes_to_record(page.get_val(slot_id), container.options.schema());
-                rwset.insert(key_bytes.clone(), RWEntry::Read(ptr, false));
-                rwset.set_field_locks(
-                    key_bytes.clone(),
-                    col_indices.iter().map(|&c| (c, false)).collect(),
+                let fields = bytes_to_fields_selective(
+                    page.get_val(slot_id),
+                    container.options.schema(),
+                    col_indices,
                 );
-                let fields = col_indices.iter().map(|&idx| record[idx].clone()).collect();
+                let mut read_set: u64 = 0;
+                for &col in col_indices {
+                    read_set |= 1u64 << col;
+                }
+                rwset.insert(
+                    key_bytes,
+                    KeyEntry::Active {
+                        ptr,
+                        ghost: false,
+                        read_set,
+                        writes: Vec::new(),
+                    },
+                );
                 Ok((fields, ptr))
             } else {
                 // Record-level shared lock
@@ -853,9 +918,20 @@ impl<M: MemPool> FieldLeveLStorageTrait for TransactionalStorage<M> {
                     return Err(TxnStorageStatus::TxnConflict);
                 }
                 let ptr = RecordPointer::new(page.page_id(), page.frame_id());
-                let record = bytes_to_record(page.get_val(slot_id), container.options.schema());
-                rwset.insert(key_bytes.clone(), RWEntry::Read(ptr, false));
-                let fields = col_indices.iter().map(|&idx| record[idx].clone()).collect();
+                let fields = bytes_to_fields_selective(
+                    page.get_val(slot_id),
+                    container.options.schema(),
+                    col_indices,
+                );
+                rwset.insert(
+                    key_bytes,
+                    KeyEntry::Active {
+                        ptr,
+                        ghost: false,
+                        read_set: 0,
+                        writes: Vec::new(),
+                    },
+                );
                 Ok((fields, ptr))
             }
         }
@@ -890,80 +966,69 @@ impl<M: MemPool> FieldLeveLStorageTrait for TransactionalStorage<M> {
         let key_bytes = key_to_bytes(&key);
         let flt = container.field_locktable.as_ref();
 
-        // Helper: upgrade or acquire per-field exclusive locks
-        let acquire_field_exclusive = |key_bytes: &[u8],
-                                       updated_cols: &[(usize, Field)],
-                                       rwset: &ReadWriteSet,
-                                       flt: &FieldLockTable| {
-            for &(col_idx, _) in updated_cols {
-                let existing = rwset.get_field_locks(key_bytes);
-                let current_lock = existing
-                    .and_then(|locks| locks.iter().find(|&&(c, _)| c == col_idx))
-                    .map(|&(_, is_excl)| is_excl);
-                match current_lock {
-                    Some(true) => {}
-                    Some(false) => {
-                        if !flt.try_upgrade(key_bytes, col_idx) {
-                            return Err(TxnStorageStatus::TxnConflict);
-                        }
-                        if let Some(locks) = rwset.get_field_locks_mut(key_bytes) {
-                            if let Some(entry) = locks.iter_mut().find(|(c, _)| *c == col_idx) {
-                                entry.1 = true;
-                            }
-                        }
-                    }
-                    None => {
-                        if !flt.try_exclusive(key_bytes, col_idx) {
-                            return Err(TxnStorageStatus::TxnConflict);
-                        }
-                        if let Some(locks) = rwset.get_field_locks_mut(key_bytes) {
-                            locks.push((col_idx, true));
-                        }
-                    }
-                }
-            }
-            Ok(())
-        };
-
         if let Some(e) = rwset.get_mut(&key_bytes) {
             match e {
-                RWEntry::Delete(_, _) => Err(TxnStorageStatus::KeyNotFound),
-                RWEntry::Read(ptr, ghost) => {
+                KeyEntry::Delete { .. } => Err(TxnStorageStatus::KeyNotFound),
+                KeyEntry::Active {
+                    ptr,
+                    read_set,
+                    writes,
+                    ..
+                } => {
+                    // Traverse btree to verify existence + hold latch
                     let page = container.btree.traverse_to_leaf_for_read_with_hint(
                         &key_bytes,
                         container.hint_to_page_ref(Some(*ptr)),
                     );
-                    let slot_id = page.upper_bound_slot_id(&BTreeKey::new(&key_bytes)) - 1;
+                    let slot_id =
+                        page.upper_bound_slot_id(&BTreeKey::new(&key_bytes)) - 1;
                     if slot_id == 0 || page.get_raw_key(slot_id) != key_bytes {
                         panic!("Key should exist in storage if in rwset");
                     }
                     if let Some(flt) = flt {
-                        acquire_field_exclusive(&key_bytes, &fields, rwset, flt)?;
-                    } else if !container.locktable.try_upgrade(key_bytes.clone()) {
-                        return Err(TxnStorageStatus::TxnConflict);
+                        // Per-field lock acquisition
+                        for &(col_idx, _) in &fields {
+                            if writes.iter().any(|&(c, _)| c == col_idx) {
+                                // Already exclusively locked
+                                continue;
+                            } else if *read_set & (1u64 << col_idx) != 0 {
+                                // Shared lock, try upgrade
+                                if !flt.try_upgrade(&key_bytes, col_idx) {
+                                    return Err(TxnStorageStatus::TxnConflict);
+                                }
+                                *read_set &= !(1u64 << col_idx);
+                            } else {
+                                // Not tracked, try exclusive
+                                if !flt.try_exclusive(&key_bytes, col_idx) {
+                                    return Err(TxnStorageStatus::TxnConflict);
+                                }
+                            }
+                        }
+                    } else if writes.is_empty() {
+                        // Record-level: need upgrade from shared to exclusive
+                        if !container.locktable.try_upgrade(key_bytes.clone()) {
+                            return Err(TxnStorageStatus::TxnConflict);
+                        }
                     }
-                    let mut record =
-                        bytes_to_record(page.get_val(slot_id), container.options.schema());
-                    fields.into_iter().for_each(|(idx, f)| record[idx] = f);
-                    let ptr = *ptr;
-                    *e = RWEntry::Update(record, ptr, *ghost);
-                    Ok(ptr)
-                }
-                RWEntry::Update(record, ptr, _) => {
-                    if let Some(flt) = flt {
-                        acquire_field_exclusive(&key_bytes, &fields, rwset, flt)?;
+                    // Store writes (no deserialization needed)
+                    for (col_idx, f) in fields {
+                        if let Some(entry) =
+                            writes.iter_mut().find(|&&mut (c, _)| c == col_idx)
+                        {
+                            entry.1 = f;
+                        } else {
+                            writes.push((col_idx, f));
+                        }
                     }
-                    fields.into_iter().for_each(|(idx, f)| record[idx] = f);
                     Ok(*ptr)
                 }
-                RWEntry::Insert(record, ptr, ghost) => {
-                    if let Some(flt) = flt {
-                        acquire_field_exclusive(&key_bytes, &fields, rwset, flt)?;
+                KeyEntry::Insert { ptr, record } => {
+                    // Mutate record in place, stay as Insert
+                    let ptr_val = *ptr;
+                    for (col_idx, f) in fields {
+                        record[col_idx] = f;
                     }
-                    let ptr = *ptr;
-                    fields.into_iter().for_each(|(idx, f)| record[idx] = f);
-                    *e = RWEntry::Update(record.clone(), ptr, *ghost);
-                    Ok(ptr)
+                    Ok(ptr_val)
                 }
             }
         } else {
@@ -979,19 +1044,33 @@ impl<M: MemPool> FieldLeveLStorageTrait for TransactionalStorage<M> {
                     return Err(TxnStorageStatus::TxnConflict);
                 }
                 let ptr = RecordPointer::new(page.page_id(), page.frame_id());
-                let mut record = bytes_to_record(page.get_val(slot_id), container.options.schema());
-                fields.into_iter().for_each(|(idx, f)| record[idx] = f);
-                rwset.insert(key_bytes.clone(), RWEntry::Update(record, ptr, false));
-                rwset.set_field_locks(key_bytes.clone(), cols.iter().map(|&c| (c, true)).collect());
+                // No deserialization — just store write entries
+                let writes: Vec<(usize, Field)> = fields;
+                rwset.insert(
+                    key_bytes,
+                    KeyEntry::Active {
+                        ptr,
+                        ghost: false,
+                        read_set: 0,
+                        writes,
+                    },
+                );
                 Ok(ptr)
             } else {
                 if !container.locktable.try_exclusive(key_bytes.clone()) {
                     return Err(TxnStorageStatus::TxnConflict);
                 }
                 let ptr = RecordPointer::new(page.page_id(), page.frame_id());
-                let mut record = bytes_to_record(page.get_val(slot_id), container.options.schema());
-                fields.into_iter().for_each(|(idx, f)| record[idx] = f);
-                rwset.insert(key_bytes.clone(), RWEntry::Update(record, ptr, false));
+                let writes: Vec<(usize, Field)> = fields;
+                rwset.insert(
+                    key_bytes,
+                    KeyEntry::Active {
+                        ptr,
+                        ghost: false,
+                        read_set: 0,
+                        writes,
+                    },
+                );
                 Ok(ptr)
             }
         }
@@ -1011,77 +1090,65 @@ impl<M: MemPool> FieldLeveLStorageTrait for TransactionalStorage<M> {
         let key_bytes = key_to_bytes(&key);
         let flt = container.field_locktable.as_ref();
 
-        // Helper: upgrade or acquire exclusive lock on a single field
-        let acquire_single_excl =
-            |key_bytes: &[u8], col: usize, rwset: &ReadWriteSet, flt: &FieldLockTable| {
-                let existing = rwset.get_field_locks(key_bytes);
-                let current = existing
-                    .and_then(|locks| locks.iter().find(|&&(c, _)| c == col))
-                    .map(|&(_, is_excl)| is_excl);
-                match current {
-                    Some(true) => Ok(()),
-                    Some(false) => {
-                        if !flt.try_upgrade(key_bytes, col) {
-                            return Err(TxnStorageStatus::TxnConflict);
-                        }
-                        if let Some(locks) = rwset.get_field_locks_mut(key_bytes) {
-                            if let Some(e) = locks.iter_mut().find(|(c, _)| *c == col) {
-                                e.1 = true;
-                            }
-                        }
-                        Ok(())
-                    }
-                    None => {
-                        if !flt.try_exclusive(key_bytes, col) {
-                            return Err(TxnStorageStatus::TxnConflict);
-                        }
-                        if let Some(locks) = rwset.get_field_locks_mut(key_bytes) {
-                            locks.push((col, true));
-                        }
-                        Ok(())
-                    }
-                }
-            };
-
         if let Some(e) = rwset.get_mut(&key_bytes) {
             match e {
-                RWEntry::Delete(_, _) => Err(TxnStorageStatus::KeyNotFound),
-                RWEntry::Read(ptr, ghost) => {
+                KeyEntry::Delete { .. } => Err(TxnStorageStatus::KeyNotFound),
+                KeyEntry::Active {
+                    ptr,
+                    read_set,
+                    writes,
+                    ..
+                } => {
+                    // Check if col is already in writes (exclusively locked)
+                    if let Some(entry) = writes.iter_mut().find(|&&mut (c, _)| c == col_idx) {
+                        // Already exclusively locked — mutate in place
+                        func(&mut entry.1);
+                        return Ok(*ptr);
+                    }
+                    // Need to acquire exclusive lock
+                    if let Some(flt) = flt {
+                        if *read_set & (1u64 << col_idx) != 0 {
+                            // Shared lock, try upgrade
+                            if !flt.try_upgrade(&key_bytes, col_idx) {
+                                return Err(TxnStorageStatus::TxnConflict);
+                            }
+                            *read_set &= !(1u64 << col_idx);
+                        } else {
+                            // Not tracked, try exclusive
+                            if !flt.try_exclusive(&key_bytes, col_idx) {
+                                return Err(TxnStorageStatus::TxnConflict);
+                            }
+                        }
+                    } else if writes.is_empty() {
+                        // Record-level: need upgrade from shared
+                        if !container.locktable.try_upgrade(key_bytes.clone()) {
+                            return Err(TxnStorageStatus::TxnConflict);
+                        }
+                    }
+                    // Read current value from disk for just this field
                     let page = container.btree.traverse_to_leaf_for_read_with_hint(
                         &key_bytes,
                         container.hint_to_page_ref(Some(*ptr)),
                     );
-                    let slot_id = page.upper_bound_slot_id(&BTreeKey::new(&key_bytes)) - 1;
+                    let slot_id =
+                        page.upper_bound_slot_id(&BTreeKey::new(&key_bytes)) - 1;
                     if slot_id == 0 || page.get_raw_key(slot_id) != key_bytes {
                         panic!("Key should exist in storage if in rwset");
                     }
-                    let ptr = *ptr;
-                    if let Some(flt) = flt {
-                        acquire_single_excl(&key_bytes, col_idx, rwset, flt)?;
-                    } else if !container.locktable.try_upgrade(key_bytes.clone()) {
-                        return Err(TxnStorageStatus::TxnConflict);
-                    }
-                    let mut record =
-                        bytes_to_record(page.get_val(slot_id), container.options.schema());
-                    func(&mut record[col_idx]);
-                    *e = RWEntry::Update(record, ptr, *ghost);
-                    Ok(ptr)
-                }
-                RWEntry::Update(record, ptr, _) => {
-                    if let Some(flt) = flt {
-                        acquire_single_excl(&key_bytes, col_idx, rwset, flt)?;
-                    }
-                    func(&mut record[col_idx]);
+                    let disk_fields = bytes_to_fields_selective(
+                        page.get_val(slot_id),
+                        container.options.schema(),
+                        &[col_idx],
+                    );
+                    let mut field_val = disk_fields.into_iter().next().unwrap();
+                    func(&mut field_val);
+                    writes.push((col_idx, field_val));
                     Ok(*ptr)
                 }
-                RWEntry::Insert(record, ptr, ghost) => {
-                    if let Some(flt) = flt {
-                        acquire_single_excl(&key_bytes, col_idx, rwset, flt)?;
-                    }
-                    let ptr = *ptr;
+                KeyEntry::Insert { ptr, record } => {
+                    // Mutate record[col_idx] in place
                     func(&mut record[col_idx]);
-                    *e = RWEntry::Update(record.clone(), ptr, *ghost);
-                    Ok(ptr)
+                    Ok(*ptr)
                 }
             }
         } else {
@@ -1096,19 +1163,44 @@ impl<M: MemPool> FieldLeveLStorageTrait for TransactionalStorage<M> {
                     return Err(TxnStorageStatus::TxnConflict);
                 }
                 let ptr = RecordPointer::new(page.page_id(), page.frame_id());
-                let mut record = bytes_to_record(page.get_val(slot_id), container.options.schema());
-                func(&mut record[col_idx]);
-                rwset.insert(key_bytes.clone(), RWEntry::Update(record, ptr, false));
-                rwset.set_field_locks(key_bytes.clone(), vec![(col_idx, true)]);
+                let disk_fields = bytes_to_fields_selective(
+                    page.get_val(slot_id),
+                    container.options.schema(),
+                    &[col_idx],
+                );
+                let mut field_val = disk_fields.into_iter().next().unwrap();
+                func(&mut field_val);
+                rwset.insert(
+                    key_bytes,
+                    KeyEntry::Active {
+                        ptr,
+                        ghost: false,
+                        read_set: 0,
+                        writes: vec![(col_idx, field_val)],
+                    },
+                );
                 Ok(ptr)
             } else {
                 if !container.locktable.try_exclusive(key_bytes.clone()) {
                     return Err(TxnStorageStatus::TxnConflict);
                 }
                 let ptr = RecordPointer::new(page.page_id(), page.frame_id());
-                let mut record = bytes_to_record(page.get_val(slot_id), container.options.schema());
-                func(&mut record[col_idx]);
-                rwset.insert(key_bytes.clone(), RWEntry::Update(record, ptr, false));
+                let disk_fields = bytes_to_fields_selective(
+                    page.get_val(slot_id),
+                    container.options.schema(),
+                    &[col_idx],
+                );
+                let mut field_val = disk_fields.into_iter().next().unwrap();
+                func(&mut field_val);
+                rwset.insert(
+                    key_bytes,
+                    KeyEntry::Active {
+                        ptr,
+                        ghost: false,
+                        read_set: 0,
+                        writes: vec![(col_idx, field_val)],
+                    },
+                );
                 Ok(ptr)
             }
         }
@@ -1132,11 +1224,22 @@ impl<M: MemPool> FieldLeveLStorageTrait for TransactionalStorage<M> {
         // Check if key already exists in rwset
         if let Some(entry) = rwset.get_mut(&key_bytes) {
             match entry {
-                RWEntry::Delete(ptr, ghost) => {
-                    // Was deleted, now inserting - this becomes an update
-                    let ptr = *ptr;
-                    *entry = RWEntry::Update(record.fields, ptr, *ghost);
-                    Ok(ptr)
+                KeyEntry::Delete { ptr, ghost } => {
+                    // Was deleted, now inserting — resurrection becomes Active with all fields as writes
+                    let ptr_val = *ptr;
+                    let ghost_val = *ghost;
+                    let writes: Vec<(usize, Field)> = record
+                        .fields
+                        .into_iter()
+                        .enumerate()
+                        .collect();
+                    *entry = KeyEntry::Active {
+                        ptr: ptr_val,
+                        ghost: ghost_val,
+                        read_set: 0,
+                        writes,
+                    };
+                    Ok(ptr_val)
                 }
                 _ => Err(TxnStorageStatus::KeyExists),
             }
@@ -1173,7 +1276,13 @@ impl<M: MemPool> FieldLeveLStorageTrait for TransactionalStorage<M> {
                     &record_to_bytes(&record.fields, container.options.schema()),
                 );
                 let ptr = RecordPointer::new(page.page_id(), page.frame_id());
-                rwset.insert(key_bytes.clone(), RWEntry::Insert(record.fields, ptr, true));
+                rwset.insert(
+                    key_bytes.clone(),
+                    KeyEntry::Insert {
+                        ptr,
+                        record: record.fields,
+                    },
+                );
                 return Ok(ptr);
             }
 
@@ -1194,7 +1303,7 @@ impl<M: MemPool> FieldLeveLStorageTrait for TransactionalStorage<M> {
                 // Case3. Next key is not in rwset
                 // => Lock the next key and then this key. Insert this key and then release the next-key lock.
                 match rwset.get(&next_key) {
-                    Some(RWEntry::Read(..)) => {
+                    Some(KeyEntry::Active { writes, .. }) if writes.is_empty() => {
                         if !locktable.try_upgrade(next_key.to_vec()) {
                             #[cfg(test)]
                             crate::txn_storage2::transactional_storage::INSERT_NEXTKEY_UPGRADE
@@ -1266,7 +1375,10 @@ impl<M: MemPool> FieldLeveLStorageTrait for TransactionalStorage<M> {
                 let ptr = RecordPointer::new(page.page_id(), page.frame_id());
                 rwset.insert(
                     key_bytes.clone(),
-                    RWEntry::Insert(record.fields, ptr, true), // Mark as ghost
+                    KeyEntry::Insert {
+                        ptr,
+                        record: record.fields,
+                    },
                 );
                 Ok(ptr)
             }
@@ -1301,20 +1413,36 @@ impl<M: MemPool> FieldLeveLStorageTrait for TransactionalStorage<M> {
         // Check rwset first
         if let Some(entry) = rwset.get_mut(&key_bytes) {
             match entry {
-                RWEntry::Read(ptr, ghost) => {
-                    // Upgrade lock
-                    let locktable = &container.locktable;
-                    if !locktable.try_upgrade(key_bytes.clone()) {
-                        return Err(TxnStorageStatus::TxnConflict);
+                KeyEntry::Active {
+                    ptr,
+                    ghost,
+                    writes,
+                    ..
+                } => {
+                    let ptr_val = *ptr;
+                    let ghost_val = *ghost;
+                    if writes.is_empty() {
+                        // Read-only, need lock upgrade
+                        let locktable = &container.locktable;
+                        if !locktable.try_upgrade(key_bytes.clone()) {
+                            return Err(TxnStorageStatus::TxnConflict);
+                        }
                     }
-                    *entry = RWEntry::Delete(*ptr, *ghost);
+                    *entry = KeyEntry::Delete {
+                        ptr: ptr_val,
+                        ghost: ghost_val,
+                    };
                     Ok(())
                 }
-                RWEntry::Update(_, ptr, ghost) | RWEntry::Insert(_, ptr, ghost) => {
-                    *entry = RWEntry::Delete(*ptr, *ghost);
+                KeyEntry::Insert { ptr, .. } => {
+                    let ptr_val = *ptr;
+                    *entry = KeyEntry::Delete {
+                        ptr: ptr_val,
+                        ghost: true,
+                    };
                     Ok(())
                 }
-                RWEntry::Delete(_, _) => Err(TxnStorageStatus::KeyNotFound),
+                KeyEntry::Delete { .. } => Err(TxnStorageStatus::KeyNotFound),
             }
         } else {
             // Not in rwset, need to check storage
@@ -1334,7 +1462,10 @@ impl<M: MemPool> FieldLeveLStorageTrait for TransactionalStorage<M> {
                 let ptr = RecordPointer::new(page.page_id(), page.frame_id());
                 rwset.insert(
                     key_bytes.clone(),
-                    RWEntry::Delete(ptr, false), // Not ghost since read from storage
+                    KeyEntry::Delete {
+                        ptr,
+                        ghost: false,
+                    },
                 );
                 Ok(())
             }
@@ -1379,7 +1510,15 @@ impl<M: MemPool> FieldLeveLStorageTrait for TransactionalStorage<M> {
                         if !locktable.try_shared(key_bytes.clone()) {
                             return Err(TxnStorageStatus::TxnConflict);
                         }
-                        rwset.insert(key_bytes, RWEntry::Read(ptr, false));
+                        rwset.insert(
+                            key_bytes,
+                            KeyEntry::Active {
+                                ptr,
+                                ghost: false,
+                                read_set: 0,
+                                writes: Vec::new(),
+                            },
+                        );
                     }
                     iter.finish();
                     return Ok(None);
@@ -1388,13 +1527,16 @@ impl<M: MemPool> FieldLeveLStorageTrait for TransactionalStorage<M> {
                 // Check if in rwset
                 let record = if let Some(entry) = rwset.get(&key_bytes) {
                     match entry {
-                        RWEntry::Read(..) => {
-                            bytes_to_record(&value_bytes, container.options.schema())
+                        KeyEntry::Active { writes, .. } => {
+                            let mut record =
+                                bytes_to_record(&value_bytes, container.options.schema());
+                            for &(col, ref v) in writes {
+                                record[col] = v.clone();
+                            }
+                            record
                         }
-                        RWEntry::Update(record, _, _) | RWEntry::Insert(record, _, _) => {
-                            record.clone()
-                        }
-                        RWEntry::Delete(_, _) => {
+                        KeyEntry::Insert { record, .. } => record.clone(),
+                        KeyEntry::Delete { .. } => {
                             // Deleted in this transaction. Skip this entry.
                             continue;
                         }
@@ -1406,7 +1548,15 @@ impl<M: MemPool> FieldLeveLStorageTrait for TransactionalStorage<M> {
                         return Err(TxnStorageStatus::TxnConflict);
                     }
                     let record = bytes_to_record(&value_bytes, container.options.schema());
-                    rwset.insert(key_bytes.clone(), RWEntry::Read(ptr, false));
+                    rwset.insert(
+                        key_bytes.clone(),
+                        KeyEntry::Active {
+                            ptr,
+                            ghost: false,
+                            read_set: 0,
+                            writes: Vec::new(),
+                        },
+                    );
                     record
                 };
 
@@ -1431,7 +1581,15 @@ impl<M: MemPool> FieldLeveLStorageTrait for TransactionalStorage<M> {
                     if !locktable.try_shared(vec![]) {
                         return Err(TxnStorageStatus::TxnConflict);
                     }
-                    rwset.insert(vec![], RWEntry::Read(RecordPointer::new(0, 0), false));
+                    rwset.insert(
+                        vec![],
+                        KeyEntry::Active {
+                            ptr: RecordPointer::new(0, 0),
+                            ghost: false,
+                            read_set: 0,
+                            writes: Vec::new(),
+                        },
+                    );
                 }
                 iter.finish();
                 return Ok(None);
@@ -1448,6 +1606,25 @@ impl<M: MemPool> FieldLeveLStorageTrait for TransactionalStorage<M> {
 // ============================================================================
 // Tests
 // ============================================================================
+
+// Global counters for get_fields internal timing (test-only)
+#[cfg(test)]
+pub static GET_FIELDS_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+#[cfg(test)]
+pub static GET_FIELDS_TRAVERSE_NS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+#[cfg(test)]
+pub static GET_FIELDS_LOCK_NS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+#[cfg(test)]
+pub static GET_FIELDS_DESER_NS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+#[cfg(test)]
+pub static GET_FIELDS_RWSET_NS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+#[cfg(test)]
+pub static GET_FIELDS_KEY_SERIAL_NS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
 
 // Global counters for insert_record abort path diagnosis (test-only)
 #[cfg(test)]

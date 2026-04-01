@@ -371,6 +371,7 @@ pub trait FosterBtreePage {
     fn get_foster_key(&self) -> &[u8];
     fn get_foster_val(&self) -> &[u8];
     fn get_val(&self, slot_id: u32) -> &[u8];
+    fn get_val_mut(&mut self, slot_id: u32) -> &mut [u8];
     fn inside_range(&self, key: &BTreeKey) -> bool;
     fn lower_bound_slot_id(&self, key: &BTreeKey) -> u32;
     fn upper_bound_slot_id(&self, key: &BTreeKey) -> u32;
@@ -848,6 +849,14 @@ impl FosterBtreePage for Page {
         let key_size = slot.key_size() as usize;
         let value_size = slot.value_size() as usize;
         &self[offset + key_size..offset + key_size + value_size]
+    }
+
+    fn get_val_mut(&mut self, slot_id: u32) -> &mut [u8] {
+        let slot = self.slot(slot_id).unwrap();
+        let offset = slot.offset() as usize;
+        let key_size = slot.key_size() as usize;
+        let value_size = slot.value_size() as usize;
+        &mut self[offset + key_size..offset + key_size + value_size]
     }
 
     fn inside_range(&self, key: &BTreeKey) -> bool {

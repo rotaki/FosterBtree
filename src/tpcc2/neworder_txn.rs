@@ -64,6 +64,86 @@ pub fn run_neworder_txn<M: MemPool>(
     }
 }
 
+/// Per-step timing breakdown for NewOrder (only collected when cfg(feature = "txn_profiling"))
+#[derive(Default)]
+pub struct NewOrderProfile {
+    pub get_warehouse_ns: u64,
+    pub update_district_ns: u64,
+    pub get_district_tax_ns: u64,
+    pub get_customer_ns: u64,
+    pub insert_order_ns: u64,
+    pub insert_order_secondary_ns: u64,
+    pub insert_new_order_ns: u64,
+    pub item_loop_ns: u64,      // total for all items
+    pub get_item_ns: u64,       // sum across items
+    pub get_stock_ns: u64,      // sum across items
+    pub update_stock_ns: u64,   // sum across items
+    pub insert_orderline_ns: u64, // sum across items
+    pub commit_ns: u64,
+    pub num_items: usize,
+}
+
+impl NewOrderProfile {
+    pub fn total_ns(&self) -> u64 {
+        self.get_warehouse_ns
+            + self.update_district_ns
+            + self.get_district_tax_ns
+            + self.get_customer_ns
+            + self.insert_order_ns
+            + self.insert_order_secondary_ns
+            + self.insert_new_order_ns
+            + self.item_loop_ns
+            + self.commit_ns
+    }
+
+    pub fn merge(&mut self, other: &NewOrderProfile) {
+        self.get_warehouse_ns += other.get_warehouse_ns;
+        self.update_district_ns += other.update_district_ns;
+        self.get_district_tax_ns += other.get_district_tax_ns;
+        self.get_customer_ns += other.get_customer_ns;
+        self.insert_order_ns += other.insert_order_ns;
+        self.insert_order_secondary_ns += other.insert_order_secondary_ns;
+        self.insert_new_order_ns += other.insert_new_order_ns;
+        self.item_loop_ns += other.item_loop_ns;
+        self.get_item_ns += other.get_item_ns;
+        self.get_stock_ns += other.get_stock_ns;
+        self.update_stock_ns += other.update_stock_ns;
+        self.insert_orderline_ns += other.insert_orderline_ns;
+        self.commit_ns += other.commit_ns;
+        self.num_items += other.num_items;
+    }
+
+    pub fn print(&self, count: u64) {
+        if count == 0 {
+            return;
+        }
+        let avg = |v: u64| v / count / 1000; // ns -> μs per txn
+        let total = self.total_ns() / count / 1000;
+        let pct = |v: u64| {
+            if self.total_ns() == 0 {
+                0.0
+            } else {
+                v as f64 / self.total_ns() as f64 * 100.0
+            }
+        };
+        let avg_items = self.num_items as f64 / count as f64;
+        println!("  NewOrder profile ({} commits, avg {:.1} items/txn, total {}μs):", count, avg_items, total);
+        println!("    get_warehouse:        {:>6}μs  ({:>5.1}%)", avg(self.get_warehouse_ns), pct(self.get_warehouse_ns));
+        println!("    update_district:      {:>6}μs  ({:>5.1}%)", avg(self.update_district_ns), pct(self.update_district_ns));
+        println!("    get_district_tax:     {:>6}μs  ({:>5.1}%)", avg(self.get_district_tax_ns), pct(self.get_district_tax_ns));
+        println!("    get_customer:         {:>6}μs  ({:>5.1}%)", avg(self.get_customer_ns), pct(self.get_customer_ns));
+        println!("    insert_order:         {:>6}μs  ({:>5.1}%)", avg(self.insert_order_ns), pct(self.insert_order_ns));
+        println!("    insert_order_sec:     {:>6}μs  ({:>5.1}%)", avg(self.insert_order_secondary_ns), pct(self.insert_order_secondary_ns));
+        println!("    insert_new_order:     {:>6}μs  ({:>5.1}%)", avg(self.insert_new_order_ns), pct(self.insert_new_order_ns));
+        println!("    item_loop (total):    {:>6}μs  ({:>5.1}%)", avg(self.item_loop_ns), pct(self.item_loop_ns));
+        println!("      get_item:           {:>6}μs  ({:>5.1}%)", avg(self.get_item_ns), pct(self.get_item_ns));
+        println!("      get_stock:          {:>6}μs  ({:>5.1}%)", avg(self.get_stock_ns), pct(self.get_stock_ns));
+        println!("      update_stock:       {:>6}μs  ({:>5.1}%)", avg(self.update_stock_ns), pct(self.update_stock_ns));
+        println!("      insert_orderline:   {:>6}μs  ({:>5.1}%)", avg(self.insert_orderline_ns), pct(self.insert_orderline_ns));
+        println!("    commit:               {:>6}μs  ({:>5.1}%)", avg(self.commit_ns), pct(self.commit_ns));
+    }
+}
+
 pub fn run_neworder_txn_with_stats<M: MemPool>(
     storage: &Arc<TransactionalStorage<M>>,
     db_id: DatabaseId,
@@ -71,6 +151,40 @@ pub fn run_neworder_txn_with_stats<M: MemPool>(
     input: &NewOrderInput,
     stats: Option<&mut TxnTypeStats>,
 ) -> (TPCCStatus, Option<NewOrderOutput>) {
+    run_neworder_txn_inner(storage, db_id, containers, input, stats, None)
+}
+
+pub fn run_neworder_txn_profiled<M: MemPool>(
+    storage: &Arc<TransactionalStorage<M>>,
+    db_id: DatabaseId,
+    containers: &TpccContainerIds,
+    input: &NewOrderInput,
+    stats: Option<&mut TxnTypeStats>,
+    profile: &mut NewOrderProfile,
+) -> (TPCCStatus, Option<NewOrderOutput>) {
+    run_neworder_txn_inner(storage, db_id, containers, input, stats, Some(profile))
+}
+
+fn run_neworder_txn_inner<M: MemPool>(
+    storage: &Arc<TransactionalStorage<M>>,
+    db_id: DatabaseId,
+    containers: &TpccContainerIds,
+    input: &NewOrderInput,
+    stats: Option<&mut TxnTypeStats>,
+    mut profile: Option<&mut NewOrderProfile>,
+) -> (TPCCStatus, Option<NewOrderOutput>) {
+    use std::time::Instant;
+    macro_rules! timed {
+        ($field:ident, $body:expr) => {{
+            let _t = Instant::now();
+            let _r = $body;
+            if let Some(ref mut p) = profile {
+                p.$field += _t.elapsed().as_nanos() as u64;
+            }
+            _r
+        }};
+    }
+
     // Create a dummy stats if none provided
     let mut dummy_stats = TxnTypeStats::new();
     let stats = stats.unwrap_or(&mut dummy_stats);
@@ -80,13 +194,9 @@ pub fn run_neworder_txn_with_stats<M: MemPool>(
 
     // Get warehouse tax
     let w_key = vec![Field::Uint16(Some(input.w_id))];
-    let res = storage.get_fields(
-        &txn,
-        containers.warehouse_cid,
-        w_key,
-        &[warehouse_fields::W_TAX],
-        None,
-    );
+    let res = timed!(get_warehouse_ns, storage.get_fields(
+        &txn, containers.warehouse_cid, w_key, &[warehouse_fields::W_TAX], None,
+    ));
     if not_successful(&res) {
         return (helper.kill(&txn, &res, AbortID::NewOrderGetWarehouse), None);
     }
@@ -99,46 +209,24 @@ pub fn run_neworder_txn_with_stats<M: MemPool>(
         Field::Uint8(Some(input.d_id)),
     ];
 
-    // Atomically read and increment d_next_o_id (acquires exclusive lock directly,
-    // avoiding the shared→upgrade livelock with field-level locking)
     let mut d_next_o_id = 0u32;
-    let res = storage.update_field_with_func(
-        &txn,
-        containers.district_cid,
-        d_key.clone(),
-        district_fields::D_NEXT_O_ID,
+    let res = timed!(update_district_ns, storage.update_field_with_func(
+        &txn, containers.district_cid, d_key.clone(), district_fields::D_NEXT_O_ID,
         |field| {
-            if let Field::Uint32(Some(v)) = field {
-                d_next_o_id = *v;
-                *v += 1;
-            } else {
-                panic!("Expected Uint32 for D_NEXT_O_ID");
-            }
-        },
-        None,
-    );
+            if let Field::Uint32(Some(v)) = field { d_next_o_id = *v; *v += 1; }
+            else { panic!("Expected Uint32 for D_NEXT_O_ID"); }
+        }, None,
+    ));
     if not_successful(&res) {
-        return (
-            helper.kill(&txn, &res, AbortID::NewOrderUpdateDistrict),
-            None,
-        );
+        return (helper.kill(&txn, &res, AbortID::NewOrderUpdateDistrict), None);
     }
     let o_id = d_next_o_id;
 
-    // Read d_tax separately (shared lock on a different field — no conflict with
-    // other NewOrders' exclusive on D_NEXT_O_ID under field-level locking)
-    let res = storage.get_fields(
-        &txn,
-        containers.district_cid,
-        d_key,
-        &[district_fields::D_TAX],
-        None,
-    );
+    let res = timed!(get_district_tax_ns, storage.get_fields(
+        &txn, containers.district_cid, d_key, &[district_fields::D_TAX], None,
+    ));
     if not_successful(&res) {
-        return (
-            helper.kill(&txn, &res, AbortID::NewOrderUpdateDistrict),
-            None,
-        );
+        return (helper.kill(&txn, &res, AbortID::NewOrderUpdateDistrict), None);
     }
     let (d_fields, _d_hint) = res.unwrap();
     let d_tax = get_f64_field(&d_fields, 0);
@@ -164,13 +252,9 @@ pub fn run_neworder_txn_with_stats<M: MemPool>(
             customer_fields::C_CREDIT,
         )
     };
-    let res = storage.get_fields(
-        &txn,
-        containers.customer_cid,
-        c_key,
-        &[disc_idx, last_idx, credit_idx],
-        None,
-    );
+    let res = timed!(get_customer_ns, storage.get_fields(
+        &txn, containers.customer_cid, c_key, &[disc_idx, last_idx, credit_idx], None,
+    ));
     if not_successful(&res) {
         return (helper.kill(&txn, &res, AbortID::NewOrderGetCustomer), None);
     }
@@ -199,7 +283,7 @@ pub fn run_neworder_txn_with_stats<M: MemPool>(
             Field::Uint64(Some(get_timestamp())),
         ],
     };
-    let res = storage.insert_record(&txn, containers.order_cid, order_record, None);
+    let res = timed!(insert_order_ns, storage.insert_record(&txn, containers.order_cid, order_record, None));
     if not_successful(&res) {
         return (helper.kill(&txn, &res, AbortID::NewOrderInsertOrder), None);
     }
@@ -215,17 +299,11 @@ pub fn run_neworder_txn_with_stats<M: MemPool>(
             Field::Pointer(Some(order_hint)),
         ],
     };
-    let res = storage.insert_record(
-        &txn,
-        containers.order_secondary_cid,
-        order_secondary_record,
-        None,
-    );
+    let res = timed!(insert_order_secondary_ns, storage.insert_record(
+        &txn, containers.order_secondary_cid, order_secondary_record, None,
+    ));
     if not_successful(&res) {
-        return (
-            helper.kill(&txn, &res, AbortID::NewOrderInsertOrderSecondary),
-            None,
-        );
+        return (helper.kill(&txn, &res, AbortID::NewOrderInsertOrderSecondary), None);
     }
     let _order_secondary_hint = res.unwrap();
 
@@ -237,42 +315,28 @@ pub fn run_neworder_txn_with_stats<M: MemPool>(
             Field::Uint32(Some(o_id)),
         ],
     };
-    let res = storage.insert_record(&txn, containers.new_order_cid, new_order_record, None);
+    let res = timed!(insert_new_order_ns, storage.insert_record(&txn, containers.new_order_cid, new_order_record, None));
     if not_successful(&res) {
-        return (
-            helper.kill(&txn, &res, AbortID::NewOrderInsertNewOrder),
-            None,
-        );
+        return (helper.kill(&txn, &res, AbortID::NewOrderInsertNewOrder), None);
     }
     let _new_order_hint = res.unwrap();
 
     // Process order items
     let mut total_amount = 0.0;
     let mut item_outputs = Vec::new();
+    let item_loop_start = std::time::Instant::now();
 
     for (ol_number, item) in input.items.iter().enumerate() {
-        // Get item info
         let i_key = vec![Field::Uint32(Some(item.i_id))];
 
-        // Check for rollback condition (1% of transactions with invalid item)
         if input.rollback && ol_number == input.items.len() - 1 {
-            // This is the last item and we want to rollback
-            // Use a non-existent item ID
             return (helper.user_abort(&txn), None);
         }
 
-        // Check if item exists (invalid item check)
-        let i_fields_result = storage.get_fields(
-            &txn,
-            containers.item_cid,
-            i_key,
-            &[
-                item_fields::I_PRICE,
-                item_fields::I_NAME,
-                item_fields::I_DATA,
-            ],
-            None,
-        );
+        let i_fields_result = timed!(get_item_ns, storage.get_fields(
+            &txn, containers.item_cid, i_key,
+            &[item_fields::I_PRICE, item_fields::I_NAME, item_fields::I_DATA], None,
+        ));
 
         if i_fields_result.is_err() {
             // Item not found - system abort
@@ -293,21 +357,11 @@ pub fn run_neworder_txn_with_stats<M: MemPool>(
             Field::Uint32(Some(item.i_id)),
         ];
 
-        // Read stock fields
-        let res = storage.get_fields(
-            &txn,
-            containers.stock_cid,
-            s_key.clone(),
-            &[
-                stock_fields::S_QUANTITY,
-                stock_fields::S_YTD,
-                stock_fields::S_ORDER_CNT,
-                stock_fields::S_REMOTE_CNT,
-                stock_fields::S_DIST,
-                stock_fields::S_DATA,
-            ],
-            None,
-        );
+        let res = timed!(get_stock_ns, storage.get_fields(
+            &txn, containers.stock_cid, s_key.clone(),
+            &[stock_fields::S_QUANTITY, stock_fields::S_YTD, stock_fields::S_ORDER_CNT,
+              stock_fields::S_REMOTE_CNT, stock_fields::S_DIST, stock_fields::S_DATA], None,
+        ));
         if not_successful(&res) {
             return (helper.kill(&txn, &res, AbortID::NewOrderGetStock), None);
         }
@@ -352,13 +406,9 @@ pub fn run_neworder_txn_with_stats<M: MemPool>(
             updates
         };
 
-        let res = storage.update_fields(
-            &txn,
-            containers.stock_cid,
-            s_key,
-            final_updates,
-            Some(s_hint),
-        );
+        let res = timed!(update_stock_ns, storage.update_fields(
+            &txn, containers.stock_cid, s_key, final_updates, Some(s_hint),
+        ));
         if not_successful(&res) {
             return (helper.kill(&txn, &res, AbortID::NewOrderUpdateStock), None);
         }
@@ -385,12 +435,9 @@ pub fn run_neworder_txn_with_stats<M: MemPool>(
                 Field::String(Some(dist_info)),
             ],
         };
-        let res = storage.insert_record(&txn, containers.order_line_cid, order_line_record, None);
+        let res = timed!(insert_orderline_ns, storage.insert_record(&txn, containers.order_line_cid, order_line_record, None));
         if not_successful(&res) {
-            return (
-                helper.kill(&txn, &res, AbortID::NewOrderInsertOrderLine),
-                None,
-            );
+            return (helper.kill(&txn, &res, AbortID::NewOrderInsertOrderLine), None);
         }
         let _order_line_hint = res.unwrap();
 
@@ -410,11 +457,20 @@ pub fn run_neworder_txn_with_stats<M: MemPool>(
         });
     }
 
+    if let Some(ref mut p) = profile {
+        p.item_loop_ns += item_loop_start.elapsed().as_nanos() as u64;
+        p.num_items += input.items.len();
+    }
+
     // Calculate final total with taxes and discount
     total_amount = total_amount * (1.0 + w_tax + d_tax) * (1.0 - c_discount);
 
     // Commit transaction
+    let commit_start = std::time::Instant::now();
     let status = helper.commit(&txn, AbortID::NewOrderCommit);
+    if let Some(ref mut p) = profile {
+        p.commit_ns += commit_start.elapsed().as_nanos() as u64;
+    }
     if status != TPCCStatus::Success {
         return (status, None);
     }

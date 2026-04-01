@@ -231,6 +231,63 @@ impl DataType {
     pub fn from_bytes(bytes: &[u8]) -> Self {
         Self::from_byte(bytes[0]).expect("Unknown data type byte")
     }
+
+    /// Returns true if this data type always has the same byte size (excluding null indicator).
+    #[inline]
+    pub const fn is_fixed_size(&self) -> bool {
+        matches!(
+            self,
+            DataType::Int8
+                | DataType::Int16
+                | DataType::Int32
+                | DataType::Int64
+                | DataType::Uint8
+                | DataType::Uint16
+                | DataType::Uint32
+                | DataType::Uint64
+                | DataType::Float32
+                | DataType::Float64
+                | DataType::FixedBytes8
+                | DataType::FixedBytes16
+                | DataType::FixedBytes24
+                | DataType::Bool
+                | DataType::DateTime
+                | DataType::Months
+                | DataType::Days
+                | DataType::Pointer
+        )
+    }
+
+    /// Returns the number of bytes a field of this type occupies starting at `bytes`,
+    /// without deserializing the value. For variable-length types (String, VarBytes),
+    /// reads the 4-byte length prefix to determine size.
+    #[inline]
+    pub fn skip_bytes(&self, bytes: &[u8], is_nullable: bool) -> usize {
+        let mut size = 0;
+        if is_nullable {
+            size += 1;
+            if bytes[0] == 0 {
+                return size; // null — only the indicator byte
+            }
+        }
+        size += match self {
+            DataType::Int8 | DataType::Uint8 | DataType::Bool => 1,
+            DataType::Int16 | DataType::Uint16 => 2,
+            DataType::Int32 | DataType::Uint32 | DataType::Float32
+            | DataType::DateTime | DataType::Months => 4,
+            DataType::Int64 | DataType::Uint64 | DataType::Float64
+            | DataType::Days | DataType::Pointer | DataType::FixedBytes8 => 8,
+            DataType::FixedBytes16 => 16,
+            DataType::FixedBytes24 => 24,
+            DataType::String | DataType::VarBytes => {
+                let len = u32::from_le_bytes([
+                    bytes[size], bytes[size + 1], bytes[size + 2], bytes[size + 3],
+                ]) as usize;
+                4 + len
+            }
+        };
+        size
+    }
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1373,6 +1430,195 @@ pub fn bytes_to_record(bytes: &[u8], schema: &Schema) -> Vec<Field> {
     }
 
     all_fields
+}
+
+/// Merge updated fields into an on-disk record at the byte level.
+/// Walks both `on_disk_bytes` and `updated_record` using the schema to find field boundaries.
+/// For exclusively-locked (modified) columns, serializes the field from `updated_record`.
+/// For all other columns, copies raw bytes from `on_disk_bytes` (zero-copy, no deserialization).
+///
+/// `exclusive_cols` should contain the column indices that were exclusively locked (modified).
+#[inline(always)]
+pub fn merge_record_bytes(
+    on_disk_bytes: &[u8],
+    updated_record: &[Field],
+    schema: &Schema,
+    exclusive_cols: &[usize],
+) -> Vec<u8> {
+    let mut result = Vec::with_capacity(on_disk_bytes.len());
+    let mut offset = 0;
+
+    for (i, (is_nullable, data_type)) in schema.cols().iter().enumerate() {
+        let field_size = data_type.skip_bytes(&on_disk_bytes[offset..], *is_nullable);
+        if exclusive_cols.contains(&i) {
+            // Serialize the updated field
+            let field_bytes = updated_record[i].to_bytes(*is_nullable);
+            result.extend_from_slice(&field_bytes);
+        } else {
+            // Copy raw bytes from on-disk record
+            result.extend_from_slice(&on_disk_bytes[offset..offset + field_size]);
+        }
+        offset += field_size;
+    }
+
+    result
+}
+
+/// Check if all exclusively-locked columns are fixed-size types.
+#[inline(always)]
+pub fn all_fixed_size(schema: &Schema, exclusive_cols: &[usize]) -> bool {
+    exclusive_cols
+        .iter()
+        .all(|&col| schema.cols()[col].1.is_fixed_size())
+}
+
+/// Patch specific fields in-place in a mutable value byte slice.
+/// Only works when all modified fields are fixed-size (caller must verify with `all_fixed_size`).
+/// Walks the schema to find byte offsets, then overwrites modified field bytes directly.
+#[inline(always)]
+pub fn patch_record_fields_inplace(
+    val_bytes: &mut [u8],
+    updated_record: &[Field],
+    schema: &Schema,
+    exclusive_cols: &[usize],
+) {
+    let mut offset = 0;
+    let max_col = exclusive_cols.iter().copied().max().unwrap_or(0);
+
+    for (i, (is_nullable, data_type)) in schema.cols().iter().enumerate() {
+        if i > max_col {
+            break;
+        }
+        let field_size = data_type.skip_bytes(&val_bytes[offset..], *is_nullable);
+        if exclusive_cols.contains(&i) {
+            let field_bytes = updated_record[i].to_bytes(*is_nullable);
+            debug_assert_eq!(
+                field_bytes.len(),
+                field_size,
+                "Fixed-size field changed size at col {}",
+                i
+            );
+            val_bytes[offset..offset + field_size].copy_from_slice(&field_bytes);
+        }
+        offset += field_size;
+    }
+}
+
+/// Merge sparse field updates into on-disk bytes.
+/// `updates` maps col_idx → new Field value. All other columns are copied as raw bytes.
+#[inline(always)]
+pub fn merge_record_bytes_sparse(
+    on_disk_bytes: &[u8],
+    updates: &HashMap<usize, &Field>,
+    schema: &Schema,
+) -> Vec<u8> {
+    let mut result = Vec::with_capacity(on_disk_bytes.len());
+    let mut offset = 0;
+
+    for (i, (is_nullable, data_type)) in schema.cols().iter().enumerate() {
+        let field_size = data_type.skip_bytes(&on_disk_bytes[offset..], *is_nullable);
+        if let Some(field) = updates.get(&i) {
+            let field_bytes = field.to_bytes(*is_nullable);
+            result.extend_from_slice(&field_bytes);
+        } else {
+            result.extend_from_slice(&on_disk_bytes[offset..offset + field_size]);
+        }
+        offset += field_size;
+    }
+
+    result
+}
+
+/// Patch sparse field updates in-place on page value bytes.
+/// Only works when all updated fields are fixed-size.
+#[inline(always)]
+pub fn patch_record_fields_inplace_sparse(
+    val_bytes: &mut [u8],
+    updates: &HashMap<usize, &Field>,
+    schema: &Schema,
+) {
+    if updates.is_empty() {
+        return;
+    }
+    let max_col = *updates.keys().max().unwrap();
+    let mut offset = 0;
+
+    for (i, (is_nullable, data_type)) in schema.cols().iter().enumerate() {
+        if i > max_col {
+            break;
+        }
+        let field_size = data_type.skip_bytes(&val_bytes[offset..], *is_nullable);
+        if let Some(field) = updates.get(&i) {
+            let field_bytes = field.to_bytes(*is_nullable);
+            debug_assert_eq!(field_bytes.len(), field_size);
+            val_bytes[offset..offset + field_size].copy_from_slice(&field_bytes);
+        }
+        offset += field_size;
+    }
+}
+
+/// Deserialize only the fields at the given column indices from a byte record.
+/// Walks all columns to compute offsets, but only allocates/deserializes requested ones.
+/// Returns fields in the same order as `col_indices` (which need not be sorted).
+#[inline(always)]
+pub fn bytes_to_fields_selective(
+    bytes: &[u8],
+    schema: &Schema,
+    col_indices: &[usize],
+) -> Vec<Field> {
+    // Fast path: check if col_indices are already sorted (common case)
+    let is_sorted = col_indices.windows(2).all(|w| w[0] < w[1]);
+    if is_sorted {
+        return bytes_to_fields_selective_sorted(bytes, schema, col_indices);
+    }
+
+    // Slow path: unsorted col_indices — sort and map back
+    let mut sorted: Vec<(usize, usize)> = col_indices
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(pos, col)| (col, pos))
+        .collect();
+    sorted.sort_unstable_by_key(|&(col, _)| col);
+
+    let sorted_cols: Vec<usize> = sorted.iter().map(|&(col, _)| col).collect();
+    let sorted_fields = bytes_to_fields_selective_sorted(bytes, schema, &sorted_cols);
+
+    // Reorder to match original col_indices order
+    let mut result = vec![None; col_indices.len()];
+    for (field, &(_, out_pos)) in sorted_fields.into_iter().zip(sorted.iter()) {
+        result[out_pos] = Some(field);
+    }
+    result.into_iter().map(|f| f.unwrap()).collect()
+}
+
+/// Fast inner path for sorted col_indices. No extra allocations beyond the result vec.
+#[inline(always)]
+fn bytes_to_fields_selective_sorted(
+    bytes: &[u8],
+    schema: &Schema,
+    col_indices: &[usize],
+) -> Vec<Field> {
+    let mut result = Vec::with_capacity(col_indices.len());
+    let mut offset = 0;
+    let mut next_wanted = 0;
+
+    for (i, (is_nullable, data_type)) in schema.cols().iter().enumerate() {
+        if next_wanted >= col_indices.len() {
+            break;
+        }
+        if col_indices[next_wanted] == i {
+            let remaining = &bytes[offset..];
+            let field = Field::from_bytes(remaining, *is_nullable, *data_type);
+            offset += field.size(*is_nullable);
+            result.push(field);
+            next_wanted += 1;
+        } else {
+            offset += data_type.skip_bytes(&bytes[offset..], *is_nullable);
+        }
+    }
+
+    result
 }
 
 #[cfg(test)]

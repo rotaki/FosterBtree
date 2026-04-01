@@ -676,6 +676,97 @@ fn test_payment_field_level() {
 }
 
 #[test]
+fn test_neworder_profile() {
+    use super::neworder_txn::{run_neworder_txn_profiled, NewOrderProfile};
+    use super::txn_helper::TxnTypeStats;
+    use crate::bp::get_test_bp_clock;
+    use std::sync::{atomic::AtomicBool, Arc};
+    use std::thread;
+    use std::time::Duration;
+
+    // Use Clock BP (same as release benchmark) instead of LRU
+    let num_frames = 1024 * 1024 * 1024 / crate::prelude::PAGE_SIZE; // 1GB
+    let bp = get_test_bp_clock(num_frames);
+    let loader = TpccLoader::with_partition_mode(bp, PartitionMode::FieldLevel);
+    let storage = loader.get_storage();
+    let db_id = loader.get_db_id();
+    let containers = loader.get_container_ids();
+    loader.load_items(crate::tpcc::Item::ITEMS);
+    loader.load_warehouse(1);
+    loader.load_warehouse(2);
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let mut handles = vec![];
+
+    for _t_id in 0..4 {
+        let storage = storage.clone();
+        let stop = stop.clone();
+        handles.push(thread::spawn(move || {
+            let mut stats = TxnTypeStats::new();
+            let mut prof = NewOrderProfile::default();
+            let home_w_id = (_t_id % 2 + 1) as u16;
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                let d_id = crate::tpcc::record_definitions::urand_int(1u8, 10);
+                let c_id = crate::tpcc::record_definitions::urand_int(1u32, 3000);
+                let ol_cnt = crate::tpcc::record_definitions::urand_int(5u8, 15);
+                let items: Vec<_> = (0..ol_cnt)
+                    .map(|_| super::neworder_txn::NewOrderItem {
+                        i_id: crate::tpcc::record_definitions::urand_int(1u32, 100000),
+                        supply_w_id: home_w_id,
+                        quantity: 5,
+                    })
+                    .collect();
+                let input = super::neworder_txn::NewOrderInput {
+                    w_id: home_w_id,
+                    d_id,
+                    c_id,
+                    items,
+                    rollback: false,
+                };
+                run_neworder_txn_profiled(
+                    &storage, db_id, &containers, &input,
+                    Some(&mut stats), &mut prof,
+                );
+            }
+            (stats, prof)
+        }));
+    }
+
+    thread::sleep(Duration::from_secs(5));
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+
+    let mut total_prof = NewOrderProfile::default();
+    let mut total_commits = 0u64;
+    for h in handles {
+        let (stats, prof) = h.join().unwrap();
+        total_commits += stats.num_commits;
+        total_prof.merge(&prof);
+    }
+    println!("\n=== NewOrder Profile (4 threads, 2 warehouses, FieldLevel) ===");
+    total_prof.print(total_commits);
+
+    // Print get_fields internal breakdown
+    use crate::txn_storage2::transactional_storage::*;
+    let count = GET_FIELDS_COUNT.load(std::sync::atomic::Ordering::Relaxed);
+    if count > 0 {
+        let traverse = GET_FIELDS_TRAVERSE_NS.load(std::sync::atomic::Ordering::Relaxed);
+        let lock = GET_FIELDS_LOCK_NS.load(std::sync::atomic::Ordering::Relaxed);
+        let deser = GET_FIELDS_DESER_NS.load(std::sync::atomic::Ordering::Relaxed);
+        let rwset = GET_FIELDS_RWSET_NS.load(std::sync::atomic::Ordering::Relaxed);
+        let key_search = GET_FIELDS_KEY_SERIAL_NS.load(std::sync::atomic::Ordering::Relaxed);
+        let total = traverse + key_search + lock + deser + rwset;
+        let avg = |v: u64| v / count;  // ns per call
+        let pct = |v: u64| v as f64 / total as f64 * 100.0;
+        println!("\n  get_fields internal breakdown ({} first-access calls, avg {}ns/call):", count, total / count);
+        println!("    btree_traverse:   {:>6}ns  ({:>5.1}%)", avg(traverse), pct(traverse));
+        println!("    upper_bound:      {:>6}ns  ({:>5.1}%)", avg(key_search), pct(key_search));
+        println!("    field_lock:       {:>6}ns  ({:>5.1}%)", avg(lock), pct(lock));
+        println!("    deserialize:      {:>6}ns  ({:>5.1}%)", avg(deser), pct(deser));
+        println!("    rwset+clone:      {:>6}ns  ({:>5.1}%)", avg(rwset), pct(rwset));
+    }
+}
+
+#[test]
 fn test_schema_serialization() {
     // Test that schemas can be serialized and deserialized correctly
     let schema = item_schema();
