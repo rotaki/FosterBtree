@@ -1,6 +1,6 @@
-mod dashmap_bp;
 mod buffer_pool;
 mod buffer_pool_clock;
+mod dashmap_bp;
 mod eviction_policy;
 mod frame_guards;
 mod hashmap_bp;
@@ -13,12 +13,12 @@ mod vmcache;
 
 use std::sync::Arc;
 
-pub use dashmap_bp::DashmapBP;
-pub use hashmap_bp::HashmapBP;
 pub use buffer_pool::BufferPool;
 pub use buffer_pool_clock::BufferPoolClock;
+pub use dashmap_bp::DashmapBP;
 pub use eviction_policy::EvictionPolicy;
 pub use frame_guards::{FrameReadGuard, FrameWriteGuard};
+pub use hashmap_bp::HashmapBP;
 pub use in_mem_pool::InMemPool;
 pub use mem_pool_trait::{
     ContainerId, ContainerKey, DatabaseId, MemPool, MemPoolStatus, PageFrameKey,
@@ -62,7 +62,6 @@ pub fn get_test_pt(num_frames: usize) -> Arc<PredictiveTranslationBP> {
     Arc::new(PredictiveTranslationBP::new(num_frames, cm).unwrap())
 }
 
-#[cfg(feature = "bp_dashmap")]
 pub fn get_test_dashmap_bp(num_frames: usize) -> Arc<DashmapBP> {
     let base_dir = gen_random_pathname(Some("test_dashmap_direct"));
     let cm = Arc::new(ContainerManager::new(base_dir, true, true).unwrap());
@@ -80,13 +79,12 @@ pub fn get_in_mem_pool() -> Arc<InMemPool> {
     Arc::new(InMemPool::new())
 }
 pub mod prelude {
-    pub use super::{
-        get_in_mem_pool, get_test_bp, get_test_pt, BufferPool, ContainerId, ContainerKey,
-        DatabaseId, DashmapBP, FrameReadGuard, FrameWriteGuard, HashmapBP, InMemPool, MemPool,
-        MemPoolStatus, PageFrameKey, PredictiveTranslationBP,
-    };
-    #[cfg(feature = "bp_dashmap")]
     pub use super::get_test_dashmap_bp;
     #[cfg(feature = "bp_hashmap")]
     pub use super::get_test_hashmap_bp;
+    pub use super::{
+        get_in_mem_pool, get_test_bp, get_test_pt, BufferPool, ContainerId, ContainerKey,
+        DashmapBP, DatabaseId, FrameReadGuard, FrameWriteGuard, HashmapBP, InMemPool, MemPool,
+        MemPoolStatus, PageFrameKey, PredictiveTranslationBP,
+    };
 }

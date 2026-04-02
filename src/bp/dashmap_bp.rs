@@ -384,9 +384,7 @@ impl MemPool for DashmapBP {
         self.stats.inc_new_page();
         self.ensure_free_frames()?;
 
-        let mut victim = self
-            .choose_victim()
-            .ok_or(MemPoolStatus::CannotEvictPage)?;
+        let mut victim = self.choose_victim().ok_or(MemPoolStatus::CannotEvictPage)?;
 
         debug_assert!(victim.page_key().is_none());
         debug_assert!(!victim.dirty().load(Ordering::Acquire));
@@ -493,7 +491,9 @@ impl MemPool for DashmapBP {
                 continue;
             }
 
-            if let Err(e) = self.container_manager.get_container(key.p_key().c_key)
+            if let Err(e) = self
+                .container_manager
+                .get_container(key.p_key().c_key)
                 .read_page(key.p_key().page_id, &mut victim)
             {
                 if self.translation.lookup(&key.p_key()) == Some(victim.frame_id() as usize) {
@@ -584,7 +584,9 @@ impl MemPool for DashmapBP {
                 continue;
             }
 
-            if let Err(e) = self.container_manager.get_container(key.p_key().c_key)
+            if let Err(e) = self
+                .container_manager
+                .get_container(key.p_key().c_key)
                 .read_page(key.p_key().page_id, &mut victim)
             {
                 if self.translation.lookup(&key.p_key()) == Some(victim.frame_id() as usize) {
@@ -758,7 +760,7 @@ impl DashmapBP {
             frame_to_page.insert(fid, *pk);
         });
         for i in 0..self.num_frames {
-            let meta = &(*self.metas.get())[i];
+            let meta = &(&(*self.metas.get()))[i];
             if let Some(pk) = meta.key() {
                 assert!(
                     frame_to_page.get(&i) == Some(&pk),

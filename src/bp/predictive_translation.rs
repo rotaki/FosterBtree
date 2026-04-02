@@ -37,13 +37,13 @@ use super::{
     frame_guards::{FrameMeta, FrameReadGuard, FrameWriteGuard},
     mem_pool_trait::{ContainerKey, MemPool, MemPoolStatus, MemoryStats, PageFrameKey, PageKey},
 };
+use crate::random::small_thread_rng;
 use crate::{
     bp::frame_guards::box_as_mut_ptr,
     container::ContainerManager,
     log_debug, log_warn,
     page::{Page, PageId},
 };
-use crate::random::small_thread_rng;
 use rand::RngCore;
 
 use std::{
@@ -507,9 +507,10 @@ impl PredictiveTranslationBP {
             // Simple promotion: preferred frame is free. Move our page there.
             pref_guard.page_mut().copy(current_guard.page());
             pref_guard.set_page_key(Some(page_key));
-            pref_guard
-                .dirty()
-                .store(current_guard.dirty().load(Ordering::Acquire), Ordering::Release);
+            pref_guard.dirty().store(
+                current_guard.dirty().load(Ordering::Acquire),
+                Ordering::Release,
+            );
             pref_guard.evict_info().update();
 
             current_guard.clear();
@@ -533,9 +534,10 @@ impl PredictiveTranslationBP {
         pref_guard.set_page_key(Some(page_key));
         current_guard.set_page_key(Some(other_key));
         let other_dirty = pref_guard.dirty().load(Ordering::Acquire);
-        pref_guard
-            .dirty()
-            .store(current_guard.dirty().load(Ordering::Acquire), Ordering::Release);
+        pref_guard.dirty().store(
+            current_guard.dirty().load(Ordering::Acquire),
+            Ordering::Release,
+        );
         current_guard.dirty().store(other_dirty, Ordering::Release);
         pref_guard.evict_info().update();
         current_guard.evict_info().update();
@@ -661,8 +663,7 @@ impl MemPool for PredictiveTranslationBP {
                                 Self::PROMOTE_PROB_DEMOTE
                             };
                             if Self::promote_roll(denom) {
-                                let guard =
-                                    self.try_promote_to_preferred(g, page_key, pref)?;
+                                let guard = self.try_promote_to_preferred(g, page_key, pref)?;
                                 return Ok(guard);
                             }
                         }
@@ -871,12 +872,13 @@ impl PredictiveTranslationBP {
             overflow_frame_to_page.insert(fid, pk);
         });
         for i in 0..self.num_frames {
-            let meta = &(*self.metas.get())[i];
+            let meta = &(&(*self.metas.get()))[i];
             if let Some(pk) = meta.key() {
                 assert!(
                     overflow_frame_to_page.get(&i) == Some(&pk),
                     "frame {} has key {:?} but overflow table disagrees",
-                    i, pk
+                    i,
+                    pk
                 );
             }
         }

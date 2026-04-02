@@ -119,7 +119,10 @@ impl HashmapBP {
         num_frames: usize,
         container_manager: Arc<ContainerManager>,
     ) -> Result<Self, MemPoolStatus> {
-        log_debug!("HashmapBP (hashmap/single RwLock) created: num_frames={}", num_frames);
+        log_debug!(
+            "HashmapBP (hashmap/single RwLock) created: num_frames={}",
+            num_frames
+        );
 
         let free_list = ConcurrentQueue::bounded(num_frames);
         for i in 0..num_frames {
@@ -311,9 +314,7 @@ impl MemPool for HashmapBP {
         self.stats.inc_new_page();
         self.ensure_free_frames()?;
 
-        let mut victim = self
-            .choose_victim()
-            .ok_or(MemPoolStatus::CannotEvictPage)?;
+        let mut victim = self.choose_victim().ok_or(MemPoolStatus::CannotEvictPage)?;
 
         debug_assert!(victim.page_key().is_none());
         debug_assert!(!victim.dirty().load(Ordering::Acquire));
@@ -322,7 +323,8 @@ impl MemPool for HashmapBP {
         let page_id = container.inc_page_count(1) as PageId;
         let page_key = PageKey::new(c_key, page_id);
 
-        self.translation.insert(page_key, victim.frame_id() as usize);
+        self.translation
+            .insert(page_key, victim.frame_id() as usize);
 
         victim.set_id(page_id);
         victim.set_page_key(Some(page_key));
@@ -390,7 +392,8 @@ impl MemPool for HashmapBP {
 
             debug_assert!(victim.page_key().is_none());
 
-            self.translation.insert(key.p_key(), victim.frame_id() as usize);
+            self.translation
+                .insert(key.p_key(), victim.frame_id() as usize);
 
             if self.translation.lookup(&key.p_key()) != Some(victim.frame_id() as usize) {
                 victim.set_page_key(None);
@@ -406,7 +409,9 @@ impl MemPool for HashmapBP {
                 continue;
             }
 
-            if let Err(e) = self.container_manager.get_container(key.p_key().c_key)
+            if let Err(e) = self
+                .container_manager
+                .get_container(key.p_key().c_key)
                 .read_page(key.p_key().page_id, &mut victim)
             {
                 if self.translation.lookup(&key.p_key()) == Some(victim.frame_id() as usize) {
@@ -468,7 +473,8 @@ impl MemPool for HashmapBP {
 
             debug_assert!(victim.page_key().is_none());
 
-            self.translation.insert(key.p_key(), victim.frame_id() as usize);
+            self.translation
+                .insert(key.p_key(), victim.frame_id() as usize);
 
             if self.translation.lookup(&key.p_key()) != Some(victim.frame_id() as usize) {
                 victim.set_page_key(None);
@@ -491,7 +497,9 @@ impl MemPool for HashmapBP {
                 continue;
             }
 
-            if let Err(e) = self.container_manager.get_container(key.p_key().c_key)
+            if let Err(e) = self
+                .container_manager
+                .get_container(key.p_key().c_key)
                 .read_page(key.p_key().page_id, &mut victim)
             {
                 if self.translation.lookup(&key.p_key()) == Some(victim.frame_id() as usize) {
@@ -602,7 +610,9 @@ impl MemPool for HashmapBP {
         }
         let (total_created, total_read, total_write) = disk_io_per_container
             .iter()
-            .fold((0, 0, 0), |acc, (_, (c, r, w))| (acc.0 + c, acc.1 + r, acc.2 + w));
+            .fold((0, 0, 0), |acc, (_, (c, r, w))| {
+                (acc.0 + c, acc.1 + r, acc.2 + w)
+            });
 
         MemoryStats {
             bp_num_frames_in_mem: self.num_frames,

@@ -607,7 +607,7 @@ impl MemPool for BufferPool {
             // Fast path access to the frame using frame_id
             let frame_id = key.frame_id();
             if (frame_id as usize) < self.num_frames
-                && unsafe { &(*self.metas.get())[frame_id as usize] }.key() == Some(key.p_key())
+                && unsafe { &(&(*self.metas.get()))[frame_id as usize] }.key() == Some(key.p_key())
             {
                 return true;
             }
@@ -641,7 +641,8 @@ impl MemPool for BufferPool {
             let frame_id = key.frame_id();
             if (frame_id as usize) < self.num_frames {
                 // Check the page_key first to avoid acquiring the latch of a not-matching pageA
-                if unsafe { &(*self.metas.get())[frame_id as usize] }.key() == Some(key.p_key()) {
+                if unsafe { &(&(*self.metas.get()))[frame_id as usize] }.key() == Some(key.p_key())
+                {
                     match self.try_get_write_guard(frame_id as usize, false) {
                         Some(g) if g.page_key().map(|k| k == key.p_key()).unwrap_or(false) => {
                             g.evict_info().update();
@@ -751,7 +752,8 @@ impl MemPool for BufferPool {
             let frame_id = key.frame_id();
             if (frame_id as usize) < self.num_frames {
                 // Check the page_key first to avoid acquiring the latch of a not-matching page
-                if unsafe { &(*self.metas.get())[frame_id as usize] }.key() == Some(key.p_key()) {
+                if unsafe { &(&(*self.metas.get()))[frame_id as usize] }.key() == Some(key.p_key())
+                {
                     let guard = self.try_get_read_guard(frame_id as usize);
                     match guard {
                         Some(g) if g.page_key().map(|k| k == key.p_key()).unwrap_or(false) => {
