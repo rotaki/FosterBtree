@@ -8,6 +8,7 @@ mod hashmap_bp;
 mod in_mem_pool;
 mod macro_profile;
 mod mem_pool_trait;
+mod open_addressing_bp;
 mod overflow_bp;
 mod overflow_table;
 pub mod predictive_translation;
@@ -31,6 +32,7 @@ pub use macro_profile::reset as reset_macro_profile;
 pub use mem_pool_trait::{
     ContainerId, ContainerKey, DatabaseId, MemPool, MemPoolStatus, PageFrameKey,
 };
+pub use open_addressing_bp::OpenAddressingBP;
 pub use overflow_bp::OverflowBP;
 pub use predictive_translation::PredictiveTranslationBP;
 pub use predictive_translation_fp::PredictiveTranslationFPBP;
@@ -126,6 +128,12 @@ pub fn get_test_overflow_bp(num_frames: usize) -> Arc<OverflowBP> {
     Arc::new(OverflowBP::new(num_frames, cm).unwrap())
 }
 
+pub fn get_test_open_addressing_bp(num_frames: usize) -> Arc<OpenAddressingBP> {
+    let base_dir = gen_random_pathname(Some("test_oa_bp_direct"));
+    let cm = Arc::new(ContainerManager::new(base_dir, true, true).unwrap());
+    Arc::new(OpenAddressingBP::new(num_frames, cm).unwrap())
+}
+
 pub fn get_test_dashmap_bp(num_frames: usize) -> Arc<DashmapBP> {
     let base_dir = gen_random_pathname(Some("test_dashmap_direct"));
     let cm = Arc::new(ContainerManager::new(base_dir, true, true).unwrap());
@@ -147,11 +155,11 @@ pub mod prelude {
     #[cfg(feature = "bp_hashmap")]
     pub use super::get_test_hashmap_bp;
     pub use super::{
-        get_in_mem_pool, get_test_bp, get_test_overflow_bp, get_test_pt, get_test_pt_two_hash,
-        get_test_pt_two_hash_bucket_validate, get_test_pt_two_hash_with_cm, BufferPool,
-        ContainerId, ContainerKey, DashmapBP, DatabaseId, FrameReadGuard, FrameWriteGuard,
-        HashmapBP, InMemPool, MemPool, MemPoolStatus, OverflowBP, PageFrameKey,
-        PredictiveTranslationBP, PredictiveTranslationFPBP, PredictiveTranslationFPTwoBP,
-        PredictiveTranslationTwoBP,
+        get_in_mem_pool, get_test_bp, get_test_open_addressing_bp, get_test_overflow_bp,
+        get_test_pt, get_test_pt_two_hash, get_test_pt_two_hash_bucket_validate,
+        get_test_pt_two_hash_with_cm, BufferPool, ContainerId, ContainerKey, DashmapBP, DatabaseId,
+        FrameReadGuard, FrameWriteGuard, HashmapBP, InMemPool, MemPool, MemPoolStatus,
+        OpenAddressingBP, OverflowBP, PageFrameKey, PredictiveTranslationBP,
+        PredictiveTranslationFPBP, PredictiveTranslationFPTwoBP, PredictiveTranslationTwoBP,
     };
 }

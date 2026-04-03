@@ -32,6 +32,7 @@ no_bp_hint = []
 
 # BP type
 bp_overflow = []  # overflow_bp module: custom chaining HT (OverflowTable) + clock
+bp_open_addressing = ["no_bp_hint"] # open_addressing_bp: frame array IS the hash table, linear probing
 bp_dashmap = []   # dashmap module: DashMap (sharded) + clock; concurrent translation
 bp_hashmap = []   # hashmap module: single RwLock<HashMap>; paper "traditional" baseline
 bp_clock = []

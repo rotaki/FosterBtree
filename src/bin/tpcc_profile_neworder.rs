@@ -561,6 +561,11 @@ pub fn get_bp(num_frames: usize) -> Arc<impl MemPool> {
         use fbtree::bp::get_test_overflow_bp;
         get_test_overflow_bp(num_frames)
     }
+    #[cfg(feature = "bp_open_addressing")]
+    {
+        use fbtree::bp::get_test_open_addressing_bp;
+        get_test_open_addressing_bp(num_frames)
+    }
     #[cfg(feature = "bp_dashmap")]
     {
         use fbtree::bp::get_test_dashmap_bp;
@@ -580,6 +585,7 @@ pub fn get_bp(num_frames: usize) -> Arc<impl MemPool> {
         feature = "bp_pt2_bucket",
         feature = "bp_pt4_bucket",
         feature = "bp_overflow",
+        feature = "bp_open_addressing",
         feature = "bp_dashmap",
         feature = "bp_hashmap"
     )))]
