@@ -3,10 +3,18 @@ use crate::page::Page;
 // Page layout:
 // 1 byte: flags (is_valid, is_root, leftmost, rightmost, has_foster_children) (u8)
 // 1 byte: level (0 for leaf) (u8)
+// 2 byte: padding (for 4-byte alignment of subsequent fields)
 // 4 byte: slot count (generally >=2  because of low and high fences) (u32)
 // 4 byte: total bytes used (PAGE_HEADER_SIZE + slots + records) (u32)
 // 4 byte: rec start offset (u32)
-pub const PAGE_HEADER_SIZE: usize = 1 + 1 + 4 + 4 + 4;
+// 8 byte: sibling address (page_id: u32, frame_id: u32) — only meaningful for leaf pages
+pub const PAGE_HEADER_SIZE: usize = 1 + 1 + 2 + 4 + 4 + 4 + 4 + 4;
+
+// Header field byte offsets
+const HDR_SLOT_COUNT: usize = 4;
+const HDR_TOTAL_BYTES_USED: usize = 8;
+const HDR_REC_START_OFFSET: usize = 12;
+const HDR_SIBLING_ADDR: usize = 16; // 8 bytes: page_id (u32) + frame_id (u32)
 // Slotted page layout:
 // * slot [ghost_bit: u8, offset: u32, key_size: u32, value_size: u32].
 //  The slots are sorted based on the key.
@@ -38,6 +46,7 @@ mod slot {
     pub const KEY_SIZE_OFF: usize = 4;
     pub const VALUE_SIZE_OFF: usize = 8;
 
+    #[repr(C)]
     pub struct Slot {
         offset_ghost: u32, // bit 31 = ghost, bits 0-30 = offset
         key_size: u32,
@@ -45,41 +54,27 @@ mod slot {
     }
 
     #[inline(always)]
-    fn read_u32(bytes: &[u8], offset: usize) -> u32 {
-        u32::from_be_bytes([
-            bytes[offset],
-            bytes[offset + 1],
-            bytes[offset + 2],
-            bytes[offset + 3],
-        ])
+    pub fn read_u32(bytes: &[u8], offset: usize) -> u32 {
+        u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap())
     }
 
     #[inline(always)]
-    fn write_u32(bytes: &mut [u8], offset: usize, val: u32) {
-        let b = val.to_be_bytes();
-        bytes[offset] = b[0];
-        bytes[offset + 1] = b[1];
-        bytes[offset + 2] = b[2];
-        bytes[offset + 3] = b[3];
+    pub fn write_u32(bytes: &mut [u8], offset: usize, val: u32) {
+        bytes[offset..offset + 4].copy_from_slice(&val.to_le_bytes());
     }
 
     impl Slot {
-        #[inline]
+        #[inline(always)]
         pub fn from_bytes(bytes: [u8; SLOT_SIZE]) -> Self {
-            Slot {
-                offset_ghost: read_u32(&bytes, OFFSET_GHOST_OFF),
-                key_size: read_u32(&bytes, KEY_SIZE_OFF),
-                value_size: read_u32(&bytes, VALUE_SIZE_OFF),
-            }
+            // Safety: Slot is repr(C) with 3 × u32 = 12 bytes, matching SLOT_SIZE.
+            // The input is a copied [u8; 12], so alignment is not a concern.
+            unsafe { std::ptr::read(bytes.as_ptr() as *const Slot) }
         }
 
-        #[inline]
+        #[inline(always)]
         pub fn to_bytes(&self) -> [u8; SLOT_SIZE] {
-            let mut bytes = [0; SLOT_SIZE];
-            write_u32(&mut bytes, OFFSET_GHOST_OFF, self.offset_ghost);
-            write_u32(&mut bytes, KEY_SIZE_OFF, self.key_size);
-            write_u32(&mut bytes, VALUE_SIZE_OFF, self.value_size);
-            bytes
+            // Safety: Slot is repr(C) with 3 × u32 = 12 bytes, matching SLOT_SIZE.
+            unsafe { std::ptr::read(self as *const Slot as *const [u8; SLOT_SIZE]) }
         }
 
         #[inline]
@@ -146,7 +141,7 @@ mod slot {
     /// `slot_page_offset` is the byte offset of the slot within the page.
     #[inline(always)]
     pub fn read_ghost(page_bytes: &[u8], slot_page_offset: usize) -> bool {
-        page_bytes[slot_page_offset] & 0x80 != 0 // MSB of big-endian u32
+        read_u32(page_bytes, slot_page_offset + OFFSET_GHOST_OFF) & GHOST_BIT != 0
     }
 
     #[inline(always)]
@@ -194,18 +189,20 @@ mod slot {
 
     #[inline(always)]
     pub fn write_ghost(page_bytes: &mut [u8], slot_page_offset: usize, ghost: bool) {
-        if ghost {
-            page_bytes[slot_page_offset] |= 0x80;
+        let val = read_u32(page_bytes, slot_page_offset + OFFSET_GHOST_OFF);
+        let new_val = if ghost {
+            val | GHOST_BIT
         } else {
-            page_bytes[slot_page_offset] &= 0x7F;
-        }
+            val & OFFSET_MASK
+        };
+        write_u32(page_bytes, slot_page_offset + OFFSET_GHOST_OFF, new_val);
     }
 }
 
 use crate::page::AVAILABLE_PAGE_SIZE;
 use slot::{
     read_ghost, read_key_size, read_offset_and_key_size, read_offset_key_val_size, read_rec_offset,
-    read_value_size, write_ghost, write_rec_offset, Slot, SLOT_SIZE,
+    read_u32, read_value_size, write_ghost, write_rec_offset, write_u32, Slot, SLOT_SIZE,
 };
 
 pub enum BTreeKey<'a> {
@@ -298,6 +295,7 @@ pub trait FosterBtreePage {
     fn slot_unchecked(&self, slot_id: u32) -> Slot;
     fn append_slot(&mut self, slot: &Slot);
     fn update_slot(&mut self, slot_id: u32, slot: &Slot);
+    fn write_slot_raw(&mut self, slot_id: u32, slot: &Slot);
     fn linear_search<F>(&self, f: F) -> u32
     where
         F: Fn(BTreeKey) -> bool;
@@ -342,6 +340,8 @@ pub trait FosterBtreePage {
     fn decrement_slot_count(&mut self);
     fn rec_start_offset(&self) -> u32;
     fn set_rec_start_offset(&mut self, rec_start_offset: u32);
+    fn sibling_address(&self) -> (u32, u32);
+    fn set_sibling_address(&mut self, page_id: u32, frame_id: u32);
     fn contiguous_free_space(&self) -> u32;
 
     // Page operations
@@ -465,12 +465,7 @@ impl FosterBtreePage for Page {
     /// Therefore, the slot count should be at least 2 after the initialization.
     #[inline]
     fn slot_count(&self) -> u32 {
-        let offset = 2;
-        u32::from_be_bytes(
-            self[offset..offset + std::mem::size_of::<u32>()]
-                .try_into()
-                .unwrap(),
-        )
+        read_u32(self, HDR_SLOT_COUNT)
     }
 
     /// The number of active slots in the page.
@@ -481,9 +476,7 @@ impl FosterBtreePage for Page {
     }
 
     fn set_slot_count(&mut self, slot_count: u32) {
-        let bytes = slot_count.to_be_bytes();
-        let offset = 2;
-        self[offset..offset + std::mem::size_of::<u32>()].copy_from_slice(&bytes);
+        write_u32(self, HDR_SLOT_COUNT, slot_count);
     }
 
     fn increment_slot_count(&mut self) {
@@ -507,19 +500,12 @@ impl FosterBtreePage for Page {
 
     #[inline]
     fn total_bytes_used(&self) -> u32 {
-        let offset = 2 + 4;
-        u32::from_be_bytes(
-            self[offset..offset + std::mem::size_of::<u32>()]
-                .try_into()
-                .unwrap(),
-        )
+        read_u32(self, HDR_TOTAL_BYTES_USED)
     }
 
     #[inline]
     fn set_total_bytes_used(&mut self, total_bytes_used: u32) {
-        let bytes = total_bytes_used.to_be_bytes();
-        let offset = 2 + 4;
-        self[offset..offset + std::mem::size_of::<u32>()].copy_from_slice(&bytes);
+        write_u32(self, HDR_TOTAL_BYTES_USED, total_bytes_used);
     }
 
     fn bytes_used(&self, range: std::ops::Range<u32>) -> u32 {
@@ -542,19 +528,25 @@ impl FosterBtreePage for Page {
 
     #[inline]
     fn rec_start_offset(&self) -> u32 {
-        let offset = 2 + 4 + 4;
-        u32::from_be_bytes(
-            self[offset..offset + std::mem::size_of::<u32>()]
-                .try_into()
-                .unwrap(),
-        )
+        read_u32(self, HDR_REC_START_OFFSET)
     }
 
     #[inline]
     fn set_rec_start_offset(&mut self, rec_start_offset: u32) {
-        let bytes = rec_start_offset.to_be_bytes();
-        let offset = 2 + 4 + 4;
-        self[offset..offset + std::mem::size_of::<u32>()].copy_from_slice(&bytes);
+        write_u32(self, HDR_REC_START_OFFSET, rec_start_offset);
+    }
+
+    #[inline]
+    fn sibling_address(&self) -> (u32, u32) {
+        let page_id = read_u32(self, HDR_SIBLING_ADDR);
+        let frame_id = read_u32(self, HDR_SIBLING_ADDR + 4);
+        (page_id, frame_id)
+    }
+
+    #[inline]
+    fn set_sibling_address(&mut self, page_id: u32, frame_id: u32) {
+        write_u32(self, HDR_SIBLING_ADDR, page_id);
+        write_u32(self, HDR_SIBLING_ADDR + 4, frame_id);
     }
 
     #[inline]
@@ -587,8 +579,9 @@ impl FosterBtreePage for Page {
     #[inline(always)]
     fn slot_unchecked(&self, slot_id: u32) -> Slot {
         let offset = self.slot_offset(slot_id);
-        let slot_bytes: [u8; SLOT_SIZE] = self[offset..offset + SLOT_SIZE].try_into().unwrap();
-        Slot::from_bytes(slot_bytes)
+        // Safety: PAGE_HEADER_SIZE is 24 (4-byte aligned) and SLOT_SIZE is 12 (multiple of 4),
+        // so all slots are 4-byte aligned. Slot is repr(C) with 3 × u32.
+        unsafe { std::ptr::read(self[offset..].as_ptr() as *const Slot) }
     }
 
     #[inline]
@@ -619,9 +612,7 @@ impl FosterBtreePage for Page {
 
         self.increment_slot_count();
 
-        // Update the slot
-        let slot_offset = self.slot_offset(slot_id);
-        self[slot_offset..slot_offset + SLOT_SIZE].copy_from_slice(&slot.to_bytes());
+        self.write_slot_raw(slot_id, slot);
 
         // Update the header
         let offset = self.rec_start_offset().min(slot.offset());
@@ -636,13 +627,23 @@ impl FosterBtreePage for Page {
         if slot_id >= self.slot_count() {
             panic!("Slot does not exist");
         }
-        // Update the slot
-        let slot_offset = self.slot_offset(slot_id);
-        self[slot_offset..slot_offset + SLOT_SIZE].copy_from_slice(&slot.to_bytes());
+        self.write_slot_raw(slot_id, slot);
 
         // Update the header
         let offset = self.rec_start_offset().min(slot.offset());
         self.set_rec_start_offset(offset);
+    }
+
+    /// Write slot bytes to page memory without updating any header fields.
+    #[inline(always)]
+    fn write_slot_raw(&mut self, slot_id: u32, slot: &Slot) {
+        let slot_offset = self.slot_offset(slot_id);
+        unsafe {
+            std::ptr::write(
+                self[slot_offset..].as_mut_ptr() as *mut Slot,
+                std::ptr::read(slot),
+            )
+        };
     }
 
     // Find the left-most key where f(key) = true.
@@ -816,6 +817,7 @@ impl FosterBtreePage for Page {
         self.set_slot_count(0);
         self.set_rec_start_offset(self.len() as u32);
         self.set_total_bytes_used(PAGE_HEADER_SIZE as u32);
+        self.set_sibling_address(0, 0);
 
         // Insert low and high fence
         self.insert_at(0, &[], &[], false);
@@ -832,6 +834,7 @@ impl FosterBtreePage for Page {
         self.set_slot_count(0);
         self.set_rec_start_offset(self.len() as u32);
         self.set_total_bytes_used(PAGE_HEADER_SIZE as u32);
+        self.set_sibling_address(0, 0);
 
         // Insert low and high fence
         self.insert_at(0, &[], &[], false);
@@ -996,10 +999,8 @@ impl FosterBtreePage for Page {
         if SLOT_SIZE + rec_size > self.contiguous_free_space() as usize {
             if SLOT_SIZE + rec_size > self.total_free_space() as usize {
                 return false;
-            } else {
-                self.compact_space();
-                return self.insert_at(slot_id, key, value, is_ghost);
             }
+            self.compact_space();
         }
         let start = self.slot_offset(slot_id);
         let end = self.slot_offset(self.slot_count());
@@ -1034,12 +1035,11 @@ impl FosterBtreePage for Page {
                     .copy_from_slice(value);
 
                 // Shift the slots to the right by 1
-                // Use copy within to avoid heap allocation
                 self.copy_within(start..end, start + SLOT_SIZE);
 
-                // Update the slot
+                // Write slot without redundant rec_start_offset update
                 let slot = Slot::new(is_ghost, offset, key.len() as u32, value.len() as u32);
-                self.update_slot(slot_id, &slot);
+                self.write_slot_raw(slot_id, &slot);
 
                 // Update the header
                 self.set_rec_start_offset(offset);

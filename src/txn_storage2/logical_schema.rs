@@ -53,11 +53,11 @@ impl LogicalSchema {
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::new();
         // Column count
-        bytes.extend_from_slice(&(self.columns.len() as u32).to_ne_bytes());
+        bytes.extend_from_slice(&(self.columns.len() as u32).to_le_bytes());
         for col in &self.columns {
             // Name: length-prefixed
             let name_bytes = col.name.as_bytes();
-            bytes.extend_from_slice(&(name_bytes.len() as u32).to_ne_bytes());
+            bytes.extend_from_slice(&(name_bytes.len() as u32).to_le_bytes());
             bytes.extend_from_slice(name_bytes);
             // DataType: 1 byte
             bytes.push(col.data_type.as_byte());
@@ -70,13 +70,13 @@ impl LogicalSchema {
     pub fn from_bytes(bytes: &[u8]) -> Self {
         let mut offset = 0;
 
-        let col_count = u32::from_ne_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
+        let col_count = u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
         offset += 4;
 
         let mut columns = Vec::with_capacity(col_count);
         for _ in 0..col_count {
             let name_len =
-                u32::from_ne_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
+                u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
             offset += 4;
 
             let name = std::str::from_utf8(&bytes[offset..offset + name_len])

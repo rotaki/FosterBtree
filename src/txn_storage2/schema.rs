@@ -44,7 +44,7 @@ impl Schema {
         let mut bytes = Vec::new();
 
         // Serialize column count
-        bytes.extend_from_slice(&(self.cols.len() as u32).to_ne_bytes());
+        bytes.extend_from_slice(&(self.cols.len() as u32).to_le_bytes());
 
         // Serialize columns
         for (is_nullable, data_type) in &self.cols {
@@ -53,11 +53,11 @@ impl Schema {
         }
 
         // Serialize key indices count
-        bytes.extend_from_slice(&(self.key_indices.len() as u32).to_ne_bytes());
+        bytes.extend_from_slice(&(self.key_indices.len() as u32).to_le_bytes());
 
         // Serialize key indices
         for &idx in &self.key_indices {
-            bytes.extend_from_slice(&(idx as u32).to_ne_bytes());
+            bytes.extend_from_slice(&(idx as u32).to_le_bytes());
         }
 
         bytes
@@ -67,7 +67,7 @@ impl Schema {
         let mut offset = 0;
 
         // Deserialize column count
-        let col_count = u32::from_ne_bytes([
+        let col_count = u32::from_le_bytes([
             bytes[offset],
             bytes[offset + 1],
             bytes[offset + 2],
@@ -86,7 +86,7 @@ impl Schema {
         }
 
         // Deserialize key indices count
-        let key_count = u32::from_ne_bytes([
+        let key_count = u32::from_le_bytes([
             bytes[offset],
             bytes[offset + 1],
             bytes[offset + 2],
@@ -97,7 +97,7 @@ impl Schema {
         // Deserialize key indices
         let mut key_indices = Vec::with_capacity(key_count);
         for _ in 0..key_count {
-            let idx = u32::from_ne_bytes([
+            let idx = u32::from_le_bytes([
                 bytes[offset],
                 bytes[offset + 1],
                 bytes[offset + 2],

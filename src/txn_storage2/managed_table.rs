@@ -119,8 +119,8 @@ impl<'a, S: FieldLeveLStorageTrait> ManagedTable<'a, S> {
                     8,
                 );
             }
-            let page_id = u32::from_ne_bytes(bytes[0..4].try_into().unwrap());
-            let frame_id = u32::from_ne_bytes(bytes[4..8].try_into().unwrap());
+            let page_id = u32::from_le_bytes(bytes[0..4].try_into().unwrap());
+            let frame_id = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
             Field::Pointer(Some(crate::txn_storage2::field::RecordPointer::new(
                 page_id, frame_id,
             )))

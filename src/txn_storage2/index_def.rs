@@ -111,16 +111,16 @@ impl IndexDef {
         let mut bytes = Vec::new();
         // Name
         let name_bytes = self.name.as_bytes();
-        bytes.extend_from_slice(&(name_bytes.len() as u32).to_ne_bytes());
+        bytes.extend_from_slice(&(name_bytes.len() as u32).to_le_bytes());
         bytes.extend_from_slice(name_bytes);
         // Kind
         bytes.push(self.kind.to_byte());
         // Unique
         bytes.push(if self.unique { 1 } else { 0 });
         // Key columns
-        bytes.extend_from_slice(&(self.key_columns.len() as u32).to_ne_bytes());
+        bytes.extend_from_slice(&(self.key_columns.len() as u32).to_le_bytes());
         for &col in &self.key_columns {
-            bytes.extend_from_slice(&(col as u32).to_ne_bytes());
+            bytes.extend_from_slice(&(col as u32).to_le_bytes());
         }
         bytes
     }
@@ -128,7 +128,7 @@ impl IndexDef {
     pub fn from_bytes(bytes: &[u8]) -> (Self, usize) {
         let mut offset = 0;
 
-        let name_len = u32::from_ne_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
+        let name_len = u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
         offset += 4;
         let name = std::str::from_utf8(&bytes[offset..offset + name_len])
             .expect("Invalid UTF-8")
@@ -141,12 +141,12 @@ impl IndexDef {
         let unique = bytes[offset] != 0;
         offset += 1;
 
-        let key_count = u32::from_ne_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
+        let key_count = u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
         offset += 4;
 
         let mut key_columns = Vec::with_capacity(key_count);
         for _ in 0..key_count {
-            let col = u32::from_ne_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
+            let col = u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
             key_columns.push(col);
             offset += 4;
         }
@@ -206,13 +206,13 @@ impl PhysicalSchema {
         let mut bytes = Vec::new();
         // Primary
         let primary_bytes = self.primary_index.to_bytes();
-        bytes.extend_from_slice(&(primary_bytes.len() as u32).to_ne_bytes());
+        bytes.extend_from_slice(&(primary_bytes.len() as u32).to_le_bytes());
         bytes.extend_from_slice(&primary_bytes);
         // Secondary count + each
-        bytes.extend_from_slice(&(self.secondary_indexes.len() as u32).to_ne_bytes());
+        bytes.extend_from_slice(&(self.secondary_indexes.len() as u32).to_le_bytes());
         for idx in &self.secondary_indexes {
             let idx_bytes = idx.to_bytes();
-            bytes.extend_from_slice(&(idx_bytes.len() as u32).to_ne_bytes());
+            bytes.extend_from_slice(&(idx_bytes.len() as u32).to_le_bytes());
             bytes.extend_from_slice(&idx_bytes);
         }
         bytes
@@ -222,18 +222,18 @@ impl PhysicalSchema {
         let mut offset = 0;
 
         let primary_len =
-            u32::from_ne_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
+            u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
         offset += 4;
         let (primary_index, _) = IndexDef::from_bytes(&bytes[offset..offset + primary_len]);
         offset += primary_len;
 
-        let sec_count = u32::from_ne_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
+        let sec_count = u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
         offset += 4;
 
         let mut secondary_indexes = Vec::with_capacity(sec_count);
         for _ in 0..sec_count {
             let idx_len =
-                u32::from_ne_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
+                u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
             offset += 4;
             let (idx, _) = IndexDef::from_bytes(&bytes[offset..offset + idx_len]);
             secondary_indexes.push(idx);

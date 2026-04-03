@@ -44,26 +44,26 @@ impl TableMeta {
 
         // Table name
         let name_bytes = self.name.as_bytes();
-        bytes.extend_from_slice(&(name_bytes.len() as u32).to_ne_bytes());
+        bytes.extend_from_slice(&(name_bytes.len() as u32).to_le_bytes());
         bytes.extend_from_slice(name_bytes);
 
         // Logical schema
         let ls_bytes = self.logical_schema.to_bytes();
-        bytes.extend_from_slice(&(ls_bytes.len() as u32).to_ne_bytes());
+        bytes.extend_from_slice(&(ls_bytes.len() as u32).to_le_bytes());
         bytes.extend_from_slice(&ls_bytes);
 
         // Physical schema
         let ps_bytes = self.physical_schema.to_bytes();
-        bytes.extend_from_slice(&(ps_bytes.len() as u32).to_ne_bytes());
+        bytes.extend_from_slice(&(ps_bytes.len() as u32).to_le_bytes());
         bytes.extend_from_slice(&ps_bytes);
 
         // Primary container ID
-        bytes.extend_from_slice(&self.primary_container_id.to_ne_bytes());
+        bytes.extend_from_slice(&self.primary_container_id.to_le_bytes());
 
         // Secondary container IDs
-        bytes.extend_from_slice(&(self.secondary_container_ids.len() as u32).to_ne_bytes());
+        bytes.extend_from_slice(&(self.secondary_container_ids.len() as u32).to_le_bytes());
         for &cid in &self.secondary_container_ids {
-            bytes.extend_from_slice(&cid.to_ne_bytes());
+            bytes.extend_from_slice(&cid.to_le_bytes());
         }
 
         bytes
@@ -74,7 +74,7 @@ impl TableMeta {
         let mut offset = 0;
 
         // Table name
-        let name_len = u32::from_ne_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
+        let name_len = u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
         offset += 4;
         let name = std::str::from_utf8(&bytes[offset..offset + name_len])
             .expect("Invalid UTF-8")
@@ -82,19 +82,19 @@ impl TableMeta {
         offset += name_len;
 
         // Logical schema
-        let ls_len = u32::from_ne_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
+        let ls_len = u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
         offset += 4;
         let logical_schema = LogicalSchema::from_bytes(&bytes[offset..offset + ls_len]);
         offset += ls_len;
 
         // Physical schema
-        let ps_len = u32::from_ne_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
+        let ps_len = u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
         offset += 4;
         let physical_schema = PhysicalSchema::from_bytes(&bytes[offset..offset + ps_len]);
         offset += ps_len;
 
         // Primary container ID
-        let primary_container_id = ContainerId::from_ne_bytes(
+        let primary_container_id = ContainerId::from_le_bytes(
             bytes[offset..offset + std::mem::size_of::<ContainerId>()]
                 .try_into()
                 .unwrap(),
@@ -102,11 +102,11 @@ impl TableMeta {
         offset += std::mem::size_of::<ContainerId>();
 
         // Secondary container IDs
-        let sec_count = u32::from_ne_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
+        let sec_count = u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
         offset += 4;
         let mut secondary_container_ids = Vec::with_capacity(sec_count);
         for _ in 0..sec_count {
-            let cid = ContainerId::from_ne_bytes(
+            let cid = ContainerId::from_le_bytes(
                 bytes[offset..offset + std::mem::size_of::<ContainerId>()]
                     .try_into()
                     .unwrap(),

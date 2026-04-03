@@ -371,8 +371,8 @@ impl<'a, S: FieldLeveLStorageTrait> QueryBuilder<'a, S> {
                 // This is safe because for TransactionalStorage, Hint = RecordPointer
                 if std::mem::size_of::<S::Hint>() == 8 {
                     let mut bytes = [0u8; 8];
-                    bytes[0..4].copy_from_slice(&ptr.page_id.to_ne_bytes());
-                    bytes[4..8].copy_from_slice(&ptr.frame_id.to_ne_bytes());
+                    bytes[0..4].copy_from_slice(&ptr.page_id.to_le_bytes());
+                    bytes[4..8].copy_from_slice(&ptr.frame_id.to_le_bytes());
                     Some(unsafe { std::mem::transmute_copy(&bytes) })
                 } else {
                     None
