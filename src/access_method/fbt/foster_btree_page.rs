@@ -175,6 +175,7 @@ mod slot {
 }
 
 use slot::{Slot, SLOT_SIZE, read_ghost, write_ghost};
+use crate::page::AVAILABLE_PAGE_SIZE;
 
 pub enum BTreeKey<'a> {
     MinusInfty,
@@ -279,6 +280,7 @@ pub trait FosterBtreePage {
     fn foster_child_slot_id(&self) -> u32;
     fn is_fence(&self, slot_id: u32) -> bool;
     fn compact_space(&mut self);
+    fn compact_into_buf(&mut self, buf: &mut [u8], ideal_start_offset: u32);
 
     // Header operations
     fn total_free_space(&self) -> u32;
@@ -429,6 +431,7 @@ impl FosterBtreePage for Page {
     /// The number of slots in the page.
     /// The low fence and high fence are always present.
     /// Therefore, the slot count should be at least 2 after the initialization.
+    #[inline]
     fn slot_count(&self) -> u32 {
         let offset = 2;
         u32::from_be_bytes(
@@ -465,10 +468,12 @@ impl FosterBtreePage for Page {
         self.len()
     }
 
+    #[inline]
     fn total_free_space(&self) -> u32 {
         self.len() as u32 - self.total_bytes_used()
     }
 
+    #[inline]
     fn total_bytes_used(&self) -> u32 {
         let offset = 2 + 4;
         u32::from_be_bytes(
@@ -478,6 +483,7 @@ impl FosterBtreePage for Page {
         )
     }
 
+    #[inline]
     fn set_total_bytes_used(&mut self, total_bytes_used: u32) {
         let bytes = total_bytes_used.to_be_bytes();
         let offset = 2 + 4;
@@ -502,6 +508,7 @@ impl FosterBtreePage for Page {
         (key.len() + value.len() + SLOT_SIZE) as u32
     }
 
+    #[inline]
     fn rec_start_offset(&self) -> u32 {
         let offset = 2 + 4 + 4;
         u32::from_be_bytes(
@@ -511,12 +518,14 @@ impl FosterBtreePage for Page {
         )
     }
 
+    #[inline]
     fn set_rec_start_offset(&mut self, rec_start_offset: u32) {
         let bytes = rec_start_offset.to_be_bytes();
         let offset = 2 + 4 + 4;
         self[offset..offset + std::mem::size_of::<u32>()].copy_from_slice(&bytes);
     }
 
+    #[inline]
     fn contiguous_free_space(&self) -> u32 {
         let next_slot_offset = self.slot_offset(self.slot_count());
         let rec_start_offset = self.rec_start_offset();
@@ -527,10 +536,12 @@ impl FosterBtreePage for Page {
         self.get_id()
     }
 
+    #[inline]
     fn slot_offset(&self, slot_id: u32) -> usize {
         PAGE_HEADER_SIZE + slot_id as usize * SLOT_SIZE
     }
 
+    #[inline]
     fn slot(&self, slot_id: u32) -> Option<Slot> {
         if slot_id < self.slot_count() {
             let offset = self.slot_offset(slot_id);
@@ -541,16 +552,19 @@ impl FosterBtreePage for Page {
         }
     }
 
+    #[inline]
     fn ghostify_at(&mut self, slot_id: u32) {
         let slot_off = self.slot_offset(slot_id);
         write_ghost(self, slot_off, true);
     }
 
+    #[inline]
     fn unghostify_at(&mut self, slot_id: u32) {
         let slot_off = self.slot_offset(slot_id);
         write_ghost(self, slot_off, false);
     }
 
+    #[inline]
     fn is_ghost(&self, slot_id: u32) -> bool {
         let slot_off = self.slot_offset(slot_id);
         read_ghost(self, slot_off)
@@ -559,6 +573,7 @@ impl FosterBtreePage for Page {
     /// Append a slot at the end of the slots.
     /// Increment the slot count.
     /// The header is also updated to set the rec_start_offset to the minimum of the current rec_start_offset and the slot's offset.
+    #[inline]
     fn append_slot(&mut self, slot: &Slot) {
         // Increment the slot count and update the header
         let slot_id = self.slot_count();
@@ -577,6 +592,7 @@ impl FosterBtreePage for Page {
     /// Update the slot at slot_id.
     /// Panic if the slot_id is out of range.
     /// The header is also updated to set the rec_start_offset to the minimum of the current rec_start_offset and the slot's offset.
+    #[inline]
     fn update_slot(&mut self, slot_id: u32, slot: &Slot) {
         if slot_id >= self.slot_count() {
             panic!("Slot does not exist");
@@ -706,44 +722,49 @@ impl FosterBtreePage for Page {
                 // No need to compact
             }
             std::cmp::Ordering::Less => {
-                let mut recs = vec![0; rec_mem_usage as usize];
-                let mut current_size = 0;
+                let rec_mem = rec_mem_usage as usize;
 
-                // Copy the records into a temporary buffer and update the slots
-                for i in 0..self.slot_count() {
-                    if let Some(mut slot) = self.slot(i) {
-                        let offset = slot.offset() as usize;
-                        let key_size = slot.key_size() as usize;
-                        let value_size = slot.value_size() as usize;
-                        let size = key_size + value_size;
-                        current_size += size;
-
-                        // Page       [.....    [                Records                   ]]
-                        // Records              [[.............][key2][value2][key1][value1]]
-                        //                                       <-----------> size
-                        //                                       <-------------------------> current_size
-                        //                                      ^
-                        //                       <-------------> local_offset
-                        //             <-----------------------> global_offset
-                        //             <-------> ideal_start_offset
-
-                        let local_offset = rec_mem_usage as usize - current_size;
-                        recs[local_offset..local_offset + size]
-                            .copy_from_slice(&self[offset..offset + size]);
-
-                        // Update the slot
-                        let global_offset = (self.len() - current_size) as u32;
-                        slot.set_offset(global_offset);
-                        self.update_slot(i, &slot);
-                    }
+                // Use an uninitialized stack buffer for typical page sizes, heap for large pages.
+                // Safety: compact_into_buf writes every byte in buf[..rec_mem] before reading.
+                const STACK_BUF_SIZE: usize = AVAILABLE_PAGE_SIZE;
+                if rec_mem <= STACK_BUF_SIZE {
+                    let mut recs =
+                        unsafe { std::mem::MaybeUninit::<[u8; STACK_BUF_SIZE]>::uninit().assume_init() };
+                    self.compact_into_buf(&mut recs[..rec_mem], ideal_start_offset);
+                } else {
+                    let mut recs = vec![0u8; rec_mem];
+                    self.compact_into_buf(&mut recs, ideal_start_offset);
                 }
-                // Copy the records back to the page
-                self[ideal_start_offset as usize..].copy_from_slice(&recs);
-
-                // Update the header
-                self.set_rec_start_offset(ideal_start_offset);
             }
         }
+    }
+
+    /// Helper: compact records into the provided buffer, then copy back.
+    #[inline]
+    fn compact_into_buf(&mut self, buf: &mut [u8], ideal_start_offset: u32) {
+        let rec_mem = buf.len();
+        let mut current_size = 0;
+
+        for i in 0..self.slot_count() {
+            if let Some(mut slot) = self.slot(i) {
+                let offset = slot.offset() as usize;
+                let key_size = slot.key_size() as usize;
+                let value_size = slot.value_size() as usize;
+                let size = key_size + value_size;
+                current_size += size;
+
+                let local_offset = rec_mem - current_size;
+                buf[local_offset..local_offset + size]
+                    .copy_from_slice(&self[offset..offset + size]);
+
+                let global_offset = (self.len() - current_size) as u32;
+                slot.set_offset(global_offset);
+                self.update_slot(i, &slot);
+            }
+        }
+        self[ideal_start_offset as usize..ideal_start_offset as usize + rec_mem]
+            .copy_from_slice(buf);
+        self.set_rec_start_offset(ideal_start_offset);
     }
 
     fn init(&mut self) {
@@ -783,6 +804,7 @@ impl FosterBtreePage for Page {
         self.slot_count() == 2 // low fence and high fence
     }
 
+    #[inline]
     fn get_raw_key(&self, slot_id: u32) -> &[u8] {
         assert!(slot_id < self.slot_count());
         let slot = self.slot(slot_id).unwrap();
@@ -791,6 +813,7 @@ impl FosterBtreePage for Page {
         &self[offset..offset + key_size]
     }
 
+    #[inline]
     fn get_btree_key(&self, slot_id: u32) -> BTreeKey {
         if slot_id == self.low_fence_slot_id() {
             self.get_low_fence()
@@ -818,6 +841,7 @@ impl FosterBtreePage for Page {
         self.get_val(foster_slot_id)
     }
 
+    #[inline]
     fn get_val(&self, slot_id: u32) -> &[u8] {
         let slot = self.slot(slot_id).unwrap();
         let offset = slot.offset() as usize;

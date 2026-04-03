@@ -91,6 +91,26 @@ fn bench_page_ops(c: &mut Criterion) {
         });
     });
 
+    // Bench compact_space: create fragmentation by deleting every other key
+    group.bench_function("compact_space (fragmented)", |b| {
+        b.iter_batched(
+            || {
+                let mut page = make_page(200);
+                // Delete every other key to create fragmentation
+                for i in (0..200).rev().step_by(2) {
+                    let key = format!("key_{:03}", i);
+                    page.remove(key.as_bytes());
+                }
+                page
+            },
+            |mut page| {
+                page.compact_space();
+                black_box(&page);
+            },
+            criterion::BatchSize::SmallInput,
+        );
+    });
+
     group.finish();
 }
 
