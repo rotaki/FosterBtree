@@ -165,10 +165,12 @@ fn main() {
     let num_scans = 3;
     let mut total_time = Duration::new(0, 0);
     for i in 0..num_scans {
+        table.clear_scan_stats();
         let dur = execute_workload(&params, table.clone());
         total_time += dur;
         println!("Scan {} took {:?}", i, dur);
         println!("Buffer pool stats after exec: {}", unsafe { bp.stats() });
+        println!("--- Scan timer stats ---\n{}", table.scan_stats());
         bp.flush_all().unwrap();
         unsafe { bp.reset_stats() };
     }

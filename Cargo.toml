@@ -12,6 +12,7 @@ log_info = []
 log_warn = []
 log_error = []
 stat = []
+timer = []
 
 # Page sizes. If page sizes are larger than 256k, pages will be heap allocated to avoid stack overflow.
 # Default is 16KB (defined in page.rs)

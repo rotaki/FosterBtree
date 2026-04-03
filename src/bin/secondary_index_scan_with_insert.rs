@@ -442,7 +442,7 @@ pub fn insert<T: MemPool>(
 ) {
     // Insert into the primary index and then into the secondary index.
     primary.insert(key, value).unwrap();
-    let iter = FosterBtreeCursor::new(primary, key, &[]);
+    let mut iter = FosterBtreeCursor::new(primary, key, &[]);
     if let Some((p_key, _)) = iter.get_kv() {
         assert_eq!(p_key, key);
         let (page_id, frame_id, slot_id) = iter.get_physical_address();

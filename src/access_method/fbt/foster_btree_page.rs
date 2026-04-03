@@ -15,11 +15,11 @@ const HDR_SLOT_COUNT: usize = 4;
 const HDR_TOTAL_BYTES_USED: usize = 8;
 const HDR_REC_START_OFFSET: usize = 12;
 const HDR_SIBLING_ADDR: usize = 16; // 8 bytes: page_id (u32) + frame_id (u32)
-// Slotted page layout:
-// * slot [ghost_bit: u8, offset: u32, key_size: u32, value_size: u32].
-//  The slots are sorted based on the key.
-// * recs [key: [u8], value: [u8]] // value should be a page id if the page is a non-leaf page, otherwise it should be a value.
-// The first slot is the low fence and the last slot is the high fence.
+                                    // Slotted page layout:
+                                    // * slot [ghost_bit: u8, offset: u32, key_size: u32, value_size: u32].
+                                    //  The slots are sorted based on the key.
+                                    // * recs [key: [u8], value: [u8]] // value should be a page id if the page is a non-leaf page, otherwise it should be a value.
+                                    // The first slot is the low fence and the last slot is the high fence.
 
 // Assumptions
 // * Keys are unique
@@ -817,7 +817,7 @@ impl FosterBtreePage for Page {
         self.set_slot_count(0);
         self.set_rec_start_offset(self.len() as u32);
         self.set_total_bytes_used(PAGE_HEADER_SIZE as u32);
-        self.set_sibling_address(0, 0);
+        self.set_sibling_address(u32::MAX, u32::MAX);
 
         // Insert low and high fence
         self.insert_at(0, &[], &[], false);
@@ -834,7 +834,7 @@ impl FosterBtreePage for Page {
         self.set_slot_count(0);
         self.set_rec_start_offset(self.len() as u32);
         self.set_total_bytes_used(PAGE_HEADER_SIZE as u32);
-        self.set_sibling_address(0, 0);
+        self.set_sibling_address(u32::MAX, u32::MAX);
 
         // Insert low and high fence
         self.insert_at(0, &[], &[], false);

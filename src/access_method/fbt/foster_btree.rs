@@ -5,6 +5,7 @@ use std::{
     collections::BTreeMap,
     sync::{atomic::Ordering, Arc},
     time::Duration,
+    time::Instant,
 };
 
 use crate::{
@@ -384,7 +385,207 @@ mod stat {
     }
 }
 
+#[cfg(feature = "timer")]
+mod scan_timer {
+    use lazy_static::lazy_static;
+    use std::sync::Mutex;
+
+    /// Per-scan timer that tracks time spent in various scan phases.
+    /// Create one at the start of a scan, call the `record_*` helpers around
+    /// hot operations, and `report()` when the scan is finished.
+    pub struct ScanTimers {
+        // Cumulative durations (nanoseconds)
+        pub page_read_ns: u64,
+        pub key_compare_ns: u64,
+        pub foster_traverse_ns: u64,
+        pub leaf_transition_ns: u64,
+        pub get_kv_ns: u64, // sampled (every 64th call, scaled up)
+        pub prefetch_ns: u64,
+
+        // Counters
+        pub page_read_count: u64,
+        pub key_compare_count: u64,
+        pub foster_traverse_count: u64,
+        pub leaf_transition_count: u64,
+        pub get_kv_count: u64, // number of sampled measurements
+        pub prefetch_count: u64,
+        pub tuples_scanned: u64,
+        pub sibling_hint_hit: u64,
+        pub sibling_hint_miss: u64,
+    }
+
+    impl ScanTimers {
+        pub fn new() -> Self {
+            ScanTimers {
+                page_read_ns: 0,
+                key_compare_ns: 0,
+                foster_traverse_ns: 0,
+                leaf_transition_ns: 0,
+                get_kv_ns: 0,
+                prefetch_ns: 0,
+                page_read_count: 0,
+                key_compare_count: 0,
+                foster_traverse_count: 0,
+                leaf_transition_count: 0,
+                get_kv_count: 0,
+                prefetch_count: 0,
+                tuples_scanned: 0,
+                sibling_hint_hit: 0,
+                sibling_hint_miss: 0,
+            }
+        }
+
+        #[inline]
+        pub fn record_page_read(&mut self, elapsed_ns: u64) {
+            self.page_read_ns += elapsed_ns;
+            self.page_read_count += 1;
+        }
+
+        #[inline]
+        pub fn record_key_compare(&mut self, elapsed_ns: u64) {
+            self.key_compare_ns += elapsed_ns;
+            self.key_compare_count += 1;
+        }
+
+        #[inline]
+        pub fn record_foster_traverse(&mut self, elapsed_ns: u64) {
+            self.foster_traverse_ns += elapsed_ns;
+            self.foster_traverse_count += 1;
+        }
+
+        #[inline]
+        pub fn record_leaf_transition(&mut self, elapsed_ns: u64) {
+            self.leaf_transition_ns += elapsed_ns;
+            self.leaf_transition_count += 1;
+        }
+
+        /// Record a sampled get_kv measurement.
+        /// `elapsed_ns` should already be scaled (raw_ns * sample_period).
+        #[inline]
+        pub fn record_get_kv(&mut self, elapsed_ns: u64) {
+            self.get_kv_ns += elapsed_ns;
+            self.get_kv_count += 1;
+        }
+
+        #[inline]
+        pub fn record_prefetch(&mut self, elapsed_ns: u64) {
+            self.prefetch_ns += elapsed_ns;
+            self.prefetch_count += 1;
+        }
+
+        fn fmt_line(name: &str, ns: u64, count: u64) -> String {
+            let avg = if count > 0 {
+                ns as f64 / count as f64
+            } else {
+                0.0
+            };
+            format!(
+                "{:20}: {:>10.3}ms  ({:>8} calls, {:>6.0}ns/call)",
+                name,
+                ns as f64 / 1_000_000.0,
+                count,
+                avg,
+            )
+        }
+
+        pub fn to_string(&self) -> String {
+            let total_ns = self.page_read_ns
+                + self.key_compare_ns
+                + self.foster_traverse_ns
+                + self.leaf_transition_ns
+                + self.get_kv_ns
+                + self.prefetch_ns;
+            let get_kv_per_tuple = if self.tuples_scanned > 0 {
+                self.get_kv_ns as f64 / self.tuples_scanned as f64
+            } else {
+                0.0
+            };
+            let lines = [
+                Self::fmt_line("page_read", self.page_read_ns, self.page_read_count),
+                Self::fmt_line("key_compare", self.key_compare_ns, self.key_compare_count),
+                Self::fmt_line(
+                    "foster_traverse",
+                    self.foster_traverse_ns,
+                    self.foster_traverse_count,
+                ),
+                Self::fmt_line(
+                    "leaf_transition",
+                    self.leaf_transition_ns,
+                    self.leaf_transition_count,
+                ),
+                format!(
+                    "{:20}: {:>10.3}ms  ({:>8} tuples, {:>6.0}ns/tuple, sampled 1/64)",
+                    "get_kv",
+                    self.get_kv_ns as f64 / 1_000_000.0,
+                    self.tuples_scanned,
+                    get_kv_per_tuple,
+                ),
+                Self::fmt_line("prefetch", self.prefetch_ns, self.prefetch_count),
+                format!(
+                    "{:20}: {:>8} hit, {:>8} miss ({:.2}% hit rate)",
+                    "sibling_hint",
+                    self.sibling_hint_hit,
+                    self.sibling_hint_miss,
+                    if self.sibling_hint_hit + self.sibling_hint_miss > 0 {
+                        self.sibling_hint_hit as f64
+                            / (self.sibling_hint_hit + self.sibling_hint_miss) as f64
+                            * 100.0
+                    } else {
+                        0.0
+                    },
+                ),
+            ];
+            format!(
+                "Scan Timers (total tracked: {:.3}ms, tuples: {})\n{}",
+                total_ns as f64 / 1_000_000.0,
+                self.tuples_scanned,
+                lines.join("\n"),
+            )
+        }
+
+        pub fn merge(&mut self, other: &ScanTimers) {
+            self.page_read_ns += other.page_read_ns;
+            self.key_compare_ns += other.key_compare_ns;
+            self.foster_traverse_ns += other.foster_traverse_ns;
+            self.leaf_transition_ns += other.leaf_transition_ns;
+            self.get_kv_ns += other.get_kv_ns;
+            self.prefetch_ns += other.prefetch_ns;
+            self.page_read_count += other.page_read_count;
+            self.key_compare_count += other.key_compare_count;
+            self.foster_traverse_count += other.foster_traverse_count;
+            self.leaf_transition_count += other.leaf_transition_count;
+            self.get_kv_count += other.get_kv_count;
+            self.prefetch_count += other.prefetch_count;
+            self.tuples_scanned += other.tuples_scanned;
+            self.sibling_hint_hit += other.sibling_hint_hit;
+            self.sibling_hint_miss += other.sibling_hint_miss;
+        }
+
+        pub fn clear(&mut self) {
+            *self = ScanTimers::new();
+        }
+    }
+
+    lazy_static! {
+        pub static ref GLOBAL_SCAN_STAT: Mutex<ScanTimers> = Mutex::new(ScanTimers::new());
+    }
+
+    pub fn merge_scan_timers(timers: &ScanTimers) {
+        GLOBAL_SCAN_STAT.lock().unwrap().merge(timers);
+    }
+
+    pub fn get_scan_stats() -> String {
+        GLOBAL_SCAN_STAT.lock().unwrap().to_string()
+    }
+
+    pub fn clear_scan_stats() {
+        GLOBAL_SCAN_STAT.lock().unwrap().clear();
+    }
+}
+
 use concurrent_queue::ConcurrentQueue;
+#[cfg(feature = "timer")]
+use scan_timer::*;
 #[cfg(feature = "stat")]
 use stat::*;
 
@@ -1424,6 +1625,24 @@ impl<T: MemPool> FosterBtree<T> {
         }
     }
 
+    pub fn scan_stats(&self) -> String {
+        #[cfg(feature = "timer")]
+        {
+            get_scan_stats()
+        }
+        #[cfg(not(feature = "timer"))]
+        {
+            "Timer is disabled".to_string()
+        }
+    }
+
+    pub fn clear_scan_stats(&self) {
+        #[cfg(feature = "timer")]
+        {
+            clear_scan_stats();
+        }
+    }
+
     /// System transaction that allocates a new page.
     fn allocate_page(&self) -> FrameWriteGuard<T::EP> {
         if let Ok(page_id) = self.unused_pages.pop() {
@@ -2142,6 +2361,13 @@ impl<T: MemPool> FosterBtreeRangeScanner<T> {
     }
 }
 
+#[cfg(feature = "timer")]
+impl<T: MemPool> Drop for FosterBtreeRangeScanner<T> {
+    fn drop(&mut self) {
+        merge_scan_timers(&self.cursor.scan_timers);
+    }
+}
+
 impl<T: MemPool> Iterator for FosterBtreeRangeScanner<T> {
     type Item = (Vec<u8>, Vec<u8>);
 
@@ -2173,6 +2399,10 @@ pub struct FosterBtreeCursor<T: MemPool> {
     current_high_fence: Option<Vec<u8>>,
     visited: Vec<PageFrameKey>,
     finished: bool,
+    is_full_scan: bool,
+
+    #[cfg(feature = "timer")]
+    pub scan_timers: ScanTimers,
 }
 
 impl<T: MemPool> FosterBtreeCursor<T> {
@@ -2186,6 +2416,9 @@ impl<T: MemPool> FosterBtreeCursor<T> {
             current_high_fence: None,
             visited: Vec::new(),
             finished: false,
+            is_full_scan: r_key.is_empty(),
+            #[cfg(feature = "timer")]
+            scan_timers: ScanTimers::new(),
         };
         cursor.initialize();
         cursor
@@ -2199,7 +2432,13 @@ impl<T: MemPool> FosterBtreeCursor<T> {
         // Push the root page to the stack
         self.visited.push(self.btree.root_key);
         let page_frame_key = self.visited.last().unwrap();
+
+        #[cfg(feature = "timer")]
+        let t = Instant::now();
         let mut current_page = self.btree.read_page(*page_frame_key);
+        #[cfg(feature = "timer")]
+        self.scan_timers
+            .record_page_read(t.elapsed().as_nanos() as u64);
 
         // Loop for traversing from the current page to the leaf page
         // Once we reach this loop, we never go back to the outer loop.
@@ -2207,7 +2446,12 @@ impl<T: MemPool> FosterBtreeCursor<T> {
             let this_page = current_page;
             // Check if the current page is a leaf page
             if this_page.is_leaf() {
+                #[cfg(feature = "timer")]
+                let t = Instant::now();
                 let mut slot = this_page.lower_bound_slot_id(&self.l_key());
+                #[cfg(feature = "timer")]
+                self.scan_timers
+                    .record_key_compare(t.elapsed().as_nanos() as u64);
 
                 // Leaf page [LO:0] 1 3 F5 [HI:8]
                 // If query is 3 -> Read the key-value pair at slot 1
@@ -2223,7 +2467,15 @@ impl<T: MemPool> FosterBtreeCursor<T> {
                         val.page_id,
                         val.frame_id,
                     );
+                    #[cfg(feature = "timer")]
+                    let t = Instant::now();
                     let foster_page = self.btree.read_page(foster_page_key);
+                    #[cfg(feature = "timer")]
+                    {
+                        let elapsed = t.elapsed().as_nanos() as u64;
+                        self.scan_timers.record_page_read(elapsed);
+                        self.scan_timers.record_foster_traverse(elapsed);
+                    }
                     current_page = foster_page;
                     self.visited.push(foster_page_key); // Push the visiting page to the stack
                     continue; // Go to the foster child
@@ -2257,7 +2509,13 @@ impl<T: MemPool> FosterBtreeCursor<T> {
                 }
             }
             // The current page is an internal node
+            #[cfg(feature = "timer")]
+            let t = Instant::now();
             let slot_id = this_page.upper_bound_slot_id(&self.l_key()) - 1;
+            #[cfg(feature = "timer")]
+            self.scan_timers
+                .record_key_compare(t.elapsed().as_nanos() as u64);
+
             debug_assert!(
                 slot_id > 0,
                 "Internal node should have at least one active slot"
@@ -2265,7 +2523,13 @@ impl<T: MemPool> FosterBtreeCursor<T> {
             let val = InnerVal::from_bytes(this_page.get_val(slot_id));
             let page_key =
                 PageFrameKey::new_with_frame_id(self.btree.c_key, val.page_id, val.frame_id);
+
+            #[cfg(feature = "timer")]
+            let t = Instant::now();
             let next_page = self.btree.read_page(page_key);
+            #[cfg(feature = "timer")]
+            self.scan_timers
+                .record_page_read(t.elapsed().as_nanos() as u64);
 
             // Do a prefetch for the next next page
             let prefetch_slot_id = slot_id + 1;
@@ -2276,7 +2540,12 @@ impl<T: MemPool> FosterBtreeCursor<T> {
                     prefetch_val.page_id,
                     prefetch_val.frame_id,
                 );
+                #[cfg(feature = "timer")]
+                let t = Instant::now();
                 let _ = self.btree.mem_pool.prefetch_page(prefetch_page_key);
+                #[cfg(feature = "timer")]
+                self.scan_timers
+                    .record_prefetch(t.elapsed().as_nanos() as u64);
             }
 
             current_page = next_page;
@@ -2310,15 +2579,22 @@ impl<T: MemPool> FosterBtreeCursor<T> {
 
     // Return None if the current slot is not in the range [l_key, r_key)
     // Returns Some((key, val)) if the current slot is in the range.
-    pub fn get_kv(&self) -> Option<(Vec<u8>, Vec<u8>)> {
+    pub fn get_kv(&mut self) -> Option<(Vec<u8>, Vec<u8>)> {
         if self.finished {
             return None;
         }
+
+        // Sample every 64th call to amortize Instant::now() overhead
+        #[cfg(feature = "timer")]
+        let sample = self.scan_timers.tuples_scanned & 63 == 0;
+        #[cfg(feature = "timer")]
+        let t = if sample { Some(Instant::now()) } else { None };
+
         debug_assert!(self.current_slot_id > 0);
         debug_assert!(self.current_leaf_page.is_some());
         let leaf_page = self.current_leaf_page.as_ref().unwrap();
         let key = leaf_page.get_raw_key(self.current_slot_id);
-        if BTreeKey::new(key) >= self.r_key() {
+        if !self.is_full_scan && BTreeKey::new(key) >= self.r_key() {
             // No more keys in the range
             None
         } else if self.current_slot_id == leaf_page.high_fence_slot_id() {
@@ -2329,7 +2605,16 @@ impl<T: MemPool> FosterBtreeCursor<T> {
             panic!("Cursor should not point to the foster child slot");
         } else {
             let val = leaf_page.get_val(self.current_slot_id);
-            Some((key.to_owned(), val.to_owned()))
+            let result = Some((key.to_owned(), val.to_owned()));
+            #[cfg(feature = "timer")]
+            {
+                if let Some(t) = t {
+                    self.scan_timers
+                        .record_get_kv(t.elapsed().as_nanos() as u64 * 64);
+                }
+                self.scan_timers.tuples_scanned += 1;
+            }
+            result
         }
     }
 
@@ -2394,8 +2679,38 @@ impl<T: MemPool> FosterBtreeCursor<T> {
                     self.finished = true;
                     return;
                 } else {
-                    // Traverse to the next leaf page.
-                    self.go_to_next_leaf_page();
+                    #[cfg(feature = "timer")]
+                    let t = Instant::now();
+                    let (page_id, frame_id) = (leaf_page.get_id(), leaf_page.frame_id());
+                    let (sib_page_id, sib_frame_id) = leaf_page.sibling_address();
+                    drop(leaf_page);
+
+                    // Try LIPAH-style sibling hint for O(1) leaf transition.
+                    if self.try_sibling_hint(sib_page_id, sib_frame_id) {
+                        #[cfg(feature = "timer")]
+                        {
+                            self.scan_timers.sibling_hint_hit += 1;
+                        }
+                    } else {
+                        #[cfg(feature = "timer")]
+                        {
+                            self.scan_timers.sibling_hint_miss += 1;
+                        }
+                        self.go_to_next_leaf_page();
+                        // Best-effort repair the hint for future scans.
+                        if let Some(ref next_leaf) = self.current_leaf_page {
+                            self.repair_sibling_hint_best_effort(
+                                page_id,
+                                frame_id,
+                                next_leaf.get_id(),
+                                next_leaf.frame_id(),
+                            );
+                        }
+                    }
+
+                    #[cfg(feature = "timer")]
+                    self.scan_timers
+                        .record_leaf_transition(t.elapsed().as_nanos() as u64);
                     // We need to check if the next page is not an empty page which is done by the outer loop
                 }
             } else if leaf_page.has_foster_child()
@@ -2406,7 +2721,15 @@ impl<T: MemPool> FosterBtreeCursor<T> {
                 let val = InnerVal::from_bytes(leaf_page.get_foster_val());
                 let foster_page_key =
                     PageFrameKey::new_with_frame_id(self.btree.c_key, val.page_id, val.frame_id);
+                #[cfg(feature = "timer")]
+                let t = Instant::now();
                 let foster_page = self.btree.read_page(foster_page_key);
+                #[cfg(feature = "timer")]
+                {
+                    let elapsed = t.elapsed().as_nanos() as u64;
+                    self.scan_timers.record_page_read(elapsed);
+                    self.scan_timers.record_foster_traverse(elapsed);
+                }
                 // Evict the current page as soon as possible
                 // self.btree
                 //     .mem_pool
@@ -2430,6 +2753,61 @@ impl<T: MemPool> FosterBtreeCursor<T> {
         }
     }
 
+    /// Try to use the sibling hint for O(1) leaf-to-leaf transition (LIPAH-style).
+    /// Returns true if the hint was valid and the cursor is now positioned on the next leaf.
+    fn try_sibling_hint(&mut self, sib_page_id: u32, sib_frame_id: u32) -> bool {
+        if sib_page_id == u32::MAX {
+            return false; // No hint set
+        }
+
+        let sib_key = PageFrameKey::new_with_frame_id(self.btree.c_key, sib_page_id, sib_frame_id);
+
+        // Only try if the page is in memory — avoid triggering disk I/O for a hint.
+        if !self.btree.mem_pool.is_in_mem(sib_key) {
+            return false;
+        }
+
+        let sib_page = self.btree.read_page(sib_key);
+        let high_fence = self.current_high_fence.as_ref().unwrap();
+
+        // Validate: page is valid, is a leaf, and low fence matches our high fence.
+        if !sib_page.is_valid()
+            || !sib_page.is_leaf()
+            || sib_page.get_raw_key(sib_page.low_fence_slot_id()) != &**high_fence
+        {
+            return false;
+        }
+
+        // Success — position cursor on the sibling.
+        // Foster children on this page will be handled by go_to_next_kv's existing logic.
+        self.current_slot_id = 1;
+        self.current_high_fence =
+            Some(sib_page.get_raw_key(sib_page.high_fence_slot_id()).to_vec());
+        self.current_leaf_page = Some(sib_page);
+        true
+    }
+
+    /// Best-effort repair of the sibling hint on the old leaf page.
+    /// Re-reads the old page if still in memory, upgrades to write, and sets the hint.
+    /// Silently does nothing if the page is evicted or the latch cannot be acquired.
+    /// Does NOT mark page dirty — hint is in-memory only, not persisted to disk.
+    fn repair_sibling_hint_best_effort(
+        &self,
+        old_page_id: PageId,
+        old_frame_id: u32,
+        next_page_id: PageId,
+        next_frame_id: u32,
+    ) {
+        let old_key = PageFrameKey::new_with_frame_id(self.btree.c_key, old_page_id, old_frame_id);
+        if !self.btree.mem_pool.is_in_mem(old_key) {
+            return;
+        }
+        let old_page = self.btree.read_page(old_key);
+        if let Ok(mut write_guard) = old_page.try_upgrade(false) {
+            write_guard.set_sibling_address(next_page_id, next_frame_id);
+        }
+    }
+
     // Sets the cursor to the next leaf page
     fn go_to_next_leaf_page(&mut self) {
         // Pop the current page from the stack
@@ -2443,7 +2821,14 @@ impl<T: MemPool> FosterBtreeCursor<T> {
         // Loop for retrying traversals from internal nodes
         loop {
             let page_frame_key = self.visited.last().unwrap();
+
+            #[cfg(feature = "timer")]
+            let t = Instant::now();
             let mut current_page = self.btree.read_page(*page_frame_key);
+            #[cfg(feature = "timer")]
+            self.scan_timers
+                .record_page_read(t.elapsed().as_nanos() as u64);
+
             if !current_page.is_valid() || !current_page.inside_range(&BTreeKey::Normal(key)) {
                 self.visited.pop().unwrap(); // The previous page was invalidated by concurrent operations. Go one level up.
                 continue;
@@ -2462,7 +2847,15 @@ impl<T: MemPool> FosterBtreeCursor<T> {
                                 val.page_id,
                                 val.frame_id,
                             );
+                            #[cfg(feature = "timer")]
+                            let t = Instant::now();
                             let foster_page = self.btree.read_page(foster_page_key);
+                            #[cfg(feature = "timer")]
+                            {
+                                let elapsed = t.elapsed().as_nanos() as u64;
+                                self.scan_timers.record_page_read(elapsed);
+                                self.scan_timers.record_foster_traverse(elapsed);
+                            }
                             current_page = foster_page;
                             self.visited.push(foster_page_key); // Push the visiting page to the stack
                             continue;
@@ -2478,7 +2871,14 @@ impl<T: MemPool> FosterBtreeCursor<T> {
                             return;
                         }
                     }
+
+                    #[cfg(feature = "timer")]
+                    let t = Instant::now();
                     let slot_id = this_page.upper_bound_slot_id(&BTreeKey::new(key)) - 1;
+                    #[cfg(feature = "timer")]
+                    self.scan_timers
+                        .record_key_compare(t.elapsed().as_nanos() as u64);
+
                     let val = InnerVal::from_bytes(this_page.get_val(slot_id));
                     let page_key = PageFrameKey::new_with_frame_id(
                         self.btree.c_key,
@@ -2486,7 +2886,12 @@ impl<T: MemPool> FosterBtreeCursor<T> {
                         val.frame_id,
                     );
 
+                    #[cfg(feature = "timer")]
+                    let t = Instant::now();
                     let next_page = self.btree.read_page(page_key);
+                    #[cfg(feature = "timer")]
+                    self.scan_timers
+                        .record_page_read(t.elapsed().as_nanos() as u64);
 
                     // Do a prefetch for the next next page
                     let prefetch_slot_id = slot_id + 1;
@@ -2498,7 +2903,12 @@ impl<T: MemPool> FosterBtreeCursor<T> {
                             prefetch_val.page_id,
                             prefetch_val.frame_id,
                         );
+                        #[cfg(feature = "timer")]
+                        let t = Instant::now();
                         let _ = self.btree.mem_pool.prefetch_page(prefetch_page_key);
+                        #[cfg(feature = "timer")]
+                        self.scan_timers
+                            .record_prefetch(t.elapsed().as_nanos() as u64);
                     }
 
                     current_page = next_page;
@@ -2524,7 +2934,7 @@ impl<T: MemPool> FosterBtreeAppendOnlyCursor<T> {
     // Returns ((key, number), value)
     // The number represents the number of times the same key has been inserted
     // to the tree.
-    pub fn get_kv(&self) -> Option<NonUniqueKeyValueType> {
+    pub fn get_kv(&mut self) -> Option<NonUniqueKeyValueType> {
         let (key, val) = self.cursor.get_kv()?;
         let (key, suffix) = key.split_at(key.len() - 4);
         let suffix = u32::from_be_bytes(suffix.try_into().unwrap());
