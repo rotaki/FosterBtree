@@ -40,6 +40,14 @@ impl ConcurrentLockTable {
         }
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.hashmap.is_empty()
+    }
+
+    pub fn lock_count(&self) -> usize {
+        self.hashmap.len()
+    }
+
     pub fn try_shared(&self, key: Vec<u8>) -> bool {
         match self.hashmap.entry(key) {
             dashmap::Entry::Occupied(entry) => {

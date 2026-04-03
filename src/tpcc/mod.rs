@@ -3,9 +3,11 @@ mod loader;
 mod neworder_txn;
 mod orderstatus_txn;
 mod payment_txn;
-mod record_definitions;
+pub mod record_definitions;
 mod stocklevel_txn;
 mod txn_utils;
+
+pub use record_definitions::*;
 
 pub mod prelude {
     pub use super::delivery_txn::*;
