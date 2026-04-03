@@ -2,9 +2,7 @@ use crate::bp::prelude::ContainerId;
 use crate::txn_storage2::{
     catalog::TableMeta,
     field::Field,
-    field_level_storage_trait::{
-        FieldLeveLStorageTrait, ScanOptions, TxnStorageStatus,
-    },
+    field_level_storage_trait::{FieldLeveLStorageTrait, ScanOptions, TxnStorageStatus},
     index_def::{IndexDef, IndexKind},
     managed_table::ManagedTable,
     to_normalized_key,
@@ -118,7 +116,10 @@ impl<'a, S: FieldLeveLStorageTrait> QueryBuilder<'a, S> {
         let options = self.build_scan_options(index_def, meta, container_id)?;
 
         // Execute scan
-        let iter = self.table.storage().scan_range(self.txn, container_id, options)?;
+        let iter = self
+            .table
+            .storage()
+            .scan_range(self.txn, container_id, options)?;
 
         let mut results = Vec::new();
         loop {
@@ -132,12 +133,7 @@ impl<'a, S: FieldLeveLStorageTrait> QueryBuilder<'a, S> {
                         IndexKind::Secondary => {
                             // For secondary index scans, we need to do a back-lookup
                             // to get the full record from the primary index.
-                            self.secondary_back_lookup(
-                                index_def,
-                                meta,
-                                &value_fields,
-                                &key_fields,
-                            )?
+                            self.secondary_back_lookup(index_def, meta, &value_fields, &key_fields)?
                         }
                     };
                     results.push(row);
@@ -156,7 +152,10 @@ impl<'a, S: FieldLeveLStorageTrait> QueryBuilder<'a, S> {
 
         let (index_def, container_id) = self.resolve_index(meta)?;
         let options = self.build_scan_options(index_def, meta, container_id)?;
-        let iter = self.table.storage().scan_range(self.txn, container_id, options)?;
+        let iter = self
+            .table
+            .storage()
+            .scan_range(self.txn, container_id, options)?;
 
         Ok(QueryIter {
             table: self.table,
@@ -245,9 +244,7 @@ impl<'a, S: FieldLeveLStorageTrait> QueryBuilder<'a, S> {
 
             // Verify this column is at the expected position in the key
             let expected_pos = prefix_fields.len();
-            if expected_pos >= key_col_order.len()
-                || key_col_order[expected_pos] != logical_idx
-            {
+            if expected_pos >= key_col_order.len() || key_col_order[expected_pos] != logical_idx {
                 return Err(TxnStorageStatus::ContainerNotFound);
             }
 
@@ -291,17 +288,14 @@ impl<'a, S: FieldLeveLStorageTrait> QueryBuilder<'a, S> {
                 } else {
                     self.select_cols
                         .iter()
-                        .map(|name| {
-                            logical.column_index(name).expect("Unknown column name")
-                        })
+                        .map(|name| logical.column_index(name).expect("Unknown column name"))
                         .collect()
                 }
             }
             IndexKind::Secondary => {
                 // Return all columns from the secondary index container
                 // (we need the PK fields for back-lookup)
-                let container_schema = index_def
-                    .to_container_schema(logical, pk_cols);
+                let container_schema = index_def.to_container_schema(logical, pk_cols);
                 (0..container_schema.cols().len()).collect()
             }
         };
@@ -457,8 +451,7 @@ impl<'a, S: FieldLeveLStorageTrait> QueryIter<'a, S> {
                         }
 
                         // Fetch all columns from primary
-                        let all_cols: Vec<usize> =
-                            (0..meta.logical_schema.num_columns()).collect();
+                        let all_cols: Vec<usize> = (0..meta.logical_schema.num_columns()).collect();
                         let (fields, _) = self.table.storage().get_fields(
                             self.txn,
                             meta.primary_container_id,

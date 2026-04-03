@@ -5,9 +5,9 @@ pub mod schema;
 pub mod transactional_storage;
 
 // Manual-plan record store layers (built on top of the storage trait)
-pub mod logical_schema;
-pub mod index_def;
 pub mod catalog;
+pub mod index_def;
+pub mod logical_schema;
 pub mod managed_table;
 pub mod query_builder;
 

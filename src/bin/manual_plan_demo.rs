@@ -23,8 +23,12 @@ use fbtree::{
 };
 
 /// Shorthand helpers for unsigned field types (the field! macro only covers signed).
-fn u32f(v: u32) -> Field { Field::Uint32(Some(v)) }
-fn u64f(v: u64) -> Field { Field::Uint64(Some(v)) }
+fn u32f(v: u32) -> Field {
+    Field::Uint32(Some(v))
+}
+fn u64f(v: u64) -> Field {
+    Field::Uint64(Some(v))
+}
 
 fn main() {
     println!("=== Manual-Plan Embedded Record Store Demo ===\n");
@@ -92,10 +96,7 @@ fn main() {
         .clone();
 
     println!("Table 'events' registered in catalog.");
-    println!(
-        "  Primary container ID: {}",
-        meta.primary_container_id
-    );
+    println!("  Primary container ID: {}", meta.primary_container_id);
     for (i, cid) in meta.secondary_container_ids.iter().enumerate() {
         println!(
             "  Secondary '{}' container ID: {}",
@@ -112,12 +113,42 @@ fn main() {
     let txn = storage.begin_txn(db_id, TxnOptions::default()).unwrap();
 
     let events = vec![
-        vec![u32f(1), u64f(100), field!(Float64 25.50), field!(String "purchase")],
-        vec![u32f(2), u64f(101), field!(Float64 10.00), field!(String "refund")],
-        vec![u32f(1), u64f(102), field!(Float64 5.75),  field!(String "fee")],
-        vec![u32f(3), u64f(103), field!(Float64 100.0), field!(String "purchase")],
-        vec![u32f(2), u64f(104), field!(Float64 42.00), field!(String "purchase")],
-        vec![u32f(1), u64f(200), field!(Float64 8.00),  field!(String "fee")],
+        vec![
+            u32f(1),
+            u64f(100),
+            field!(Float64 25.50),
+            field!(String "purchase"),
+        ],
+        vec![
+            u32f(2),
+            u64f(101),
+            field!(Float64 10.00),
+            field!(String "refund"),
+        ],
+        vec![
+            u32f(1),
+            u64f(102),
+            field!(Float64 5.75),
+            field!(String "fee"),
+        ],
+        vec![
+            u32f(3),
+            u64f(103),
+            field!(Float64 100.0),
+            field!(String "purchase"),
+        ],
+        vec![
+            u32f(2),
+            u64f(104),
+            field!(Float64 42.00),
+            field!(String "purchase"),
+        ],
+        vec![
+            u32f(1),
+            u64f(200),
+            field!(Float64 8.00),
+            field!(String "fee"),
+        ],
     ];
 
     println!("Inserting {} records...", events.len());
@@ -215,9 +246,7 @@ fn main() {
     // =========================================================================
     println!("--- Delete: Remove event (user_id=3, ts=103) ---");
 
-    table
-        .delete(&txn, vec![u32f(3), u64f(103)])
-        .unwrap();
+    table.delete(&txn, vec![u32f(3), u64f(103)]).unwrap();
 
     // Verify user 3 has no events
     let results = QueryBuilder::new(&table, &txn)
@@ -225,7 +254,10 @@ fn main() {
         .prefix_eq("user_id", u32f(3))
         .execute()
         .unwrap();
-    println!("  Events for user_id=3 after delete: {} rows", results.len());
+    println!(
+        "  Events for user_id=3 after delete: {} rows",
+        results.len()
+    );
     println!();
 
     // =========================================================================

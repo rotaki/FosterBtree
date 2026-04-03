@@ -1,8 +1,4 @@
-use crate::txn_storage2::{
-    field::DataType,
-    logical_schema::LogicalSchema,
-    schema::Schema,
-};
+use crate::txn_storage2::{field::DataType, logical_schema::LogicalSchema, schema::Schema};
 
 /// What role an index plays.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -132,9 +128,7 @@ impl IndexDef {
     pub fn from_bytes(bytes: &[u8]) -> (Self, usize) {
         let mut offset = 0;
 
-        let name_len = u32::from_ne_bytes(
-            bytes[offset..offset + 4].try_into().unwrap(),
-        ) as usize;
+        let name_len = u32::from_ne_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
         offset += 4;
         let name = std::str::from_utf8(&bytes[offset..offset + name_len])
             .expect("Invalid UTF-8")
@@ -147,16 +141,12 @@ impl IndexDef {
         let unique = bytes[offset] != 0;
         offset += 1;
 
-        let key_count = u32::from_ne_bytes(
-            bytes[offset..offset + 4].try_into().unwrap(),
-        ) as usize;
+        let key_count = u32::from_ne_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
         offset += 4;
 
         let mut key_columns = Vec::with_capacity(key_count);
         for _ in 0..key_count {
-            let col = u32::from_ne_bytes(
-                bytes[offset..offset + 4].try_into().unwrap(),
-            ) as usize;
+            let col = u32::from_ne_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
             key_columns.push(col);
             offset += 4;
         }
@@ -231,23 +221,19 @@ impl PhysicalSchema {
     pub fn from_bytes(bytes: &[u8]) -> Self {
         let mut offset = 0;
 
-        let primary_len = u32::from_ne_bytes(
-            bytes[offset..offset + 4].try_into().unwrap(),
-        ) as usize;
+        let primary_len =
+            u32::from_ne_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
         offset += 4;
         let (primary_index, _) = IndexDef::from_bytes(&bytes[offset..offset + primary_len]);
         offset += primary_len;
 
-        let sec_count = u32::from_ne_bytes(
-            bytes[offset..offset + 4].try_into().unwrap(),
-        ) as usize;
+        let sec_count = u32::from_ne_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
         offset += 4;
 
         let mut secondary_indexes = Vec::with_capacity(sec_count);
         for _ in 0..sec_count {
-            let idx_len = u32::from_ne_bytes(
-                bytes[offset..offset + 4].try_into().unwrap(),
-            ) as usize;
+            let idx_len =
+                u32::from_ne_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
             offset += 4;
             let (idx, _) = IndexDef::from_bytes(&bytes[offset..offset + idx_len]);
             secondary_indexes.push(idx);

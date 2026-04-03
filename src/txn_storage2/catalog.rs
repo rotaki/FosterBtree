@@ -74,8 +74,7 @@ impl TableMeta {
         let mut offset = 0;
 
         // Table name
-        let name_len =
-            u32::from_ne_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
+        let name_len = u32::from_ne_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
         offset += 4;
         let name = std::str::from_utf8(&bytes[offset..offset + name_len])
             .expect("Invalid UTF-8")
@@ -83,15 +82,13 @@ impl TableMeta {
         offset += name_len;
 
         // Logical schema
-        let ls_len =
-            u32::from_ne_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
+        let ls_len = u32::from_ne_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
         offset += 4;
         let logical_schema = LogicalSchema::from_bytes(&bytes[offset..offset + ls_len]);
         offset += ls_len;
 
         // Physical schema
-        let ps_len =
-            u32::from_ne_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
+        let ps_len = u32::from_ne_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
         offset += 4;
         let physical_schema = PhysicalSchema::from_bytes(&bytes[offset..offset + ps_len]);
         offset += ps_len;
@@ -105,8 +102,7 @@ impl TableMeta {
         offset += std::mem::size_of::<ContainerId>();
 
         // Secondary container IDs
-        let sec_count =
-            u32::from_ne_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
+        let sec_count = u32::from_ne_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
         offset += 4;
         let mut secondary_container_ids = Vec::with_capacity(sec_count);
         for _ in 0..sec_count {
@@ -163,12 +159,11 @@ impl<S: FieldLeveLStorageTrait> Catalog<S> {
                 let schema = Schema::with_primary_key(
                     vec![
                         (false, DataType::String),   // table name (key)
-                        (false, DataType::VarBytes),  // serialized TableMeta
+                        (false, DataType::VarBytes), // serialized TableMeta
                     ],
                     vec![0],
                 );
-                let opts =
-                    ContainerOptions::new("__catalog__", ContainerDS::BTree, schema);
+                let opts = ContainerOptions::new("__catalog__", ContainerDS::BTree, schema);
                 storage.create_container(db_id, opts)?
             }
         };
@@ -190,9 +185,7 @@ impl<S: FieldLeveLStorageTrait> Catalog<S> {
     fn load_all(&mut self) -> Result<(), TxnStorageStatus> {
         self.tables.clear();
 
-        let txn = self
-            .storage
-            .begin_txn(self.db_id, Default::default())?;
+        let txn = self.storage.begin_txn(self.db_id, Default::default())?;
 
         let scan = self.storage.scan_range(
             &txn,
@@ -305,9 +298,7 @@ impl<S: FieldLeveLStorageTrait> Catalog<S> {
         }
 
         // Remove from catalog container
-        let txn = self
-            .storage
-            .begin_txn(self.db_id, Default::default())?;
+        let txn = self.storage.begin_txn(self.db_id, Default::default())?;
         self.storage.delete_record(
             &txn,
             self.catalog_container_id,

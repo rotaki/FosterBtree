@@ -164,6 +164,34 @@ mod slot {
         read_u32(page_bytes, slot_page_offset + VALUE_SIZE_OFF)
     }
 
+    /// Read record offset and key_size from a slot without constructing a Slot.
+    #[inline(always)]
+    pub fn read_offset_and_key_size(page_bytes: &[u8], slot_page_offset: usize) -> (u32, u32) {
+        let b = &page_bytes[slot_page_offset..slot_page_offset + SLOT_SIZE];
+        let offset = read_u32(b, OFFSET_GHOST_OFF) & OFFSET_MASK;
+        let key_size = read_u32(b, KEY_SIZE_OFF);
+        (offset, key_size)
+    }
+
+    /// Read all three slot fields without constructing a Slot.
+    #[inline(always)]
+    pub fn read_offset_key_val_size(page_bytes: &[u8], slot_page_offset: usize) -> (u32, u32, u32) {
+        let b = &page_bytes[slot_page_offset..slot_page_offset + SLOT_SIZE];
+        let offset = read_u32(b, OFFSET_GHOST_OFF) & OFFSET_MASK;
+        let key_size = read_u32(b, KEY_SIZE_OFF);
+        let value_size = read_u32(b, VALUE_SIZE_OFF);
+        (offset, key_size, value_size)
+    }
+
+    /// Write just the record offset field of a slot, preserving the ghost bit.
+    #[inline(always)]
+    pub fn write_rec_offset(page_bytes: &mut [u8], slot_page_offset: usize, offset: u32) {
+        debug_assert!(offset & GHOST_BIT == 0, "offset too large for 31-bit field");
+        let existing = read_u32(page_bytes, slot_page_offset + OFFSET_GHOST_OFF);
+        let new_val = (existing & GHOST_BIT) | offset;
+        write_u32(page_bytes, slot_page_offset + OFFSET_GHOST_OFF, new_val);
+    }
+
     #[inline(always)]
     pub fn write_ghost(page_bytes: &mut [u8], slot_page_offset: usize, ghost: bool) {
         if ghost {
@@ -174,8 +202,11 @@ mod slot {
     }
 }
 
-use slot::{Slot, SLOT_SIZE, read_ghost, write_ghost};
 use crate::page::AVAILABLE_PAGE_SIZE;
+use slot::{
+    read_ghost, read_key_size, read_offset_and_key_size, read_offset_key_val_size, read_rec_offset,
+    read_value_size, write_ghost, write_rec_offset, Slot, SLOT_SIZE,
+};
 
 pub enum BTreeKey<'a> {
     MinusInfty,
@@ -264,6 +295,7 @@ pub trait FosterBtreePage {
     fn get_id(&self) -> u32;
     fn slot_offset(&self, slot_id: u32) -> usize;
     fn slot(&self, slot_id: u32) -> Option<Slot>;
+    fn slot_unchecked(&self, slot_id: u32) -> Slot;
     fn append_slot(&mut self, slot: &Slot);
     fn update_slot(&mut self, slot_id: u32, slot: &Slot);
     fn linear_search<F>(&self, f: F) -> u32
@@ -497,9 +529,9 @@ impl FosterBtreePage for Page {
         }
         let mut sum_used = 0;
         for i in range {
-            let slot = self.slot(i).unwrap();
-            sum_used += slot.key_size() as usize + slot.value_size() as usize;
-            sum_used += SLOT_SIZE;
+            let slot_off = self.slot_offset(i);
+            let (_, key_size, value_size) = read_offset_key_val_size(self, slot_off);
+            sum_used += key_size as usize + value_size as usize + SLOT_SIZE;
         }
         sum_used as u32
     }
@@ -544,12 +576,19 @@ impl FosterBtreePage for Page {
     #[inline]
     fn slot(&self, slot_id: u32) -> Option<Slot> {
         if slot_id < self.slot_count() {
-            let offset = self.slot_offset(slot_id);
-            let slot_bytes: [u8; SLOT_SIZE] = self[offset..offset + SLOT_SIZE].try_into().unwrap();
-            Some(Slot::from_bytes(slot_bytes))
+            Some(self.slot_unchecked(slot_id))
         } else {
             None
         }
+    }
+
+    /// Read a slot without checking slot_id < slot_count.
+    /// Caller must guarantee slot_id is in bounds.
+    #[inline(always)]
+    fn slot_unchecked(&self, slot_id: u32) -> Slot {
+        let offset = self.slot_offset(slot_id);
+        let slot_bytes: [u8; SLOT_SIZE] = self[offset..offset + SLOT_SIZE].try_into().unwrap();
+        Slot::from_bytes(slot_bytes)
     }
 
     #[inline]
@@ -728,8 +767,9 @@ impl FosterBtreePage for Page {
                 // Safety: compact_into_buf writes every byte in buf[..rec_mem] before reading.
                 const STACK_BUF_SIZE: usize = AVAILABLE_PAGE_SIZE;
                 if rec_mem <= STACK_BUF_SIZE {
-                    let mut recs =
-                        unsafe { std::mem::MaybeUninit::<[u8; STACK_BUF_SIZE]>::uninit().assume_init() };
+                    let mut recs = unsafe {
+                        std::mem::MaybeUninit::<[u8; STACK_BUF_SIZE]>::uninit().assume_init()
+                    };
                     self.compact_into_buf(&mut recs[..rec_mem], ideal_start_offset);
                 } else {
                     let mut recs = vec![0u8; rec_mem];
@@ -744,23 +784,21 @@ impl FosterBtreePage for Page {
     fn compact_into_buf(&mut self, buf: &mut [u8], ideal_start_offset: u32) {
         let rec_mem = buf.len();
         let mut current_size = 0;
+        let slot_count = self.slot_count();
+        let page_len = self.len();
 
-        for i in 0..self.slot_count() {
-            if let Some(mut slot) = self.slot(i) {
-                let offset = slot.offset() as usize;
-                let key_size = slot.key_size() as usize;
-                let value_size = slot.value_size() as usize;
-                let size = key_size + value_size;
-                current_size += size;
+        for i in 0..slot_count {
+            let slot_off = self.slot_offset(i);
+            let (rec_offset, key_size, value_size) = read_offset_key_val_size(self, slot_off);
+            let offset = rec_offset as usize;
+            let size = key_size as usize + value_size as usize;
+            current_size += size;
 
-                let local_offset = rec_mem - current_size;
-                buf[local_offset..local_offset + size]
-                    .copy_from_slice(&self[offset..offset + size]);
+            let local_offset = rec_mem - current_size;
+            buf[local_offset..local_offset + size].copy_from_slice(&self[offset..offset + size]);
 
-                let global_offset = (self.len() - current_size) as u32;
-                slot.set_offset(global_offset);
-                self.update_slot(i, &slot);
-            }
+            let global_offset = (page_len - current_size) as u32;
+            write_rec_offset(self, slot_off, global_offset);
         }
         self[ideal_start_offset as usize..ideal_start_offset as usize + rec_mem]
             .copy_from_slice(buf);
@@ -806,8 +844,7 @@ impl FosterBtreePage for Page {
 
     #[inline]
     fn get_raw_key(&self, slot_id: u32) -> &[u8] {
-        assert!(slot_id < self.slot_count());
-        let slot = self.slot(slot_id).unwrap();
+        let slot = self.slot_unchecked(slot_id);
         let offset = slot.offset() as usize;
         let key_size = slot.key_size() as usize;
         &self[offset..offset + key_size]
@@ -843,7 +880,7 @@ impl FosterBtreePage for Page {
 
     #[inline]
     fn get_val(&self, slot_id: u32) -> &[u8] {
-        let slot = self.slot(slot_id).unwrap();
+        let slot = self.slot_unchecked(slot_id);
         let offset = slot.offset() as usize;
         let key_size = slot.key_size() as usize;
         let value_size = slot.value_size() as usize;
@@ -1108,24 +1145,18 @@ impl FosterBtreePage for Page {
             panic!("Cannot shift slot to the left if start == 0");
         } else if start > end {
             panic!("Slot does not exist at the given slot_id");
-        } else if start == end {
-            self.set_total_bytes_used(
-                self.total_bytes_used() - self.slot(slot_id).unwrap().total_size(),
-            );
-            // No need to shift slots if start == end. Just decrement the slot_count of the page.
-            self.decrement_slot_count();
-        } else {
-            self.set_total_bytes_used(
-                self.total_bytes_used() - self.slot(slot_id).unwrap().total_size(),
-            );
-
-            // Shift the slots to the left by 1
-            // Use copy_within to avoid heap allocation
-            self.copy_within(start..end, start - SLOT_SIZE);
-
-            // Update the slot_count of the page
-            self.decrement_slot_count();
         }
+
+        // Read slot size once via direct field readers
+        let slot_off = self.slot_offset(slot_id);
+        let (_, key_size, value_size) = read_offset_key_val_size(self, slot_off);
+        let rec_size = key_size + value_size + SLOT_SIZE as u32;
+        self.set_total_bytes_used(self.total_bytes_used() - rec_size);
+
+        if start < end {
+            self.copy_within(start..end, start - SLOT_SIZE);
+        }
+        self.decrement_slot_count();
     }
 
     /// Insert a key-value pair into the page.

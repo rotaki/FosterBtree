@@ -70,16 +70,13 @@ impl LogicalSchema {
     pub fn from_bytes(bytes: &[u8]) -> Self {
         let mut offset = 0;
 
-        let col_count = u32::from_ne_bytes(
-            bytes[offset..offset + 4].try_into().unwrap(),
-        ) as usize;
+        let col_count = u32::from_ne_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
         offset += 4;
 
         let mut columns = Vec::with_capacity(col_count);
         for _ in 0..col_count {
-            let name_len = u32::from_ne_bytes(
-                bytes[offset..offset + 4].try_into().unwrap(),
-            ) as usize;
+            let name_len =
+                u32::from_ne_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
             offset += 4;
 
             let name = std::str::from_utf8(&bytes[offset..offset + name_len])

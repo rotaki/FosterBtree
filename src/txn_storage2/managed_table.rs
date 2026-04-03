@@ -2,9 +2,7 @@ use crate::bp::prelude::DatabaseId;
 use crate::txn_storage2::{
     catalog::TableMeta,
     field::{Field, Record},
-    field_level_storage_trait::{
-        FieldLeveLStorageTrait, ScanOptions, TxnStorageStatus,
-    },
+    field_level_storage_trait::{FieldLeveLStorageTrait, ScanOptions, TxnStorageStatus},
 };
 
 /// A handle to a table with automatic index maintenance.
@@ -86,11 +84,7 @@ impl<'a, S: FieldLeveLStorageTrait> ManagedTable<'a, S> {
 
     /// Extract the key fields of a secondary index record (for deletion).
     /// The key is: [secondary_key_fields..., pk_fields_not_in_sec_key...]
-    fn build_secondary_key(
-        &self,
-        sec_idx_pos: usize,
-        full_record: &[Field],
-    ) -> Vec<Field> {
+    fn build_secondary_key(&self, sec_idx_pos: usize, full_record: &[Field]) -> Vec<Field> {
         let sec_def = &self.meta.physical_schema.secondary_indexes[sec_idx_pos];
         let pk_cols = &self.meta.physical_schema.primary_index.key_columns;
 
@@ -162,7 +156,13 @@ impl<'a, S: FieldLeveLStorageTrait> ManagedTable<'a, S> {
         )?;
 
         // Insert into each secondary index
-        for (i, _sec_def) in self.meta.physical_schema.secondary_indexes.iter().enumerate() {
+        for (i, _sec_def) in self
+            .meta
+            .physical_schema
+            .secondary_indexes
+            .iter()
+            .enumerate()
+        {
             let sec_record = self.build_secondary_record(i, &fields, hint);
             let sec_cid = self.meta.secondary_container_ids[i];
             self.storage.insert_record(txn, sec_cid, sec_record, None)?;
@@ -184,7 +184,13 @@ impl<'a, S: FieldLeveLStorageTrait> ManagedTable<'a, S> {
             primary_record,
         )?;
 
-        for (i, _sec_def) in self.meta.physical_schema.secondary_indexes.iter().enumerate() {
+        for (i, _sec_def) in self
+            .meta
+            .physical_schema
+            .secondary_indexes
+            .iter()
+            .enumerate()
+        {
             let sec_record = self.build_secondary_record(i, &fields, hint);
             let sec_cid = self.meta.secondary_container_ids[i];
             self.storage
@@ -203,8 +209,7 @@ impl<'a, S: FieldLeveLStorageTrait> ManagedTable<'a, S> {
         primary_key: Vec<Field>,
     ) -> Result<(), TxnStorageStatus> {
         // Read the full record to compute secondary keys
-        let all_cols: Vec<usize> =
-            (0..self.meta.logical_schema.num_columns()).collect();
+        let all_cols: Vec<usize> = (0..self.meta.logical_schema.num_columns()).collect();
         let (full_fields, _hint) = self.storage.get_fields(
             txn,
             self.meta.primary_container_id,
@@ -214,19 +219,21 @@ impl<'a, S: FieldLeveLStorageTrait> ManagedTable<'a, S> {
         )?;
 
         // Delete from each secondary index
-        for (i, _sec_def) in self.meta.physical_schema.secondary_indexes.iter().enumerate() {
+        for (i, _sec_def) in self
+            .meta
+            .physical_schema
+            .secondary_indexes
+            .iter()
+            .enumerate()
+        {
             let sec_key = self.build_secondary_key(i, &full_fields);
             let sec_cid = self.meta.secondary_container_ids[i];
             self.storage.delete_record(txn, sec_cid, sec_key, None)?;
         }
 
         // Delete from primary
-        self.storage.delete_record(
-            txn,
-            self.meta.primary_container_id,
-            primary_key,
-            None,
-        )?;
+        self.storage
+            .delete_record(txn, self.meta.primary_container_id, primary_key, None)?;
 
         Ok(())
     }
@@ -245,8 +252,7 @@ impl<'a, S: FieldLeveLStorageTrait> ManagedTable<'a, S> {
         // affects a secondary index key.
         if !self.meta.physical_schema.secondary_indexes.is_empty() {
             // Read the full record before update (for old secondary keys)
-            let all_cols: Vec<usize> =
-                (0..self.meta.logical_schema.num_columns()).collect();
+            let all_cols: Vec<usize> = (0..self.meta.logical_schema.num_columns()).collect();
             let (old_fields, _) = self.storage.get_fields(
                 txn,
                 self.meta.primary_container_id,
@@ -262,7 +268,13 @@ impl<'a, S: FieldLeveLStorageTrait> ManagedTable<'a, S> {
             }
 
             // For each secondary index, check if any key column changed
-            for (i, sec_def) in self.meta.physical_schema.secondary_indexes.iter().enumerate() {
+            for (i, sec_def) in self
+                .meta
+                .physical_schema
+                .secondary_indexes
+                .iter()
+                .enumerate()
+            {
                 let affected = sec_def
                     .key_columns
                     .iter()
@@ -272,7 +284,8 @@ impl<'a, S: FieldLeveLStorageTrait> ManagedTable<'a, S> {
                     let sec_cid = self.meta.secondary_container_ids[i];
                     // Delete old secondary entry
                     let old_sec_key = self.build_secondary_key(i, &old_fields);
-                    self.storage.delete_record(txn, sec_cid, old_sec_key, None)?;
+                    self.storage
+                        .delete_record(txn, sec_cid, old_sec_key, None)?;
 
                     // After primary update, re-insert with new key
                     // (we'll insert after the primary update below)
@@ -289,7 +302,13 @@ impl<'a, S: FieldLeveLStorageTrait> ManagedTable<'a, S> {
             )?;
 
             // Re-insert affected secondary index entries
-            for (i, sec_def) in self.meta.physical_schema.secondary_indexes.iter().enumerate() {
+            for (i, sec_def) in self
+                .meta
+                .physical_schema
+                .secondary_indexes
+                .iter()
+                .enumerate()
+            {
                 let affected = sec_def
                     .key_columns
                     .iter()
@@ -297,8 +316,7 @@ impl<'a, S: FieldLeveLStorageTrait> ManagedTable<'a, S> {
 
                 if affected {
                     let sec_cid = self.meta.secondary_container_ids[i];
-                    let new_sec_record =
-                        self.build_secondary_record(i, &new_fields, hint);
+                    let new_sec_record = self.build_secondary_record(i, &new_fields, hint);
                     self.storage
                         .insert_record(txn, sec_cid, new_sec_record, None)?;
                 }
