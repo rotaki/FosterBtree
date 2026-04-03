@@ -167,13 +167,23 @@ impl OverflowTable {
         guard: &crossbeam_epoch::Guard,
     ) -> Option<usize> {
         let bucket = &self.buckets[idx];
-        let inlined = unsafe { (*bucket.inlined.get()).clone() };
-        if let Some((k, v)) = &inlined {
-            if k == key {
-                return Some(*v);
-            }
+        // Acquire the lock to get a consistent read — this is the cold path
+        // so the extra cost is acceptable.
+        while !bucket.try_lock() {
+            std::hint::spin_loop();
         }
-        Self::lookup_chain(&bucket.chain_head, key, guard)
+        let result = unsafe {
+            let inlined = &*bucket.inlined.get();
+            if let Some((k, v)) = inlined {
+                if k == key {
+                    bucket.unlock();
+                    return Some(*v);
+                }
+            }
+            Self::lookup_chain(&bucket.chain_head, key, guard)
+        };
+        bucket.unlock();
+        result
     }
 
     /// Lock-free read path.
