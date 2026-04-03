@@ -249,15 +249,15 @@ impl PaymentTxn {
 /// The Input struct for PaymentTx
 #[derive(Default)]
 pub struct PaymentTxnInput {
-    w_id: u16,
-    d_id: u8,
-    c_id: u32,
-    c_w_id: u16,
-    c_d_id: u8,
-    h_amount: f64,
-    h_date: Timestamp,
-    by_last_name: bool,
-    c_last: [u8; Customer::MAX_LAST + 1],
+    pub w_id: u16,
+    pub d_id: u8,
+    pub c_id: u32,
+    pub c_w_id: u16,
+    pub c_d_id: u8,
+    pub h_amount: f64,
+    pub h_date: Timestamp,
+    pub by_last_name: bool,
+    pub c_last: [u8; Customer::MAX_LAST + 1],
 }
 
 impl PaymentTxnInput {

@@ -28,12 +28,40 @@ pub fn get_bp(num_frames: usize, cm: Arc<ContainerManager>) -> Arc<impl MemPool>
         use fbtree::bp::BufferPoolClock;
         Arc::new(BufferPoolClock::<64>::new(num_frames, cm).unwrap())
     }
+    #[cfg(feature = "bp_pt2")]
+    {
+        use fbtree::bp::get_test_pt_two_hash_with_cm;
+        get_test_pt_two_hash_with_cm(num_frames, cm)
+    }
+    #[cfg(feature = "bp_pt_bucket")]
+    {
+        use fbtree::bp::PredictiveTranslationFPBP;
+        Arc::new(PredictiveTranslationFPBP::new(num_frames, cm).unwrap())
+    }
+    #[cfg(feature = "bp_pt2_bucket")]
+    {
+        use fbtree::bp::PredictiveTranslationFPTwoBP;
+        Arc::new(PredictiveTranslationFPTwoBP::new(num_frames, cm).unwrap())
+    }
+    #[cfg(feature = "bp_pt4_bucket")]
+    {
+        use fbtree::bp::PredictiveTranslationFPFourBP;
+        Arc::new(PredictiveTranslationFPFourBP::new(num_frames, cm).unwrap())
+    }
     #[cfg(feature = "bp_pt")]
     {
         use fbtree::bp::PredictiveTranslationBP;
         Arc::new(PredictiveTranslationBP::new(num_frames, cm).unwrap())
     }
-    #[cfg(not(any(feature = "vmcache", feature = "bp_clock", feature = "bp_pt")))]
+    #[cfg(not(any(
+        feature = "vmcache",
+        feature = "bp_clock",
+        feature = "bp_pt",
+        feature = "bp_pt2",
+        feature = "bp_pt_bucket",
+        feature = "bp_pt2_bucket",
+        feature = "bp_pt4_bucket"
+    )))]
     {
         use fbtree::bp::BufferPool;
         Arc::new(BufferPool::new(num_frames, cm).unwrap())

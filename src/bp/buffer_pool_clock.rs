@@ -5,6 +5,7 @@ use super::{
     buffer_pool::BPStats,
     eviction_policy::{ClockEvictionPolicy, EvictionPolicy},
     frame_guards::{FrameMeta, FrameReadGuard, FrameWriteGuard},
+    macro_profile::{report as macro_profile_report, scoped as macro_profile_scoped, BpMacroOp},
     mem_pool_trait::{ContainerKey, MemPool, MemPoolStatus, MemoryStats, PageFrameKey, PageKey},
 };
 use crate::{
@@ -18,7 +19,7 @@ use std::{
     cell::{RefCell, UnsafeCell},
     collections::BTreeMap,
     sync::{
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicU64, AtomicUsize, Ordering},
         Arc, OnceLock,
     },
 };
@@ -31,6 +32,68 @@ type FRGuard = FrameReadGuard<EvictionPolicyImpl>;
 use concurrent_queue::ConcurrentQueue;
 use dashmap::{mapref::entry, DashMap};
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
+
+#[cfg(feature = "pt_profile")]
+pub struct ClockFastPathProfile {
+    pub read_hits: AtomicU64,
+    pub read_total_ns: AtomicU64,
+    pub read_meta_check_ns: AtomicU64,
+    pub read_latch_ns: AtomicU64,
+    pub read_revalidate_ns: AtomicU64,
+    pub read_evict_update_ns: AtomicU64,
+}
+
+#[cfg(feature = "pt_profile")]
+impl ClockFastPathProfile {
+    fn new() -> Self {
+        Self {
+            read_hits: AtomicU64::new(0),
+            read_total_ns: AtomicU64::new(0),
+            read_meta_check_ns: AtomicU64::new(0),
+            read_latch_ns: AtomicU64::new(0),
+            read_revalidate_ns: AtomicU64::new(0),
+            read_evict_update_ns: AtomicU64::new(0),
+        }
+    }
+
+    fn print(&self) {
+        let hits = self.read_hits.load(Ordering::Relaxed);
+        if hits == 0 {
+            return;
+        }
+
+        let avg = |ns: u64| -> String {
+            let avg = ns as f64 / hits as f64;
+            if avg >= 1000.0 {
+                format!("{:.2} us", avg / 1000.0)
+            } else {
+                format!("{:.1} ns", avg)
+            }
+        };
+
+        println!("Clock fast-path read hits: {}", hits);
+        println!(
+            "Clock fast-path read avg: {}",
+            avg(self.read_total_ns.load(Ordering::Relaxed))
+        );
+        println!(
+            "  meta check:         {}",
+            avg(self.read_meta_check_ns.load(Ordering::Relaxed))
+        );
+        println!(
+            "  latch acquire:      {}",
+            avg(self.read_latch_ns.load(Ordering::Relaxed))
+        );
+        println!(
+            "  post-latch verify:  {}",
+            avg(self.read_revalidate_ns.load(Ordering::Relaxed))
+        );
+        println!(
+            "  evict update:       {}",
+            avg(self.read_evict_update_ns.load(Ordering::Relaxed))
+        );
+    }
+}
 
 pub struct PageToFrame {
     map: DashMap<ContainerKey, Arc<DashMap<PageId, usize>>>, // (c_key, page_id) -> frame_index
@@ -195,6 +258,8 @@ pub struct BufferPoolClock<const EVICTION_BATCH_SIZE: usize> {
     metas: UnsafeCell<Vec<Box<FMeta>>>, // Boxed to be able to use box::as_mut_ptr to have multiple mutable references to the same object
     page_to_frame: PageToFrame, // (c_key, page_id) -> frame_index
     stats: BPStats,
+    #[cfg(feature = "pt_profile")]
+    fast_path_profile: ClockFastPathProfile,
 }
 
 impl<const EVICTION_BATCH_SIZE: usize> Drop for BufferPoolClock<EVICTION_BATCH_SIZE> {
@@ -248,6 +313,8 @@ impl<const EVICTION_BATCH_SIZE: usize> BufferPoolClock<EVICTION_BATCH_SIZE> {
             pages,
             metas,
             stats: BPStats::new(),
+            #[cfg(feature = "pt_profile")]
+            fast_path_profile: ClockFastPathProfile::new(),
         })
     }
 
@@ -562,6 +629,7 @@ impl<const EVICTION_BATCH_SIZE: usize> MemPool for BufferPoolClock<EVICTION_BATC
     /// The newly allocated page is not formatted except for the page id.
     /// The caller is responsible for initializing the page.
     fn create_new_page_for_write(&self, c_key: ContainerKey) -> Result<FWGuard, MemPoolStatus> {
+        let _macro_timer = macro_profile_scoped(BpMacroOp::CreateNewPage);
         self.stats.inc_new_page();
 
         self.ensure_free_frames()?;
@@ -624,6 +692,7 @@ impl<const EVICTION_BATCH_SIZE: usize> MemPool for BufferPoolClock<EVICTION_BATC
     }
 
     fn get_page_for_write(&self, key: PageFrameKey) -> Result<FWGuard, MemPoolStatus> {
+        let _macro_timer = macro_profile_scoped(BpMacroOp::GetPageWrite);
         log_debug!("Page write: {}", key);
         self.stats.inc_write_count();
 
@@ -691,24 +760,68 @@ impl<const EVICTION_BATCH_SIZE: usize> MemPool for BufferPoolClock<EVICTION_BATC
     }
 
     fn get_page_for_read(&self, key: PageFrameKey) -> Result<FRGuard, MemPoolStatus> {
+        let _macro_timer = macro_profile_scoped(BpMacroOp::GetPageRead);
         log_debug!("Page read: {}", key);
         self.stats.inc_read_count();
 
         #[cfg(not(feature = "no_bp_hint"))]
         {
             // Fast path access to the frame using frame_id
+            #[cfg(feature = "pt_profile")]
+            let fast_path_start = std::time::Instant::now();
             let frame_id = key.frame_id();
             if (frame_id as usize) < self.num_frames {
                 // Check the page_key first to avoid acquiring the latch of a not-matching page
-                if unsafe { &(&(*self.metas.get()))[frame_id as usize] }.key() == Some(key.p_key())
-                {
+                #[cfg(feature = "pt_profile")]
+                let meta_start = std::time::Instant::now();
+                let matches = unsafe { &(&(*self.metas.get()))[frame_id as usize] }.key()
+                    == Some(key.p_key());
+                #[cfg(feature = "pt_profile")]
+                let meta_ns = meta_start.elapsed().as_nanos() as u64;
+                if matches {
+                    #[cfg(feature = "pt_profile")]
+                    let latch_start = std::time::Instant::now();
                     let guard = self.try_get_read_guard(frame_id as usize);
+                    #[cfg(feature = "pt_profile")]
+                    let latch_ns = latch_start.elapsed().as_nanos() as u64;
                     match guard {
-                        Some(g) if g.page_key().map(|k| k == key.p_key()).unwrap_or(false) => {
-                            // Update the eviction info
-                            g.evict_info().reset();
-                            log_debug!("Page fast path read: {}", key);
-                            return Ok(g);
+                        Some(g) => {
+                            #[cfg(feature = "pt_profile")]
+                            let revalidate_start = std::time::Instant::now();
+                            let valid = g.page_key().map(|k| k == key.p_key()).unwrap_or(false);
+                            #[cfg(feature = "pt_profile")]
+                            let revalidate_ns = revalidate_start.elapsed().as_nanos() as u64;
+                            if valid {
+                                #[cfg(feature = "pt_profile")]
+                                let evict_start = std::time::Instant::now();
+                                // Update the eviction info
+                                g.evict_info().reset();
+                                #[cfg(feature = "pt_profile")]
+                                {
+                                    let evict_ns = evict_start.elapsed().as_nanos() as u64;
+                                    self.fast_path_profile
+                                        .read_hits
+                                        .fetch_add(1, Ordering::Relaxed);
+                                    self.fast_path_profile.read_total_ns.fetch_add(
+                                        fast_path_start.elapsed().as_nanos() as u64,
+                                        Ordering::Relaxed,
+                                    );
+                                    self.fast_path_profile
+                                        .read_meta_check_ns
+                                        .fetch_add(meta_ns, Ordering::Relaxed);
+                                    self.fast_path_profile
+                                        .read_latch_ns
+                                        .fetch_add(latch_ns, Ordering::Relaxed);
+                                    self.fast_path_profile
+                                        .read_revalidate_ns
+                                        .fetch_add(revalidate_ns, Ordering::Relaxed);
+                                    self.fast_path_profile
+                                        .read_evict_update_ns
+                                        .fetch_add(evict_ns, Ordering::Relaxed);
+                                }
+                                log_debug!("Page fast path read: {}", key);
+                                return Ok(g);
+                            }
                         }
                         _ => {}
                     }
@@ -831,6 +944,14 @@ impl<const EVICTION_BATCH_SIZE: usize> MemPool for BufferPoolClock<EVICTION_BATC
     // Reset the runtime stats
     unsafe fn reset_stats(&self) {
         self.stats.clear();
+    }
+
+    fn print_profile(&self) {
+        if let Some(report) = macro_profile_report() {
+            println!("\n{}", report);
+        }
+        #[cfg(feature = "pt_profile")]
+        self.fast_path_profile.print();
     }
 
     /// Reset the buffer pool to its initial state.

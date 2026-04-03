@@ -26,23 +26,12 @@ struct Entry {
     pid: AtomicU64,
 }
 
-/// A very small Murmur ‐ style 64-bit hash identical to the C++ version.
+use super::hash::hash_u64;
+
+/// Alias for the shared Murmur64 finalizer.
 #[inline(always)]
-fn hash(mut k: u64) -> u64 {
-    const M: u64 = 0xc6a4a7935bd1e995;
-    const R: u32 = 47;
-    let mut h = 0x8445d61a4e774912u64 ^ (8u64).wrapping_mul(M);
-
-    k = k.wrapping_mul(M);
-    k ^= k >> R;
-    k = k.wrapping_mul(M);
-
-    h ^= k;
-    h = h.wrapping_mul(M);
-    h ^= h >> R;
-    h = h.wrapping_mul(M);
-    h ^= h >> R;
-    h
+fn hash(k: u64) -> u64 {
+    hash_u64(k)
 }
 
 /// Allocate `len` bytes backed by huge pages.  Panics on failure.

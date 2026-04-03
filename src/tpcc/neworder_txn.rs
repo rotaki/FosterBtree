@@ -311,21 +311,21 @@ impl NewOrderTxn {
 /// The Input struct for NewOrderTxn
 #[derive(Default)]
 pub struct NewOrderTxnInput {
-    w_id: u16,
-    d_id: u8,
-    c_id: u32,
-    ol_cnt: u8,
-    o_entry_d: Timestamp,
-    rbk: bool,
-    is_remote: bool,
-    items: Vec<NewOrderItem>,
+    pub w_id: u16,
+    pub d_id: u8,
+    pub c_id: u32,
+    pub ol_cnt: u8,
+    pub o_entry_d: Timestamp,
+    pub rbk: bool,
+    pub is_remote: bool,
+    pub items: Vec<NewOrderItem>,
 }
 
 #[derive(Default)]
 pub struct NewOrderItem {
-    ol_supply_w_id: u16,
-    ol_i_id: u32,
-    ol_quantity: u8,
+    pub ol_supply_w_id: u16,
+    pub ol_i_id: u32,
+    pub ol_quantity: u8,
 }
 
 impl NewOrderTxnInput {

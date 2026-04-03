@@ -27,6 +27,22 @@ pub fn print_cfg_flags() {
     {
         println!("Using Predictive Translation (PT) buffer pool");
     }
+    #[cfg(feature = "bp_pt2")]
+    {
+        println!("Using Predictive Translation (PT) buffer pool with two hashes");
+    }
+    #[cfg(feature = "bp_pt_bucket")]
+    {
+        println!("Using Predictive Translation (PT) bucket-validate-first buffer pool");
+    }
+    #[cfg(feature = "bp_pt2_bucket")]
+    {
+        println!("Using Predictive Translation (PT) two-hash bucket-validate-first buffer pool");
+    }
+    #[cfg(feature = "bp_overflow")]
+    {
+        println!("Using OverflowTable (custom HT) buffer pool");
+    }
     #[cfg(feature = "bp_dashmap")]
     {
         println!("Using DashMap baseline buffer pool");
@@ -39,6 +55,10 @@ pub fn print_cfg_flags() {
         feature = "vmcache",
         feature = "bp_clock",
         feature = "bp_pt",
+        feature = "bp_pt2",
+        feature = "bp_pt_bucket",
+        feature = "bp_pt2_bucket",
+        feature = "bp_overflow",
         feature = "bp_dashmap",
         feature = "bp_hashmap"
     )))]

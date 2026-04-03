@@ -473,4 +473,8 @@ pub trait MemPool: Sync + Send {
     ///
     /// The caller must ensure that the memory pool is not in use when calling this function.
     unsafe fn reset_stats(&self);
+
+    /// Print sub-step profile counters (PT-only, feature = "pt_profile").
+    /// Default is no-op.
+    fn print_profile(&self) {}
 }

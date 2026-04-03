@@ -31,10 +31,19 @@ no_tree_hint = []
 no_bp_hint = []
 
 # BP type
+bp_overflow = []  # overflow_bp module: custom chaining HT (OverflowTable) + clock
 bp_dashmap = []   # dashmap module: DashMap (sharded) + clock; concurrent translation
 bp_hashmap = []   # hashmap module: single RwLock<HashMap>; paper "traditional" baseline
 bp_clock = []
-bp_pt = []
+bp_pt = ["no_bp_hint"]
+bp_pt2 = ["no_bp_hint"]       # predictive_translation_two module: PT with two hash predictions
+bp_pt_bucket = ["no_bp_hint"] # PT variant: validate preferred frame via bucket head before lookup
+bp_pt2_bucket = ["no_bp_hint"] # PT variant: two hashes + metadata verify-and-fast-return
+bp_pt4_bucket = ["no_bp_hint"] # PT variant: four hashes + metadata verify-and-fast-return
+pt_counts = []    # Lightweight PT hit/fallback counters without timing detail
+pt_profile = ["bp_pt"]  # Enables sub-step timing within PT page accesses
+pt_no_prefetch = []     # Disable PT speculative prefetch for comparison runs
+bp_macro_profile = []   # Coarse BP method timing for create/read/write paths
 vmcache = ["no_bp_hint"] # vmcache does not need a bp hint
 
 # Old iterator for foster btree

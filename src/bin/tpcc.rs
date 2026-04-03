@@ -35,10 +35,30 @@ pub fn get_bp(num_frames: usize) -> Arc<impl MemPool> {
         use fbtree::bp::get_test_bp_clock;
         get_test_bp_clock::<64>(num_frames)
     }
+    #[cfg(feature = "bp_pt2")]
+    {
+        use fbtree::bp::get_test_pt_two_hash;
+        get_test_pt_two_hash(num_frames)
+    }
+    #[cfg(feature = "bp_pt_bucket")]
+    {
+        use fbtree::bp::get_test_pt_bucket_validate;
+        get_test_pt_bucket_validate(num_frames)
+    }
+    #[cfg(feature = "bp_pt2_bucket")]
+    {
+        use fbtree::bp::get_test_pt_two_hash_bucket_validate;
+        get_test_pt_two_hash_bucket_validate(num_frames)
+    }
     #[cfg(feature = "bp_pt")]
     {
         use fbtree::bp::get_test_pt;
         get_test_pt(num_frames)
+    }
+    #[cfg(feature = "bp_overflow")]
+    {
+        use fbtree::bp::get_test_overflow_bp;
+        get_test_overflow_bp(num_frames)
     }
     #[cfg(feature = "bp_dashmap")]
     {
@@ -54,6 +74,10 @@ pub fn get_bp(num_frames: usize) -> Arc<impl MemPool> {
         feature = "vmcache",
         feature = "bp_clock",
         feature = "bp_pt",
+        feature = "bp_pt2",
+        feature = "bp_pt_bucket",
+        feature = "bp_pt2_bucket",
+        feature = "bp_overflow",
         feature = "bp_dashmap",
         feature = "bp_hashmap"
     )))]

@@ -12,8 +12,9 @@
 //!       (move to preferred frame if free, or swap with occupant and demote).
 //!       Probabilities: 1/50 (no demotion) or 1/512 (demotion needed).
 //!
-//! - [x] **One-hit-wonder** (Sec 3.2): overflow access count per page; promotion
-//!       only considered when count >= 2 (so first access never promotes).
+//! - [x] **Promotion** (Sec 3.2): any page found in an overflow slot is already
+//!       resident (≥ 2nd access), so it is immediately eligible for probabilistic
+//!       promotion on the write path. No per-page counter needed (paper-aligned).
 //!
 //! - [x] **Lock-free overflow reads** (Sec 4.2): overflow table uses version +
 //!       ArcSwap per bucket; read path has no mutex so lookup can overlap with
@@ -35,6 +36,8 @@ use super::{
     buffer_pool::BPStats,
     eviction_policy::{ClockEvictionPolicy, EvictionPolicy},
     frame_guards::{FrameMeta, FrameReadGuard, FrameWriteGuard},
+    hash::{hash_page_key, hash_page_key_2, hash_page_key_3, hash_page_key_4},
+    macro_profile::{report as macro_profile_report, scoped as macro_profile_scoped, BpMacroOp},
     mem_pool_trait::{ContainerKey, MemPool, MemPoolStatus, MemoryStats, PageFrameKey, PageKey},
 };
 use crate::random::small_thread_rng;
@@ -49,15 +52,230 @@ use rand::RngCore;
 use std::{
     cell::UnsafeCell,
     collections::BTreeMap,
-    hash::{Hash, Hasher},
     sync::{
-        atomic::{AtomicU32, AtomicUsize, Ordering},
+        atomic::{AtomicUsize, Ordering},
         Arc,
     },
 };
 
-use dashmap::{DashMap, DashSet};
+use concurrent_queue::ConcurrentQueue;
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
+
+#[cfg(target_arch = "x86_64")]
+use core::arch::x86_64::{_mm_prefetch, _MM_HINT_T0};
+
+// ---------------------------------------------------------------------------
+// Sub-step profiling / counters (feature = "pt_profile" / "pt_counts")
+// ---------------------------------------------------------------------------
+
+#[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
+use std::sync::atomic::AtomicU64;
+
+/// Cumulative counters for sub-step timing within PT page accesses.
+/// All `_ns` fields are cumulative nanoseconds across all threads.
+#[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
+pub struct PTProfileCounters {
+    // -- timing (cumulative ns) --
+    #[cfg(feature = "pt_profile")]
+    pub ensure_free_ns: AtomicU64,
+    #[cfg(feature = "pt_profile")]
+    pub hash_preferred_ns: AtomicU64,
+    #[cfg(feature = "pt_profile")]
+    pub overflow_lookup_ns: AtomicU64,
+    #[cfg(feature = "pt_profile")]
+    pub latch_ns: AtomicU64,
+    #[cfg(feature = "pt_profile")]
+    pub promotion_check_ns: AtomicU64,
+    #[cfg(feature = "pt_profile")]
+    pub fault_ns: AtomicU64,
+    // -- counts --
+    pub preferred_frame_hits: AtomicU64,
+    pub fast_return_read_hits: AtomicU64,
+    pub fast_return_read_ns: AtomicU64,
+    pub fast_return_meta_check_ns: AtomicU64,
+    pub fast_return_latch_ns: AtomicU64,
+    pub fast_return_revalidate_ns: AtomicU64,
+    pub fast_return_evict_update_ns: AtomicU64,
+    pub overflow_chain_hits: AtomicU64,
+    pub page_faults: AtomicU64,
+    pub total_reads: AtomicU64,
+    pub total_writes: AtomicU64,
+    pub promotions_attempted: AtomicU64,
+    pub promotions_fired: AtomicU64,
+}
+
+#[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
+impl PTProfileCounters {
+    pub fn new() -> Self {
+        Self {
+            #[cfg(feature = "pt_profile")]
+            ensure_free_ns: AtomicU64::new(0),
+            #[cfg(feature = "pt_profile")]
+            hash_preferred_ns: AtomicU64::new(0),
+            #[cfg(feature = "pt_profile")]
+            overflow_lookup_ns: AtomicU64::new(0),
+            #[cfg(feature = "pt_profile")]
+            latch_ns: AtomicU64::new(0),
+            #[cfg(feature = "pt_profile")]
+            promotion_check_ns: AtomicU64::new(0),
+            #[cfg(feature = "pt_profile")]
+            fault_ns: AtomicU64::new(0),
+            preferred_frame_hits: AtomicU64::new(0),
+            fast_return_read_hits: AtomicU64::new(0),
+            fast_return_read_ns: AtomicU64::new(0),
+            fast_return_meta_check_ns: AtomicU64::new(0),
+            fast_return_latch_ns: AtomicU64::new(0),
+            fast_return_revalidate_ns: AtomicU64::new(0),
+            fast_return_evict_update_ns: AtomicU64::new(0),
+            overflow_chain_hits: AtomicU64::new(0),
+            page_faults: AtomicU64::new(0),
+            total_reads: AtomicU64::new(0),
+            total_writes: AtomicU64::new(0),
+            promotions_attempted: AtomicU64::new(0),
+            promotions_fired: AtomicU64::new(0),
+        }
+    }
+
+    pub fn print(&self) {
+        let r = |a: &AtomicU64| a.load(Ordering::Relaxed);
+        let total_accesses = r(&self.total_reads) + r(&self.total_writes);
+        println!("\n=== PT Access Profile ===");
+        println!(
+            "Total accesses:       {:>12}  (reads: {}, writes: {})",
+            total_accesses,
+            r(&self.total_reads),
+            r(&self.total_writes)
+        );
+        println!(
+            "Preferred frame hits: {:>12}  ({:.1}%)",
+            r(&self.preferred_frame_hits),
+            r(&self.preferred_frame_hits) as f64 / total_accesses.max(1) as f64 * 100.0
+        );
+        println!(
+            "Fast-return read hits:{:>12}",
+            r(&self.fast_return_read_hits)
+        );
+        println!(
+            "Overflow chain hits:  {:>12}  ({:.1}%)",
+            r(&self.overflow_chain_hits),
+            r(&self.overflow_chain_hits) as f64 / total_accesses.max(1) as f64 * 100.0
+        );
+        println!(
+            "Page faults:          {:>12}  ({:.1}%)",
+            r(&self.page_faults),
+            r(&self.page_faults) as f64 / total_accesses.max(1) as f64 * 100.0
+        );
+        println!(
+            "Promotions attempted: {:>12}",
+            r(&self.promotions_attempted)
+        );
+        println!("Promotions fired:     {:>12}", r(&self.promotions_fired));
+
+        #[cfg(feature = "pt_profile")]
+        {
+            let total_timed_ns = r(&self.ensure_free_ns)
+                + r(&self.hash_preferred_ns)
+                + r(&self.overflow_lookup_ns)
+                + r(&self.latch_ns)
+                + r(&self.promotion_check_ns)
+                + r(&self.fault_ns);
+            let fmt = |ns: u64, count: u64| -> String {
+                if count == 0 {
+                    return "N/A".to_string();
+                }
+                let avg = ns as f64 / count as f64;
+                if avg >= 1000.0 {
+                    format!(
+                        "{:>8.2} us  ({:>5.1}%)",
+                        avg / 1000.0,
+                        ns as f64 / total_timed_ns as f64 * 100.0
+                    )
+                } else {
+                    format!(
+                        "{:>8.1} ns  ({:>5.1}%)",
+                        avg,
+                        ns as f64 / total_timed_ns as f64 * 100.0
+                    )
+                }
+            };
+
+            println!();
+            println!("Per-access avg latency breakdown (cumulative / total_accesses):");
+            println!(
+                "  ensure_free_frames: {}",
+                fmt(r(&self.ensure_free_ns), total_accesses)
+            );
+            println!(
+                "  hash + preferred:   {}",
+                fmt(r(&self.hash_preferred_ns), total_accesses)
+            );
+            println!(
+                "  overflow lookup:    {}",
+                fmt(r(&self.overflow_lookup_ns), total_accesses)
+            );
+            println!(
+                "  latch acquire:      {}",
+                fmt(r(&self.latch_ns), total_accesses)
+            );
+            println!(
+                "  promotion check:    {}",
+                fmt(r(&self.promotion_check_ns), total_accesses)
+            );
+            println!(
+                "  page fault:         {}",
+                fmt(r(&self.fault_ns), r(&self.page_faults))
+            );
+            println!("  ---");
+            println!(
+                "  total timed:        {}",
+                fmt(total_timed_ns, total_accesses)
+            );
+        }
+        println!("=====================\n");
+
+        let fast_return_hits = r(&self.fast_return_read_hits);
+        if fast_return_hits > 0 {
+            let avg = r(&self.fast_return_read_ns) as f64 / fast_return_hits as f64;
+            if avg >= 1000.0 {
+                println!(
+                    "Fast-return read hit avg: {:.2} us over {} hits",
+                    avg / 1000.0,
+                    fast_return_hits
+                );
+            } else {
+                println!(
+                    "Fast-return read hit avg: {:.1} ns over {} hits",
+                    avg, fast_return_hits
+                );
+            }
+            let fmt_stage = |ns: u64| -> String {
+                let avg = ns as f64 / fast_return_hits as f64;
+                if avg >= 1000.0 {
+                    format!("{:.2} us", avg / 1000.0)
+                } else {
+                    format!("{:.1} ns", avg)
+                }
+            };
+            println!(
+                "  meta check:         {}",
+                fmt_stage(r(&self.fast_return_meta_check_ns))
+            );
+            println!(
+                "  latch acquire:      {}",
+                fmt_stage(r(&self.fast_return_latch_ns))
+            );
+            println!(
+                "  post-latch verify:  {}",
+                fmt_stage(r(&self.fast_return_revalidate_ns))
+            );
+            println!(
+                "  evict update:       {}",
+                fmt_stage(r(&self.fast_return_evict_update_ns))
+            );
+            println!();
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Type aliases (mirrors the convention in buffer_pool_clock.rs)
@@ -73,43 +291,42 @@ use super::overflow_table::OverflowTable;
 // Per-page fault claim (ensures only one thread faults a given page at a time)
 // ---------------------------------------------------------------------------
 
-/// Guard that removes `key` from `fault_in_progress` on drop.
-struct FaultClaim(Arc<DashMap<PageKey, ()>>, PageKey);
-
-impl Drop for FaultClaim {
-    fn drop(&mut self) {
-        self.0.remove(&self.1);
-    }
-}
-
 // ---------------------------------------------------------------------------
 // PredictiveTranslationBP
 // ---------------------------------------------------------------------------
 
+/// Map a 64-bit hash uniformly to `[0, n)` without division.
+///
+/// Uses the "fastrange" trick (Lemire): `(hash * n) >> 64`.
+/// A single widening multiply + shift (~3-4 cycles) vs `div` (~20-30 cycles).
+#[inline(always)]
+fn fastmod(hash: u64, n: u64) -> usize {
+    ((hash as u128 * n as u128) >> 64) as usize
+}
+
 /// Buffer pool using predictive translation.
 pub struct PredictiveTranslationBP {
-    num_frames: usize,
+    pub(crate) num_frames: usize,
+    num_frames_u64: u64, // cached as u64 for fastmod
     used_frames: AtomicUsize,
     clock_hand: AtomicUsize,
     container_manager: Arc<ContainerManager>,
-    /// Indices of frames known to be free. Set allows taking the preferred frame when free.
-    free_frames: DashSet<usize>,
+    /// Free-frame hint queue. Metadata is the source of truth; the queue is only a hint.
+    free_list: ConcurrentQueue<usize>,
     /// The actual page data for each frame.
     #[allow(clippy::vec_box)]
-    pages: UnsafeCell<Vec<Box<Page>>>,
+    pub(crate) pages: UnsafeCell<Vec<Box<Page>>>,
     /// Per-frame metadata (latch, dirty bit, eviction info, page key).
     #[allow(clippy::vec_box)]
-    metas: UnsafeCell<Vec<Box<FMeta>>>,
+    pub(crate) metas: UnsafeCell<Vec<Box<FMeta>>>,
     /// Overflow table: maps PageKey -> frame index for pages NOT in their
     /// preferred frame.  Pages in their preferred frame are found via tag check.
-    overflow: OverflowTable,
-    /// One-hit-wonder (§3.2): access count per page while in overflow. Used to
-    /// defer promotion until at least the second access.
-    overflow_access_count: Arc<DashMap<PageKey, AtomicU32>>,
-    /// Pages currently being faulted; claim before faulting, release on drop.
-    fault_in_progress: Arc<DashMap<PageKey, ()>>,
+    pub(crate) overflow: OverflowTable,
     /// Runtime statistics.
-    stats: BPStats,
+    pub(crate) stats: BPStats,
+    /// PT access counters; timing fields are only active with `pt_profile`.
+    #[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
+    pub profile: PTProfileCounters,
 }
 
 // SAFETY: synchronisation is done via per-frame latches and the translation table.
@@ -137,9 +354,9 @@ impl PredictiveTranslationBP {
     ) -> Result<Self, MemPoolStatus> {
         log_debug!("PredictiveTranslationBP created: num_frames={}", num_frames);
 
-        let free_frames = DashSet::new();
+        let free_list = ConcurrentQueue::bounded(num_frames);
         for i in 0..num_frames {
-            free_frames.insert(i);
+            free_list.push(i).unwrap();
         }
 
         let pages: UnsafeCell<Vec<Box<Page>>> = UnsafeCell::new(
@@ -158,16 +375,18 @@ impl PredictiveTranslationBP {
 
         Ok(Self {
             num_frames,
+            num_frames_u64: num_frames as u64,
             used_frames: AtomicUsize::new(0),
             clock_hand: AtomicUsize::new(0),
             container_manager,
-            free_frames,
+            free_list,
             pages,
             metas,
             overflow: OverflowTable::new(num_frames),
-            overflow_access_count: Arc::new(DashMap::new()),
-            fault_in_progress: Arc::new(DashMap::new()),
+
             stats: BPStats::new(),
+            #[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
+            profile: PTProfileCounters::new(),
         })
     }
 
@@ -175,28 +394,30 @@ impl PredictiveTranslationBP {
     // Deterministic placement
     // ------------------------------------------------------------------
 
-    /// Compute the preferred frame index for a page key.
-    /// `hash(page_key) % num_frames`.
+    /// Compute the preferred frame index for a page key (single hash).
     #[inline]
-    fn preferred_frame(&self, key: &PageKey) -> usize {
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        key.hash(&mut hasher);
-        hasher.finish() as usize % self.num_frames
+    pub(crate) fn preferred_frame(&self, key: &PageKey) -> usize {
+        fastmod(hash_page_key(key), self.num_frames_u64)
     }
 
-    /// Check whether frame `idx` currently holds `key` (tag check).
-    /// This reads the atomic page key from FrameMeta without latching.
+    /// Compute two preferred frame indices for a page key (two hashes).
     #[inline]
-    fn frame_holds_page(&self, idx: usize, key: &PageKey) -> bool {
-        let meta = &unsafe { &*self.metas.get() }[idx];
-        meta.key() == Some(*key)
+    pub(crate) fn preferred_frames(&self, key: &PageKey) -> (usize, usize) {
+        let p1 = fastmod(hash_page_key(key), self.num_frames_u64);
+        let p2 = fastmod(hash_page_key_2(key), self.num_frames_u64);
+        (p1, p2)
     }
 
-    /// Returns true if `page_key` is in its preferred frame (i.e. NOT in
-    /// the overflow table).
+    /// Compute four preferred frame indices for a page key (four hashes).
     #[inline]
-    fn is_in_preferred_frame(&self, page_key: &PageKey) -> bool {
-        self.frame_holds_page(self.preferred_frame(page_key), page_key)
+    pub(crate) fn preferred_frames_four(&self, key: &PageKey) -> [usize; 4] {
+        let n = self.num_frames_u64;
+        [
+            fastmod(hash_page_key(key), n),
+            fastmod(hash_page_key_2(key), n),
+            fastmod(hash_page_key_3(key), n),
+            fastmod(hash_page_key_4(key), n),
+        ]
     }
 
     /// Returns true if frame `idx` has no page (key is None). Lock-free read of atomic key.
@@ -204,6 +425,46 @@ impl PredictiveTranslationBP {
     fn frame_is_free(&self, idx: usize) -> bool {
         let metas = unsafe { &*self.metas.get() };
         metas[idx].key().is_none()
+    }
+
+    #[inline]
+    #[allow(dead_code)]
+    fn frame_matches_page(&self, idx: usize, key: &PageKey) -> bool {
+        let metas = unsafe { &*self.metas.get() };
+        metas[idx].key() == Some(*key)
+    }
+
+    /// Hint the CPU toward the predicted frame before translation resolves.
+    #[inline]
+    #[allow(dead_code)]
+    fn prefetch_predicted_frame(&self, idx: usize) {
+        self.prefetch_predicted_frames(idx, idx);
+    }
+
+    /// Hint the CPU toward the predicted frames before translation resolves.
+    #[inline]
+    pub(crate) fn prefetch_predicted_frames(&self, first: usize, second: usize) {
+        let metas = unsafe { &*self.metas.get() };
+        let pages = unsafe { &*self.pages.get() };
+
+        #[cfg(target_arch = "x86_64")]
+        unsafe {
+            let meta_ptr = (&*metas[first]) as *const FMeta as *const i8;
+            let page_ptr = (&*pages[first]) as *const Page as *const i8;
+            _mm_prefetch(meta_ptr, _MM_HINT_T0);
+            _mm_prefetch(page_ptr, _MM_HINT_T0);
+            if second != first {
+                let meta_ptr = (&*metas[second]) as *const FMeta as *const i8;
+                let page_ptr = (&*pages[second]) as *const Page as *const i8;
+                _mm_prefetch(meta_ptr, _MM_HINT_T0);
+                _mm_prefetch(page_ptr, _MM_HINT_T0);
+            }
+        }
+
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            let _ = (&metas[first], &pages[first], &metas[second], &pages[second]);
+        }
     }
 
     pub fn eviction_stats(&self) -> String {
@@ -218,7 +479,7 @@ impl PredictiveTranslationBP {
     // Frame access helpers
     // ------------------------------------------------------------------
 
-    fn try_get_read_guard(&self, index: usize) -> Option<FRGuard> {
+    pub(crate) fn try_get_read_guard(&self, index: usize) -> Option<FRGuard> {
         let metas = unsafe { &mut *self.metas.get() };
         let pages = unsafe { &mut *self.pages.get() };
         FRGuard::try_new(
@@ -227,7 +488,7 @@ impl PredictiveTranslationBP {
         )
     }
 
-    fn try_get_write_guard(&self, index: usize, make_dirty: bool) -> Option<FWGuard> {
+    pub(crate) fn try_get_write_guard(&self, index: usize, make_dirty: bool) -> Option<FWGuard> {
         let metas = unsafe { &mut *self.metas.get() };
         let pages = unsafe { &mut *self.pages.get() };
         FWGuard::try_new(
@@ -241,37 +502,43 @@ impl PredictiveTranslationBP {
     // Eviction
     // ------------------------------------------------------------------
 
+    /// Return frame `idx` to the free-frame hint queue.
+    #[inline]
+    fn enqueue_free_frame(&self, idx: usize) {
+        self.free_list.push(idx).ok();
+    }
+
     /// Try to get a free frame. If `preferred` is Some(p), try to take that frame first
     /// (so pages are placed in their preferred frame when free — paper §3.1).
     fn choose_victim(&self, preferred: Option<usize>) -> Option<FWGuard> {
-        // Prefer the preferred frame when it's free.
+        // Prefer the preferred frame when it is free.
         if let Some(p) = preferred {
-            if self.free_frames.remove(&p).is_some() {
-                if let Some(guard) = self.try_get_write_guard(p, false) {
-                    if guard.page_key().is_none() {
-                        return Some(guard);
-                    }
+            if let Some(guard) = self.try_get_write_guard(p, false) {
+                if guard.page_key().is_none() {
+                    return Some(guard);
                 }
-                self.free_frames.insert(p);
             }
         }
-        // Otherwise take any free frame. Snapshot indices to avoid unbounded or
-        // inconsistent iteration over the concurrent set (could hang under contention).
-        let indices: Vec<usize> = self.free_frames.iter().map(|x| *x).collect();
-        for idx in indices {
-            if self.free_frames.remove(&idx).is_some() {
-                if let Some(guard) = self.try_get_write_guard(idx, false) {
-                    if guard.page_key().is_none() {
-                        return Some(guard);
-                    }
+        // Otherwise pop hint frames until we get a usable free frame.
+        while let Ok(idx) = self.free_list.pop() {
+            if let Some(guard) = self.try_get_write_guard(idx, false) {
+                if guard.page_key().is_none() {
+                    return Some(guard);
                 }
-                self.free_frames.insert(idx);
+            }
+        }
+        // Fallback: scan all frames for a free one (free_list hints may be stale).
+        for idx in 0..self.num_frames {
+            if let Some(guard) = self.try_get_write_guard(idx, false) {
+                if guard.page_key().is_none() {
+                    return Some(guard);
+                }
             }
         }
         None
     }
 
-    fn ensure_free_frames(&self) -> Result<(), MemPoolStatus> {
+    pub(crate) fn ensure_free_frames(&self) -> Result<(), MemPoolStatus> {
         let used = self.used_frames.load(Ordering::Acquire);
         let ratio = used as f64 / self.num_frames as f64;
         if ratio > 0.95 {
@@ -290,7 +557,7 @@ impl PredictiveTranslationBP {
     fn fetch_add_clock_hand(&self, increment: usize) -> usize {
         self.clock_hand
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |cur| {
-                Some((cur + increment) % self.num_frames)
+                Some((cur + increment) % self.num_frames) // cold path, plain mod ok
             })
             .expect("clock hand update should not fail")
     }
@@ -328,13 +595,12 @@ impl PredictiveTranslationBP {
                     if let Some(pk) = guard.page_key() {
                         if self.overflow.lookup(&pk) == Some(idx) {
                             self.overflow.remove(&pk);
-                            self.overflow_access_count.remove(&pk);
                         }
                     }
                     // Clear the frame.
                     guard.set_page_key(None);
                     guard.evict_info().reset();
-                    self.free_frames.insert(idx);
+                    self.enqueue_free_frame(idx);
                     evicted += 1;
                 }
             }
@@ -361,20 +627,21 @@ impl PredictiveTranslationBP {
     /// We obtain a frame via `choose_victim(Some(pref))`, so we use the preferred
     /// frame when it's free (paper §3.1). Otherwise we take any free frame and
     /// add to the overflow table.
-    fn handle_page_fault_write(
+    pub(crate) fn handle_page_fault_write<const N: usize>(
         &self,
         page_key: PageKey,
-        pref: usize,
+        prefs: [usize; N],
     ) -> Result<FWGuard, MemPoolStatus> {
-        // Only one thread may fault a given page at a time.
-        if self.fault_in_progress.insert(page_key, ()).is_some() {
-            return Err(MemPoolStatus::RetryPageFault);
-        }
-        let _fault_claim = FaultClaim(Arc::clone(&self.fault_in_progress), page_key);
-
         self.used_frames.fetch_add(1, Ordering::AcqRel);
 
-        let mut victim = match self.choose_victim(Some(pref)) {
+        // Pick the first free preferred frame, or fall back to prefs[0].
+        let chosen_pref = prefs
+            .iter()
+            .find(|&&p| self.frame_is_free(p))
+            .copied()
+            .unwrap_or(prefs[0]);
+
+        let mut victim = match self.choose_victim(Some(chosen_pref)) {
             Some(v) => v,
             None => {
                 self.used_frames.fetch_sub(1, Ordering::AcqRel);
@@ -384,31 +651,21 @@ impl PredictiveTranslationBP {
 
         debug_assert!(victim.page_key().is_none());
 
-        // Avoid duplicate fault: another thread may have loaded this page (unified: only overflow).
-        if self.overflow.contains_key(&page_key) {
-            self.free_frames.insert(victim.frame_id() as usize);
+        // Atomic try-insert: claims the page in the overflow table under the
+        // bucket lock. If another thread already faulted this page, try_insert
+        // returns Err and we retry. This replaces the old fault_in_progress
+        // DashMap + 4 separate overflow verification lookups (§4.1-4.2).
+        if self
+            .overflow
+            .try_insert(page_key, victim.frame_id() as usize)
+            .is_err()
+        {
+            self.enqueue_free_frame(victim.frame_id() as usize);
             self.used_frames.fetch_sub(1, Ordering::AcqRel);
             return Err(MemPoolStatus::RetryPageFault);
         }
 
         victim.set_page_key(Some(page_key));
-        self.overflow.insert(page_key, victim.frame_id() as usize);
-        if self.overflow.lookup(&page_key) != Some(victim.frame_id() as usize) {
-            victim.set_page_key(None);
-            self.overflow.remove(&page_key);
-            self.free_frames.insert(victim.frame_id() as usize);
-            self.used_frames.fetch_sub(1, Ordering::AcqRel);
-            return Err(MemPoolStatus::RetryPageFault);
-        }
-
-        // Re-check before disk I/O.
-        if self.overflow.lookup(&page_key) != Some(victim.frame_id() as usize) {
-            victim.set_page_key(None);
-            self.overflow.remove(&page_key);
-            self.free_frames.insert(victim.frame_id() as usize);
-            self.used_frames.fetch_sub(1, Ordering::AcqRel);
-            return Err(MemPoolStatus::RetryPageFault);
-        }
 
         // Read the page from disk.
         if let Err(e) = self
@@ -417,29 +674,14 @@ impl PredictiveTranslationBP {
             .read_page(page_key.page_id, &mut victim)
         {
             victim.set_page_key(None);
-            if self.overflow.lookup(&page_key) == Some(victim.frame_id() as usize) {
-                self.overflow.remove(&page_key);
-                self.overflow_access_count.remove(&page_key);
-            }
-            self.free_frames.insert(victim.frame_id() as usize);
+            self.overflow.remove(&page_key);
+            self.enqueue_free_frame(victim.frame_id() as usize);
             self.used_frames.fetch_sub(1, Ordering::AcqRel);
             return Err(MemPoolStatus::FileManagerError(e.to_string()));
         }
 
         victim.evict_info().reset();
         victim.dirty().store(true, Ordering::Release);
-
-        if self.overflow.lookup(&page_key) != Some(victim.frame_id() as usize) {
-            self.write_to_disk_if_dirty_w(&victim).ok();
-            victim.set_page_key(None);
-            if self.overflow.lookup(&page_key) == Some(victim.frame_id() as usize) {
-                self.overflow.remove(&page_key);
-                self.overflow_access_count.remove(&page_key);
-            }
-            self.free_frames.insert(victim.frame_id() as usize);
-            self.used_frames.fetch_sub(1, Ordering::AcqRel);
-            return Err(MemPoolStatus::RetryPageFault);
-        }
 
         Ok(victim)
     }
@@ -477,77 +719,97 @@ impl PredictiveTranslationBP {
     }
 
     // ------------------------------------------------------------------
-    // Promotion / demotion (§3.2, 5.1) with one-hit-wonder
+    // Promotion / demotion (§3.2, 5.1)
     // ------------------------------------------------------------------
 
     /// Paper probabilities: 1/50 when preferred frame is free, 1/512 when demotion needed.
     const PROMOTE_PROB_NO_DEMOTE: u32 = 50;
     const PROMOTE_PROB_DEMOTE: u32 = 512;
 
-    /// Try to promote the page from its current (overflow) frame to its preferred frame.
-    /// Caller holds a write guard on the overflow frame. Returns either the same guard
-    /// (no promotion / failed) or a new write guard on the preferred frame (promotion done).
-    fn try_promote_to_preferred(
+    /// Try to promote the page from its current (overflow) frame to one of its
+    /// preferred frames. Caller holds a write guard on the overflow frame.
+    /// Returns either the same guard (no promotion / failed) or a new write guard
+    /// on a preferred frame (promotion done).
+    fn try_promote<const N: usize>(
         &self,
         mut current_guard: FWGuard,
         page_key: PageKey,
-        pref: usize,
+        prefs: [usize; N],
     ) -> Result<FWGuard, MemPoolStatus> {
         let current_idx = current_guard.frame_id() as usize;
-        if current_idx == pref {
+        if prefs.contains(&current_idx) {
             return Ok(current_guard);
         }
 
-        let mut pref_guard = match self.try_get_write_guard(pref, false) {
+        // First pass: look for a free preferred frame.
+        let mut victim_guard: Option<FWGuard> = None;
+        for &p in &prefs {
+            if self.frame_is_free(p) {
+                if let Some(g) = self.try_get_write_guard(p, false) {
+                    victim_guard = Some(g);
+                    break;
+                }
+            }
+        }
+
+        // Second pass: if no free frame found, latch any preferred frame.
+        if victim_guard.is_none() {
+            for &p in &prefs {
+                if let Some(g) = self.try_get_write_guard(p, false) {
+                    victim_guard = Some(g);
+                    break;
+                }
+            }
+        }
+
+        let mut victim_guard = match victim_guard {
             Some(g) => g,
             None => return Ok(current_guard),
         };
+        let victim_idx = victim_guard.frame_id() as usize;
 
-        if pref_guard.page_key().is_none() {
-            // Simple promotion: preferred frame is free. Move our page there.
-            pref_guard.page_mut().copy(current_guard.page());
-            pref_guard.set_page_key(Some(page_key));
-            pref_guard.dirty().store(
+        if victim_guard.page_key().is_none() {
+            // Promotion: move page to the free preferred frame.
+            victim_guard.page_mut().copy(current_guard.page());
+            victim_guard.set_page_key(Some(page_key));
+            victim_guard.dirty().store(
                 current_guard.dirty().load(Ordering::Acquire),
                 Ordering::Release,
             );
-            pref_guard.evict_info().update();
+            victim_guard.evict_info().update();
 
+            self.overflow.insert(page_key, victim_idx);
             current_guard.clear();
-            self.overflow.remove(&page_key);
-            self.overflow.insert(page_key, pref); // Unified: preferred slot still in table
-            self.overflow_access_count.remove(&page_key);
-            self.free_frames.insert(current_idx);
+            self.enqueue_free_frame(current_idx);
             self.used_frames.fetch_sub(1, Ordering::AcqRel);
 
-            drop(current_guard);
-            return Ok(pref_guard);
+            return Ok(victim_guard);
         }
 
-        // Demotion: preferred frame holds another page. Swap contents.
-        let other_key = pref_guard.page_key().unwrap();
+        // Demotion: swap contents with the occupied preferred frame.
+        let other_key = victim_guard.page_key().unwrap();
+
         let mut temp = Page::new_empty();
         temp.copy(current_guard.page());
-        current_guard.page_mut().copy(pref_guard.page());
-        pref_guard.page_mut().copy(&temp);
+        current_guard.page_mut().copy(victim_guard.page());
+        victim_guard.page_mut().copy(&temp);
 
-        pref_guard.set_page_key(Some(page_key));
+        victim_guard.set_page_key(Some(page_key));
         current_guard.set_page_key(Some(other_key));
-        let other_dirty = pref_guard.dirty().load(Ordering::Acquire);
-        pref_guard.dirty().store(
+        let other_dirty = victim_guard.dirty().load(Ordering::Acquire);
+        victim_guard.dirty().store(
             current_guard.dirty().load(Ordering::Acquire),
             Ordering::Release,
         );
         current_guard.dirty().store(other_dirty, Ordering::Release);
-        pref_guard.evict_info().update();
+        victim_guard.evict_info().update();
         current_guard.evict_info().update();
 
-        self.overflow.remove(&page_key);
+        self.overflow.insert(page_key, victim_idx);
         self.overflow.insert(other_key, current_idx);
-        self.overflow_access_count.remove(&page_key);
 
         drop(current_guard);
-        Ok(pref_guard)
+        Ok(victim_guard)
     }
 
     /// Roll for promotion: true with probability 1/denom. Uses next_u32() % denom == 0.
@@ -555,6 +817,229 @@ impl PredictiveTranslationBP {
     fn promote_roll(denom: u32) -> bool {
         let mut rng = small_thread_rng();
         rng.next_u32() % denom == 0
+    }
+
+    // ------------------------------------------------------------------
+    // Slow-path helpers for the fast-path wrapper
+    // ------------------------------------------------------------------
+
+    /// Read slow path: ensure free frames, then loop (overflow lookup / page fault).
+    /// Called by `PredictiveTranslationFPBP` after its inlined fast path misses.
+    #[inline(always)]
+    pub(crate) fn get_page_for_read_slow<const N: usize>(
+        &self,
+        page_key: PageKey,
+        prefs: [usize; N],
+    ) -> Result<FRGuard, MemPoolStatus> {
+        #[cfg(feature = "pt_profile")]
+        let t0 = std::time::Instant::now();
+
+        self.ensure_free_frames()?;
+
+        #[cfg(feature = "pt_profile")]
+        self.profile
+            .ensure_free_ns
+            .fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+
+        loop {
+            #[cfg(feature = "pt_profile")]
+            let t2 = std::time::Instant::now();
+
+            let frame_idx = self.overflow.lookup_with_bucket(&page_key, prefs[0]);
+
+            #[cfg(feature = "pt_profile")]
+            self.profile
+                .overflow_lookup_ns
+                .fetch_add(t2.elapsed().as_nanos() as u64, Ordering::Relaxed);
+
+            if let Some(idx) = frame_idx {
+                #[cfg(feature = "pt_profile")]
+                let t3 = std::time::Instant::now();
+
+                if let Some(g) = self.try_get_read_guard(idx) {
+                    #[cfg(feature = "pt_profile")]
+                    self.profile
+                        .latch_ns
+                        .fetch_add(t3.elapsed().as_nanos() as u64, Ordering::Relaxed);
+
+                    if g.page_key() == Some(page_key) {
+                        g.evict_info().update();
+                        #[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
+                        if prefs.contains(&idx) {
+                            self.profile
+                                .preferred_frame_hits
+                                .fetch_add(1, Ordering::Relaxed);
+                        } else {
+                            self.profile
+                                .overflow_chain_hits
+                                .fetch_add(1, Ordering::Relaxed);
+                        }
+                        return Ok(g);
+                    }
+                } else {
+                    #[cfg(feature = "pt_profile")]
+                    self.profile
+                        .latch_ns
+                        .fetch_add(t3.elapsed().as_nanos() as u64, Ordering::Relaxed);
+
+                    if self.overflow.lookup_with_bucket(&page_key, prefs[0]) == Some(idx) {
+                        return Err(MemPoolStatus::FrameReadLatchGrantFailed);
+                    }
+                }
+                continue;
+            }
+
+            #[cfg(feature = "pt_profile")]
+            let t6 = std::time::Instant::now();
+
+            match self.handle_page_fault_write(page_key, prefs) {
+                Ok(victim) => {
+                    #[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
+                    self.profile.page_faults.fetch_add(1, Ordering::Relaxed);
+                    #[cfg(feature = "pt_profile")]
+                    self.profile
+                        .fault_ns
+                        .fetch_add(t6.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                    return Ok(victim.downgrade());
+                }
+                Err(MemPoolStatus::RetryPageFault) => {
+                    #[cfg(feature = "pt_profile")]
+                    self.profile
+                        .fault_ns
+                        .fetch_add(t6.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                    continue;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
+    /// Write slow path: ensure free frames, then loop (overflow lookup / page fault / promotion).
+    /// Called by `PredictiveTranslationFPBP` after its inlined fast path misses.
+    #[inline(always)]
+    pub(crate) fn get_page_for_write_slow<const N: usize>(
+        &self,
+        page_key: PageKey,
+        prefs: [usize; N],
+    ) -> Result<FWGuard, MemPoolStatus> {
+        #[cfg(feature = "pt_profile")]
+        let t0 = std::time::Instant::now();
+
+        self.ensure_free_frames()?;
+
+        #[cfg(feature = "pt_profile")]
+        self.profile
+            .ensure_free_ns
+            .fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+
+        let pref_free_hint = prefs.iter().any(|&p| self.frame_is_free(p));
+
+        loop {
+            #[cfg(feature = "pt_profile")]
+            let t2 = std::time::Instant::now();
+
+            let frame_idx = self.overflow.lookup_with_bucket(&page_key, prefs[0]);
+
+            #[cfg(feature = "pt_profile")]
+            self.profile
+                .overflow_lookup_ns
+                .fetch_add(t2.elapsed().as_nanos() as u64, Ordering::Relaxed);
+
+            if let Some(idx) = frame_idx {
+                #[cfg(feature = "pt_profile")]
+                let t3 = std::time::Instant::now();
+
+                if let Some(g) = self.try_get_write_guard(idx, true) {
+                    #[cfg(feature = "pt_profile")]
+                    self.profile
+                        .latch_ns
+                        .fetch_add(t3.elapsed().as_nanos() as u64, Ordering::Relaxed);
+
+                    if g.page_key() == Some(page_key) {
+                        g.evict_info().update();
+
+                        #[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
+                        if prefs.contains(&idx) {
+                            self.profile
+                                .preferred_frame_hits
+                                .fetch_add(1, Ordering::Relaxed);
+                        } else {
+                            self.profile
+                                .overflow_chain_hits
+                                .fetch_add(1, Ordering::Relaxed);
+                        }
+
+                        // Promotion (§3.2): page in overflow, try to move to preferred.
+                        if !prefs.contains(&idx) {
+                            #[cfg(feature = "pt_profile")]
+                            let t5 = std::time::Instant::now();
+
+                            let denom = if pref_free_hint {
+                                Self::PROMOTE_PROB_NO_DEMOTE
+                            } else {
+                                Self::PROMOTE_PROB_DEMOTE
+                            };
+                            #[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
+                            self.profile
+                                .promotions_attempted
+                                .fetch_add(1, Ordering::Relaxed);
+
+                            if Self::promote_roll(denom) {
+                                #[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
+                                self.profile
+                                    .promotions_fired
+                                    .fetch_add(1, Ordering::Relaxed);
+                                #[cfg(feature = "pt_profile")]
+                                self.profile
+                                    .promotion_check_ns
+                                    .fetch_add(t5.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                                let guard = self.try_promote(g, page_key, prefs)?;
+                                return Ok(guard);
+                            }
+
+                            #[cfg(feature = "pt_profile")]
+                            self.profile
+                                .promotion_check_ns
+                                .fetch_add(t5.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                        }
+                        return Ok(g);
+                    }
+                } else {
+                    #[cfg(feature = "pt_profile")]
+                    self.profile
+                        .latch_ns
+                        .fetch_add(t3.elapsed().as_nanos() as u64, Ordering::Relaxed);
+
+                    if self.overflow.lookup_with_bucket(&page_key, prefs[0]) == Some(idx) {
+                        return Err(MemPoolStatus::FrameWriteLatchGrantFailed);
+                    }
+                }
+                continue;
+            }
+
+            #[cfg(feature = "pt_profile")]
+            let t6 = std::time::Instant::now();
+
+            match self.handle_page_fault_write(page_key, prefs) {
+                Ok(g) => {
+                    #[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
+                    self.profile.page_faults.fetch_add(1, Ordering::Relaxed);
+                    #[cfg(feature = "pt_profile")]
+                    self.profile
+                        .fault_ns
+                        .fetch_add(t6.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                    return Ok(g);
+                }
+                Err(MemPoolStatus::RetryPageFault) => {
+                    #[cfg(feature = "pt_profile")]
+                    self.profile
+                        .fault_ns
+                        .fetch_add(t6.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                    continue;
+                }
+                Err(e) => return Err(e),
+            }
+        }
     }
 }
 
@@ -578,15 +1063,16 @@ impl MemPool for PredictiveTranslationBP {
     // ----- create new page ------------------------------------------------
 
     fn create_new_page_for_write(&self, c_key: ContainerKey) -> Result<FWGuard, MemPoolStatus> {
+        let _macro_timer = macro_profile_scoped(BpMacroOp::CreateNewPage);
         self.stats.inc_new_page();
         self.ensure_free_frames()?;
 
         let container = self.container_manager.get_container(c_key);
         let page_id = container.inc_page_count(1) as PageId;
         let page_key = PageKey::new(c_key, page_id);
-        let preferred = self.preferred_frame(&page_key);
+        let pref = self.preferred_frame(&page_key);
         let mut victim = self
-            .choose_victim(Some(preferred))
+            .choose_victim(Some(pref))
             .ok_or(MemPoolStatus::CannotEvictPage)?;
 
         debug_assert!(victim.page_key().is_none());
@@ -633,94 +1119,37 @@ impl MemPool for PredictiveTranslationBP {
     // ----- get page for write ---------------------------------------------
 
     fn get_page_for_write(&self, key: PageFrameKey) -> Result<FWGuard, MemPoolStatus> {
-        log_debug!("PT page write: {}", key);
+        let _macro_timer = macro_profile_scoped(BpMacroOp::GetPageWrite);
         self.stats.inc_write_count();
 
-        self.ensure_free_frames()?;
+        #[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
+        self.profile.total_writes.fetch_add(1, Ordering::Relaxed);
 
         let page_key = key.p_key();
         let pref = self.preferred_frame(&page_key);
 
-        loop {
-            // Unified translation: single lookup (paper/C++ style).
-            let frame_idx = self.overflow.lookup_with_bucket(&page_key, pref);
+        #[cfg(not(feature = "pt_no_prefetch"))]
+        self.prefetch_predicted_frames(pref, pref);
 
-            if let Some(idx) = frame_idx {
-                if let Some(g) = self.try_get_write_guard(idx, true) {
-                    if g.page_key() == Some(page_key) {
-                        g.evict_info().update();
-                        // One-hit-wonder (§3.2): only consider promotion after second access
-                        let prev = self
-                            .overflow_access_count
-                            .entry(page_key)
-                            .or_insert_with(|| AtomicU32::new(0))
-                            .fetch_add(1, Ordering::Relaxed);
-                        if prev >= 1 {
-                            let pref_free = self.frame_is_free(pref);
-                            let denom = if pref_free {
-                                Self::PROMOTE_PROB_NO_DEMOTE
-                            } else {
-                                Self::PROMOTE_PROB_DEMOTE
-                            };
-                            if Self::promote_roll(denom) {
-                                let guard = self.try_promote_to_preferred(g, page_key, pref)?;
-                                return Ok(guard);
-                            }
-                        }
-                        return Ok(g);
-                    }
-                } else if self.overflow.lookup_with_bucket(&page_key, pref) == Some(idx) {
-                    return Err(MemPoolStatus::FrameWriteLatchGrantFailed);
-                }
-                continue;
-            }
-
-            match self.handle_page_fault_write(page_key, pref) {
-                Ok(g) => return Ok(g),
-                Err(MemPoolStatus::RetryPageFault) => continue,
-                Err(e) => return Err(e),
-            }
-        }
+        self.get_page_for_write_slow(page_key, [pref])
     }
 
     // ----- get page for read ----------------------------------------------
 
     fn get_page_for_read(&self, key: PageFrameKey) -> Result<FRGuard, MemPoolStatus> {
-        log_debug!("PT page read: {}", key);
+        let _macro_timer = macro_profile_scoped(BpMacroOp::GetPageRead);
         self.stats.inc_read_count();
 
-        self.ensure_free_frames()?;
+        #[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
+        self.profile.total_reads.fetch_add(1, Ordering::Relaxed);
 
         let page_key = key.p_key();
         let pref = self.preferred_frame(&page_key);
 
-        loop {
-            // Unified translation: single lookup (paper/C++ style).
-            let frame_idx = self.overflow.lookup_with_bucket(&page_key, pref);
+        #[cfg(not(feature = "pt_no_prefetch"))]
+        self.prefetch_predicted_frames(pref, pref);
 
-            if let Some(idx) = frame_idx {
-                if let Some(g) = self.try_get_read_guard(idx) {
-                    if g.page_key() == Some(page_key) {
-                        g.evict_info().update();
-                        // One-hit-wonder: count overflow accesses (promotion only on write path)
-                        self.overflow_access_count
-                            .entry(page_key)
-                            .or_insert_with(|| AtomicU32::new(0))
-                            .fetch_add(1, Ordering::Relaxed);
-                        return Ok(g);
-                    }
-                } else if self.overflow.lookup_with_bucket(&page_key, pref) == Some(idx) {
-                    return Err(MemPoolStatus::FrameReadLatchGrantFailed);
-                }
-                continue;
-            }
-
-            match self.handle_page_fault_write(page_key, pref) {
-                Ok(victim) => return Ok(victim.downgrade()),
-                Err(MemPoolStatus::RetryPageFault) => continue,
-                Err(e) => return Err(e),
-            }
-        }
+        self.get_page_for_read_slow(page_key, [pref])
     }
 
     // ----- prefetch -------------------------------------------------------
@@ -758,7 +1187,6 @@ impl MemPool for PredictiveTranslationBP {
             if let Some(pk) = frame.page_key() {
                 if self.overflow.lookup(&pk) == Some(i) {
                     self.overflow.remove(&pk);
-                    self.overflow_access_count.remove(&pk);
                 }
             }
             frame.clear();
@@ -766,10 +1194,10 @@ impl MemPool for PredictiveTranslationBP {
 
         self.container_manager.flush_all()?;
 
-        // Repopulate the free set.
-        self.free_frames.clear();
+        // Drain the queue and repopulate.
+        while self.free_list.pop().is_ok() {}
         for i in 0..self.num_frames {
-            self.free_frames.insert(i);
+            self.free_list.push(i).unwrap();
         }
         self.used_frames.store(0, Ordering::Release);
 
@@ -838,6 +1266,15 @@ impl MemPool for PredictiveTranslationBP {
 
     unsafe fn reset_stats(&self) {
         self.stats.clear();
+    }
+
+    fn print_profile(&self) {
+        if let Some(report) = macro_profile_report() {
+            println!("\n{}", report);
+        }
+
+        #[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
+        self.profile.print();
     }
 }
 

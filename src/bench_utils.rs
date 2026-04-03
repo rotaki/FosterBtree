@@ -17,7 +17,13 @@ use crate::{
 use crate::bp::{get_test_bp_clock, BufferPoolClock};
 
 #[cfg(feature = "bp_pt")]
-use crate::bp::{get_test_pt, PredictiveTranslationBP};
+use crate::bp::get_test_pt;
+#[cfg(feature = "bp_pt_bucket")]
+use crate::bp::get_test_pt_bucket_validate;
+#[cfg(feature = "bp_pt2")]
+use crate::bp::get_test_pt_two_hash;
+#[cfg(feature = "bp_pt2_bucket")]
+use crate::bp::get_test_pt_two_hash_bucket_validate;
 
 #[derive(Debug, Parser, Clone)]
 pub struct BenchParams {
@@ -133,12 +139,33 @@ pub fn gen_foster_btree_on_disk(bp_size: usize) -> Arc<FosterBtree<impl MemPool>
         let btree = FosterBtree::new(c_key, get_test_bp_clock::<64>(bp_size));
         return Arc::new(btree);
     }
+    #[cfg(feature = "bp_pt2")]
+    {
+        let btree = FosterBtree::new(c_key, get_test_pt_two_hash(bp_size));
+        return Arc::new(btree);
+    }
+    #[cfg(feature = "bp_pt_bucket")]
+    {
+        let btree = FosterBtree::new(c_key, get_test_pt_bucket_validate(bp_size));
+        return Arc::new(btree);
+    }
+    #[cfg(feature = "bp_pt2_bucket")]
+    {
+        let btree = FosterBtree::new(c_key, get_test_pt_two_hash_bucket_validate(bp_size));
+        return Arc::new(btree);
+    }
     #[cfg(feature = "bp_pt")]
     {
         let btree = FosterBtree::new(c_key, get_test_pt(bp_size));
         return Arc::new(btree);
     }
-    #[cfg(not(any(feature = "bp_clock", feature = "bp_pt")))]
+    #[cfg(not(any(
+        feature = "bp_clock",
+        feature = "bp_pt",
+        feature = "bp_pt2",
+        feature = "bp_pt_bucket",
+        feature = "bp_pt2_bucket"
+    )))]
     {
         let btree = FosterBtree::new(c_key, get_test_bp(bp_size));
         Arc::new(btree)
