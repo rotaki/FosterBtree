@@ -98,5 +98,9 @@ name = "foster_btree_insert"
 harness = false
 
 [[bench]]
+name = "foster_btree_page_ops"
+harness = false
+
+[[bench]]
 name = "hash_index_insert"
 harness = false

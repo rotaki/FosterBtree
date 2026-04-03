@@ -24,93 +24,101 @@ pub const PAGE_HEADER_SIZE: usize = 1 + 1 + 4 + 4 + 4;
 // * A record refers to the key-value pair in the page.
 
 mod slot {
-    pub const SLOT_SIZE: usize = std::mem::size_of::<u8>()
-        + std::mem::size_of::<u32>()
-        + std::mem::size_of::<u32>()
-        + std::mem::size_of::<u32>();
+    // Packed slot layout: 3 x u32 = 12 bytes
+    //   [offset_ghost: u32] — bit 31 = ghost flag, bits 0-30 = record offset
+    //   [key_size: u32]
+    //   [value_size: u32]
+    pub const SLOT_SIZE: usize = std::mem::size_of::<u32>() * 3;
+
+    const GHOST_BIT: u32 = 1 << 31;
+    const OFFSET_MASK: u32 = !GHOST_BIT;
+
+    // Field byte offsets within a slot
+    pub const OFFSET_GHOST_OFF: usize = 0;
+    pub const KEY_SIZE_OFF: usize = 4;
+    pub const VALUE_SIZE_OFF: usize = 8;
 
     pub struct Slot {
-        ghost: u8,       // 0 if the slot is active, 1 if the slot is a ghost
-        offset: u32,     // The offset of the key-value pair in the page
-        key_size: u32,   // The size of the key
-        value_size: u32, // The size of the value
+        offset_ghost: u32, // bit 31 = ghost, bits 0-30 = offset
+        key_size: u32,
+        value_size: u32,
+    }
+
+    #[inline(always)]
+    fn read_u32(bytes: &[u8], offset: usize) -> u32 {
+        u32::from_be_bytes([
+            bytes[offset],
+            bytes[offset + 1],
+            bytes[offset + 2],
+            bytes[offset + 3],
+        ])
+    }
+
+    #[inline(always)]
+    fn write_u32(bytes: &mut [u8], offset: usize, val: u32) {
+        let b = val.to_be_bytes();
+        bytes[offset] = b[0];
+        bytes[offset + 1] = b[1];
+        bytes[offset + 2] = b[2];
+        bytes[offset + 3] = b[3];
     }
 
     impl Slot {
+        #[inline]
         pub fn from_bytes(bytes: [u8; SLOT_SIZE]) -> Self {
-            let mut current_pos = 0;
-            let ghost = bytes[current_pos];
-            current_pos += std::mem::size_of::<u8>();
-
-            let offset = u32::from_be_bytes(
-                bytes[current_pos..current_pos + std::mem::size_of::<u32>()]
-                    .try_into()
-                    .unwrap(),
-            );
-            current_pos += std::mem::size_of::<u32>();
-            let key_size = u32::from_be_bytes(
-                bytes[current_pos..current_pos + std::mem::size_of::<u32>()]
-                    .try_into()
-                    .unwrap(),
-            );
-            current_pos += std::mem::size_of::<u32>();
-            let value_size = u32::from_be_bytes(
-                bytes[current_pos..current_pos + std::mem::size_of::<u32>()]
-                    .try_into()
-                    .unwrap(),
-            );
             Slot {
-                ghost,
-                offset,
-                key_size,
-                value_size,
+                offset_ghost: read_u32(&bytes, OFFSET_GHOST_OFF),
+                key_size: read_u32(&bytes, KEY_SIZE_OFF),
+                value_size: read_u32(&bytes, VALUE_SIZE_OFF),
             }
         }
 
+        #[inline]
         pub fn to_bytes(&self) -> [u8; SLOT_SIZE] {
-            let offset_bytes = self.offset.to_be_bytes();
-            let key_size_bytes = self.key_size.to_be_bytes();
-            let value_size_bytes = self.value_size.to_be_bytes();
             let mut bytes = [0; SLOT_SIZE];
-            let mut current_pos = 0;
-            bytes[current_pos] = self.ghost;
-            current_pos += std::mem::size_of::<u8>();
-            bytes[current_pos..current_pos + std::mem::size_of::<u32>()]
-                .copy_from_slice(&offset_bytes);
-            current_pos += std::mem::size_of::<u32>();
-            bytes[current_pos..current_pos + std::mem::size_of::<u32>()]
-                .copy_from_slice(&key_size_bytes);
-            current_pos += std::mem::size_of::<u32>();
-            bytes[current_pos..current_pos + std::mem::size_of::<u32>()]
-                .copy_from_slice(&value_size_bytes);
+            write_u32(&mut bytes, OFFSET_GHOST_OFF, self.offset_ghost);
+            write_u32(&mut bytes, KEY_SIZE_OFF, self.key_size);
+            write_u32(&mut bytes, VALUE_SIZE_OFF, self.value_size);
             bytes
         }
 
+        #[inline]
         pub fn new(is_ghost: bool, offset: u32, key_size: u32, value_size: u32) -> Self {
+            debug_assert!(offset & GHOST_BIT == 0, "offset too large for 31-bit field");
+            let offset_ghost = if is_ghost { offset | GHOST_BIT } else { offset };
             Slot {
-                ghost: is_ghost as u8,
-                offset,
+                offset_ghost,
                 key_size,
                 value_size,
             }
         }
 
+        #[inline]
         pub fn is_ghost(&self) -> bool {
-            self.ghost == 1
+            self.offset_ghost & GHOST_BIT != 0
         }
 
+        #[inline]
         pub fn set_ghost(&mut self, ghost: u8) {
-            self.ghost = ghost;
+            if ghost != 0 {
+                self.offset_ghost |= GHOST_BIT;
+            } else {
+                self.offset_ghost &= OFFSET_MASK;
+            }
         }
 
+        #[inline]
         pub fn offset(&self) -> u32 {
-            self.offset
+            self.offset_ghost & OFFSET_MASK
         }
 
+        #[inline]
         pub fn set_offset(&mut self, offset: u32) {
-            self.offset = offset;
+            debug_assert!(offset & GHOST_BIT == 0, "offset too large for 31-bit field");
+            self.offset_ghost = (self.offset_ghost & GHOST_BIT) | offset;
         }
 
+        #[inline]
         pub fn key_size(&self) -> u32 {
             self.key_size
         }
@@ -119,6 +127,7 @@ mod slot {
             self.key_size = key_size;
         }
 
+        #[inline]
         pub fn value_size(&self) -> u32 {
             self.value_size
         }
@@ -127,13 +136,45 @@ mod slot {
             self.value_size = value_size;
         }
 
+        #[inline]
         pub fn total_size(&self) -> u32 {
             self.key_size + self.value_size + SLOT_SIZE as u32
         }
     }
+
+    /// Read individual slot fields directly from page bytes without constructing a Slot.
+    /// `slot_page_offset` is the byte offset of the slot within the page.
+    #[inline(always)]
+    pub fn read_ghost(page_bytes: &[u8], slot_page_offset: usize) -> bool {
+        page_bytes[slot_page_offset] & 0x80 != 0 // MSB of big-endian u32
+    }
+
+    #[inline(always)]
+    pub fn read_rec_offset(page_bytes: &[u8], slot_page_offset: usize) -> u32 {
+        read_u32(page_bytes, slot_page_offset + OFFSET_GHOST_OFF) & OFFSET_MASK
+    }
+
+    #[inline(always)]
+    pub fn read_key_size(page_bytes: &[u8], slot_page_offset: usize) -> u32 {
+        read_u32(page_bytes, slot_page_offset + KEY_SIZE_OFF)
+    }
+
+    #[inline(always)]
+    pub fn read_value_size(page_bytes: &[u8], slot_page_offset: usize) -> u32 {
+        read_u32(page_bytes, slot_page_offset + VALUE_SIZE_OFF)
+    }
+
+    #[inline(always)]
+    pub fn write_ghost(page_bytes: &mut [u8], slot_page_offset: usize, ghost: bool) {
+        if ghost {
+            page_bytes[slot_page_offset] |= 0x80;
+        } else {
+            page_bytes[slot_page_offset] &= 0x7F;
+        }
+    }
 }
 
-use slot::{Slot, SLOT_SIZE};
+use slot::{Slot, SLOT_SIZE, read_ghost, write_ghost};
 
 pub enum BTreeKey<'a> {
     MinusInfty,
@@ -501,22 +542,18 @@ impl FosterBtreePage for Page {
     }
 
     fn ghostify_at(&mut self, slot_id: u32) {
-        let mut slot = self.slot(slot_id).unwrap();
-        let slot_offset = self.slot_offset(slot_id);
-        slot.set_ghost(1);
-        self[slot_offset..slot_offset + SLOT_SIZE].copy_from_slice(&slot.to_bytes());
+        let slot_off = self.slot_offset(slot_id);
+        write_ghost(self, slot_off, true);
     }
 
     fn unghostify_at(&mut self, slot_id: u32) {
-        let mut slot = self.slot(slot_id).unwrap();
-        let slot_offset = self.slot_offset(slot_id);
-        slot.set_ghost(0);
-        self[slot_offset..slot_offset + SLOT_SIZE].copy_from_slice(&slot.to_bytes());
+        let slot_off = self.slot_offset(slot_id);
+        write_ghost(self, slot_off, false);
     }
 
     fn is_ghost(&self, slot_id: u32) -> bool {
-        let slot = self.slot(slot_id).unwrap();
-        slot.is_ghost()
+        let slot_off = self.slot_offset(slot_id);
+        read_ghost(self, slot_off)
     }
 
     /// Append a slot at the end of the slots.
