@@ -122,47 +122,49 @@ impl<'a, S: FieldLeveLStorageTrait> QueryBuilder<'a, S> {
             .scan_range(self.txn, container_id, options)?;
 
         let mut results = Vec::new();
-        loop {
-            match self.table.storage().iter_next(self.txn, &iter)? {
-                Some((key_fields, value_fields, _hint)) => {
-                    let row = match index_def.kind {
-                        IndexKind::Primary => {
-                            // value_fields are the requested columns from the primary record
-                            value_fields
+        let mut lookup_err: Option<TxnStorageStatus> = None;
+        self.table.storage().iter_for_each_fields(
+            self.txn,
+            &iter,
+            &mut |key_fields, value_fields, _hint| {
+                let row = match index_def.kind {
+                    IndexKind::Primary => {
+                        // value_fields are the requested columns from the primary record
+                        value_fields.to_vec()
+                    }
+                    IndexKind::Secondary => {
+                        // For secondary index scans, we need to do a back-lookup
+                        // to get the full record from the primary index.
+                        match self.secondary_back_lookup(index_def, meta, value_fields, key_fields)
+                        {
+                            Ok(fields) => fields,
+                            Err(e) => {
+                                lookup_err = Some(e);
+                                return false;
+                            }
                         }
-                        IndexKind::Secondary => {
-                            // For secondary index scans, we need to do a back-lookup
-                            // to get the full record from the primary index.
-                            self.secondary_back_lookup(index_def, meta, &value_fields, &key_fields)?
-                        }
-                    };
-                    results.push(row);
-                }
-                None => break,
-            }
-        }
+                    }
+                };
+                results.push(row);
+                true
+            },
+        )?;
 
         self.table.storage().drop_iterator_handle(iter)?;
+        if let Some(e) = lookup_err {
+            return Err(e);
+        }
         Ok(results)
     }
 
-    /// Execute the scan and return an iterator-like struct for streaming results.
+    /// Execute the scan and return a buffered iterator over the results.
     pub fn execute_iter(self) -> Result<QueryIter<'a, S>, TxnStorageStatus> {
-        let meta = self.table.meta();
-
-        let (index_def, container_id) = self.resolve_index(meta)?;
-        let options = self.build_scan_options(index_def, meta, container_id)?;
-        let iter = self
-            .table
-            .storage()
-            .scan_range(self.txn, container_id, options)?;
-
+        let table = self.table;
+        let rows = self.execute()?;
         Ok(QueryIter {
-            table: self.table,
-            txn: self.txn,
-            iter,
-            index_def: index_def.clone(),
-            finished: false,
+            table,
+            rows,
+            pos: 0,
         })
     }
 
@@ -336,7 +338,7 @@ impl<'a, S: FieldLeveLStorageTrait> QueryBuilder<'a, S> {
         let pk_cols = &meta.physical_schema.primary_index.key_columns;
 
         // The secondary container record is: [sec_key_cols..., pk_extra_cols..., Pointer]
-        // The value_fields from iter_next are the cols we asked for (all of them).
+        // The value_fields from the scan are the cols we asked for (all of them).
         // Extract PK fields for back-lookup.
 
         // Figure out where PK fields are in the secondary record
@@ -403,76 +405,29 @@ impl<'a, S: FieldLeveLStorageTrait> QueryBuilder<'a, S> {
     }
 }
 
-/// Streaming iterator for query results.
+/// Buffered iterator for query results.  Results are eagerly collected via
+/// `iter_for_each_fields` and then yielded one at a time from the buffer.
 pub struct QueryIter<'a, S: FieldLeveLStorageTrait> {
     table: &'a ManagedTable<'a, S>,
-    txn: &'a S::TxnHandle,
-    iter: S::IteratorHandle,
-    index_def: IndexDef,
-    finished: bool,
+    rows: Vec<Vec<Field>>,
+    pos: usize,
 }
 
 impl<'a, S: FieldLeveLStorageTrait> QueryIter<'a, S> {
     /// Get the next result row.
     pub fn next(&mut self) -> Result<Option<Vec<Field>>, TxnStorageStatus> {
-        if self.finished {
+        if self.pos >= self.rows.len() {
             return Ok(None);
         }
-
-        match self.table.storage().iter_next(self.txn, &self.iter)? {
-            Some((_key_fields, value_fields, _hint)) => {
-                let row = match self.index_def.kind {
-                    IndexKind::Primary => value_fields,
-                    IndexKind::Secondary => {
-                        // For secondary scans, the value_fields contain the secondary record.
-                        // Extract PK and do back-lookup.
-                        let meta = self.table.meta();
-                        let pk_cols = &meta.physical_schema.primary_index.key_columns;
-                        let sec_key_len = self.index_def.key_columns.len();
-
-                        let mut pk_fields = Vec::with_capacity(pk_cols.len());
-                        for &pk_col in pk_cols {
-                            if let Some(pos) =
-                                self.index_def.key_columns.iter().position(|&c| c == pk_col)
-                            {
-                                pk_fields.push(value_fields[pos].clone());
-                            } else {
-                                let mut extra_pos = sec_key_len;
-                                for &other_pk in pk_cols {
-                                    if other_pk == pk_col {
-                                        break;
-                                    }
-                                    if !self.index_def.key_columns.contains(&other_pk) {
-                                        extra_pos += 1;
-                                    }
-                                }
-                                pk_fields.push(value_fields[extra_pos].clone());
-                            }
-                        }
-
-                        // Fetch all columns from primary
-                        let all_cols: Vec<usize> = (0..meta.logical_schema.num_columns()).collect();
-                        let (fields, _) = self.table.storage().get_fields(
-                            self.txn,
-                            meta.primary_container_id,
-                            pk_fields,
-                            &all_cols,
-                            None,
-                        )?;
-                        fields
-                    }
-                };
-                Ok(Some(row))
-            }
-            None => {
-                self.finished = true;
-                Ok(None)
-            }
-        }
+        let row = std::mem::take(&mut self.rows[self.pos]);
+        self.pos += 1;
+        Ok(Some(row))
     }
 
-    /// Drop the iterator handle, releasing resources.
+    /// No-op for API compatibility — resources were already released after
+    /// the eager scan completed.
     pub fn finish(self) -> Result<(), TxnStorageStatus> {
-        self.table.storage().drop_iterator_handle(self.iter)
+        let _ = self.table;
+        Ok(())
     }
 }

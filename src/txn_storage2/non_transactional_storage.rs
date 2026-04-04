@@ -585,50 +585,6 @@ impl<M: MemPool> FieldLeveLStorageTrait for NonTransactionalStorage<M> {
         })
     }
 
-    fn iter_next(
-        &self,
-        _txn: &Self::TxnHandle,
-        iter: &Self::IteratorHandle,
-    ) -> Result<Option<(Vec<Field>, Vec<Field>, RecordPointer)>, TxnStorageStatus> {
-        // SAFETY: We assume single-threaded access as per the requirements
-        let container = unsafe {
-            (*self.containers.get())
-                .get(&iter.c_id)
-                .ok_or(TxnStorageStatus::ContainerNotFound)?
-        };
-
-        // SAFETY: We assume single-threaded access as per the requirements
-        unsafe {
-            let scanner = &mut *iter.scanner.get();
-
-            if let Some((_, value_bytes)) = scanner.next() {
-                let record = bytes_to_record(&value_bytes, container.options.schema());
-
-                // Extract primary key fields from the full record
-                let key_fields: Vec<Field> = container
-                    .options
-                    .schema()
-                    .key_indices()
-                    .iter()
-                    .map(|&idx| record[idx].clone())
-                    .collect();
-
-                let val_fields: Vec<Field> = iter
-                    .options
-                    .cols
-                    .iter()
-                    .map(|&idx| record[idx].clone())
-                    .collect();
-
-                // TODO: Get actual page_id and frame_id from btree
-                let ptr = RecordPointer::new(0, 0);
-                Ok(Some((key_fields, val_fields, ptr)))
-            } else {
-                Ok(None)
-            }
-        }
-    }
-
     fn iter_for_each(
         &self,
         _txn: &Self::TxnHandle,
@@ -1166,22 +1122,23 @@ mod tests {
             .scan_range(&txn, container_id, ScanOptions::new(&[0, 1]))
             .unwrap();
 
-        let mut count = 0;
         let mut collected_keys = Vec::new();
         let mut collected_values = Vec::new();
 
-        while let Ok(Some((key_fields, value_fields, _ptr))) = storage.iter_next(&txn, &iter) {
-            count += 1;
-            collected_keys.push(key_fields);
-            collected_values.push(value_fields);
-        }
+        let count = storage
+            .iter_for_each_fields(&txn, &iter, &mut |key_fields, value_fields, _ptr| {
+                collected_keys.push(key_fields.to_vec());
+                collected_values.push(value_fields.to_vec());
+                true
+            })
+            .unwrap();
 
         assert_eq!(count, 10);
         assert_eq!(collected_keys.len(), 10);
         assert_eq!(collected_values.len(), 10);
 
         // Verify some collected data
-        for i in 0..count {
+        for i in 0..count as usize {
             // Keys should contain the primary key field
             assert_eq!(collected_keys[i].len(), 1);
 

@@ -359,14 +359,6 @@ pub trait FieldLeveLStorageTrait: Send + Sync {
         options: ScanOptions,
     ) -> Result<Self::IteratorHandle, TxnStorageStatus>;
 
-    // Iterate next
-    #[allow(clippy::type_complexity)]
-    fn iter_next(
-        &self,
-        txn: &Self::TxnHandle,
-        iter: &Self::IteratorHandle,
-    ) -> Result<Option<(Vec<Field>, Vec<Field>, Self::Hint)>, TxnStorageStatus>;
-
     /// Zero-copy scan: calls the closure with raw (&[u8], &[u8], Hint) for each
     /// KV pair. No allocation for key/value bytes. The closure returns `true` to
     /// continue or `false` to stop early. Returns total tuples processed.

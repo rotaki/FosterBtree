@@ -404,7 +404,7 @@ impl<'a, S: FieldLeveLStorageTrait> ManagedTable<'a, S> {
     /// Scan using a specific named index.
     ///
     /// This is the "explicit access-path selection" — the caller picks which index.
-    /// Returns the low-level iterator handle for use with `iter_next`.
+    /// Returns the low-level iterator handle for use with `iter_for_each_fields`.
     pub fn scan_index(
         &self,
         txn: &S::TxnHandle,

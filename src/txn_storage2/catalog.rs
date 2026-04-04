@@ -193,20 +193,20 @@ impl<S: FieldLeveLStorageTrait> Catalog<S> {
             crate::txn_storage2::ScanOptions::new(&[0, 1]),
         )?;
 
-        loop {
-            match self.storage.iter_next(&txn, &scan)? {
-                Some((_key_fields, value_fields, _hint)) => {
-                    // value_fields[0] = table name (String), value_fields[1] = serialized meta (VarBytes)
-                    let meta_bytes = match &value_fields[1] {
-                        Field::VarBytes(Some(b)) => b.clone(),
-                        _ => panic!("Catalog entry has invalid meta field"),
-                    };
-                    let meta = TableMeta::from_bytes(&meta_bytes);
-                    self.tables.insert(meta.name.clone(), meta);
-                }
-                None => break,
-            }
-        }
+        self.storage.iter_for_each_fields(
+            &txn,
+            &scan,
+            &mut |_key_fields, value_fields, _hint| {
+                // value_fields[0] = table name (String), value_fields[1] = serialized meta (VarBytes)
+                let meta_bytes = match &value_fields[1] {
+                    Field::VarBytes(Some(b)) => b.clone(),
+                    _ => panic!("Catalog entry has invalid meta field"),
+                };
+                let meta = TableMeta::from_bytes(&meta_bytes);
+                self.tables.insert(meta.name.clone(), meta);
+                true
+            },
+        )?;
 
         self.storage.drop_iterator_handle(scan)?;
         self.storage.commit_txn(&txn, false)?;

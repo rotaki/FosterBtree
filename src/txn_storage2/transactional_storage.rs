@@ -1126,87 +1126,6 @@ impl<M: MemPool> FieldLeveLStorageTrait for TransactionalStorage<M> {
         Ok(TxnIterator::new(options, scanner, c_id))
     }
 
-    fn iter_next(
-        &self,
-        txn: &Self::TxnHandle,
-        iter: &Self::IteratorHandle,
-    ) -> Result<Option<(Vec<Field>, Vec<Field>, RecordPointer)>, TxnStorageStatus> {
-        if iter.is_finished() {
-            return Ok(None); // Iterator already finished
-        }
-
-        let container = self.get_container(iter.c_id)?;
-        let rwset = txn.get_or_create_rwset(iter.c_id);
-
-        loop {
-            if let Some((key_bytes, value_bytes, ptr)) = iter.scanner.next() {
-                if !iter.options.upper_exc.is_empty() && key_bytes >= iter.options.upper_exc {
-                    // For phantom protection, we need to lock the upper bound key
-                    if rwset.get(&key_bytes).is_none() {
-                        let locktable = &container.locktable;
-                        if !locktable.try_shared(key_bytes.clone()) {
-                            return Err(TxnStorageStatus::TxnConflict);
-                        }
-                        rwset.insert(key_bytes, RWEntry::Read(ptr, false));
-                    }
-                    iter.finish();
-                    return Ok(None);
-                }
-
-                // Check if in rwset
-                let record = if let Some(entry) = rwset.get(&key_bytes) {
-                    match entry {
-                        RWEntry::Read(..) => {
-                            bytes_to_record(&value_bytes, container.options.schema())
-                        }
-                        RWEntry::Update(record, _, _) | RWEntry::Insert(record, _, _) => {
-                            record.clone()
-                        }
-                        RWEntry::Delete(_, _) => {
-                            // Deleted in this transaction. Skip this entry.
-                            continue;
-                        }
-                    }
-                } else {
-                    // Lock the key
-                    let locktable = &container.locktable;
-                    if !locktable.try_shared(key_bytes.clone()) {
-                        return Err(TxnStorageStatus::TxnConflict);
-                    }
-                    let record = bytes_to_record(&value_bytes, container.options.schema());
-                    rwset.insert(key_bytes.clone(), RWEntry::Read(ptr, false));
-                    record
-                };
-
-                let key = container
-                    .options
-                    .schema()
-                    .key_indices()
-                    .iter()
-                    .map(|&i| record[i].clone())
-                    .collect();
-                let fields = iter
-                    .options
-                    .cols
-                    .iter()
-                    .map(|&i| record[i].clone())
-                    .collect();
-                return Ok(Some((key, fields, ptr)));
-            } else {
-                // Last entry reached. Lock the &[] key to ensure no new entries are added
-                if rwset.get(&[]).is_none() {
-                    let locktable = &container.locktable;
-                    if !locktable.try_shared(vec![]) {
-                        return Err(TxnStorageStatus::TxnConflict);
-                    }
-                    rwset.insert(vec![], RWEntry::Read(RecordPointer::new(0, 0), false));
-                }
-                iter.finish();
-                return Ok(None);
-            }
-        }
-    }
-
     fn iter_for_each(
         &self,
         txn: &Self::TxnHandle,
@@ -1861,16 +1780,17 @@ mod tests {
         let iter = storage
             .scan_range(&txn2, container_id, ScanOptions::new(&[]))
             .unwrap();
-        let mut count = 0;
         let mut keys = Vec::new();
 
-        while let Ok(Some((key, _fields, _))) = storage.iter_next(&txn2, &iter) {
-            assert_eq!(key.len(), 1);
-            if let Field::Int32(Some(k)) = &key[0] {
-                keys.push(*k);
-            }
-            count += 1;
-        }
+        let count = storage
+            .iter_for_each_fields(&txn2, &iter, &mut |key, _fields, _| {
+                assert_eq!(key.len(), 1);
+                if let Field::Int32(Some(k)) = &key[0] {
+                    keys.push(*k);
+                }
+                true
+            })
+            .unwrap();
 
         assert_eq!(count, 3);
         assert_eq!(keys, vec![1, 2, 3]);
@@ -2508,9 +2428,10 @@ mod tests {
             .scan_range(&txn1, container_id, scan_options.clone())
             .unwrap();
 
-        storage.iter_next(&txn1, &iter).unwrap().unwrap(); // Read first record (key 1)
-        storage.iter_next(&txn1, &iter).unwrap().unwrap(); // Read second record (key 3)
-        assert_eq!(storage.iter_next(&txn1, &iter).unwrap(), None);
+        let count = storage
+            .iter_for_each_fields(&txn1, &iter, &mut |_, _, _| true)
+            .unwrap();
+        assert_eq!(count, 2); // Read keys 1 and 3
         drop(iter); // Explicitly drop the iterator to release page latches.
 
         // Txn2: Try to insert key 2 (between 1 and 3 -- fails because 1, 3, [inf] are locked)
@@ -2541,9 +2462,10 @@ mod tests {
         let iter = storage
             .scan_range(&txn1, container_id, scan_options)
             .unwrap();
-        storage.iter_next(&txn1, &iter).unwrap(); // Consume first record (key 1)
-        storage.iter_next(&txn1, &iter).unwrap(); // Consume second record (key 3)
-        assert_eq!(storage.iter_next(&txn1, &iter).unwrap(), None);
+        let count = storage
+            .iter_for_each_fields(&txn1, &iter, &mut |_, _, _| true)
+            .unwrap();
+        assert_eq!(count, 2); // Consume keys 1 and 3
 
         storage.commit_txn(&txn1, false).unwrap();
 
@@ -2593,10 +2515,22 @@ mod tests {
                 .scan_range(&txn1, container_id, scan_options)
                 .unwrap();
 
-            // Read first record (id=1)
-            let (key1, value1, _) = storage.iter_next(&txn1, &iter).unwrap().unwrap();
-            assert_field!(&key1[0], Int32(1));
-            assert_field!(&value1[1], String("Alice")); // name is at index 1
+            // Consume the entire scan — this acquires locks on keys 1, 3, 5 and end-of-range
+            let mut scanned = Vec::new();
+            storage
+                .iter_for_each_fields(&txn1, &iter, &mut |key, value, _| {
+                    scanned.push((key.to_vec(), value.to_vec()));
+                    true
+                })
+                .unwrap();
+
+            assert_eq!(scanned.len(), 3);
+            assert_field!(&scanned[0].0[0], Int32(1));
+            assert_field!(&scanned[0].1[1], String("Alice"));
+            assert_field!(&scanned[1].0[0], Int32(3));
+            assert_field!(&scanned[1].1[1], String("Carol"));
+            assert_field!(&scanned[2].0[0], Int32(5));
+            assert_field!(&scanned[2].1[1], String("Eve"));
 
             // Txn2: Try to insert id=2 (within scan range)
             let txn2 = storage.begin_txn(db_id, TxnOptions::default()).unwrap();
@@ -2620,18 +2554,6 @@ mod tests {
 
             // This should also conflict
             assert!(matches!(result, Err(TxnStorageStatus::TxnConflict)));
-
-            // Continue scan in Txn1
-            let (key2, value2, _) = storage.iter_next(&txn1, &iter).unwrap().unwrap();
-            assert_field!(&key2[0], Int32(3));
-            assert_field!(&value2[1], String("Carol")); // name is at index 1
-
-            let (key3, value3, _) = storage.iter_next(&txn1, &iter).unwrap().unwrap();
-            assert_field!(&key3[0], Int32(5));
-            assert_field!(&value3[1], String("Eve")); // name is at index 1
-
-            // End of scan
-            assert!(storage.iter_next(&txn1, &iter).unwrap().is_none());
 
             storage.commit_txn(&txn1, false).unwrap();
 
@@ -2673,13 +2595,18 @@ mod tests {
                 (5, "Eve"),
             ];
 
-            for (expected_id, expected_name) in expected {
-                let (key, value, _) = storage.iter_next(&txn3, &iter).unwrap().unwrap();
-                assert_field!(&key[0], Int32(expected_id));
-                assert_field!(&value[1], String(expected_name)); // name is at index 1
-            }
+            let mut idx = 0;
+            let count = storage
+                .iter_for_each_fields(&txn3, &iter, &mut |key, value, _| {
+                    let (expected_id, expected_name) = expected[idx];
+                    assert_field!(&key[0], Int32(expected_id));
+                    assert_field!(&value[1], String(expected_name)); // name is at index 1
+                    idx += 1;
+                    true
+                })
+                .unwrap();
 
-            assert!(storage.iter_next(&txn3, &iter).unwrap().is_none());
+            assert_eq!(count, 5);
             storage.commit_txn(&txn3, false).unwrap();
         }
 
@@ -3025,15 +2952,14 @@ mod tests {
             )
             .unwrap();
 
-        // Read some results
+        // Read some results (stop after 5)
         let mut count = 0;
-        while count < 5 {
-            if let Ok(Some(_)) = storage.iter_next(&txn, &iter) {
+        storage
+            .iter_for_each_fields(&txn, &iter, &mut |_, _, _| {
                 count += 1;
-            } else {
-                break;
-            }
-        }
+                count < 5
+            })
+            .unwrap();
 
         // Locks should be held during scan
         assert!(
