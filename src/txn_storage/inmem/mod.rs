@@ -643,6 +643,27 @@ impl TxnStorageTrait for InMemStorage {
         Ok(iter.next())
     }
 
+    fn iter_for_each(
+        &self,
+        txn: &Self::TxnHandle,
+        iter: &Self::IteratorHandle,
+        f: &mut dyn FnMut(&[u8], &[u8]) -> bool,
+    ) -> Result<u64, TxnStorageStatus> {
+        let mut count: u64 = 0;
+        loop {
+            match self.iter_next(txn, iter)? {
+                Some((key, value)) => {
+                    count += 1;
+                    if !f(&key, &value) {
+                        break;
+                    }
+                }
+                None => break,
+            }
+        }
+        Ok(count)
+    }
+
     // Drop an iterator handle
     fn drop_iterator_handle(&self, _iter: Self::IteratorHandle) -> Result<(), TxnStorageStatus> {
         // Do nothing

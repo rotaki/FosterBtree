@@ -107,21 +107,13 @@ impl TPCCTxnProfile for PaymentTxn {
                 return helper.kill(&txn, &res, AbortID::ScanCustomerByLastName as u8);
             }
             let iter = res.unwrap();
-
-            loop {
-                match txn_storage.iter_next(&txn, &iter) {
-                    Ok(Some((_, p_value))) => {
-                        customer_recs.push(p_value);
-                    }
-                    Ok(None) => break,
-                    Err(e) => {
-                        return helper.kill::<()>(
-                            &txn,
-                            &Err(e),
-                            AbortID::ScanCustomerByLastName as u8,
-                        )
-                    }
-                }
+            let fe_res = txn_storage.iter_for_each(&txn, &iter, &mut |_key, value| {
+                customer_recs.push(value.to_vec());
+                true
+            });
+            if let Err(e) = fe_res {
+                drop(iter);
+                return helper.kill::<()>(&txn, &Err(e), AbortID::ScanCustomerByLastName as u8);
             }
             drop(iter);
 

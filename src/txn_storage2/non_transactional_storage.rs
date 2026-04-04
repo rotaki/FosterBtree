@@ -629,6 +629,23 @@ impl<M: MemPool> FieldLeveLStorageTrait for NonTransactionalStorage<M> {
         }
     }
 
+    fn iter_for_each(
+        &self,
+        _txn: &Self::TxnHandle,
+        iter: &Self::IteratorHandle,
+        f: &mut dyn FnMut(&[u8], &[u8], RecordPointer) -> bool,
+    ) -> Result<u64, TxnStorageStatus> {
+        let mut count: u64 = 0;
+        let scanner = unsafe { &mut *iter.scanner.get() };
+        for (key, value) in scanner {
+            count += 1;
+            if !f(&key, &value, RecordPointer::new(0, 0)) {
+                break;
+            }
+        }
+        Ok(count)
+    }
+
     fn drop_iterator_handle(&self, _iter: Self::IteratorHandle) -> Result<(), TxnStorageStatus> {
         // Iterator will be dropped automatically
         Ok(())

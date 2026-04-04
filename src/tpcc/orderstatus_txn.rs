@@ -65,20 +65,13 @@ impl TPCCTxnProfile for OrderStatusTxn {
                 return helper.kill(&txn, &res, AbortID::GetCustomerByLastName as u8);
             }
             let iter = res.unwrap();
-            loop {
-                match txn_storage.iter_next(&txn, &iter) {
-                    Ok(Some((_, p_value))) => {
-                        customer_recs.push(p_value);
-                    }
-                    Ok(None) => break,
-                    Err(e) => {
-                        return helper.kill::<()>(
-                            &txn,
-                            &Err(e),
-                            AbortID::GetCustomerByLastName as u8,
-                        )
-                    }
-                }
+            let fe_res = txn_storage.iter_for_each(&txn, &iter, &mut |_key, value| {
+                customer_recs.push(value.to_vec());
+                true
+            });
+            if let Err(e) = fe_res {
+                drop(iter);
+                return helper.kill::<()>(&txn, &Err(e), AbortID::GetCustomerByLastName as u8);
             }
             drop(iter);
 
@@ -135,17 +128,14 @@ impl TPCCTxnProfile for OrderStatusTxn {
         let iter = res.unwrap();
         // Find the last order
         let mut last_order = vec![];
-        loop {
-            match txn_storage.iter_next(&txn, &iter) {
-                Ok(Some((sec_key, p_value))) => {
-                    debug_assert_eq!(sec_key, o_sec_low_key.into_bytes());
-                    last_order = p_value;
-                }
-                Ok(None) => break,
-                Err(e) => {
-                    return helper.kill::<()>(&txn, &Err(e), AbortID::GetOrderByCustomerId as u8)
-                }
-            }
+        let fe_res = txn_storage.iter_for_each(&txn, &iter, &mut |_key, value| {
+            last_order.clear();
+            last_order.extend_from_slice(value);
+            true
+        });
+        if let Err(e) = fe_res {
+            drop(iter);
+            return helper.kill::<()>(&txn, &Err(e), AbortID::GetOrderByCustomerId as u8);
         }
         drop(iter);
 
@@ -176,24 +166,21 @@ impl TPCCTxnProfile for OrderStatusTxn {
             return helper.kill(&txn, &res, AbortID::RangeGetOrderLine as u8);
         }
         let iter = res.unwrap();
-        loop {
-            match txn_storage.iter_next(&txn, &iter) {
-                Ok(Some((_, val))) => {
-                    let ol = unsafe { OrderLine::from_bytes(&val) };
-                    write_fields!(
-                        out,
-                        &ol.ol_supply_w_id,
-                        &ol.ol_i_id,
-                        &ol.ol_quantity,
-                        &ol.ol_amount,
-                        &ol.ol_delivery_d
-                    );
-                }
-                Ok(None) => break,
-                Err(e) => {
-                    return helper.kill::<()>(&txn, &Err(e), AbortID::RangeGetOrderLine as u8)
-                }
-            }
+        let fe_res = txn_storage.iter_for_each(&txn, &iter, &mut |_key, val| {
+            let ol = unsafe { OrderLine::from_bytes(val) };
+            write_fields!(
+                out,
+                &ol.ol_supply_w_id,
+                &ol.ol_i_id,
+                &ol.ol_quantity,
+                &ol.ol_amount,
+                &ol.ol_delivery_d
+            );
+            true
+        });
+        if let Err(e) = fe_res {
+            drop(iter);
+            return helper.kill::<()>(&txn, &Err(e), AbortID::RangeGetOrderLine as u8);
         }
         drop(iter);
 

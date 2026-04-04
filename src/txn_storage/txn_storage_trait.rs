@@ -361,6 +361,16 @@ pub trait TxnStorageTrait: Send + Sync {
         iter: &Self::IteratorHandle,
     ) -> Result<Option<(Vec<u8>, Vec<u8>)>, TxnStorageStatus>;
 
+    /// Zero-copy scan: calls the closure with raw (&[u8], &[u8]) for each
+    /// KV pair. No allocation for key/value bytes. The closure returns `true` to
+    /// continue or `false` to stop early. Returns total tuples processed.
+    fn iter_for_each(
+        &self,
+        txn: &Self::TxnHandle,
+        iter: &Self::IteratorHandle,
+        f: &mut dyn FnMut(&[u8], &[u8]) -> bool,
+    ) -> Result<u64, TxnStorageStatus>;
+
     // Drop an iterator handle.
     fn drop_iterator_handle(&self, iter: Self::IteratorHandle) -> Result<(), TxnStorageStatus>;
 }

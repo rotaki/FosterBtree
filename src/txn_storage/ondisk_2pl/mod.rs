@@ -4,6 +4,8 @@ use std::fmt::Display;
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::Arc;
 
+use dashmap::DashMap;
+
 use crate::access_method::fbt::{BTreeKey, FosterBtreeCursor};
 use crate::bp::PageFrameKey;
 use crate::event_tracer::trace_secidx;
@@ -345,7 +347,7 @@ impl<M: MemPool> SecondaryStorages<M> {
 unsafe impl<M: MemPool> Sync for SecondaryStorages<M> {}
 
 pub struct NoWaitTxn {
-    rwset: UnsafeCell<HashMap<ContainerId, ReadWriteSet>>, // Read-write set
+    rwset: UnsafeCell<HashMap<ContainerId, Box<ReadWriteSet>>>, // Read-write set. Boxed for stable addresses.
 }
 
 impl Display for NoWaitTxn {
@@ -398,6 +400,17 @@ impl Display for NoWaitTxn {
 // 2. Release all locks
 
 impl NoWaitTxn {
+    /// Get or create the ReadWriteSet for a container.
+    /// Returns a reference with stable address (Box ensures heap allocation).
+    /// Safe because: single-threaded txn access, entries are never removed.
+    fn get_or_create_rwset(&self, c_id: ContainerId) -> &ReadWriteSet {
+        let rwset_all = unsafe { &mut *self.rwset.get() };
+        rwset_all
+            .entry(c_id)
+            .or_insert_with(|| Box::new(ReadWriteSet::new()));
+        // The Box gives a stable heap address that survives HashMap resizes.
+        unsafe { &**(rwset_all.get(&c_id).unwrap() as *const Box<ReadWriteSet>) }
+    }
     pub fn print_read_write_sets(&self) {
         let rwset_all = unsafe { &*self.rwset.get() };
         for (c_id, rwset) in rwset_all.iter() {
@@ -413,8 +426,7 @@ impl NoWaitTxn {
         hint: Option<PhysicalAddress>,
     ) -> Result<(Vec<u8>, PhysicalAddress), TxnStorageStatus> {
         let c_id = ps.c_id;
-        let rwset_all = unsafe { &mut *self.rwset.get() };
-        let rwset = rwset_all.entry(c_id).or_insert_with(ReadWriteSet::new);
+        let rwset = self.get_or_create_rwset(c_id);
 
         if let Some(e) = rwset.get_mut(key.as_ref()) {
             match e {
@@ -473,8 +485,7 @@ impl NoWaitTxn {
     ) -> Result<PhysicalAddress, TxnStorageStatus> {
         // Get from rwset or insert a new entry
         let c_id = ps.c_id;
-        let rwset_all = unsafe { &mut *self.rwset.get() };
-        let rwset = rwset_all.entry(c_id).or_insert_with(ReadWriteSet::new);
+        let rwset = self.get_or_create_rwset(c_id);
         if let Some(e) = rwset.get_mut(key.as_ref()) {
             match e {
                 RWEntry::Read(_, _) | RWEntry::Update(_, _, _) | RWEntry::Insert(_, _, _) => {
@@ -593,8 +604,7 @@ impl NoWaitTxn {
     ) -> Result<PhysicalAddress, TxnStorageStatus> {
         // Get from rwset or insert a new entry
         let c_id = ss.c_id;
-        let rwset_all = unsafe { &mut *self.rwset.get() };
-        let rwset = rwset_all.entry(c_id).or_insert_with(ReadWriteSet::new);
+        let rwset = self.get_or_create_rwset(c_id);
         if let Some(e) = rwset.get_mut(key.as_ref()) {
             match e {
                 RWEntry::Read(_, _) | RWEntry::Update(_, _, _) | RWEntry::Insert(_, _, _) => {
@@ -712,8 +722,7 @@ impl NoWaitTxn {
         hint: Option<PhysicalAddress>,
     ) -> Result<PhysicalAddress, TxnStorageStatus> {
         let c_id = ps.c_id;
-        let rwset_all = unsafe { &mut *self.rwset.get() };
-        let rwset = rwset_all.entry(c_id).or_insert_with(ReadWriteSet::new);
+        let rwset = self.get_or_create_rwset(c_id);
         if let Some(e) = rwset.get_mut(key.as_ref()) {
             match e {
                 RWEntry::Read(inserted_as_ghost, pa) => {
@@ -772,8 +781,7 @@ impl NoWaitTxn {
         hint: Option<PhysicalAddress>,
     ) -> Result<PhysicalAddress, TxnStorageStatus> {
         let c_id = ps.c_id;
-        let rwset_all = unsafe { &mut *self.rwset.get() };
-        let rwset = rwset_all.entry(c_id).or_insert_with(ReadWriteSet::new);
+        let rwset = self.get_or_create_rwset(c_id);
         if let Some(e) = rwset.get_mut(key.as_ref()) {
             match e {
                 RWEntry::Read(inserted_as_ghost, pa) => {
@@ -834,8 +842,7 @@ impl NoWaitTxn {
         let c_id = pi.ps.c_id;
         let locktable = &pi.ps.locktable;
 
-        let rwset_all = unsafe { &mut *self.rwset.get() };
-        let rwset = rwset_all.entry(c_id).or_insert_with(ReadWriteSet::new);
+        let rwset = self.get_or_create_rwset(c_id);
         loop {
             if let Some((key, value)) = pi.cursor.get_kv() {
                 if !pi.options.upper_exc.is_empty() && key >= pi.options.upper_exc {
@@ -912,8 +919,7 @@ impl NoWaitTxn {
         let c_id = si.ss.c_id;
         let locktable = &si.ss.locktable;
 
-        let rwset_all = unsafe { &mut *self.rwset.get() };
-        let rwset = rwset_all.entry(c_id).or_insert_with(ReadWriteSet::new);
+        let rwset = self.get_or_create_rwset(c_id);
         let (s_key, s_value) = loop {
             if let Some((key, value)) = si.cursor.get_kv() {
                 if !si.options.upper_exc.is_empty() && key >= si.options.upper_exc {
@@ -1586,6 +1592,180 @@ impl<M: MemPool> TxnStorageTrait for NoWaitTxnStorage<M> {
             KVIterator::Secondary(iter) => {
                 let iter = unsafe { &mut *iter.get() };
                 txn.iter_next_sec(iter)
+            }
+        }
+    }
+
+    fn iter_for_each(
+        &self,
+        txn: &Self::TxnHandle,
+        iter: &Self::IteratorHandle,
+        f: &mut dyn FnMut(&[u8], &[u8]) -> bool,
+    ) -> Result<u64, TxnStorageStatus> {
+        match iter {
+            KVIterator::Primary(iter) => {
+                let pi = unsafe { &mut *iter.get() };
+                if pi.finished {
+                    return Ok(0);
+                }
+
+                let c_id = pi.ps.c_id;
+                let locktable = &pi.ps.locktable;
+                let rwset = txn.get_or_create_rwset(c_id);
+
+                let mut count: u64 = 0;
+                let mut err: Option<TxnStorageStatus> = None;
+
+                pi.cursor
+                    .for_each_with_ptr(|key_bytes, value_bytes, (page_id, frame_id)| {
+                        // Upper bound check
+                        if !pi.options.upper_exc.is_empty() && key_bytes >= &*pi.options.upper_exc {
+                            if rwset.get(key_bytes).is_none() {
+                                if !locktable.try_shared(key_bytes.to_vec()) {
+                                    err = Some(TxnStorageStatus::TxnConflict);
+                                    return false;
+                                }
+                                rwset.insert(
+                                    key_bytes.to_vec(),
+                                    RWEntry::Read(false, PhysicalAddress::new(page_id, frame_id)),
+                                );
+                            }
+                            pi.finished = true;
+                            return false;
+                        }
+
+                        // Check rwset
+                        if let Some(e) = rwset.get_mut(key_bytes) {
+                            e.update_physical_address(PhysicalAddress::new(page_id, frame_id));
+                            match e {
+                                RWEntry::Delete(_, _) => return true, // Skip deleted
+                                RWEntry::Update(_, _, new_val) | RWEntry::Insert(_, _, new_val) => {
+                                    count += 1;
+                                    return f(key_bytes, new_val);
+                                }
+                                RWEntry::Read(_, _) => {
+                                    count += 1;
+                                    return f(key_bytes, value_bytes);
+                                }
+                            }
+                        }
+
+                        // Lock the key
+                        if !locktable.try_shared(key_bytes.to_vec()) {
+                            err = Some(TxnStorageStatus::TxnConflict);
+                            return false;
+                        }
+                        rwset.insert(
+                            key_bytes.to_vec(),
+                            RWEntry::Read(false, PhysicalAddress::new(page_id, frame_id)),
+                        );
+                        count += 1;
+                        f(key_bytes, value_bytes)
+                    });
+
+                // Phantom protection at end of range
+                if err.is_none() && !pi.finished {
+                    if rwset.get(&[]).is_none() {
+                        if !locktable.try_shared(vec![]) {
+                            return Err(TxnStorageStatus::TxnConflict);
+                        }
+                        rwset.insert(vec![], RWEntry::Read(false, PhysicalAddress::default()));
+                    }
+                    pi.finished = true;
+                }
+
+                match err {
+                    Some(e) => Err(e),
+                    None => Ok(count),
+                }
+            }
+            KVIterator::Secondary(iter) => {
+                let si = unsafe { &mut *iter.get() };
+                if si.finished {
+                    return Ok(0);
+                }
+
+                let sec_c_id = si.ss.c_id;
+                let sec_locktable = &si.ss.locktable;
+                let ps = &si.ss.ps;
+                // Pre-create both rwsets so HashMap resizes don't invalidate
+                // the Box<ReadWriteSet> pointer while the closure runs.
+                txn.get_or_create_rwset(sec_c_id);
+                txn.get_or_create_rwset(ps.c_id);
+                let sec_rwset = txn.get_or_create_rwset(sec_c_id);
+
+                let mut count: u64 = 0;
+                let mut err: Option<TxnStorageStatus> = None;
+                let mut hit_upper_bound = false;
+
+                si.cursor
+                    .for_each_with_ptr(|s_key_bytes, s_value_bytes, (_page_id, _frame_id)| {
+                        // Upper bound — locks boundary key for phantom protection
+                        if !si.options.upper_exc.is_empty() && s_key_bytes >= &*si.options.upper_exc
+                        {
+                            if sec_rwset.get(s_key_bytes).is_none() {
+                                if !sec_locktable.try_shared(s_key_bytes.to_vec()) {
+                                    err = Some(TxnStorageStatus::TxnConflict);
+                                    return false;
+                                }
+                                sec_rwset.insert(
+                                    s_key_bytes.to_vec(),
+                                    RWEntry::Read(false, PhysicalAddress::default()),
+                                );
+                            }
+                            hit_upper_bound = true;
+                            return false;
+                        }
+
+                        // Check sec_rwset for deleted entries
+                        if let Some(e) = sec_rwset.get(s_key_bytes) {
+                            if matches!(e, RWEntry::Delete(_, _)) {
+                                return true;
+                            }
+                        } else {
+                            if !sec_locktable.try_shared(s_key_bytes.to_vec()) {
+                                err = Some(TxnStorageStatus::TxnConflict);
+                                return false;
+                            }
+                            sec_rwset.insert(
+                                s_key_bytes.to_vec(),
+                                RWEntry::Read(false, PhysicalAddress::default()),
+                            );
+                        }
+
+                        // Extract primary key and hint from secondary value
+                        let (p_key, p_hint_bytes) = s_value_bytes.split_at(s_value_bytes.len() - 8);
+                        let p_hint = PhysicalAddress::from_bytes(p_hint_bytes);
+
+                        // Primary read — Box<ReadWriteSet> has stable address, safe to call txn.read()
+                        match txn.read(ps, p_key, Some(p_hint)) {
+                            Ok((p_value, _p_addr)) => {
+                                count += 1;
+                                f(s_key_bytes, &p_value)
+                            }
+                            Err(e) => {
+                                err = Some(e);
+                                false
+                            }
+                        }
+                    });
+
+                // Phantom protection: if cursor exhausted naturally (not by upper bound),
+                // lock &[] to prevent new inserts at the end of the range.
+                if err.is_none() && !hit_upper_bound {
+                    if sec_rwset.get(&[]).is_none() {
+                        if !sec_locktable.try_shared(vec![]) {
+                            return Err(TxnStorageStatus::TxnConflict);
+                        }
+                        sec_rwset.insert(vec![], RWEntry::Read(false, PhysicalAddress::default()));
+                    }
+                }
+                si.finished = true;
+
+                match err {
+                    Some(e) => Err(e),
+                    None => Ok(count),
+                }
             }
         }
     }

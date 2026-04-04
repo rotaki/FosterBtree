@@ -74,19 +74,15 @@ impl TPCCTxnProfile for StockLevelTxn {
         }
         let iter = res.unwrap();
 
-        loop {
-            let item = txn_storage.iter_next(&txn, &iter);
-            match item {
-                Ok(Some((_key_bytes, value_bytes))) => {
-                    let ol = unsafe { OrderLine::from_bytes(&value_bytes) };
-                    debug_assert_ne!(ol.ol_i_id, { Item::UNUSED_ID });
-                    s_i_ids.insert(ol.ol_i_id);
-                }
-                Ok(None) => break,
-                Err(e) => {
-                    return helper.kill::<()>(&txn, &Err(e), AbortID::RangeGetOrderLine as u8);
-                }
-            }
+        let fe_res = txn_storage.iter_for_each(&txn, &iter, &mut |_key_bytes, value_bytes| {
+            let ol = unsafe { OrderLine::from_bytes(value_bytes) };
+            debug_assert_ne!(ol.ol_i_id, { Item::UNUSED_ID });
+            s_i_ids.insert(ol.ol_i_id);
+            true
+        });
+        if let Err(e) = fe_res {
+            drop(iter);
+            return helper.kill::<()>(&txn, &Err(e), AbortID::RangeGetOrderLine as u8);
         }
 
         // Filter s_i_ids based on Stock quantity

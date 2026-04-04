@@ -179,6 +179,19 @@ impl<M: MemPool> KVCursor<M> {
             Some((key, value, RecordPointer::new(page_id, frame_id)))
         }
     }
+
+    /// Zero-copy scan over raw key/value bytes.
+    /// The closure receives borrowed slices directly from the page — no allocation.
+    /// Returns the number of tuples processed.
+    /// Closure returns `true` to continue, `false` to stop early.
+    fn for_each_raw(&self, mut f: impl FnMut(&[u8], &[u8], RecordPointer) -> bool) -> u64 {
+        unsafe {
+            let cursor_ref = &mut *self.cursor.get();
+            cursor_ref.for_each_with_ptr(|key, val, (page_id, frame_id)| {
+                f(key, val, RecordPointer::new(page_id, frame_id))
+            })
+        }
+    }
 }
 
 struct ContainerInfo<M: MemPool> {
@@ -1191,6 +1204,73 @@ impl<M: MemPool> FieldLeveLStorageTrait for TransactionalStorage<M> {
                 iter.finish();
                 return Ok(None);
             }
+        }
+    }
+
+    fn iter_for_each(
+        &self,
+        txn: &Self::TxnHandle,
+        iter: &Self::IteratorHandle,
+        f: &mut dyn FnMut(&[u8], &[u8], RecordPointer) -> bool,
+    ) -> Result<u64, TxnStorageStatus> {
+        if iter.is_finished() {
+            return Ok(0);
+        }
+
+        let container = self.get_container(iter.c_id)?;
+        let rwset = txn.get_or_create_rwset(iter.c_id);
+        let mut count: u64 = 0;
+        let mut err: Option<TxnStorageStatus> = None;
+
+        iter.scanner.for_each_raw(|key_bytes, value_bytes, ptr| {
+            // Upper bound check
+            if !iter.options.upper_exc.is_empty() && key_bytes >= &*iter.options.upper_exc {
+                if rwset.get(key_bytes).is_none() {
+                    let locktable = &container.locktable;
+                    if !locktable.try_shared(key_bytes.to_vec()) {
+                        err = Some(TxnStorageStatus::TxnConflict);
+                        return false;
+                    }
+                    rwset.insert(key_bytes.to_vec(), RWEntry::Read(ptr, false));
+                }
+                iter.finish();
+                return false;
+            }
+
+            // Check rwset for deleted entries
+            if let Some(entry) = rwset.get(key_bytes) {
+                if matches!(entry, RWEntry::Delete(_, _)) {
+                    return true; // Skip deleted, continue
+                }
+            } else {
+                // Lock the key
+                let locktable = &container.locktable;
+                if !locktable.try_shared(key_bytes.to_vec()) {
+                    err = Some(TxnStorageStatus::TxnConflict);
+                    return false;
+                }
+                rwset.insert(key_bytes.to_vec(), RWEntry::Read(ptr, false));
+            }
+
+            count += 1;
+            f(key_bytes, value_bytes, ptr)
+        });
+
+        // Lock the end-of-range for phantom protection
+        if err.is_none() && !iter.is_finished() {
+            if rwset.get(&[]).is_none() {
+                let locktable = &container.locktable;
+                if !locktable.try_shared(vec![]) {
+                    return Err(TxnStorageStatus::TxnConflict);
+                }
+                rwset.insert(vec![], RWEntry::Read(RecordPointer::new(0, 0), false));
+            }
+            iter.finish();
+        }
+
+        match err {
+            Some(e) => Err(e),
+            None => Ok(count),
         }
     }
 

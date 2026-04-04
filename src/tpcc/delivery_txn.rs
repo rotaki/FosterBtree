@@ -134,22 +134,13 @@ impl TPCCTxnProfile for DeliveryTxn {
             }
             let iter = res.unwrap();
             let mut order_lines = vec![];
-            loop {
-                match txn_storage.iter_next(&txn, &iter) {
-                    Ok(Some((key_bytes, value_bytes))) => {
-                        order_lines.push((key_bytes, value_bytes));
-                    }
-                    Ok(None) => {
-                        break;
-                    }
-                    Err(e) => {
-                        return helper.kill::<()>(
-                            &txn,
-                            &Err(e),
-                            AbortID::RangeUpdateOrderLine as u8,
-                        );
-                    }
-                }
+            let fe_res = txn_storage.iter_for_each(&txn, &iter, &mut |key_bytes, value_bytes| {
+                order_lines.push((key_bytes.to_vec(), value_bytes.to_vec()));
+                true
+            });
+            if let Err(e) = fe_res {
+                drop(iter);
+                return helper.kill::<()>(&txn, &Err(e), AbortID::RangeUpdateOrderLine as u8);
             }
             drop(iter);
 

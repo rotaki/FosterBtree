@@ -2406,6 +2406,10 @@ pub struct FosterBtreeCursor<T: MemPool> {
 }
 
 impl<T: MemPool> FosterBtreeCursor<T> {
+    pub fn is_finished(&self) -> bool {
+        self.finished
+    }
+
     pub fn new(btree: &Arc<FosterBtree<T>>, l_key: &[u8], r_key: &[u8]) -> Self {
         let mut cursor = Self {
             btree: btree.clone(),
@@ -2691,6 +2695,109 @@ impl<T: MemPool> FosterBtreeCursor<T> {
             }
 
             // Transition to next leaf via sibling hint or parent traversal.
+            let (sib_page_id, sib_frame_id) = leaf_page.sibling_address();
+            let old_page_id = leaf_page.get_id();
+            let old_frame_id = leaf_page.frame_id();
+            drop(leaf_page);
+
+            if self.try_sibling_hint(sib_page_id, sib_frame_id) {
+                #[cfg(feature = "timer")]
+                {
+                    self.scan_timers.sibling_hint_hit += 1;
+                }
+            } else {
+                #[cfg(feature = "timer")]
+                {
+                    self.scan_timers.sibling_hint_miss += 1;
+                }
+                self.go_to_next_leaf_page();
+                if let Some(ref next_leaf) = self.current_leaf_page {
+                    self.repair_sibling_hint_best_effort(
+                        old_page_id,
+                        old_frame_id,
+                        next_leaf.get_id(),
+                        next_leaf.frame_id(),
+                    );
+                }
+            }
+        }
+
+        #[cfg(feature = "timer")]
+        {
+            self.scan_timers.tuples_scanned += count;
+        }
+        count
+    }
+
+    /// Like `for_each`, but also passes the physical address (page_id, frame_id)
+    /// of the current page to the closure for record pointer hints.
+    pub fn for_each_with_ptr(
+        &mut self,
+        mut f: impl FnMut(&[u8], &[u8], (PageId, u32)) -> bool,
+    ) -> u64 {
+        let mut count: u64 = 0;
+
+        'outer: while !self.finished {
+            let leaf_page = match self.current_leaf_page.take() {
+                Some(p) => p,
+                None => break,
+            };
+
+            let last_data_slot = if leaf_page.has_foster_child() {
+                leaf_page.foster_child_slot_id()
+            } else {
+                leaf_page.high_fence_slot_id()
+            };
+
+            // Prefetch the next page.
+            {
+                let (pf_page_id, pf_frame_id) = leaf_page.sibling_address();
+                if pf_page_id != u32::MAX {
+                    let pf_key =
+                        PageFrameKey::new_with_frame_id(self.btree.c_key, pf_page_id, pf_frame_id);
+                    let _ = self.btree.mem_pool.prefetch_page(pf_key);
+                }
+            }
+
+            let ptr = (leaf_page.get_id(), leaf_page.frame_id());
+
+            // Tight inner loop.
+            while self.current_slot_id < last_data_slot {
+                let key = leaf_page.get_raw_key(self.current_slot_id);
+                if !self.is_full_scan && BTreeKey::new(key) >= self.r_key() {
+                    self.finished = true;
+                    break 'outer;
+                }
+                let val = leaf_page.get_val(self.current_slot_id);
+                count += 1;
+                self.current_slot_id += 1;
+                if !f(key, val, ptr) {
+                    self.current_leaf_page = Some(leaf_page);
+                    #[cfg(feature = "timer")]
+                    {
+                        self.scan_timers.tuples_scanned += count;
+                    }
+                    return count;
+                }
+            }
+
+            // Inline page transition.
+            if leaf_page.has_foster_child() {
+                let val = InnerVal::from_bytes(leaf_page.get_foster_val());
+                let foster_page_key =
+                    PageFrameKey::new_with_frame_id(self.btree.c_key, val.page_id, val.frame_id);
+                let foster_page = self.btree.read_page(foster_page_key);
+                drop(leaf_page);
+                self.current_slot_id = 1;
+                self.current_leaf_page = Some(foster_page);
+                continue 'outer;
+            }
+
+            if self.current_high_fence() >= self.r_key() {
+                self.finished = true;
+                break 'outer;
+            }
+
             let (sib_page_id, sib_frame_id) = leaf_page.sibling_address();
             let old_page_id = leaf_page.get_id();
             let old_frame_id = leaf_page.frame_id();
