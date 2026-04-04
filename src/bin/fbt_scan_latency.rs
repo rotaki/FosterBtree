@@ -9,6 +9,7 @@ use fbtree::{
 use std::{sync::Arc, time::Duration};
 
 use fbtree::{
+    access_method::fbt::FosterBtreeCursor,
     bp::{ContainerKey, MemPool},
     prelude::FosterBtree,
 };
@@ -175,4 +176,31 @@ fn main() {
         unsafe { bp.reset_stats() };
     }
     println!("Avg Latency: {:?}", total_time / num_scans);
+
+    // Benchmark for_each (zero-copy) scan
+    println!("\n=== for_each (zero-copy) scan ===");
+    unsafe { bp.reset_stats() };
+
+    // Warmup for_each
+    {
+        let mut cursor = FosterBtreeCursor::new(&table, &[], &[]);
+        let start = std::time::Instant::now();
+        let count = cursor.for_each(|_key, _val| true);
+        println!("for_each warmup: {:?}, {} tuples", start.elapsed(), count);
+        assert_eq!(count as usize, params.num_keys);
+    }
+
+    let mut total_time_fe = Duration::new(0, 0);
+    for i in 0..num_scans {
+        table.clear_scan_stats();
+        let mut cursor = FosterBtreeCursor::new(&table, &[], &[]);
+        let start = std::time::Instant::now();
+        let count = cursor.for_each(|_key, _val| true);
+        let dur = start.elapsed();
+        total_time_fe += dur;
+        println!("for_each scan {} took {:?}, {} tuples", i, dur, count);
+        println!("--- Scan timer stats ---\n{}", table.scan_stats());
+        assert_eq!(count as usize, params.num_keys);
+    }
+    println!("for_each Avg Latency: {:?}", total_time_fe / num_scans);
 }

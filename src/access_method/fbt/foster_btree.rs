@@ -2618,6 +2618,113 @@ impl<T: MemPool> FosterBtreeCursor<T> {
         }
     }
 
+    /// Zero-copy scan: calls `f(key, val)` for every KV pair in [l_key, r_key).
+    /// The closure receives borrowed slices directly into the page — no allocation.
+    /// Returns the number of tuples processed.
+    /// The closure returns `true` to continue, `false` to stop early.
+    pub fn for_each(&mut self, mut f: impl FnMut(&[u8], &[u8]) -> bool) -> u64 {
+        let mut count: u64 = 0;
+
+        'outer: while !self.finished {
+            let leaf_page = match self.current_leaf_page.take() {
+                Some(p) => p,
+                None => break,
+            };
+
+            // Compute the last data slot in this page (exclusive bound).
+            let last_data_slot = if leaf_page.has_foster_child() {
+                leaf_page.foster_child_slot_id()
+            } else {
+                leaf_page.high_fence_slot_id()
+            };
+
+            // Prefetch the next page while we process this one.
+            // Use sibling hint if available; otherwise foster child.
+            {
+                let (pf_page_id, pf_frame_id) = leaf_page.sibling_address();
+                if pf_page_id != u32::MAX {
+                    let pf_key =
+                        PageFrameKey::new_with_frame_id(self.btree.c_key, pf_page_id, pf_frame_id);
+                    let _ = self.btree.mem_pool.prefetch_page(pf_key);
+                }
+            }
+
+            // Tight inner loop over all data slots in this page.
+            while self.current_slot_id < last_data_slot {
+                let key = leaf_page.get_raw_key(self.current_slot_id);
+                if !self.is_full_scan && BTreeKey::new(key) >= self.r_key() {
+                    self.finished = true;
+                    break 'outer;
+                }
+                let val = leaf_page.get_val(self.current_slot_id);
+                count += 1;
+                self.current_slot_id += 1;
+                if !f(key, val) {
+                    self.current_leaf_page = Some(leaf_page);
+                    #[cfg(feature = "timer")]
+                    {
+                        self.scan_timers.tuples_scanned += count;
+                    }
+                    return count;
+                }
+            }
+
+            // --- Inline page transition ---
+
+            // Foster child: follow directly. High fence stays the same.
+            if leaf_page.has_foster_child() {
+                let val = InnerVal::from_bytes(leaf_page.get_foster_val());
+                let foster_page_key =
+                    PageFrameKey::new_with_frame_id(self.btree.c_key, val.page_id, val.frame_id);
+                let foster_page = self.btree.read_page(foster_page_key);
+                drop(leaf_page);
+                // current_high_fence unchanged — foster child has same high fence.
+                self.current_slot_id = 1;
+                self.current_leaf_page = Some(foster_page);
+                continue 'outer;
+            }
+
+            // No foster child — at high fence. Check if scan range exhausted.
+            if self.current_high_fence() >= self.r_key() {
+                self.finished = true;
+                break 'outer;
+            }
+
+            // Transition to next leaf via sibling hint or parent traversal.
+            let (sib_page_id, sib_frame_id) = leaf_page.sibling_address();
+            let old_page_id = leaf_page.get_id();
+            let old_frame_id = leaf_page.frame_id();
+            drop(leaf_page);
+
+            if self.try_sibling_hint(sib_page_id, sib_frame_id) {
+                #[cfg(feature = "timer")]
+                {
+                    self.scan_timers.sibling_hint_hit += 1;
+                }
+            } else {
+                #[cfg(feature = "timer")]
+                {
+                    self.scan_timers.sibling_hint_miss += 1;
+                }
+                self.go_to_next_leaf_page();
+                if let Some(ref next_leaf) = self.current_leaf_page {
+                    self.repair_sibling_hint_best_effort(
+                        old_page_id,
+                        old_frame_id,
+                        next_leaf.get_id(),
+                        next_leaf.frame_id(),
+                    );
+                }
+            }
+        }
+
+        #[cfg(feature = "timer")]
+        {
+            self.scan_timers.tuples_scanned += count;
+        }
+        count
+    }
+
     pub fn get_physical_address(&self) -> (PageId, u32, u32) {
         let leaf_page = self.current_leaf_page.as_ref().unwrap();
         (

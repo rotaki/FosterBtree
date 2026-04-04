@@ -854,7 +854,35 @@ impl MemPool for BufferPool {
         }
     }
 
-    fn prefetch_page(&self, _key: PageFrameKey) -> Result<(), MemPoolStatus> {
+    fn prefetch_page(&self, key: PageFrameKey) -> Result<(), MemPoolStatus> {
+        let frame_id = key.frame_id();
+        if (frame_id as usize) < self.num_frames {
+            // Touch frame meta and page data to warm them into CPU cache.
+            unsafe {
+                let metas = &*self.metas.get();
+                let pages = &*self.pages.get();
+                let meta_ptr = metas[frame_id as usize].as_ref() as *const _ as *const u8;
+                let page_ptr = pages[frame_id as usize].as_ref() as *const Page as *const u8;
+                #[cfg(target_arch = "x86_64")]
+                {
+                    std::arch::x86_64::_mm_prefetch(
+                        meta_ptr as *const i8,
+                        std::arch::x86_64::_MM_HINT_T0,
+                    );
+                    // Prefetch first cache line of the page (slot array lives here).
+                    std::arch::x86_64::_mm_prefetch(
+                        page_ptr as *const i8,
+                        std::arch::x86_64::_MM_HINT_T0,
+                    );
+                }
+                #[cfg(not(target_arch = "x86_64"))]
+                {
+                    // Volatile read to force the cache line fetch.
+                    std::ptr::read_volatile(meta_ptr);
+                    std::ptr::read_volatile(page_ptr);
+                }
+            }
+        }
         Ok(())
     }
 
