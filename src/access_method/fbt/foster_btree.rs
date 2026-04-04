@@ -2832,6 +2832,112 @@ impl<T: MemPool> FosterBtreeCursor<T> {
         count
     }
 
+    /// Page-at-a-time iteration.
+    ///
+    /// For each leaf page the closure receives the `FrameReadGuard`, the
+    /// precomputed slot range `[start_slot, end_slot)`, and a `last_page`
+    /// flag. When `last_page` is true, the key at `end_slot` is the first
+    /// key >= the scan's upper bound (useful for phantom-protection locking).
+    /// The closure returns `(guard, should_continue)`.
+    pub fn for_each_page(
+        &mut self,
+        mut f: impl FnMut(FrameReadGuard<T::EP>, u32, u32, bool) -> (FrameReadGuard<T::EP>, bool),
+    ) -> u64 {
+        let mut count: u64 = 0;
+
+        'outer: while !self.finished {
+            let leaf_page = match self.current_leaf_page.take() {
+                Some(p) => p,
+                None => break,
+            };
+
+            let last_data_slot = if leaf_page.has_foster_child() {
+                leaf_page.foster_child_slot_id()
+            } else {
+                leaf_page.high_fence_slot_id()
+            };
+
+            // Prefetch the next page.
+            {
+                let (pf_page_id, pf_frame_id) = leaf_page.sibling_address();
+                if pf_page_id != u32::MAX {
+                    let pf_key =
+                        PageFrameKey::new_with_frame_id(self.btree.c_key, pf_page_id, pf_frame_id);
+                    let _ = self.btree.mem_pool.prefetch_page(pf_key);
+                }
+            }
+
+            // Compute end_slot: binary search for the first slot >= upper bound.
+            let start_slot = self.current_slot_id;
+            let r_key = self.r_key();
+            let end_slot = leaf_page
+                .binary_search(|slot_key| slot_key >= r_key)
+                .min(last_data_slot);
+
+            // Last page if the upper bound <= this page's high fence.
+            let last_page = self.current_high_fence() >= self.r_key();
+
+            let num_entries = end_slot - start_slot;
+            self.current_slot_id = end_slot;
+
+            let (leaf_page, should_continue) = if num_entries > 0 || last_page {
+                count += num_entries as u64;
+                f(leaf_page, start_slot, end_slot, last_page)
+            } else {
+                (leaf_page, true)
+            };
+
+            if last_page || !should_continue {
+                self.finished = true;
+                break 'outer;
+            }
+
+            // Inline page transition (same as for_each_with_ptr).
+            if leaf_page.has_foster_child() {
+                let val = InnerVal::from_bytes(leaf_page.get_foster_val());
+                let foster_page_key =
+                    PageFrameKey::new_with_frame_id(self.btree.c_key, val.page_id, val.frame_id);
+                let foster_page = self.btree.read_page(foster_page_key);
+                drop(leaf_page);
+                self.current_slot_id = 1;
+                self.current_leaf_page = Some(foster_page);
+                continue 'outer;
+            }
+
+            let (sib_page_id, sib_frame_id) = leaf_page.sibling_address();
+            let old_page_id = leaf_page.get_id();
+            let old_frame_id = leaf_page.frame_id();
+            drop(leaf_page);
+
+            if self.try_sibling_hint(sib_page_id, sib_frame_id) {
+                #[cfg(feature = "timer")]
+                {
+                    self.scan_timers.sibling_hint_hit += 1;
+                }
+            } else {
+                #[cfg(feature = "timer")]
+                {
+                    self.scan_timers.sibling_hint_miss += 1;
+                }
+                self.go_to_next_leaf_page();
+                if let Some(ref next_leaf) = self.current_leaf_page {
+                    self.repair_sibling_hint_best_effort(
+                        old_page_id,
+                        old_frame_id,
+                        next_leaf.get_id(),
+                        next_leaf.frame_id(),
+                    );
+                }
+            }
+        }
+
+        #[cfg(feature = "timer")]
+        {
+            self.scan_timers.tuples_scanned += count;
+        }
+        count
+    }
+
     pub fn get_physical_address(&self) -> (PageId, u32, u32) {
         let leaf_page = self.current_leaf_page.as_ref().unwrap();
         (

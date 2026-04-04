@@ -83,10 +83,12 @@ impl<M: MemPool> TpccLoader<M> {
         let customer_secondary_cid = storage
             .create_container(
                 db_id,
-                ContainerOptions::new(
+                ContainerOptions::secondary(
                     CUSTOMER_SECONDARY_TABLE,
                     ContainerDS::BTree,
                     customer_secondary_schema(),
+                    customer_cid,
+                    vec![0, 1, 3], // w_id, d_id, c_id
                 ),
             )
             .unwrap();
@@ -108,10 +110,12 @@ impl<M: MemPool> TpccLoader<M> {
         let order_secondary_cid = storage
             .create_container(
                 db_id,
-                ContainerOptions::new(
+                ContainerOptions::secondary(
                     ORDER_SECONDARY_TABLE,
                     ContainerDS::BTree,
                     order_secondary_schema(),
+                    order_cid,
+                    vec![0, 1, 3], // w_id, d_id, o_id
                 ),
             )
             .unwrap();

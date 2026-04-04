@@ -103,11 +103,26 @@ impl ContainerDS {
     }
 }
 
+/// Describes how a container relates to other containers.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ContainerType {
+    /// A standalone primary container.
+    Primary,
+    /// A secondary index that references a primary container.
+    /// Stores the primary container ID and the indices within the secondary
+    /// schema that together form the primary key.
+    Secondary {
+        primary_c_id: ContainerId,
+        primary_key_col_indices: Vec<usize>,
+    },
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ContainerOptions {
     name: String,
     c_ds: ContainerDS,
     schema: Schema,
+    c_type: ContainerType,
 }
 
 impl ContainerOptions {
@@ -116,6 +131,29 @@ impl ContainerOptions {
             name: String::from(name),
             c_ds,
             schema,
+            c_type: ContainerType::Primary,
+        }
+    }
+
+    /// Create options for a secondary index container.
+    /// `primary_c_id` is the container this index references.
+    /// `primary_key_col_indices` are the column positions in the secondary
+    /// schema that together form the primary key.
+    pub fn secondary(
+        name: &str,
+        c_ds: ContainerDS,
+        schema: Schema,
+        primary_c_id: ContainerId,
+        primary_key_col_indices: Vec<usize>,
+    ) -> Self {
+        ContainerOptions {
+            name: String::from(name),
+            c_ds,
+            schema,
+            c_type: ContainerType::Secondary {
+                primary_c_id,
+                primary_key_col_indices,
+            },
         }
     }
 
@@ -131,6 +169,10 @@ impl ContainerOptions {
         &self.schema
     }
 
+    pub fn container_type(&self) -> &ContainerType {
+        &self.c_type
+    }
+
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut bytes = self.c_ds.to_bytes();
         bytes.extend_from_slice(self.name.as_bytes());
@@ -143,7 +185,12 @@ impl ContainerOptions {
         let name = String::from_utf8(bytes[1..].to_vec()).expect("Invalid container name");
         let schema_bytes = &bytes[1 + name.len()..];
         let schema = Schema::from_bytes(schema_bytes);
-        ContainerOptions { name, c_ds, schema }
+        ContainerOptions {
+            name,
+            c_ds,
+            schema,
+            c_type: ContainerType::Primary,
+        }
     }
 }
 

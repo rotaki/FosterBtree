@@ -188,29 +188,6 @@ pub fn run_orderstatus_txn_with_stats<M: MemPool>(
     }
     let (c_fields, c_actual_hint) = res.unwrap();
 
-    // Check if hint from secondary index is stale and update if needed
-    if let (Some(c_secondary_key), Some(c_hint), Some(c_secondary_hint)) =
-        (c_secondary_key, c_hint, c_secondary_hint)
-    {
-        if c_hint != c_actual_hint {
-            // Hint is stale, update secondary index
-            let res = storage.update_field(
-                &txn,
-                containers.customer_secondary_cid,
-                c_secondary_key,
-                4, // Pointer is at index 4 in the secondary index schema
-                Field::Pointer(Some(c_actual_hint)),
-                Some(c_secondary_hint),
-            );
-            if not_successful(&res) {
-                return (
-                    helper.kill(&txn, &res, AbortID::OrderStatusGetCustomer),
-                    None,
-                );
-            }
-        }
-    }
-
     let c_first = get_string_field(&c_fields, 0);
     let c_middle = get_string_field(&c_fields, 1);
     let c_last = get_string_field(&c_fields, 2);
@@ -245,12 +222,10 @@ pub fn run_orderstatus_txn_with_stats<M: MemPool>(
 
     let mut latest_o_id = 0u32;
     let mut latest_order_hint = None;
-    let mut latest_order_secondary_key = None;
     let fe_res = storage.iter_for_each_fields(&txn, &iter, &mut |key_fields, value_fields, _| {
         let o_id = get_u32_field(key_fields, 3);
         if o_id > latest_o_id {
             latest_o_id = o_id;
-            latest_order_secondary_key = Some(key_fields.to_vec());
             latest_order_hint = Some(get_pointer_field(value_fields, 0));
         }
         true
@@ -296,26 +271,6 @@ pub fn run_orderstatus_txn_with_stats<M: MemPool>(
         return (helper.kill(&txn, &res, AbortID::OrderStatusGetOrder), None);
     }
     let (o_fields, o_actual_hint) = res.unwrap();
-
-    // Check if hint from order secondary index is stale and update if needed
-    if latest_order_hint.unwrap() != o_actual_hint {
-        // Hint is stale, update secondary index
-        let update_res = storage.update_field(
-            &txn,
-            containers.order_secondary_cid,
-            latest_order_secondary_key.unwrap(),
-            4, // Pointer is at index 4 in the secondary index schema
-            Field::Pointer(Some(o_actual_hint)),
-            None,
-        );
-        // Log but don't fail the transaction if secondary index update fails
-        if update_res.is_err() {
-            eprintln!(
-                "Warning: Failed to update stale secondary index pointer for order {}",
-                latest_o_id
-            );
-        }
-    }
 
     let o_entry_d = get_u64_field(&o_fields, 0);
     let o_carrier_id = get_optional_u8_field(&o_fields, 1);

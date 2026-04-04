@@ -277,27 +277,6 @@ pub fn run_payment_txn_with_stats<M: MemPool>(
     }
     let (c_all_fields, c_actual_hint) = res.unwrap();
 
-    // Check if hint from secondary index is stale and update if needed
-    if let (Some(c_hint), Some(c_secondary_key), Some(c_secondary_hint)) =
-        (c_hint, c_secondary_key, c_secondary_hint)
-    {
-        if c_hint != c_actual_hint {
-            // Hint is stale, update secondary index
-            let res = storage.update_field(
-                &txn,
-                containers.customer_secondary_cid,
-                c_secondary_key,
-                4, // Pointer is at index 4 in the secondary index schema
-                Field::Pointer(Some(c_actual_hint)),
-                Some(c_secondary_hint),
-            );
-            // Log but don't fail the transaction if secondary index update fails
-            if not_successful(&res) {
-                return (helper.kill(&txn, &res, AbortID::PaymentGetCustomer), None);
-            }
-        }
-    }
-
     let c_first = get_string_field(&c_all_fields, 0);
     let c_middle = get_string_field(&c_all_fields, 1);
     let c_last = get_string_field(&c_all_fields, 2);

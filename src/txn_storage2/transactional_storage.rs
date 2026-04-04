@@ -9,7 +9,7 @@ use crate::{
         fbt::{BTreeKey, FosterBtree, FosterBtreeCursor, FosterBtreePage},
         prelude::*,
     },
-    bp::{ContainerId, ContainerKey, DatabaseId, MemPool, PageFrameKey},
+    bp::{ContainerId, ContainerKey, DatabaseId, FrameReadGuard, MemPool, PageFrameKey},
     txn_storage::locktable::ConcurrentLockTable as LockTable,
     txn_storage2::{
         field::{
@@ -17,8 +17,8 @@ use crate::{
             RecordPointer,
         },
         field_level_storage_trait::{
-            ContainerDS, ContainerOptions, DBOptions, FieldLeveLStorageTrait, ScanOptions,
-            TxnOptions, TxnStorageStatus,
+            ContainerDS, ContainerOptions, ContainerType, DBOptions, FieldLeveLStorageTrait,
+            ScanOptions, TxnOptions, TxnStorageStatus,
         },
     },
 };
@@ -170,16 +170,6 @@ struct KVCursor<M: MemPool> {
 }
 
 impl<M: MemPool> KVCursor<M> {
-    fn next(&self) -> Option<(Vec<u8>, Vec<u8>, RecordPointer)> {
-        unsafe {
-            let cursor_ref = &mut *self.cursor.get();
-            let (key, value) = cursor_ref.get_kv()?;
-            let (page_id, frame_id, _) = cursor_ref.get_physical_address();
-            cursor_ref.go_to_next_kv();
-            Some((key, value, RecordPointer::new(page_id, frame_id)))
-        }
-    }
-
     /// Zero-copy scan over raw key/value bytes.
     /// The closure receives borrowed slices directly from the page — no allocation.
     /// Returns the number of tuples processed.
@@ -190,6 +180,23 @@ impl<M: MemPool> KVCursor<M> {
             cursor_ref.for_each_with_ptr(|key, val, (page_id, frame_id)| {
                 f(key, val, RecordPointer::new(page_id, frame_id))
             })
+        }
+    }
+    /// Page-at-a-time iteration. The closure receives the page guard,
+    /// precomputed slot range [start, end), and whether this is the last page
+    /// (upper bound hit). Returns (guard, should_continue).
+    fn for_each_page(
+        &self,
+        f: impl FnMut(
+            FrameReadGuard<<M as MemPool>::EP>,
+            u32,  // start_slot (inclusive)
+            u32,  // end_slot (exclusive)
+            bool, // last_page
+        ) -> (FrameReadGuard<<M as MemPool>::EP>, bool),
+    ) -> u64 {
+        unsafe {
+            let cursor_ref = &mut *self.cursor.get();
+            cursor_ref.for_each_page(f)
         }
     }
 }
@@ -389,6 +396,157 @@ impl<M: MemPool> TransactionalStorage<M> {
             (*self.containers.get())
                 .get(&c_id)
                 .ok_or(TxnStorageStatus::ContainerNotFound)
+        }
+    }
+
+    /// Secondary index scan with batch prefetch + hint repair.
+    /// Called internally by `iter_for_each_fields` when the container is secondary.
+    fn iter_for_each_fields_secondary_impl(
+        &self,
+        txn: &TxnHandle,
+        iter: &TxnIterator<M>,
+        sec_container: &ContainerInfo<M>,
+        primary_c_id: ContainerId,
+        primary_key_col_indices: &[usize],
+        f: &mut dyn FnMut(&[Field], &[Field], RecordPointer) -> bool,
+    ) -> Result<u64, TxnStorageStatus> {
+        let pri_container = self.get_container(primary_c_id)?;
+        let sec_schema = sec_container.options.schema();
+        let rwset = txn.get_or_create_rwset(iter.c_id);
+        let mut count: u64 = 0;
+        let mut err: Option<TxnStorageStatus> = None;
+        let mut repairs: Vec<(u32, [u8; 8])> = Vec::new();
+        let mut stopped = false;
+
+        iter.scanner
+            .for_each_page(|page, start_slot, end_slot, last_page| {
+                // Phase 1: Prefetch primary pages for the batch.
+                for slot in start_slot..end_slot {
+                    let value_bytes = page.get_val(slot);
+                    if value_bytes.len() >= 8 {
+                        let stored =
+                            RecordPointer::from_bytes(&value_bytes[value_bytes.len() - 8..]);
+                        if let Some(pfk) = pri_container.hint_to_page_frame_key(Some(stored)) {
+                            let _ = pri_container.btree.mem_pool.prefetch_page(pfk);
+                        }
+                    }
+                }
+
+                // Phase 2: Process entries — rwset, locking, hint check, user closure.
+                for slot in start_slot..end_slot {
+                    let key_bytes = page.get_raw_key(slot);
+                    let value_bytes = page.get_val(slot);
+                    let ptr = RecordPointer::new(0, 0);
+
+                    // Check rwset
+                    let record = if let Some(entry) = rwset.get(key_bytes) {
+                        match entry {
+                            RWEntry::Delete(_, _) => continue, // Skip deleted
+                            RWEntry::Read(..) => bytes_to_record(value_bytes, sec_schema),
+                            RWEntry::Update(record, _, _) | RWEntry::Insert(record, _, _) => {
+                                record.clone()
+                            }
+                        }
+                    } else {
+                        let locktable = &sec_container.locktable;
+                        if !locktable.try_shared(key_bytes.to_vec()) {
+                            err = Some(TxnStorageStatus::TxnConflict);
+                            stopped = true;
+                            break;
+                        }
+                        let record = bytes_to_record(value_bytes, sec_schema);
+                        rwset.insert(key_bytes.to_vec(), RWEntry::Read(ptr, false));
+                        record
+                    };
+
+                    // Hint repair: extract stored pointer, verify against primary.
+                    if value_bytes.len() >= 8 {
+                        let stored =
+                            RecordPointer::from_bytes(&value_bytes[value_bytes.len() - 8..]);
+                        let primary_key: Vec<Field> = primary_key_col_indices
+                            .iter()
+                            .map(|&i| record[i].clone())
+                            .collect();
+                        let primary_key_bytes = key_to_bytes(&primary_key);
+                        let pri_page = pri_container.btree.traverse_to_leaf_for_read_with_hint(
+                            &primary_key_bytes,
+                            pri_container.hint_to_page_frame_key(Some(stored)),
+                        );
+                        let actual =
+                            RecordPointer::new(pri_page.page().get_id(), pri_page.frame_id());
+                        drop(pri_page);
+
+                        if stored != actual {
+                            repairs.push((slot, actual.to_bytes()));
+                        }
+                    }
+
+                    // Deserialize key/value fields and call user closure.
+                    let key_fields: Vec<Field> = sec_schema
+                        .key_indices()
+                        .iter()
+                        .map(|&i| record[i].clone())
+                        .collect();
+                    let val_fields: Vec<Field> = iter
+                        .options
+                        .cols
+                        .iter()
+                        .map(|&i| record[i].clone())
+                        .collect();
+
+                    count += 1;
+                    if !f(&key_fields, &val_fields, ptr) {
+                        stopped = true;
+                        break;
+                    }
+                }
+
+                // Phantom protection: lock the boundary key on the last page.
+                if last_page && err.is_none() {
+                    let boundary_key = page.get_raw_key(end_slot);
+                    if rwset.get(boundary_key).is_none() {
+                        let locktable = &sec_container.locktable;
+                        if !locktable.try_shared(boundary_key.to_vec()) {
+                            err = Some(TxnStorageStatus::TxnConflict);
+                            stopped = true;
+                        } else {
+                            rwset.insert(
+                                boundary_key.to_vec(),
+                                RWEntry::Read(RecordPointer::new(0, 0), false),
+                            );
+                        }
+                    }
+                    iter.finish();
+                }
+
+                // Phase 3: Apply batched repairs via single try_upgrade.
+                let should_continue = !stopped && err.is_none();
+                if repairs.is_empty() {
+                    return (page, should_continue);
+                }
+                let page = match page.try_upgrade(true) {
+                    Ok(mut write_guard) => {
+                        for (slot_id, new_bytes) in repairs.drain(..) {
+                            let val_len = write_guard.get_val(slot_id).len();
+                            if val_len >= 8 {
+                                let s = write_guard.slot_unchecked(slot_id);
+                                let off = s.offset() as usize + s.key_size() as usize + val_len - 8;
+                                write_guard[off..off + 8].copy_from_slice(&new_bytes);
+                            }
+                        }
+                        write_guard.downgrade()
+                    }
+                    Err(guard) => {
+                        repairs.clear();
+                        guard
+                    }
+                };
+                (page, should_continue)
+            });
+
+        match err {
+            Some(e) => Err(e),
+            None => Ok(count),
         }
     }
 
@@ -638,12 +796,8 @@ impl<M: MemPool> FieldLeveLStorageTrait for TransactionalStorage<M> {
 
         // This is a simplified implementation - in production you might want to
         // maintain counters or use more efficient methods
-        let mut count = 0;
         let scanner = container.scan_range(&[], &[]);
-
-        while scanner.next().is_some() {
-            count += 1;
-        }
+        let mut count = scanner.for_each_raw(|_, _, _| true) as usize;
 
         // Adjust count based on uncommitted changes in this transaction
         let rwset = txn.get_or_create_rwset(c_id);
@@ -1121,7 +1275,7 @@ impl<M: MemPool> FieldLeveLStorageTrait for TransactionalStorage<M> {
     ) -> Result<Self::IteratorHandle, TxnStorageStatus> {
         let container = self.get_container(c_id)?;
 
-        let scanner = container.scan_range(&options.lower_inc, &[]);
+        let scanner = container.scan_range(&options.lower_inc, &options.upper_exc);
 
         Ok(TxnIterator::new(options, scanner, c_id))
     }
@@ -1204,6 +1358,25 @@ impl<M: MemPool> FieldLeveLStorageTrait for TransactionalStorage<M> {
         }
 
         let container = self.get_container(iter.c_id)?;
+
+        // If this container is a secondary index, use the batch page path
+        // with prefetch + hint repair.
+        if let ContainerType::Secondary {
+            primary_c_id,
+            ref primary_key_col_indices,
+        } = container.options.container_type()
+        {
+            return self.iter_for_each_fields_secondary_impl(
+                txn,
+                iter,
+                container,
+                *primary_c_id,
+                primary_key_col_indices,
+                f,
+            );
+        }
+
+        // Primary container: simple per-entry iteration.
         let schema = container.options.schema();
         let rwset = txn.get_or_create_rwset(iter.c_id);
         let mut count: u64 = 0;
@@ -2979,6 +3152,109 @@ mod tests {
             "Lock tables should be empty after commit with scan"
         );
 
+        storage.close_db(db_id).unwrap();
+    }
+
+    #[test]
+    fn test_secondary_scan_locks_boundary_key() {
+        // Schema: secondary index with (key_id: Int32, pointer: Pointer)
+        // Primary: (key_id: Int32, name: String)
+        let pri_schema = schema!(pk: [0], cols: [
+            (false, DataType::Int32),   // id
+            (false, DataType::String),  // name
+        ]);
+        let sec_schema = schema!(pk: [0], cols: [
+            (false, DataType::Int32),   // key_id (same as primary key)
+            (false, DataType::Pointer), // pointer to primary record
+        ]);
+
+        let bp = get_test_bp(100);
+        let storage = Arc::new(TransactionalStorage::new(bp));
+
+        let db_id = storage.open_db(DBOptions::new("test_db")).unwrap();
+        let pri_cid = storage
+            .create_container(
+                db_id,
+                ContainerOptions::new("primary", ContainerDS::BTree, pri_schema),
+            )
+            .unwrap();
+        let sec_cid = storage
+            .create_container(
+                db_id,
+                ContainerOptions::secondary(
+                    "secondary",
+                    ContainerDS::BTree,
+                    sec_schema,
+                    pri_cid,
+                    vec![0], // key_id maps to primary key
+                ),
+            )
+            .unwrap();
+
+        // Insert primary records: keys 1, 3, 5
+        let txn_init = storage.begin_txn(db_id, TxnOptions::default()).unwrap();
+        for id in [1, 3, 5] {
+            let pri_ptr = storage
+                .raw_insert_record(
+                    db_id,
+                    pri_cid,
+                    record![field!(Int32 id), field!(String format!("name_{}", id))],
+                )
+                .unwrap();
+            // Insert secondary index entry pointing to primary
+            storage
+                .raw_insert_record(
+                    db_id,
+                    sec_cid,
+                    record![field!(Int32 id), Field::Pointer(Some(pri_ptr))],
+                )
+                .unwrap();
+        }
+        storage.commit_txn(&txn_init, false).unwrap();
+
+        // Txn1: Scan secondary index with upper bound key=4 (should see keys 1, 3)
+        let txn1 = storage.begin_txn(db_id, TxnOptions::default()).unwrap();
+        let iter = storage
+            .scan_range(
+                &txn1,
+                sec_cid,
+                ScanOptions::new(&[1]) // request pointer field
+                    .with_bounds(vec![field!(Int32 1)], vec![field!(Int32 4)]),
+            )
+            .unwrap();
+
+        let mut scanned_keys = Vec::new();
+        storage
+            .iter_for_each_fields(&txn1, &iter, &mut |key_fields, _val, _hint| {
+                if let Field::Int32(Some(k)) = &key_fields[0] {
+                    scanned_keys.push(*k);
+                }
+                true
+            })
+            .unwrap();
+        storage.drop_iterator_handle(iter).unwrap();
+
+        // Should have scanned keys 1 and 3
+        assert_eq!(scanned_keys, vec![1, 3]);
+
+        // Txn2: Try to insert key=2 into primary and secondary (within scan range)
+        // This should conflict because key 5 (the boundary key >= 4) is locked
+        let txn2 = storage.begin_txn(db_id, TxnOptions::default()).unwrap();
+        let result = storage.insert_record(
+            &txn2,
+            sec_cid,
+            record![
+                field!(Int32 2),
+                Field::Pointer(Some(RecordPointer::new(0, 0)))
+            ],
+            None,
+        );
+        assert!(
+            matches!(result, Err(TxnStorageStatus::TxnConflict)),
+            "Insert within scan range should conflict due to phantom protection"
+        );
+
+        storage.commit_txn(&txn1, false).unwrap();
         storage.close_db(db_id).unwrap();
     }
 }
