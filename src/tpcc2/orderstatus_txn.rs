@@ -109,28 +109,24 @@ pub fn run_orderstatus_txn_with_stats<M: MemPool>(
         }
         let iter = res.unwrap();
 
-        loop {
-            match storage.iter_next(&txn, &iter) {
-                Ok(Some((key_fields, value_fields, c_secondary_hint))) => {
-                    let c_id = get_u32_field(&key_fields, 3);
-                    matching_customers.push((
-                        c_id,
-                        key_fields,
-                        get_pointer_field(&value_fields, 0),
-                        c_secondary_hint,
-                    ));
-                }
-                Ok(None) => break,
-                Err(e) => {
-                    let _ = storage.drop_iterator_handle(iter);
-                    return (
-                        helper.kill::<()>(&txn, &Err(e), AbortID::OrderStatusScanCustomerSecondary),
-                        None,
-                    );
-                }
-            }
-        }
+        let fe_res =
+            storage.iter_for_each_fields(&txn, &iter, &mut |key_fields, value_fields, hint| {
+                let c_id = get_u32_field(key_fields, 3);
+                matching_customers.push((
+                    c_id,
+                    key_fields.to_vec(),
+                    get_pointer_field(value_fields, 0),
+                    hint,
+                ));
+                true
+            });
         let _ = storage.drop_iterator_handle(iter);
+        if let Err(e) = fe_res {
+            return (
+                helper.kill::<()>(&txn, &Err(e), AbortID::OrderStatusScanCustomerSecondary),
+                None,
+            );
+        }
 
         if matching_customers.is_empty() {
             return (
@@ -250,27 +246,22 @@ pub fn run_orderstatus_txn_with_stats<M: MemPool>(
     let mut latest_o_id = 0u32;
     let mut latest_order_hint = None;
     let mut latest_order_secondary_key = None;
-    loop {
-        match storage.iter_next(&txn, &iter) {
-            Ok(Some((key_fields, value_fields, _))) => {
-                let o_id = get_u32_field(&key_fields, 3);
-                if o_id > latest_o_id {
-                    latest_o_id = o_id;
-                    latest_order_secondary_key = Some(key_fields);
-                    latest_order_hint = Some(get_pointer_field(&value_fields, 0));
-                }
-            }
-            Ok(None) => break,
-            Err(e) => {
-                let _ = storage.drop_iterator_handle(iter);
-                return (
-                    helper.kill::<()>(&txn, &Err(e), AbortID::OrderStatusScanOrderSecondary),
-                    None,
-                );
-            }
+    let fe_res = storage.iter_for_each_fields(&txn, &iter, &mut |key_fields, value_fields, _| {
+        let o_id = get_u32_field(key_fields, 3);
+        if o_id > latest_o_id {
+            latest_o_id = o_id;
+            latest_order_secondary_key = Some(key_fields.to_vec());
+            latest_order_hint = Some(get_pointer_field(value_fields, 0));
         }
-    }
+        true
+    });
     let _ = storage.drop_iterator_handle(iter);
+    if let Err(e) = fe_res {
+        return (
+            helper.kill::<()>(&txn, &Err(e), AbortID::OrderStatusScanOrderSecondary),
+            None,
+        );
+    }
 
     if latest_o_id == 0 {
         return (
@@ -367,35 +358,29 @@ pub fn run_orderstatus_txn_with_stats<M: MemPool>(
     }
     let iter = res.unwrap();
 
-    loop {
-        match storage.iter_next(&txn, &iter) {
-            Ok(Some((_, value_fields, _))) => {
-                // Extract fields from the order line
-                let ol_i_id = get_u32_field(&value_fields, 0);
-                let ol_supply_w_id = get_u16_field(&value_fields, 1);
-                let ol_quantity = get_u8_field(&value_fields, 2);
-                let ol_amount = get_f64_field(&value_fields, 3);
-                let ol_delivery_d = get_optional_u64_field(&value_fields, 4);
+    let fe_res = storage.iter_for_each_fields(&txn, &iter, &mut |_, value_fields, _| {
+        let ol_i_id = get_u32_field(value_fields, 0);
+        let ol_supply_w_id = get_u16_field(value_fields, 1);
+        let ol_quantity = get_u8_field(value_fields, 2);
+        let ol_amount = get_f64_field(value_fields, 3);
+        let ol_delivery_d = get_optional_u64_field(value_fields, 4);
 
-                order_lines.push(OrderLineInfo {
-                    ol_i_id,
-                    ol_supply_w_id,
-                    ol_quantity,
-                    ol_amount,
-                    ol_delivery_d,
-                });
-            }
-            Ok(None) => break,
-            Err(e) => {
-                let _ = storage.drop_iterator_handle(iter);
-                return (
-                    helper.kill::<()>(&txn, &Err(e), AbortID::OrderStatusGetOrderLine),
-                    None,
-                );
-            }
-        }
-    }
+        order_lines.push(OrderLineInfo {
+            ol_i_id,
+            ol_supply_w_id,
+            ol_quantity,
+            ol_amount,
+            ol_delivery_d,
+        });
+        true
+    });
     let _ = storage.drop_iterator_handle(iter);
+    if let Err(e) = fe_res {
+        return (
+            helper.kill::<()>(&txn, &Err(e), AbortID::OrderStatusGetOrderLine),
+            None,
+        );
+    }
 
     // Commit transaction (read-only)
     let status = helper.commit(&txn, AbortID::OrderStatusCommit);

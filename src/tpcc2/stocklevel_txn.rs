@@ -112,24 +112,18 @@ pub fn run_stocklevel_txn_with_stats<M: MemPool>(
     }
     let iter = res.unwrap();
 
-    loop {
-        match storage.iter_next(&txn, &iter) {
-            Ok(Some((_, value_fields, _))) => {
-                // Extract item ID from value fields
-                let ol_i_id = get_u32_field(&value_fields, 0);
-                unique_items.insert(ol_i_id);
-            }
-            Ok(None) => break,
-            Err(e) => {
-                let _ = storage.drop_iterator_handle(iter);
-                return (
-                    helper.kill::<()>(&txn, &Err(e), AbortID::StockLevelScanOrderLine),
-                    None,
-                );
-            }
-        }
-    }
+    let fe_res = storage.iter_for_each_fields(&txn, &iter, &mut |_, value_fields, _| {
+        let ol_i_id = get_u32_field(value_fields, 0);
+        unique_items.insert(ol_i_id);
+        true
+    });
     let _ = storage.drop_iterator_handle(iter);
+    if let Err(e) = fe_res {
+        return (
+            helper.kill::<()>(&txn, &Err(e), AbortID::StockLevelScanOrderLine),
+            None,
+        );
+    }
 
     // Count items with stock below threshold
     let mut low_stock_count = 0;

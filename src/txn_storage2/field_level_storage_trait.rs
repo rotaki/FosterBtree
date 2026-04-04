@@ -377,6 +377,18 @@ pub trait FieldLeveLStorageTrait: Send + Sync {
         f: &mut dyn FnMut(&[u8], &[u8], Self::Hint) -> bool,
     ) -> Result<u64, TxnStorageStatus>;
 
+    /// Field-level scan: deserializes each KV pair inside the storage layer and
+    /// calls the closure with (&[Field], &[Field], Hint) — key fields, projected
+    /// value fields (per ScanOptions::cols), and the record hint. The closure
+    /// returns `true` to continue or `false` to stop early. Returns total tuples
+    /// processed.
+    fn iter_for_each_fields(
+        &self,
+        txn: &Self::TxnHandle,
+        iter: &Self::IteratorHandle,
+        f: &mut dyn FnMut(&[Field], &[Field], Self::Hint) -> bool,
+    ) -> Result<u64, TxnStorageStatus>;
+
     // Drop an iterator handle.
     fn drop_iterator_handle(&self, iter: Self::IteratorHandle) -> Result<(), TxnStorageStatus>;
 }

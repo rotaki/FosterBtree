@@ -646,6 +646,47 @@ impl<M: MemPool> FieldLeveLStorageTrait for NonTransactionalStorage<M> {
         Ok(count)
     }
 
+    fn iter_for_each_fields(
+        &self,
+        _txn: &Self::TxnHandle,
+        iter: &Self::IteratorHandle,
+        f: &mut dyn FnMut(&[Field], &[Field], RecordPointer) -> bool,
+    ) -> Result<u64, TxnStorageStatus> {
+        let container = unsafe {
+            (*self.containers.get())
+                .get(&iter.c_id)
+                .ok_or(TxnStorageStatus::ContainerNotFound)?
+        };
+
+        let schema = container.options.schema();
+        let mut count: u64 = 0;
+        let scanner = unsafe { &mut *iter.scanner.get() };
+
+        for (_, value_bytes) in scanner {
+            let record = bytes_to_record(&value_bytes, schema);
+
+            let key_fields: Vec<Field> = schema
+                .key_indices()
+                .iter()
+                .map(|&idx| record[idx].clone())
+                .collect();
+
+            let val_fields: Vec<Field> = iter
+                .options
+                .cols
+                .iter()
+                .map(|&idx| record[idx].clone())
+                .collect();
+
+            let ptr = RecordPointer::new(0, 0);
+            count += 1;
+            if !f(&key_fields, &val_fields, ptr) {
+                break;
+            }
+        }
+        Ok(count)
+    }
+
     fn drop_iterator_handle(&self, _iter: Self::IteratorHandle) -> Result<(), TxnStorageStatus> {
         // Iterator will be dropped automatically
         Ok(())

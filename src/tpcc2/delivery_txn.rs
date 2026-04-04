@@ -88,23 +88,18 @@ pub fn run_delivery_txn_with_stats<M: MemPool>(
         let iter = res.unwrap();
 
         let mut oldest_no_o_id = None;
-        match storage.iter_next(&txn, &iter) {
-            Ok(Some((key_fields, _, _))) => {
-                let o_id = get_u32_field(&key_fields, 2);
-                oldest_no_o_id = Some(o_id);
-            }
-            Ok(None) => {
-                // No new orders for this district
-            }
-            Err(e) => {
-                let _ = storage.drop_iterator_handle(iter);
-                return (
-                    helper.kill::<()>(&txn, &Err(e), AbortID::DeliveryScanNewOrder),
-                    None,
-                );
-            }
-        }
+        let fe_res = storage.iter_for_each_fields(&txn, &iter, &mut |key_fields, _, _| {
+            let o_id = get_u32_field(key_fields, 2);
+            oldest_no_o_id = Some(o_id);
+            false // only need the first (oldest) entry
+        });
         let _ = storage.drop_iterator_handle(iter);
+        if let Err(e) = fe_res {
+            return (
+                helper.kill::<()>(&txn, &Err(e), AbortID::DeliveryScanNewOrder),
+                None,
+            );
+        }
 
         // If no new order found, skip this district
         let o_id = match oldest_no_o_id {
@@ -191,24 +186,20 @@ pub fn run_delivery_txn_with_stats<M: MemPool>(
 
         // First pass: collect order line keys, amounts, and hints
         let mut order_line_updates = Vec::new();
-        loop {
-            match storage.iter_next(&txn, &iter) {
-                Ok(Some((key_fields, value_fields, hint))) => {
-                    let ol_amount = get_f64_field(&value_fields, 0);
-                    total_amount += ol_amount;
-                    order_line_updates.push((key_fields, hint));
-                }
-                Ok(None) => break,
-                Err(e) => {
-                    let _ = storage.drop_iterator_handle(iter);
-                    return (
-                        helper.kill::<()>(&txn, &Err(e), AbortID::DeliveryGetOrderLine),
-                        None,
-                    );
-                }
-            }
-        }
+        let fe_res =
+            storage.iter_for_each_fields(&txn, &iter, &mut |key_fields, value_fields, hint| {
+                let ol_amount = get_f64_field(value_fields, 0);
+                total_amount += ol_amount;
+                order_line_updates.push((key_fields.to_vec(), hint));
+                true
+            });
         let _ = storage.drop_iterator_handle(iter);
+        if let Err(e) = fe_res {
+            return (
+                helper.kill::<()>(&txn, &Err(e), AbortID::DeliveryGetOrderLine),
+                None,
+            );
+        }
 
         // Second pass: update delivery dates
         for (ol_key, ol_hint) in order_line_updates {

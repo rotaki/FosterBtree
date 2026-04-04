@@ -1274,6 +1274,90 @@ impl<M: MemPool> FieldLeveLStorageTrait for TransactionalStorage<M> {
         }
     }
 
+    fn iter_for_each_fields(
+        &self,
+        txn: &Self::TxnHandle,
+        iter: &Self::IteratorHandle,
+        f: &mut dyn FnMut(&[Field], &[Field], RecordPointer) -> bool,
+    ) -> Result<u64, TxnStorageStatus> {
+        if iter.is_finished() {
+            return Ok(0);
+        }
+
+        let container = self.get_container(iter.c_id)?;
+        let schema = container.options.schema();
+        let rwset = txn.get_or_create_rwset(iter.c_id);
+        let mut count: u64 = 0;
+        let mut err: Option<TxnStorageStatus> = None;
+
+        iter.scanner.for_each_raw(|key_bytes, value_bytes, ptr| {
+            // Upper bound check
+            if !iter.options.upper_exc.is_empty() && key_bytes >= &*iter.options.upper_exc {
+                if rwset.get(key_bytes).is_none() {
+                    let locktable = &container.locktable;
+                    if !locktable.try_shared(key_bytes.to_vec()) {
+                        err = Some(TxnStorageStatus::TxnConflict);
+                        return false;
+                    }
+                    rwset.insert(key_bytes.to_vec(), RWEntry::Read(ptr, false));
+                }
+                iter.finish();
+                return false;
+            }
+
+            // Check rwset
+            let record = if let Some(entry) = rwset.get(key_bytes) {
+                match entry {
+                    RWEntry::Delete(_, _) => return true, // Skip deleted, continue
+                    RWEntry::Read(..) => bytes_to_record(value_bytes, schema),
+                    RWEntry::Update(record, _, _) | RWEntry::Insert(record, _, _) => record.clone(),
+                }
+            } else {
+                // Lock the key
+                let locktable = &container.locktable;
+                if !locktable.try_shared(key_bytes.to_vec()) {
+                    err = Some(TxnStorageStatus::TxnConflict);
+                    return false;
+                }
+                let record = bytes_to_record(value_bytes, schema);
+                rwset.insert(key_bytes.to_vec(), RWEntry::Read(ptr, false));
+                record
+            };
+
+            let key_fields: Vec<Field> = schema
+                .key_indices()
+                .iter()
+                .map(|&i| record[i].clone())
+                .collect();
+            let val_fields: Vec<Field> = iter
+                .options
+                .cols
+                .iter()
+                .map(|&i| record[i].clone())
+                .collect();
+
+            count += 1;
+            f(&key_fields, &val_fields, ptr)
+        });
+
+        // Lock the end-of-range for phantom protection
+        if err.is_none() && !iter.is_finished() {
+            if rwset.get(&[]).is_none() {
+                let locktable = &container.locktable;
+                if !locktable.try_shared(vec![]) {
+                    return Err(TxnStorageStatus::TxnConflict);
+                }
+                rwset.insert(vec![], RWEntry::Read(RecordPointer::new(0, 0), false));
+            }
+            iter.finish();
+        }
+
+        match err {
+            Some(e) => Err(e),
+            None => Ok(count),
+        }
+    }
+
     fn drop_iterator_handle(&self, _iter: Self::IteratorHandle) -> Result<(), TxnStorageStatus> {
         // Iterator will be dropped automatically
         Ok(())

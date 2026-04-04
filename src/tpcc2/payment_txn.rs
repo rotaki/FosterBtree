@@ -191,28 +191,24 @@ pub fn run_payment_txn_with_stats<M: MemPool>(
         }
         let iter = res.unwrap();
 
-        loop {
-            match storage.iter_next(&txn, &iter) {
-                Ok(Some((key_fields, value_fields, c_secondary_hint))) => {
-                    let c_id = get_u32_field(&key_fields, 3);
-                    matching_customers.push((
-                        c_id,
-                        key_fields,
-                        get_pointer_field(&value_fields, 0),
-                        c_secondary_hint,
-                    ));
-                }
-                Ok(None) => break,
-                Err(e) => {
-                    let _ = storage.drop_iterator_handle(iter);
-                    return (
-                        helper.kill::<()>(&txn, &Err(e), AbortID::PaymentScanCustomerSecondary),
-                        None,
-                    );
-                }
-            }
-        }
+        let fe_res =
+            storage.iter_for_each_fields(&txn, &iter, &mut |key_fields, value_fields, hint| {
+                let c_id = get_u32_field(key_fields, 3);
+                matching_customers.push((
+                    c_id,
+                    key_fields.to_vec(),
+                    get_pointer_field(value_fields, 0),
+                    hint,
+                ));
+                true
+            });
         let _ = storage.drop_iterator_handle(iter);
+        if let Err(e) = fe_res {
+            return (
+                helper.kill::<()>(&txn, &Err(e), AbortID::PaymentScanCustomerSecondary),
+                None,
+            );
+        }
 
         if matching_customers.is_empty() {
             return (

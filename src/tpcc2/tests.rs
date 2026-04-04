@@ -188,15 +188,16 @@ fn test_customer_loading_and_secondary_index() {
         .unwrap();
 
     let mut found = false;
-    while let Ok(Some((key_fields, _, _))) = storage.iter_next(&txn, &iter) {
+    let _ = storage.iter_for_each_fields(&txn, &iter, &mut |key_fields, _, _| {
         if key_fields.len() >= 4 {
             if let Field::Uint32(Some(c_id)) = &key_fields[3] {
                 assert_eq!(*c_id, 1); // First customer should have this last name
                 found = true;
-                break;
+                return false;
             }
         }
-    }
+        true
+    });
     assert!(
         found,
         "Customer with last name {} not found in secondary index",
