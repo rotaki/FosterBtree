@@ -124,6 +124,7 @@ pub fn run_orderstatus_txn_with_stats<M: MemPool>(
             &txn,
             containers.customer_secondary_cid,
             ScanOptions::new(&[
+                customer_fields::C_ID,
                 customer_fields::C_FIRST,
                 customer_fields::C_MIDDLE,
                 customer_fields::C_LAST,
@@ -139,18 +140,17 @@ pub fn run_orderstatus_txn_with_stats<M: MemPool>(
         }
         let iter = res.unwrap();
 
-        let fe_res =
-            storage.iter_for_each_fields(&txn, &iter, &mut |key_fields, value_fields, _| {
-                let c_id = get_u32_field(key_fields, 3);
-                customer_recs.push((
-                    c_id,
-                    get_string_field(value_fields, 0),
-                    get_string_field(value_fields, 1),
-                    get_string_field(value_fields, 2),
-                    get_f64_field(value_fields, 3),
-                ));
-                true
-            });
+        let fe_res = storage.iter_for_each_fields(&txn, &iter, &mut |fields, _| {
+            let c_id = get_u32_field(fields, 0);
+            customer_recs.push((
+                c_id,
+                get_string_field(fields, 1),
+                get_string_field(fields, 2),
+                get_string_field(fields, 3),
+                get_f64_field(fields, 4),
+            ));
+            true
+        });
         let _ = storage.drop_iterator_handle(iter);
         if let Err(e) = fe_res {
             return (
@@ -203,6 +203,7 @@ pub fn run_orderstatus_txn_with_stats<M: MemPool>(
         &txn,
         containers.order_secondary_cid,
         ScanOptions::new(&[
+            order_fields::O_ID,
             order_fields::O_ENTRY_D,
             order_fields::O_CARRIER_ID,
             order_fields::O_OL_CNT,
@@ -221,13 +222,13 @@ pub fn run_orderstatus_txn_with_stats<M: MemPool>(
     let mut latest_o_entry_d = 0u64;
     let mut latest_o_carrier_id = None;
     let mut latest_o_ol_cnt = 0u8;
-    let fe_res = storage.iter_for_each_fields(&txn, &iter, &mut |key_fields, value_fields, _| {
-        let o_id = get_u32_field(key_fields, 3);
+    let fe_res = storage.iter_for_each_fields(&txn, &iter, &mut |fields, _| {
+        let o_id = get_u32_field(fields, 0);
         if o_id > latest_o_id {
             latest_o_id = o_id;
-            latest_o_entry_d = get_u64_field(value_fields, 0);
-            latest_o_carrier_id = get_optional_u8_field(value_fields, 1);
-            latest_o_ol_cnt = get_u8_field(value_fields, 2);
+            latest_o_entry_d = get_u64_field(fields, 1);
+            latest_o_carrier_id = get_optional_u8_field(fields, 2);
+            latest_o_ol_cnt = get_u8_field(fields, 3);
         }
         true
     });
@@ -291,12 +292,12 @@ pub fn run_orderstatus_txn_with_stats<M: MemPool>(
     }
     let iter = res.unwrap();
 
-    let fe_res = storage.iter_for_each_fields(&txn, &iter, &mut |_, value_fields, _| {
-        let ol_i_id = get_u32_field(value_fields, 0);
-        let ol_supply_w_id = get_u16_field(value_fields, 1);
-        let ol_quantity = get_u8_field(value_fields, 2);
-        let ol_amount = get_f64_field(value_fields, 3);
-        let ol_delivery_d = get_optional_u64_field(value_fields, 4);
+    let fe_res = storage.iter_for_each_fields(&txn, &iter, &mut |fields, _| {
+        let ol_i_id = get_u32_field(fields, 0);
+        let ol_supply_w_id = get_u16_field(fields, 1);
+        let ol_quantity = get_u8_field(fields, 2);
+        let ol_amount = get_f64_field(fields, 3);
+        let ol_delivery_d = get_optional_u64_field(fields, 4);
 
         order_lines.push(OrderLineInfo {
             ol_i_id,

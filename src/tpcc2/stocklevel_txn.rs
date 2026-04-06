@@ -112,8 +112,8 @@ pub fn run_stocklevel_txn_with_stats<M: MemPool>(
     }
     let iter = res.unwrap();
 
-    let fe_res = storage.iter_for_each_fields(&txn, &iter, &mut |_, value_fields, _| {
-        let ol_i_id = get_u32_field(value_fields, 0);
+    let fe_res = storage.iter_for_each_fields(&txn, &iter, &mut |fields, _| {
+        let ol_i_id = get_u32_field(fields, 0);
         unique_items.insert(ol_i_id);
         true
     });

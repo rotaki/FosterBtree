@@ -2,7 +2,7 @@ use crate::{
     access_method::AccessMethodError,
     bp::prelude::{ContainerId, DatabaseId},
     txn_storage2::{
-        field::{Field, Record, RecordPointer},
+        field::{DataType, Field, Record},
         schema::Schema,
     },
 };
@@ -109,10 +109,22 @@ pub enum ContainerType {
     /// A standalone primary container.
     Primary,
     /// A secondary index that references a primary container.
-    /// Stores the primary container ID and the indices within the secondary
-    /// schema that together form the primary key.
+    ///
+    /// `secondary_key_columns` lists primary schema column indices that form
+    /// the secondary key, in order. The secondary schema is derived from the
+    /// primary schema at `create_container` time.
+    ///
+    /// After creation, the derived fields are populated:
+    /// - `primary_key_col_indices`: positions within the secondary key that
+    ///   correspond to the primary table's key columns.
+    /// - `sec_to_pri_col_map`: maps each secondary column position to its
+    ///   primary schema column index (same as `secondary_key_columns`).
     Secondary {
         primary_c_id: ContainerId,
+        /// Primary schema column indices forming the secondary key, in order.
+        secondary_key_columns: Vec<usize>,
+        /// Positions in secondary key that form the primary key. Derived at
+        /// create_container time.
         primary_key_col_indices: Vec<usize>,
     },
 }
@@ -136,44 +148,73 @@ impl ContainerOptions {
     }
 
     /// Create options for a secondary index container.
-    /// `primary_c_id` is the container this index references.
-    /// `primary_key_col_indices` are the column positions in the secondary
-    /// schema that together form the primary key.
     ///
-    /// **Design invariant**: All primary key columns must be present in the
-    /// secondary key. This ensures each secondary entry is unique (non-unique
-    /// secondary columns + PK = unique composite key) and allows the storage
-    /// layer to derive the primary key entirely from the secondary B-tree key
-    /// at scan time. The secondary value stores only an 8-byte page pointer
-    /// hint — no spilled key columns.
+    /// `primary_c_id` is the container this index references.
+    /// `secondary_key_columns` lists primary schema column indices that form
+    /// the secondary key, in the desired key order. The secondary schema is
+    /// derived automatically from the primary schema at `create_container` time.
+    ///
+    /// **Design invariant**: All primary key columns must appear in
+    /// `secondary_key_columns`. This ensures each secondary entry is unique
+    /// (non-unique secondary columns + PK = unique composite key).
     pub fn secondary(
         name: &str,
         c_ds: ContainerDS,
-        schema: Schema,
         primary_c_id: ContainerId,
-        primary_key_col_indices: Vec<usize>,
+        secondary_key_columns: Vec<usize>,
     ) -> Self {
-        // Validate that all primary key column indices are part of the
-        // secondary schema's key indices.
-        let sec_key_indices = schema.key_indices();
-        for &pk_col in &primary_key_col_indices {
-            assert!(
-                sec_key_indices.contains(&pk_col),
-                "primary_key_col_indices[{}] = {} is not in the secondary key indices {:?}. \
-                 All primary key columns must be embedded in the secondary key.",
-                pk_col,
-                pk_col,
-                sec_key_indices,
-            );
-        }
+        // Schema will be derived from the primary at create_container time.
+        // Use an empty placeholder for now.
+        let placeholder_schema = Schema::with_primary_key(vec![], vec![]);
         ContainerOptions {
             name: String::from(name),
             c_ds,
-            schema,
+            schema: placeholder_schema,
             c_type: ContainerType::Secondary {
                 primary_c_id,
-                primary_key_col_indices,
+                secondary_key_columns,
+                primary_key_col_indices: vec![], // derived at create_container time
             },
+        }
+    }
+
+    /// Called by the storage layer at create_container time to derive the
+    /// secondary schema from the primary and compute primary_key_col_indices.
+    pub fn resolve_secondary_schema(&mut self, primary_schema: &Schema) {
+        if let ContainerType::Secondary {
+            ref secondary_key_columns,
+            ref mut primary_key_col_indices,
+            ..
+        } = self.c_type
+        {
+            // Derive secondary schema: column types from primary, all are key columns
+            let cols: Vec<(bool, DataType)> = secondary_key_columns
+                .iter()
+                .map(|&pri_col| primary_schema.cols()[pri_col])
+                .collect();
+            let key_indices: Vec<usize> = (0..cols.len()).collect();
+            self.schema = Schema::with_primary_key(cols, key_indices);
+
+            // Compute primary_key_col_indices: which positions in the secondary
+            // key correspond to the primary table's key columns.
+            let pri_key_set: std::collections::HashSet<usize> =
+                primary_schema.key_indices().iter().copied().collect();
+            *primary_key_col_indices = secondary_key_columns
+                .iter()
+                .enumerate()
+                .filter(|(_, &pri_col)| pri_key_set.contains(&pri_col))
+                .map(|(sec_pos, _)| sec_pos)
+                .collect();
+
+            // Validate: all primary key columns must be present
+            assert_eq!(
+                primary_key_col_indices.len(),
+                primary_schema.key_indices().len(),
+                "secondary_key_columns must contain all primary key columns. \
+                 Primary key indices: {:?}, found in secondary: {:?}",
+                primary_schema.key_indices(),
+                primary_key_col_indices,
+            );
         }
     }
 
@@ -456,7 +497,7 @@ pub trait FieldLeveLStorageTrait: Send + Sync {
         &self,
         txn: &Self::TxnHandle,
         iter: &Self::IteratorHandle,
-        f: &mut dyn FnMut(&[Field], &[Field], Self::Hint) -> bool,
+        f: &mut dyn FnMut(&[Field], Self::Hint) -> bool,
     ) -> Result<u64, TxnStorageStatus>;
 
     // Drop an iterator handle.

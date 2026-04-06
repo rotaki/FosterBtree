@@ -19,7 +19,7 @@ use clap::Parser;
 use fbtree::{
     bp::get_test_bp,
     txn_storage2::{
-        field::{DataType, Field, Record, RecordPointer},
+        field::{DataType, Field, Record, RecordHandle},
         field_level_storage_trait::{
             ContainerDS, ContainerOptions, DBOptions, FieldLeveLStorageTrait, ScanOptions,
             TxnOptions,
@@ -84,28 +84,26 @@ fn format_throughput(count: u64, elapsed_ns: u64) -> String {
 
 // ── Schemas ─────────────────────────────────────────────────────────────────
 
-/// Primary table: (pk: Uint32) + N value columns (Float64 each).
+// Primary schema column indices
+const PK: usize = 0; // pk: Uint32
+const GROUP: usize = 1; // group_id: Uint32 (for secondary index grouping)
+const FIRST_VAL: usize = 2; // value columns start here
+
+/// Primary table: (pk: Uint32, group_id: Uint32) + N value columns (Float64 each).
 fn primary_schema(num_value_cols: usize) -> Schema {
-    let mut cols = vec![(false, DataType::Uint32)]; // pk
+    let mut cols = vec![
+        (false, DataType::Uint32), // pk
+        (false, DataType::Uint32), // group_id (for secondary key grouping)
+    ];
     for _ in 0..num_value_cols {
         cols.push((false, DataType::Float64));
     }
-    Schema::with_primary_key(cols, vec![0])
+    Schema::with_primary_key(cols, vec![PK])
 }
 
-/// Secondary index: (sk_prefix: Uint16, sk_suffix: Uint32, pk: Uint32, pointer)
-/// Key columns = [0,1,2], primary_key_col_indices = [2]
-fn secondary_schema() -> Schema {
-    Schema::with_primary_key(
-        vec![
-            (false, DataType::Uint16),  // sk_prefix (e.g. warehouse/district)
-            (false, DataType::Uint32),  // sk_suffix (e.g. customer_id — non-unique part)
-            (false, DataType::Uint32),  // pk (order_id — makes it unique)
-            (false, DataType::Pointer), // pointer to primary record
-        ],
-        vec![0, 1, 2], // all three form the secondary key
-    )
-}
+/// Secondary key columns: (group_id, pk) — references primary columns.
+/// Schema is derived automatically by the storage layer.
+const SECONDARY_KEY_COLUMNS: &[usize] = &[GROUP, PK];
 
 // ── Benchmark routines ──────────────────────────────────────────────────────
 
@@ -169,7 +167,7 @@ fn bench_iter_for_each_fields_with_deref<M: fbtree::bp::MemPool>(
     let start = Instant::now();
     let mut count = 0u64;
     let _total = storage
-        .iter_for_each_fields(&txn, &iter, &mut |_key_fields, _val_fields, _hint| {
+        .iter_for_each_fields(&txn, &iter, &mut |_fields, _hint| {
             count += 1;
             true
         })
@@ -205,7 +203,6 @@ fn main() {
     let db_id = storage.open_db(DBOptions::new("bench")).unwrap();
 
     let pri_schema = primary_schema(args.num_value_cols);
-    let sec_schema = secondary_schema();
 
     let pri_cid = storage
         .create_container(
@@ -219,9 +216,8 @@ fn main() {
             ContainerOptions::secondary(
                 "secondary",
                 ContainerDS::BTree,
-                sec_schema,
                 pri_cid,
-                vec![2], // primary_key_col_indices: pk is at index 2 in secondary schema
+                SECONDARY_KEY_COLUMNS.to_vec(),
             ),
         )
         .unwrap();
@@ -236,8 +232,10 @@ fn main() {
             let end = (loaded + chunk).min(n);
             // Use raw_insert for loading (no txn overhead)
             for i in loaded..end {
-                // Primary record: pk=i, then value columns
-                let mut fields = vec![Field::Uint32(Some(i))];
+                let group_id = i / 10; // groups of 10
+
+                // Primary record: (pk=i, group_id, value columns...)
+                let mut fields = vec![Field::Uint32(Some(i)), Field::Uint32(Some(group_id))];
                 for c in 0..args.num_value_cols {
                     fields.push(Field::Float64(Some(i as f64 + c as f64 * 0.1)));
                 }
@@ -245,15 +243,9 @@ fn main() {
                     .raw_insert_record(db_id, pri_cid, Record { fields })
                     .unwrap();
 
-                // Secondary record: (sk_prefix=1, sk_suffix=i/10, pk=i, pointer)
-                let sk_prefix = 1u16; // single "warehouse"
-                let sk_suffix = i / 10; // groups of 10
+                // Secondary record: (group_id, pk=i) — matches SECONDARY_KEY_COLUMNS order
                 let sec_record = Record {
-                    fields: vec![
-                        Field::Uint16(Some(sk_prefix)),
-                        Field::Uint32(Some(sk_suffix)),
-                        Field::Uint32(Some(i)),
-                    ],
+                    fields: vec![Field::Uint32(Some(group_id)), Field::Uint32(Some(i))],
                 };
                 storage
                     .raw_insert_secondary_record(db_id, sec_cid, sec_record, pri_hint)
@@ -270,19 +262,17 @@ fn main() {
     let end_idx = (start_idx + scan_size).min(n);
     let expected = (end_idx - start_idx) as u64;
 
-    // Build normalized key bounds using Field + ScanOptions::with_bounds
+    // Build normalized key bounds. Secondary key is (group_id, pk).
     let lower_fields = vec![
-        Field::Uint16(Some(1)),
         Field::Uint32(Some(start_idx / 10)),
         Field::Uint32(Some(start_idx)),
     ];
     let upper_fields = vec![
-        Field::Uint16(Some(1)),
         Field::Uint32(Some((end_idx - 1) / 10)),
         Field::Uint32(Some(end_idx)),
     ];
 
-    let scan_opts = ScanOptions::new(&[3]).with_bounds(lower_fields, upper_fields);
+    let scan_opts = ScanOptions::new(&[]).with_bounds(lower_fields, upper_fields);
     let lower = scan_opts.lower_inc.clone();
     let upper = scan_opts.upper_exc.clone();
 
@@ -298,7 +288,7 @@ fn main() {
     } else {
         args.project_cols.min(args.num_value_cols)
     };
-    let deref_cols: Vec<usize> = (1..=project_count).collect();
+    let deref_cols: Vec<usize> = (FIRST_VAL..FIRST_VAL + project_count).collect();
 
     // ── Benchmark: iter_for_each (raw bytes) ───────────────────────────
     println!("--- iter_for_each (raw bytes, no field deser, no primary deref) ---");

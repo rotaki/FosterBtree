@@ -18,6 +18,7 @@ use crate::{
 };
 
 use super::record_definitions::*;
+use super::txn_utils::{customer_fields, order_fields};
 
 pub struct TpccLoader<M: MemPool> {
     storage: Arc<TransactionalStorage<M>>,
@@ -86,9 +87,13 @@ impl<M: MemPool> TpccLoader<M> {
                 ContainerOptions::secondary(
                     CUSTOMER_SECONDARY_TABLE,
                     ContainerDS::BTree,
-                    customer_secondary_schema(),
                     customer_cid,
-                    vec![0, 1, 3], // w_id, d_id, c_id
+                    vec![
+                        customer_fields::C_W_ID,
+                        customer_fields::C_D_ID,
+                        customer_fields::C_LAST,
+                        customer_fields::C_ID,
+                    ],
                 ),
             )
             .unwrap();
@@ -113,9 +118,13 @@ impl<M: MemPool> TpccLoader<M> {
                 ContainerOptions::secondary(
                     ORDER_SECONDARY_TABLE,
                     ContainerDS::BTree,
-                    order_secondary_schema(),
                     order_cid,
-                    vec![0, 1, 3], // w_id, d_id, o_id
+                    vec![
+                        order_fields::O_W_ID,
+                        order_fields::O_D_ID,
+                        order_fields::O_C_ID,
+                        order_fields::O_ID,
+                    ],
                 ),
             )
             .unwrap();

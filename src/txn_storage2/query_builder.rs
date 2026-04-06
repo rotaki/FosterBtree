@@ -123,32 +123,14 @@ impl<'a, S: FieldLeveLStorageTrait> QueryBuilder<'a, S> {
 
         let mut results = Vec::new();
         let mut lookup_err: Option<TxnStorageStatus> = None;
-        self.table.storage().iter_for_each_fields(
-            self.txn,
-            &iter,
-            &mut |key_fields, value_fields, _hint| {
-                let row = match index_def.kind {
-                    IndexKind::Primary => {
-                        // value_fields are the requested columns from the primary record
-                        value_fields.to_vec()
-                    }
-                    IndexKind::Secondary => {
-                        // For secondary index scans, we need to do a back-lookup
-                        // to get the full record from the primary index.
-                        match self.secondary_back_lookup(index_def, meta, value_fields, key_fields)
-                        {
-                            Ok(fields) => fields,
-                            Err(e) => {
-                                lookup_err = Some(e);
-                                return false;
-                            }
-                        }
-                    }
-                };
-                results.push(row);
+        self.table
+            .storage()
+            .iter_for_each_fields(self.txn, &iter, &mut |fields, _hint| {
+                // With the unified interface, fields contains exactly the
+                // requested columns (both key-sourced and primary-sourced).
+                results.push(fields.to_vec());
                 true
-            },
-        )?;
+            })?;
 
         self.table.storage().drop_iterator_handle(iter)?;
         if let Some(e) = lookup_err {
@@ -369,8 +351,8 @@ impl<'a, S: FieldLeveLStorageTrait> QueryBuilder<'a, S> {
         let pointer_field = &value_fields[value_fields.len() - 1];
         let hint = match pointer_field {
             Field::Pointer(Some(ptr)) => {
-                // Convert RecordPointer back to Hint
-                // This is safe because for TransactionalStorage, Hint = RecordPointer
+                // Convert RecordHandle back to Hint
+                // This is safe because for TransactionalStorage, Hint = RecordHandle
                 if std::mem::size_of::<S::Hint>() == 8 {
                     let mut bytes = [0u8; 8];
                     bytes[0..4].copy_from_slice(&ptr.page_id.to_le_bytes());

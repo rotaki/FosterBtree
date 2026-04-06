@@ -174,7 +174,8 @@ pub fn run_payment_txn_with_stats<M: MemPool>(
         let res = storage.scan_range(
             &txn,
             containers.customer_secondary_cid,
-            ScanOptions::new(&[customer_fields::C_FIRST]).with_bounds(scan_key_start, scan_key_end),
+            ScanOptions::new(&[customer_fields::C_ID, customer_fields::C_FIRST])
+                .with_bounds(scan_key_start, scan_key_end),
         );
         if not_successful(&res) {
             return (
@@ -184,13 +185,12 @@ pub fn run_payment_txn_with_stats<M: MemPool>(
         }
         let iter = res.unwrap();
 
-        let fe_res =
-            storage.iter_for_each_fields(&txn, &iter, &mut |key_fields, value_fields, _| {
-                let c_id = get_u32_field(key_fields, 3);
-                let c_first = get_string_field(value_fields, 0);
-                customer_recs.push((c_id, c_first));
-                true
-            });
+        let fe_res = storage.iter_for_each_fields(&txn, &iter, &mut |fields, _| {
+            let c_id = get_u32_field(fields, 0);
+            let c_first = get_string_field(fields, 1);
+            customer_recs.push((c_id, c_first));
+            true
+        });
         let _ = storage.drop_iterator_handle(iter);
         if let Err(e) = fe_res {
             return (

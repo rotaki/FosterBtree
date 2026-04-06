@@ -258,12 +258,21 @@ impl DataType {
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RecordPointer {
+pub struct RecordHandle {
     pub page_id: u32,
     pub frame_id: u32,
 }
 
-impl RecordPointer {
+impl Default for RecordHandle {
+    fn default() -> Self {
+        RecordHandle {
+            page_id: 0,
+            frame_id: u32::MAX,
+        }
+    }
+}
+
+impl RecordHandle {
     pub fn new(page_id: u32, frame_id: u32) -> Self {
         Self { page_id, frame_id }
     }
@@ -281,6 +290,12 @@ impl RecordPointer {
             page_id: u32::from_be_bytes(bytes[0..4].try_into().unwrap()),
             frame_id: u32::from_be_bytes(bytes[4..8].try_into().unwrap()),
         }
+    }
+}
+
+impl std::fmt::Display for RecordHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "(p_id: {}, f_id: {})", self.page_id, self.frame_id)
     }
 }
 
@@ -305,7 +320,7 @@ pub enum Field {
     Date(Option<NaiveDate>),
     Months(Option<i32>),
     Days(Option<i64>),
-    Pointer(Option<RecordPointer>),
+    Pointer(Option<RecordHandle>),
 }
 
 impl Field {
@@ -616,7 +631,7 @@ impl Field {
                 Field::Days(Some(value))
             }
             DataType::Pointer => {
-                let pointer = RecordPointer::from_bytes(&bytes[offset..offset + 8]);
+                let pointer = RecordHandle::from_bytes(&bytes[offset..offset + 8]);
                 Field::Pointer(Some(pointer))
             }
         }
@@ -1217,13 +1232,13 @@ pub fn from_normalized_key(
                 }
                 // For pointer, we need to decode if desc order
                 if asc {
-                    let ptr = RecordPointer::from_bytes(&normalized_key[pos..pos + 8]);
+                    let ptr = RecordHandle::from_bytes(&normalized_key[pos..pos + 8]);
                     pos += 8;
                     Field::Pointer(Some(ptr))
                 } else {
                     // Decode bytes for descending order
                     let byte_array = decode_bytes_array::<8>(&normalized_key[pos..pos + 8], asc);
-                    let ptr = RecordPointer::from_bytes(&byte_array);
+                    let ptr = RecordHandle::from_bytes(&byte_array);
                     pos += 8;
                     Field::Pointer(Some(ptr))
                 }
@@ -1600,14 +1615,14 @@ mod tests {
 
     #[test]
     fn test_record_pointer() {
-        let ptr = RecordPointer::new(42, 100);
+        let ptr = RecordHandle::new(42, 100);
         assert_eq!(ptr.page_id, 42);
         assert_eq!(ptr.frame_id, 100);
 
         let bytes = ptr.to_bytes();
         assert_eq!(bytes.len(), 8);
 
-        let recovered = RecordPointer::from_bytes(&bytes);
+        let recovered = RecordHandle::from_bytes(&bytes);
         assert_eq!(recovered.page_id, 42);
         assert_eq!(recovered.frame_id, 100);
         assert_eq!(ptr, recovered);
@@ -1697,7 +1712,7 @@ mod tests {
             (Field::Days(Some(365)), DataType::Days),
             (Field::Days(None), DataType::Days),
             (
-                Field::Pointer(Some(RecordPointer::new(123, 456))),
+                Field::Pointer(Some(RecordHandle::new(123, 456))),
                 DataType::Pointer,
             ),
             (Field::Pointer(None), DataType::Pointer),
@@ -1783,7 +1798,7 @@ mod tests {
             (Field::Months(Some(24)), DataType::Months),
             (Field::Days(Some(365)), DataType::Days),
             (
-                Field::Pointer(Some(RecordPointer::new(789, 101112))),
+                Field::Pointer(Some(RecordHandle::new(789, 101112))),
                 DataType::Pointer,
             ),
         ];
@@ -2402,7 +2417,7 @@ mod tests {
     #[test]
     fn test_normalized_key_all_types() {
         let date = NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
-        let ptr = RecordPointer::new(123, 456);
+        let ptr = RecordHandle::new(123, 456);
 
         let fields = vec![
             Field::Int8(Some(-42)),

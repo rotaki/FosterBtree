@@ -9,9 +9,9 @@ use dashmap::DashMap;
 use crate::access_method::fbt::{BTreeKey, FosterBtreeCursor};
 use crate::bp::PageFrameKey;
 use crate::event_tracer::trace_secidx;
-use crate::page::PageId;
 use crate::prelude::{FosterBtreePage, ScanOptions, UniqueKeyIndex};
 use crate::txn_storage::TxnStorageStatus;
+use crate::txn_storage2::field::RecordHandle;
 use crate::{
     bp::prelude::{ContainerId, DatabaseId, MemPool},
     prelude::{ContainerKey, FosterBtree},
@@ -29,55 +29,15 @@ use crate::{log_error, log_info};
 
 // Each transaction has a read-write set
 
-#[derive(Clone, Debug, PartialEq)]
-pub struct PhysicalAddress {
-    page_id: PageId,
-    frame_id: u32,
-}
-
-impl Default for PhysicalAddress {
-    fn default() -> Self {
-        PhysicalAddress {
-            page_id: 0,
-            frame_id: u32::MAX,
-        }
-    }
-}
-
-impl PhysicalAddress {
-    pub fn new(page_id: PageId, frame_id: u32) -> Self {
-        PhysicalAddress { page_id, frame_id }
-    }
-
-    pub fn to_pf_key(&self, c_id: ContainerId) -> PageFrameKey {
-        PageFrameKey::new_with_frame_id(ContainerKey::new(0, c_id), self.page_id, self.frame_id)
-    }
-
-    pub fn from_bytes(bytes: &[u8]) -> Self {
-        let page_id = u32::from_be_bytes(bytes[0..4].try_into().unwrap());
-        let frame_id = u32::from_be_bytes(bytes[4..8].try_into().unwrap());
-        PhysicalAddress { page_id, frame_id }
-    }
-
-    pub fn to_bytes(&self) -> [u8; 8] {
-        let mut bytes = [0; 8];
-        bytes[0..4].copy_from_slice(&self.page_id.to_be_bytes());
-        bytes[4..8].copy_from_slice(&self.frame_id.to_be_bytes());
-        bytes
-    }
-}
-
-impl Display for PhysicalAddress {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "(p_id: {}, f_id: {})", self.page_id, self.frame_id)
-    }
+fn record_handle_to_pf_key(rh: &RecordHandle, c_id: ContainerId) -> PageFrameKey {
+    PageFrameKey::new_with_frame_id(ContainerKey::new(0, c_id), rh.page_id, rh.frame_id)
 }
 
 pub enum RWEntry {
-    Read(bool, PhysicalAddress), // inserted_as_ghost, physical_address
-    Update(bool, PhysicalAddress, Vec<u8>), // inserted_as_ghost, physical_address, value
-    Insert(bool, PhysicalAddress, Vec<u8>), // inserted_as_ghost, physical_address, value
-    Delete(bool, PhysicalAddress), // inserted_as_ghost, physical_address
+    Read(bool, RecordHandle),            // inserted_as_ghost, physical_address
+    Update(bool, RecordHandle, Vec<u8>), // inserted_as_ghost, physical_address, value
+    Insert(bool, RecordHandle, Vec<u8>), // inserted_as_ghost, physical_address, value
+    Delete(bool, RecordHandle),          // inserted_as_ghost, physical_address
 }
 
 impl Display for RWEntry {
@@ -108,7 +68,7 @@ impl Display for RWEntry {
 }
 
 impl RWEntry {
-    pub fn update_physical_address(&mut self, new_pa: PhysicalAddress) {
+    pub fn update_physical_address(&mut self, new_pa: RecordHandle) {
         match self {
             RWEntry::Read(_, pa) => {
                 *pa = new_pa;
@@ -151,7 +111,7 @@ impl RWEntry {
         }
     }
 
-    pub fn physical_address(&self) -> PhysicalAddress {
+    pub fn physical_address(&self) -> RecordHandle {
         match self {
             RWEntry::Read(_, pa) => pa.clone(),
             RWEntry::Update(_, pa, _) => pa.clone(),
@@ -423,8 +383,8 @@ impl NoWaitTxn {
         &self,
         ps: &PrimaryStorage<M>,
         key: K,
-        hint: Option<PhysicalAddress>,
-    ) -> Result<(Vec<u8>, PhysicalAddress), TxnStorageStatus> {
+        hint: Option<RecordHandle>,
+    ) -> Result<(Vec<u8>, RecordHandle), TxnStorageStatus> {
         let c_id = ps.c_id;
         let rwset = self.get_or_create_rwset(c_id);
 
@@ -435,7 +395,7 @@ impl NoWaitTxn {
                     let storage = &ps.btree;
                     let page = storage.traverse_to_leaf_for_read_with_hint(
                         key.as_ref(),
-                        Some(pa.to_pf_key(c_id)),
+                        Some(record_handle_to_pf_key(&pa, c_id)),
                     );
                     let slot_id = page.upper_bound_slot_id(&BTreeKey::new(key.as_ref())) - 1;
                     if slot_id == 0 || page.get_raw_key(slot_id) != key.as_ref() {
@@ -443,7 +403,7 @@ impl NoWaitTxn {
                         panic!("Key should exist in storage if it is in rwset")
                     } else {
                         // Update the physical address
-                        let new_pa = PhysicalAddress::new(page.get_id(), page.frame_id());
+                        let new_pa = RecordHandle::new(page.get_id(), page.frame_id());
                         e.update_physical_address(new_pa.clone());
                         Ok((page.get_val(slot_id).to_vec(), new_pa))
                     }
@@ -457,8 +417,10 @@ impl NoWaitTxn {
             // Find from index
             let storage = &ps.btree;
             let locktable = &ps.locktable;
-            let page = storage
-                .traverse_to_leaf_for_read_with_hint(key.as_ref(), hint.map(|h| h.to_pf_key(c_id)));
+            let page = storage.traverse_to_leaf_for_read_with_hint(
+                key.as_ref(),
+                hint.map(|h| record_handle_to_pf_key(&h, c_id)),
+            );
             let slot_id = page.upper_bound_slot_id(&BTreeKey::new(key.as_ref())) - 1;
             if slot_id == 0 || page.get_raw_key(slot_id) != key.as_ref() {
                 // Lower fence or non-existent key
@@ -469,7 +431,7 @@ impl NoWaitTxn {
                     return Err(TxnStorageStatus::TxnConflict);
                 }
                 // Insert into rwset
-                let new_pa = PhysicalAddress::new(page.get_id(), page.frame_id());
+                let new_pa = RecordHandle::new(page.get_id(), page.frame_id());
                 rwset.insert(key.as_ref().to_vec(), RWEntry::Read(false, new_pa.clone()));
                 Ok((page.get_val(slot_id).to_vec(), new_pa))
             }
@@ -481,8 +443,8 @@ impl NoWaitTxn {
         ps: &PrimaryStorage<M>,
         key: K,
         value: V,
-        hint: Option<PhysicalAddress>,
-    ) -> Result<PhysicalAddress, TxnStorageStatus> {
+        hint: Option<RecordHandle>,
+    ) -> Result<RecordHandle, TxnStorageStatus> {
         // Get from rwset or insert a new entry
         let c_id = ps.c_id;
         let rwset = self.get_or_create_rwset(c_id);
@@ -503,7 +465,7 @@ impl NoWaitTxn {
             let locktable = &ps.locktable;
             let mut page = storage.traverse_to_leaf_for_write_with_hint(
                 key.as_ref(),
-                hint.map(|h| h.to_pf_key(c_id)),
+                hint.map(|h| record_handle_to_pf_key(&h, c_id)),
             );
             let slot_id = page.upper_bound_slot_id(&BTreeKey::new(key.as_ref())) - 1;
             if slot_id == 0 || page.get_raw_key(slot_id) != key.as_ref() {
@@ -583,7 +545,7 @@ impl NoWaitTxn {
                     }
                 }
                 // Insert this key into rwset
-                let new_pa = PhysicalAddress::new(page.get_id(), page.frame_id());
+                let new_pa = RecordHandle::new(page.get_id(), page.frame_id());
                 rwset.insert(
                     key.as_ref().to_vec(),
                     RWEntry::Insert(true, new_pa.clone(), value.as_ref().to_vec()),
@@ -600,8 +562,8 @@ impl NoWaitTxn {
         ss: &SecondaryStorage<M>,
         key: K,
         value: V,
-        hint: Option<PhysicalAddress>,
-    ) -> Result<PhysicalAddress, TxnStorageStatus> {
+        hint: Option<RecordHandle>,
+    ) -> Result<RecordHandle, TxnStorageStatus> {
         // Get from rwset or insert a new entry
         let c_id = ss.c_id;
         let rwset = self.get_or_create_rwset(c_id);
@@ -622,7 +584,7 @@ impl NoWaitTxn {
             let locktable = &ss.locktable;
             let mut page = storage.traverse_to_leaf_for_write_with_hint(
                 key.as_ref(),
-                hint.map(|h| h.to_pf_key(c_id)),
+                hint.map(|h| record_handle_to_pf_key(&h, c_id)),
             );
             let slot_id = page.upper_bound_slot_id(&BTreeKey::new(key.as_ref())) - 1;
             if slot_id == 0 || page.get_raw_key(slot_id) != key.as_ref() {
@@ -702,7 +664,7 @@ impl NoWaitTxn {
                     }
                 }
                 // Insert this key into rwset
-                let new_pa = PhysicalAddress::new(page.get_id(), page.frame_id());
+                let new_pa = RecordHandle::new(page.get_id(), page.frame_id());
                 rwset.insert(
                     key.as_ref().to_vec(),
                     RWEntry::Insert(true, new_pa.clone(), value.as_ref().to_vec()),
@@ -719,8 +681,8 @@ impl NoWaitTxn {
         ps: &PrimaryStorage<M>,
         key: K,
         value: V,
-        hint: Option<PhysicalAddress>,
-    ) -> Result<PhysicalAddress, TxnStorageStatus> {
+        hint: Option<RecordHandle>,
+    ) -> Result<RecordHandle, TxnStorageStatus> {
         let c_id = ps.c_id;
         let rwset = self.get_or_create_rwset(c_id);
         if let Some(e) = rwset.get_mut(key.as_ref()) {
@@ -753,8 +715,10 @@ impl NoWaitTxn {
             // Abort if not found in index
             let storage = &ps.btree;
             let locktable = &ps.locktable;
-            let page = storage
-                .traverse_to_leaf_for_read_with_hint(key.as_ref(), hint.map(|h| h.to_pf_key(c_id)));
+            let page = storage.traverse_to_leaf_for_read_with_hint(
+                key.as_ref(),
+                hint.map(|h| record_handle_to_pf_key(&h, c_id)),
+            );
             let slot_id = page.upper_bound_slot_id(&BTreeKey::new(key.as_ref())) - 1;
             if slot_id == 0 || page.get_raw_key(slot_id) != key.as_ref() {
                 Err(TxnStorageStatus::KeyNotFound)
@@ -764,7 +728,7 @@ impl NoWaitTxn {
                     return Err(TxnStorageStatus::TxnConflict);
                 }
                 // Insert into rwset
-                let new_pa = PhysicalAddress::new(page.get_id(), page.frame_id());
+                let new_pa = RecordHandle::new(page.get_id(), page.frame_id());
                 rwset.insert(
                     key.as_ref().to_vec(),
                     RWEntry::Update(false, new_pa.clone(), value.as_ref().to_vec()),
@@ -778,8 +742,8 @@ impl NoWaitTxn {
         &self,
         ps: &PrimaryStorage<M>,
         key: K,
-        hint: Option<PhysicalAddress>,
-    ) -> Result<PhysicalAddress, TxnStorageStatus> {
+        hint: Option<RecordHandle>,
+    ) -> Result<RecordHandle, TxnStorageStatus> {
         let c_id = ps.c_id;
         let rwset = self.get_or_create_rwset(c_id);
         if let Some(e) = rwset.get_mut(key.as_ref()) {
@@ -809,8 +773,10 @@ impl NoWaitTxn {
             // Abort if not found in index
             let storage = &ps.btree;
             let locktable = &ps.locktable;
-            let page = storage
-                .traverse_to_leaf_for_read_with_hint(key.as_ref(), hint.map(|h| h.to_pf_key(c_id)));
+            let page = storage.traverse_to_leaf_for_read_with_hint(
+                key.as_ref(),
+                hint.map(|h| record_handle_to_pf_key(&h, c_id)),
+            );
             let slot_id = page.upper_bound_slot_id(&BTreeKey::new(key.as_ref())) - 1;
             if slot_id == 0 || page.get_raw_key(slot_id) != key.as_ref() {
                 Err(TxnStorageStatus::KeyNotFound)
@@ -820,7 +786,7 @@ impl NoWaitTxn {
                     return Err(TxnStorageStatus::TxnConflict);
                 }
                 // Insert into rwset
-                let new_pa = PhysicalAddress::new(page.get_id(), page.frame_id());
+                let new_pa = RecordHandle::new(page.get_id(), page.frame_id());
                 rwset.insert(
                     key.as_ref().to_vec(),
                     RWEntry::Delete(false, new_pa.clone()),
@@ -852,10 +818,7 @@ impl NoWaitTxn {
                         if !locktable.try_shared(key.clone()) {
                             return Err(TxnStorageStatus::TxnConflict);
                         }
-                        rwset.insert(
-                            key.clone(),
-                            RWEntry::Read(false, PhysicalAddress::default()),
-                        );
+                        rwset.insert(key.clone(), RWEntry::Read(false, RecordHandle::default()));
                     }
                     pi.finished = true; // We reached the upper bound
                     return Ok(None);
@@ -864,7 +827,7 @@ impl NoWaitTxn {
                 let (page_id, frame_id, _) = pi.cursor.get_physical_address();
                 pi.cursor.go_to_next_kv();
                 if let Some(e) = rwset.get_mut(&key) {
-                    e.update_physical_address(PhysicalAddress::new(page_id, frame_id));
+                    e.update_physical_address(RecordHandle::new(page_id, frame_id));
                     match e {
                         RWEntry::Read(_, _) => {
                             return Ok(Some((key, value)));
@@ -884,7 +847,7 @@ impl NoWaitTxn {
                     // Insert into rwset
                     rwset.insert(
                         key.clone(),
-                        RWEntry::Read(false, PhysicalAddress::new(page_id, frame_id)),
+                        RWEntry::Read(false, RecordHandle::new(page_id, frame_id)),
                     );
                     return Ok(Some((key, value)));
                 }
@@ -895,10 +858,7 @@ impl NoWaitTxn {
                     if !locktable.try_shared([].to_vec()) {
                         return Err(TxnStorageStatus::TxnConflict);
                     }
-                    rwset.insert(
-                        [].to_vec(),
-                        RWEntry::Read(false, PhysicalAddress::default()),
-                    );
+                    rwset.insert([].to_vec(), RWEntry::Read(false, RecordHandle::default()));
                 }
                 pi.finished = true; // We reached the end of the primary index
                 return Ok(None);
@@ -929,10 +889,7 @@ impl NoWaitTxn {
                         if !locktable.try_shared(key.clone()) {
                             return Err(TxnStorageStatus::TxnConflict);
                         }
-                        rwset.insert(
-                            key.clone(),
-                            RWEntry::Read(false, PhysicalAddress::default()),
-                        );
+                        rwset.insert(key.clone(), RWEntry::Read(false, RecordHandle::default()));
                     }
                     si.finished = true; // We reached the upper bound
                     return Ok(None);
@@ -940,7 +897,7 @@ impl NoWaitTxn {
 
                 let (page_id, frame_id, _) = si.cursor.get_physical_address();
                 if let Some(e) = rwset.get_mut(&key) {
-                    e.update_physical_address(PhysicalAddress::new(page_id, frame_id));
+                    e.update_physical_address(RecordHandle::new(page_id, frame_id));
                     match e {
                         RWEntry::Read(_, _) => break (key, value),
                         RWEntry::Update(_, _, new_val) | RWEntry::Insert(_, _, new_val) => {
@@ -959,7 +916,7 @@ impl NoWaitTxn {
                     // Insert into rwset
                     rwset.insert(
                         key.clone(),
-                        RWEntry::Read(false, PhysicalAddress::new(page_id, frame_id)),
+                        RWEntry::Read(false, RecordHandle::new(page_id, frame_id)),
                     );
                     break (key, value);
                 }
@@ -970,10 +927,7 @@ impl NoWaitTxn {
                     if !locktable.try_shared([].to_vec()) {
                         return Err(TxnStorageStatus::TxnConflict);
                     }
-                    rwset.insert(
-                        [].to_vec(),
-                        RWEntry::Read(false, PhysicalAddress::default()),
-                    );
+                    rwset.insert([].to_vec(), RWEntry::Read(false, RecordHandle::default()));
                 }
                 si.finished = true; // We reached the end of the primary index
                 return Ok(None);
@@ -983,7 +937,7 @@ impl NoWaitTxn {
         // We got the primary key from the secondary index. Now, we need to get the value from the primary index.
         let ps = &si.ss.ps;
         let (p_key, p_hint) = s_value.split_at(s_value.len() - 8);
-        let p_hint = PhysicalAddress::from_bytes(p_hint);
+        let p_hint = RecordHandle::from_bytes(p_hint);
         let (p_value, _p_addr) = self.read(ps, p_key, Some(p_hint.clone()))?;
         // println!("Hint: {}, Actual: {}", p_hint, p_addr);
         // Rewrite the physical address in the secondary index. The last 8 bytes should be updated with the new physical address.
@@ -1051,8 +1005,10 @@ impl NoWaitTxn {
                         continue;
                     }
                     RWEntry::Update(inserted_as_ghost, pa, value) => {
-                        let mut page = storage
-                            .traverse_to_leaf_for_write_with_hint(key, Some(pa.to_pf_key(*c_id)));
+                        let mut page = storage.traverse_to_leaf_for_write_with_hint(
+                            key,
+                            Some(record_handle_to_pf_key(&pa, *c_id)),
+                        );
                         let slot_id = page.upper_bound_slot_id(&BTreeKey::new(key)) - 1;
                         if slot_id == 0 || page.get_raw_key(slot_id) != key {
                             panic!("Key: {:?} of container: {} should exist in storage at slot_id: {} if it is in rwset", key, c_id, slot_id);
@@ -1069,8 +1025,10 @@ impl NoWaitTxn {
                     RWEntry::Insert(inserted_as_ghost, pa, _) => {
                         // Insert is always a ghost record insertion
                         assert!(inserted_as_ghost);
-                        let mut page = storage
-                            .traverse_to_leaf_for_write_with_hint(key, Some(pa.to_pf_key(*c_id)));
+                        let mut page = storage.traverse_to_leaf_for_write_with_hint(
+                            key,
+                            Some(record_handle_to_pf_key(&pa, *c_id)),
+                        );
                         let slot_id = page.upper_bound_slot_id(&BTreeKey::new(key)) - 1;
                         if slot_id == 0 || page.get_raw_key(slot_id) != key {
                             panic!("Key: {:?} of container: {} should exist in storage at slot_id: {} if it is in rwset", key, c_id, slot_id);
@@ -1079,8 +1037,10 @@ impl NoWaitTxn {
                         }
                     }
                     RWEntry::Delete(_, pa) => {
-                        let mut page = storage
-                            .traverse_to_leaf_for_write_with_hint(key, Some(pa.to_pf_key(*c_id)));
+                        let mut page = storage.traverse_to_leaf_for_write_with_hint(
+                            key,
+                            Some(record_handle_to_pf_key(&pa, *c_id)),
+                        );
                         let slot_id = page.upper_bound_slot_id(&BTreeKey::new(key)) - 1;
                         if slot_id == 0 || page.get_raw_key(slot_id) != key {
                             panic!("Key should exist in storage if it is in rwset")
@@ -1117,7 +1077,7 @@ impl NoWaitTxn {
                 if e.ghost_inserted() {
                     let mut page = storage.traverse_to_leaf_for_write_with_hint(
                         key,
-                        Some(e.physical_address().to_pf_key(*c_id)),
+                        Some(record_handle_to_pf_key(&e.physical_address(), *c_id)),
                     );
                     let slot_id = page.upper_bound_slot_id(&BTreeKey::new(key)) - 1;
                     if slot_id == 0 || page.get_raw_key(slot_id) != key {
@@ -1370,7 +1330,7 @@ impl<M: MemPool> TxnStorageTrait for NoWaitTxnStorage<M> {
             }
             None => match self.sss.get(c_id) {
                 Some(ss) => {
-                    let value = [value, PhysicalAddress::default().to_bytes().to_vec()].concat();
+                    let value = [value, RecordHandle::default().to_bytes().to_vec()].concat();
                     ss.btree.insert(&key, &value).unwrap();
                     Ok(())
                 }
@@ -1470,7 +1430,7 @@ impl<M: MemPool> TxnStorageTrait for NoWaitTxnStorage<M> {
             }
             None => match self.sss.get(c_id) {
                 Some(_ss) => {
-                    let value = [value, PhysicalAddress::default().to_bytes().to_vec()].concat();
+                    let value = [value, RecordHandle::default().to_bytes().to_vec()].concat();
                     txn.insert_secondary(_ss, key, value, None)?;
                     Ok(())
                 }
@@ -1627,7 +1587,7 @@ impl<M: MemPool> TxnStorageTrait for NoWaitTxnStorage<M> {
                                 }
                                 rwset.insert(
                                     key_bytes.to_vec(),
-                                    RWEntry::Read(false, PhysicalAddress::new(page_id, frame_id)),
+                                    RWEntry::Read(false, RecordHandle::new(page_id, frame_id)),
                                 );
                             }
                             pi.finished = true;
@@ -1636,7 +1596,7 @@ impl<M: MemPool> TxnStorageTrait for NoWaitTxnStorage<M> {
 
                         // Check rwset
                         if let Some(e) = rwset.get_mut(key_bytes) {
-                            e.update_physical_address(PhysicalAddress::new(page_id, frame_id));
+                            e.update_physical_address(RecordHandle::new(page_id, frame_id));
                             match e {
                                 RWEntry::Delete(_, _) => return true, // Skip deleted
                                 RWEntry::Update(_, _, new_val) | RWEntry::Insert(_, _, new_val) => {
@@ -1657,7 +1617,7 @@ impl<M: MemPool> TxnStorageTrait for NoWaitTxnStorage<M> {
                         }
                         rwset.insert(
                             key_bytes.to_vec(),
-                            RWEntry::Read(false, PhysicalAddress::new(page_id, frame_id)),
+                            RWEntry::Read(false, RecordHandle::new(page_id, frame_id)),
                         );
                         count += 1;
                         f(key_bytes, value_bytes)
@@ -1669,7 +1629,7 @@ impl<M: MemPool> TxnStorageTrait for NoWaitTxnStorage<M> {
                         if !locktable.try_shared(vec![]) {
                             return Err(TxnStorageStatus::TxnConflict);
                         }
-                        rwset.insert(vec![], RWEntry::Read(false, PhysicalAddress::default()));
+                        rwset.insert(vec![], RWEntry::Read(false, RecordHandle::default()));
                     }
                     pi.finished = true;
                 }
@@ -1706,10 +1666,10 @@ impl<M: MemPool> TxnStorageTrait for NoWaitTxnStorage<M> {
                         for slot in start_slot..end_slot {
                             let s_value_bytes = page.get_val(slot);
                             if s_value_bytes.len() >= 8 {
-                                let hint = PhysicalAddress::from_bytes(
+                                let hint = RecordHandle::from_bytes(
                                     &s_value_bytes[s_value_bytes.len() - 8..],
                                 );
-                                let pfk = hint.to_pf_key(pri_c_id);
+                                let pfk = record_handle_to_pf_key(&hint, pri_c_id);
                                 let _ = ps.btree.mem_pool.prefetch_page(pfk);
                             }
                         }
@@ -1732,14 +1692,14 @@ impl<M: MemPool> TxnStorageTrait for NoWaitTxnStorage<M> {
                                 }
                                 sec_rwset.insert(
                                     s_key_bytes.to_vec(),
-                                    RWEntry::Read(false, PhysicalAddress::default()),
+                                    RWEntry::Read(false, RecordHandle::default()),
                                 );
                             }
 
                             // Extract primary key and hint from secondary value
                             let (p_key, p_hint_bytes) =
                                 s_value_bytes.split_at(s_value_bytes.len() - 8);
-                            let p_hint = PhysicalAddress::from_bytes(p_hint_bytes);
+                            let p_hint = RecordHandle::from_bytes(p_hint_bytes);
 
                             // Primary read — Box<ReadWriteSet> has stable address
                             match txn.read(ps, p_key, Some(p_hint.clone())) {
@@ -1772,7 +1732,7 @@ impl<M: MemPool> TxnStorageTrait for NoWaitTxnStorage<M> {
                                 } else {
                                     sec_rwset.insert(
                                         boundary_key.to_vec(),
-                                        RWEntry::Read(false, PhysicalAddress::default()),
+                                        RWEntry::Read(false, RecordHandle::default()),
                                     );
                                 }
                             }
@@ -3166,13 +3126,13 @@ mod tests {
 
     #[test]
     fn test_physical_address_serialization() {
-        let pa = PhysicalAddress::new(12345, 67890);
+        let pa = RecordHandle::new(12345, 67890);
         let bytes = pa.to_bytes();
-        let pa2 = PhysicalAddress::from_bytes(&bytes);
+        let pa2 = RecordHandle::from_bytes(&bytes);
         assert_eq!(pa, pa2);
 
         // Test default
-        let default_pa = PhysicalAddress::default();
+        let default_pa = RecordHandle::default();
         assert_eq!(default_pa.page_id, 0);
         assert_eq!(default_pa.frame_id, u32::MAX);
     }
@@ -3607,7 +3567,7 @@ mod tests {
     fn test_secondary_iter_for_each_hint_repair() {
         let (storage, db_id, pri, sec) = setup_secondary_test(20);
 
-        // Insert data — insert_value appends PhysicalAddress::default() (page=0, frame=MAX)
+        // Insert data — insert_value appends RecordHandle::default() (page=0, frame=MAX)
         // as the hint, which will be stale.
         let txn = storage.begin_txn(db_id, TxnOptions::default()).unwrap();
         for i in 0u8..5 {
@@ -3629,10 +3589,10 @@ mod tests {
             let slot = leaf.upper_bound_slot_id(&BTreeKey::new(sk.as_bytes())) - 1;
             let raw_val = leaf.get_val(slot);
             let hint_bytes = &raw_val[raw_val.len() - 8..];
-            let hint = PhysicalAddress::from_bytes(hint_bytes);
+            let hint = RecordHandle::from_bytes(hint_bytes);
             assert_eq!(
                 hint,
-                PhysicalAddress::default(),
+                RecordHandle::default(),
                 "Before repair, hint should be default"
             );
         }
@@ -3666,14 +3626,14 @@ mod tests {
             let slot = leaf.upper_bound_slot_id(&BTreeKey::new(sk.as_bytes())) - 1;
             let raw_val = leaf.get_val(slot);
             let hint_bytes = &raw_val[raw_val.len() - 8..];
-            let repaired_hint = PhysicalAddress::from_bytes(hint_bytes);
+            let repaired_hint = RecordHandle::from_bytes(hint_bytes);
 
             // Verify the repaired hint points to the correct primary leaf
             let ps = storage.pss.get(pri).unwrap();
             let pri_leaf = ps
                 .btree
                 .traverse_to_leaf_for_read_with_hint(pk.as_bytes(), None);
-            let expected = PhysicalAddress::new(pri_leaf.get_id(), pri_leaf.frame_id());
+            let expected = RecordHandle::new(pri_leaf.get_id(), pri_leaf.frame_id());
             assert_eq!(
                 repaired_hint, expected,
                 "After repair, hint for {} should point to primary leaf of {}",

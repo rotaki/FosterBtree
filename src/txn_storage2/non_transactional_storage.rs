@@ -9,7 +9,7 @@ use crate::{
     txn_storage2::{
         field::{
             bytes_to_record, key_to_bytes, record_to_bytes, record_to_key_bytes, Field, Record,
-            RecordPointer,
+            RecordHandle,
         },
         field_level_storage_trait::{
             ContainerDS, ContainerOptions, ContainerType, DBOptions, FieldLeveLStorageTrait,
@@ -81,7 +81,7 @@ impl<M: MemPool> NonTransactionalStorage<M> {
 impl<M: MemPool> FieldLeveLStorageTrait for NonTransactionalStorage<M> {
     type TxnHandle = NonTxnHandle;
     type IteratorHandle = NonTxnIterator<M>;
-    type Hint = RecordPointer;
+    type Hint = RecordHandle;
 
     // ========================================================================
     // Database Management
@@ -190,7 +190,7 @@ impl<M: MemPool> FieldLeveLStorageTrait for NonTransactionalStorage<M> {
         _db_id: DatabaseId,
         c_id: ContainerId,
         record: Record,
-    ) -> Result<RecordPointer, TxnStorageStatus> {
+    ) -> Result<RecordHandle, TxnStorageStatus> {
         self.insert_record(
             &NonTxnHandle,
             c_id,
@@ -204,8 +204,8 @@ impl<M: MemPool> FieldLeveLStorageTrait for NonTransactionalStorage<M> {
         _db_id: DatabaseId,
         c_id: ContainerId,
         record: Record,
-        primary_hint: RecordPointer,
-    ) -> Result<RecordPointer, TxnStorageStatus> {
+        primary_hint: RecordHandle,
+    ) -> Result<RecordHandle, TxnStorageStatus> {
         self.insert_record(&NonTxnHandle, c_id, record, Some(primary_hint))
     }
 
@@ -283,8 +283,8 @@ impl<M: MemPool> FieldLeveLStorageTrait for NonTransactionalStorage<M> {
         c_id: ContainerId,
         key: Vec<Field>,
         col_idx: usize,
-        hint: Option<RecordPointer>,
-    ) -> Result<(Field, RecordPointer), TxnStorageStatus> {
+        hint: Option<RecordHandle>,
+    ) -> Result<(Field, RecordHandle), TxnStorageStatus> {
         let (fields, ptr) = self.get_fields(txn, c_id, key, &[col_idx], hint)?;
         Ok((fields.into_iter().next().unwrap(), ptr))
     }
@@ -295,8 +295,8 @@ impl<M: MemPool> FieldLeveLStorageTrait for NonTransactionalStorage<M> {
         c_id: ContainerId,
         key: Vec<Field>,
         col_indices: &[usize],
-        hint: Option<RecordPointer>,
-    ) -> Result<(Vec<Field>, RecordPointer), TxnStorageStatus> {
+        hint: Option<RecordHandle>,
+    ) -> Result<(Vec<Field>, RecordHandle), TxnStorageStatus> {
         // SAFETY: We assume single-threaded access as per the requirements
         let container = unsafe {
             (*self.containers.get())
@@ -327,7 +327,7 @@ impl<M: MemPool> FieldLeveLStorageTrait for NonTransactionalStorage<M> {
                     .collect::<Vec<_>>();
                 Ok((
                     fields,
-                    RecordPointer::new(leaf_page.page().get_id(), leaf_page.frame_id()),
+                    RecordHandle::new(leaf_page.page().get_id(), leaf_page.frame_id()),
                 ))
             } else {
                 // Non-existent key
@@ -347,8 +347,8 @@ impl<M: MemPool> FieldLeveLStorageTrait for NonTransactionalStorage<M> {
         key: Vec<Field>,
         col_idx: usize,
         field: Field,
-        hint: Option<RecordPointer>,
-    ) -> Result<RecordPointer, TxnStorageStatus> {
+        hint: Option<RecordHandle>,
+    ) -> Result<RecordHandle, TxnStorageStatus> {
         self.update_fields(txn, c_id, key, vec![(col_idx, field)], hint)
     }
 
@@ -358,8 +358,8 @@ impl<M: MemPool> FieldLeveLStorageTrait for NonTransactionalStorage<M> {
         c_id: ContainerId,
         key: Vec<Field>,
         fields: Vec<(usize, Field)>,
-        hint: Option<RecordPointer>,
-    ) -> Result<RecordPointer, TxnStorageStatus> {
+        hint: Option<RecordHandle>,
+    ) -> Result<RecordHandle, TxnStorageStatus> {
         // SAFETY: We assume single-threaded access as per the requirements
         let container = unsafe {
             (*self.containers.get())
@@ -392,7 +392,7 @@ impl<M: MemPool> FieldLeveLStorageTrait for NonTransactionalStorage<M> {
                 container
                     .btree
                     .update_at_slot_or_split(&mut leaf_page, slot_id, &key, &value);
-                Ok(RecordPointer::new(
+                Ok(RecordHandle::new(
                     leaf_page.page().get_id(),
                     leaf_page.frame_id(),
                 ))
@@ -410,8 +410,8 @@ impl<M: MemPool> FieldLeveLStorageTrait for NonTransactionalStorage<M> {
         key: Vec<Field>,
         col_idx: usize,
         func: F,
-        hint: Option<RecordPointer>,
-    ) -> Result<RecordPointer, TxnStorageStatus> {
+        hint: Option<RecordHandle>,
+    ) -> Result<RecordHandle, TxnStorageStatus> {
         // SAFETY: We assume single-threaded access as per the requirements
         let container = unsafe {
             (*self.containers.get())
@@ -442,7 +442,7 @@ impl<M: MemPool> FieldLeveLStorageTrait for NonTransactionalStorage<M> {
                 container
                     .btree
                     .update_at_slot_or_split(&mut leaf_page, slot_id, &key, &value);
-                Ok(RecordPointer::new(
+                Ok(RecordHandle::new(
                     leaf_page.page().get_id(),
                     leaf_page.frame_id(),
                 ))
@@ -462,8 +462,8 @@ impl<M: MemPool> FieldLeveLStorageTrait for NonTransactionalStorage<M> {
         _txn: &Self::TxnHandle,
         c_id: ContainerId,
         record: Record,
-        hint: Option<RecordPointer>,
-    ) -> Result<RecordPointer, TxnStorageStatus> {
+        hint: Option<RecordHandle>,
+    ) -> Result<RecordHandle, TxnStorageStatus> {
         // SAFETY: We assume single-threaded access as per the requirements
         let container = unsafe {
             (*self.containers.get())
@@ -490,7 +490,7 @@ impl<M: MemPool> FieldLeveLStorageTrait for NonTransactionalStorage<M> {
                 &value,
                 false,
             );
-            Ok(RecordPointer::new(
+            Ok(RecordHandle::new(
                 leaf_page.page().get_id(),
                 leaf_page.frame_id(),
             ))
@@ -507,7 +507,7 @@ impl<M: MemPool> FieldLeveLStorageTrait for NonTransactionalStorage<M> {
                     &value,
                     false,
                 );
-                Ok(RecordPointer::new(
+                Ok(RecordHandle::new(
                     leaf_page.page().get_id(),
                     leaf_page.frame_id(),
                 ))
@@ -519,8 +519,8 @@ impl<M: MemPool> FieldLeveLStorageTrait for NonTransactionalStorage<M> {
         &self,
         txn: &Self::TxnHandle,
         c_id: ContainerId,
-        records: Vec<(Record, Option<RecordPointer>)>,
-    ) -> Result<Vec<RecordPointer>, TxnStorageStatus> {
+        records: Vec<(Record, Option<RecordHandle>)>,
+    ) -> Result<Vec<RecordHandle>, TxnStorageStatus> {
         let mut pointers = Vec::new();
         for (record, hint) in records {
             let ptr = self.insert_record(txn, c_id, record, hint)?;
@@ -534,7 +534,7 @@ impl<M: MemPool> FieldLeveLStorageTrait for NonTransactionalStorage<M> {
         _txn: &Self::TxnHandle,
         c_id: ContainerId,
         key: Vec<Field>,
-        hint: Option<RecordPointer>,
+        hint: Option<RecordHandle>,
     ) -> Result<(), TxnStorageStatus> {
         // SAFETY: We assume single-threaded access as per the requirements
         let container = unsafe {
@@ -599,13 +599,13 @@ impl<M: MemPool> FieldLeveLStorageTrait for NonTransactionalStorage<M> {
         &self,
         _txn: &Self::TxnHandle,
         iter: &Self::IteratorHandle,
-        f: &mut dyn FnMut(&[u8], &[u8], RecordPointer) -> bool,
+        f: &mut dyn FnMut(&[u8], &[u8], RecordHandle) -> bool,
     ) -> Result<u64, TxnStorageStatus> {
         let mut count: u64 = 0;
         let scanner = unsafe { &mut *iter.scanner.get() };
         for (key, value) in scanner {
             count += 1;
-            if !f(&key, &value, RecordPointer::new(0, 0)) {
+            if !f(&key, &value, RecordHandle::new(0, 0)) {
                 break;
             }
         }
@@ -616,7 +616,7 @@ impl<M: MemPool> FieldLeveLStorageTrait for NonTransactionalStorage<M> {
         &self,
         _txn: &Self::TxnHandle,
         iter: &Self::IteratorHandle,
-        f: &mut dyn FnMut(&[Field], &[Field], RecordPointer) -> bool,
+        f: &mut dyn FnMut(&[Field], RecordHandle) -> bool,
     ) -> Result<u64, TxnStorageStatus> {
         let container = unsafe {
             (*self.containers.get())
@@ -631,22 +631,16 @@ impl<M: MemPool> FieldLeveLStorageTrait for NonTransactionalStorage<M> {
         for (_, value_bytes) in scanner {
             let record = bytes_to_record(&value_bytes, schema);
 
-            let key_fields: Vec<Field> = schema
-                .key_indices()
-                .iter()
-                .map(|&idx| record[idx].clone())
-                .collect();
-
-            let val_fields: Vec<Field> = iter
+            let fields: Vec<Field> = iter
                 .options
                 .cols
                 .iter()
                 .map(|&idx| record[idx].clone())
                 .collect();
 
-            let ptr = RecordPointer::new(0, 0);
+            let ptr = RecordHandle::new(0, 0);
             count += 1;
-            if !f(&key_fields, &val_fields, ptr) {
+            if !f(&fields, ptr) {
                 break;
             }
         }
@@ -1077,7 +1071,7 @@ mod tests {
             .map(|i| record![field!(Int32 i), field!(String format!("additional_{}", i))])
             .collect::<Vec<_>>();
 
-        let additional_records_with_hints: Vec<(Record, Option<RecordPointer>)> =
+        let additional_records_with_hints: Vec<(Record, Option<RecordHandle>)> =
             additional_records.into_iter().map(|r| (r, None)).collect();
         storage
             .insert_records(&txn, container_id, additional_records_with_hints)
@@ -1132,28 +1126,22 @@ mod tests {
             .scan_range(&txn, container_id, ScanOptions::new(&[0, 1]))
             .unwrap();
 
-        let mut collected_keys = Vec::new();
-        let mut collected_values = Vec::new();
+        let mut collected_fields = Vec::new();
 
         let count = storage
-            .iter_for_each_fields(&txn, &iter, &mut |key_fields, value_fields, _ptr| {
-                collected_keys.push(key_fields.to_vec());
-                collected_values.push(value_fields.to_vec());
+            .iter_for_each_fields(&txn, &iter, &mut |fields, _ptr| {
+                collected_fields.push(fields.to_vec());
                 true
             })
             .unwrap();
 
         assert_eq!(count, 10);
-        assert_eq!(collected_keys.len(), 10);
-        assert_eq!(collected_values.len(), 10);
+        assert_eq!(collected_fields.len(), 10);
 
         // Verify some collected data
         for i in 0..count as usize {
-            // Keys should contain the primary key field
-            assert_eq!(collected_keys[i].len(), 1);
-
-            // Values should contain all fields
-            assert_eq!(collected_values[i].len(), 2);
+            // Fields should contain the two projected columns (0 and 1)
+            assert_eq!(collected_fields[i].len(), 2);
         }
 
         storage.drop_iterator_handle(iter).unwrap();

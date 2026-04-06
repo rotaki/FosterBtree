@@ -183,18 +183,16 @@ fn test_customer_loading_and_secondary_index() {
         .scan_range(
             &txn,
             containers.customer_secondary_cid,
-            ScanOptions::new(&[]).with_bounds(scan_start, scan_end),
+            ScanOptions::new(&[customer_fields::C_ID]).with_bounds(scan_start, scan_end),
         )
         .unwrap();
 
     let mut found = false;
-    let _ = storage.iter_for_each_fields(&txn, &iter, &mut |key_fields, _, _| {
-        if key_fields.len() >= 4 {
-            if let Field::Uint32(Some(c_id)) = &key_fields[3] {
-                assert_eq!(*c_id, 1); // First customer should have this last name
-                found = true;
-                return false;
-            }
+    let _ = storage.iter_for_each_fields(&txn, &iter, &mut |fields, _| {
+        if let Field::Uint32(Some(c_id)) = &fields[0] {
+            assert_eq!(*c_id, 1); // First customer should have this last name
+            found = true;
+            return false;
         }
         true
     });

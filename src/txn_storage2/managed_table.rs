@@ -47,7 +47,7 @@ impl<'a, S: FieldLeveLStorageTrait> ManagedTable<'a, S> {
             .collect()
     }
 
-    /// Build a secondary index record from a full table record and a hint (RecordPointer).
+    /// Build a secondary index record from a full table record and a hint (RecordHandle).
     ///
     /// Layout: [secondary_key_fields..., pk_fields_not_in_sec_key..., Pointer]
     fn build_secondary_record(
@@ -74,8 +74,8 @@ impl<'a, S: FieldLeveLStorageTrait> ManagedTable<'a, S> {
         }
 
         // Pointer to primary record
-        // We need to convert the Hint to a RecordPointer for the Pointer field.
-        // The Hint type for transactional storage IS RecordPointer.
+        // We need to convert the Hint to a RecordHandle for the Pointer field.
+        // The Hint type for transactional storage IS RecordHandle.
         // We store it via Field::Pointer.
         rec.push(Self::hint_to_pointer_field(hint));
 
@@ -105,12 +105,12 @@ impl<'a, S: FieldLeveLStorageTrait> ManagedTable<'a, S> {
 
     /// Convert a Hint to Field::Pointer.
     ///
-    /// This works because for the transactional storage, Hint = RecordPointer.
+    /// This works because for the transactional storage, Hint = RecordHandle.
     /// For other backends where Hint might be (), we store a null pointer.
     fn hint_to_pointer_field(hint: S::Hint) -> Field {
         let size = std::mem::size_of::<S::Hint>();
-        if size == std::mem::size_of::<crate::txn_storage2::field::RecordPointer>() {
-            // RecordPointer is 8 bytes (page_id: u32, frame_id: u32)
+        if size == std::mem::size_of::<crate::txn_storage2::field::RecordHandle>() {
+            // RecordHandle is 8 bytes (page_id: u32, frame_id: u32)
             let mut bytes = [0u8; 8];
             unsafe {
                 std::ptr::copy_nonoverlapping(
@@ -121,7 +121,7 @@ impl<'a, S: FieldLeveLStorageTrait> ManagedTable<'a, S> {
             }
             let page_id = u32::from_le_bytes(bytes[0..4].try_into().unwrap());
             let frame_id = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
-            Field::Pointer(Some(crate::txn_storage2::field::RecordPointer::new(
+            Field::Pointer(Some(crate::txn_storage2::field::RecordHandle::new(
                 page_id, frame_id,
             )))
         } else {
