@@ -12,8 +12,8 @@ use crate::{
             RecordPointer,
         },
         field_level_storage_trait::{
-            ContainerDS, ContainerOptions, DBOptions, FieldLeveLStorageTrait, ScanOptions,
-            TxnOptions, TxnStorageStatus,
+            ContainerDS, ContainerOptions, ContainerType, DBOptions, FieldLeveLStorageTrait,
+            ScanOptions, TxnOptions, TxnStorageStatus,
         },
     },
 };
@@ -197,6 +197,16 @@ impl<M: MemPool> FieldLeveLStorageTrait for NonTransactionalStorage<M> {
             record,
             None, // No hint for non-transactional insert
         )
+    }
+
+    fn raw_insert_secondary_record(
+        &self,
+        _db_id: DatabaseId,
+        c_id: ContainerId,
+        record: Record,
+        primary_hint: RecordPointer,
+    ) -> Result<RecordPointer, TxnStorageStatus> {
+        self.insert_record(&NonTxnHandle, c_id, record, Some(primary_hint))
     }
 
     // ========================================================================

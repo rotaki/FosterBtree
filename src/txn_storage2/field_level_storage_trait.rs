@@ -139,6 +139,13 @@ impl ContainerOptions {
     /// `primary_c_id` is the container this index references.
     /// `primary_key_col_indices` are the column positions in the secondary
     /// schema that together form the primary key.
+    ///
+    /// **Design invariant**: All primary key columns must be present in the
+    /// secondary key. This ensures each secondary entry is unique (non-unique
+    /// secondary columns + PK = unique composite key) and allows the storage
+    /// layer to derive the primary key entirely from the secondary B-tree key
+    /// at scan time. The secondary value stores only an 8-byte page pointer
+    /// hint — no spilled key columns.
     pub fn secondary(
         name: &str,
         c_ds: ContainerDS,
@@ -146,6 +153,19 @@ impl ContainerOptions {
         primary_c_id: ContainerId,
         primary_key_col_indices: Vec<usize>,
     ) -> Self {
+        // Validate that all primary key column indices are part of the
+        // secondary schema's key indices.
+        let sec_key_indices = schema.key_indices();
+        for &pk_col in &primary_key_col_indices {
+            assert!(
+                sec_key_indices.contains(&pk_col),
+                "primary_key_col_indices[{}] = {} is not in the secondary key indices {:?}. \
+                 All primary key columns must be embedded in the secondary key.",
+                pk_col,
+                pk_col,
+                sec_key_indices,
+            );
+        }
         ContainerOptions {
             name: String::from(name),
             c_ds,
@@ -282,14 +302,25 @@ pub trait FieldLeveLStorageTrait: Send + Sync {
     ) -> Result<Vec<(ContainerId, ContainerOptions)>, TxnStorageStatus>;
 
     // Insert records without transaction support
-    // Raw insert without transaction support
-    // This method bypasses all transaction mechanisms and directly inserts the record
-    // Use with caution as it provides no ACID guarantees
+    // Raw insert without transaction support.
+    // Bypasses all transaction mechanisms and directly inserts the record.
+    // Use with caution as it provides no ACID guarantees.
     fn raw_insert_record(
         &self,
         db_id: DatabaseId,
         c_id: ContainerId,
         record: Record,
+    ) -> Result<Self::Hint, TxnStorageStatus>;
+
+    // Raw insert into a secondary index container.
+    // `primary_hint` is the pointer to the primary record, embedded as the
+    // last 8 bytes of the secondary value for prefetch and direct lookup.
+    fn raw_insert_secondary_record(
+        &self,
+        db_id: DatabaseId,
+        c_id: ContainerId,
+        record: Record,
+        primary_hint: Self::Hint,
     ) -> Result<Self::Hint, TxnStorageStatus>;
 
     // Transactional operations

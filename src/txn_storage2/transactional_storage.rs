@@ -13,8 +13,8 @@ use crate::{
     txn_storage::locktable::ConcurrentLockTable as LockTable,
     txn_storage2::{
         field::{
-            bytes_to_record, key_to_bytes, record_to_bytes, record_to_key_bytes, Field, Record,
-            RecordPointer,
+            bytes_to_record, from_normalized_key, key_to_bytes, record_to_bytes,
+            record_to_key_bytes, DataType, Field, Record, RecordPointer,
         },
         field_level_storage_trait::{
             ContainerDS, ContainerOptions, ContainerType, DBOptions, FieldLeveLStorageTrait,
@@ -209,6 +209,23 @@ struct ContainerInfo<M: MemPool> {
 }
 
 impl<M: MemPool> ContainerInfo<M> {
+    /// Serialize primary record value: full field-level encoding.
+    fn serialize_primary_value(&self, record: &[Field]) -> Vec<u8> {
+        record_to_bytes(record, self.options.schema())
+    }
+
+    /// Serialize secondary index value: just the 8-byte pointer to the primary
+    /// record's page location. The primary key is derived from the secondary
+    /// B-tree key via `primary_key_col_indices` at scan time.
+    /// If `primary_hint` is `None`, max value bytes are written (the hint-repair
+    /// path will fix them on first scan).
+    fn serialize_secondary_value(&self, primary_hint: Option<RecordPointer>) -> Vec<u8> {
+        match primary_hint {
+            Some(ptr) => ptr.to_bytes().to_vec(),
+            None => vec![u8::MAX; 8],
+        }
+    }
+
     fn hint_to_page_frame_key(&self, hint: Option<RecordPointer>) -> Option<PageFrameKey> {
         hint.map(|h| PageFrameKey::new_with_frame_id(self.c_key, h.page_id, h.frame_id))
     }
@@ -298,12 +315,12 @@ impl<M: MemPool> ContainerInfo<M> {
                         if *ghost {
                             page.unghostify_at(slot_id);
                         }
-                        self.btree.update_at_slot_or_split(
-                            &mut page,
-                            slot_id,
-                            key,
-                            &record_to_bytes(record, self.options.schema()),
-                        );
+                        let value = match self.options.container_type() {
+                            ContainerType::Secondary { .. } => self.serialize_secondary_value(None),
+                            ContainerType::Primary => self.serialize_primary_value(record),
+                        };
+                        self.btree
+                            .update_at_slot_or_split(&mut page, slot_id, key, &value);
                     }
                 }
                 RWEntry::Insert(_record, ptr, ghost) => {
@@ -401,6 +418,12 @@ impl<M: MemPool> TransactionalStorage<M> {
 
     /// Secondary index scan with batch prefetch + hint repair.
     /// Called internally by `iter_for_each_fields` when the container is secondary.
+    /// Secondary index scan with inline primary dereference.
+    /// Secondary value format: `[pk_normalized_bytes | pointer_8bytes]`.
+    /// For each secondary entry, extracts primary key directly from the value,
+    /// reads the primary record, and returns (key_fields, val_fields, hint) to
+    /// the closure. `key_fields` are the secondary key columns; `val_fields` are
+    /// projected from the primary record via `iter.options.cols`.
     fn iter_for_each_fields_secondary_impl(
         &self,
         txn: &TxnHandle,
@@ -411,8 +434,24 @@ impl<M: MemPool> TransactionalStorage<M> {
         f: &mut dyn FnMut(&[Field], &[Field], RecordPointer) -> bool,
     ) -> Result<u64, TxnStorageStatus> {
         let pri_container = self.get_container(primary_c_id)?;
+        let pri_schema = pri_container.options.schema();
         let sec_schema = sec_container.options.schema();
-        let rwset = txn.get_or_create_rwset(iter.c_id);
+        // Pre-create both rwsets so that subsequent get_or_create_rwset calls
+        // don't trigger a HashMap resize that would invalidate references.
+        txn.get_or_create_rwset(iter.c_id);
+        txn.get_or_create_rwset(primary_c_id);
+        let sec_rwset = txn.get_or_create_rwset(iter.c_id);
+        let pri_rwset = txn.get_or_create_rwset(primary_c_id);
+
+        // Pre-compute from_normalized_key args for recovering key fields from
+        // the secondary B-tree key bytes.
+        let sec_key_indexes: Vec<(usize, bool, bool)> = sec_schema
+            .key_indices()
+            .iter()
+            .map(|&i| (i, true, false))
+            .collect();
+        let sec_field_types: Vec<DataType> = sec_schema.cols().iter().map(|&(_, dt)| dt).collect();
+
         let mut count: u64 = 0;
         let mut err: Option<TxnStorageStatus> = None;
         let mut repairs: Vec<(u32, [u8; 8])> = Vec::new();
@@ -423,28 +462,34 @@ impl<M: MemPool> TransactionalStorage<M> {
                 // Phase 1: Prefetch primary pages for the batch.
                 for slot in start_slot..end_slot {
                     let value_bytes = page.get_val(slot);
-                    if value_bytes.len() >= 8 {
-                        let stored =
-                            RecordPointer::from_bytes(&value_bytes[value_bytes.len() - 8..]);
+                    if value_bytes.len() == 8 {
+                        let stored = RecordPointer::from_bytes(value_bytes);
                         if let Some(pfk) = pri_container.hint_to_page_frame_key(Some(stored)) {
                             let _ = pri_container.btree.mem_pool.prefetch_page(pfk);
                         }
                     }
                 }
 
-                // Phase 2: Process entries — rwset, locking, hint check, user closure.
+                // Phase 2: Process entries — secondary rwset, primary read, closure.
                 for slot in start_slot..end_slot {
                     let key_bytes = page.get_raw_key(slot);
                     let value_bytes = page.get_val(slot);
-                    let ptr = RecordPointer::new(0, 0);
 
-                    // Check rwset
-                    let record = if let Some(entry) = rwset.get(key_bytes) {
+                    // Secondary rwset check + lock.
+                    // Value is just the 8-byte pointer. PK is derived from the
+                    // secondary B-tree key via primary_key_col_indices.
+                    let (key_fields, stored_ptr) = if let Some(entry) = sec_rwset.get(key_bytes) {
                         match entry {
-                            RWEntry::Delete(_, _) => continue, // Skip deleted
-                            RWEntry::Read(..) => bytes_to_record(value_bytes, sec_schema),
-                            RWEntry::Update(record, _, _) | RWEntry::Insert(record, _, _) => {
-                                record.clone()
+                            RWEntry::Delete(_, _) => continue,
+                            RWEntry::Read(..) | RWEntry::Update(..) | RWEntry::Insert(..) => {
+                                let stored = RecordPointer::from_bytes(value_bytes);
+                                let kf = from_normalized_key(
+                                    key_bytes,
+                                    &sec_key_indexes,
+                                    &sec_field_types,
+                                )
+                                .unwrap();
+                                (kf, stored)
                             }
                         }
                     } else {
@@ -454,63 +499,117 @@ impl<M: MemPool> TransactionalStorage<M> {
                             stopped = true;
                             break;
                         }
-                        let record = bytes_to_record(value_bytes, sec_schema);
-                        rwset.insert(key_bytes.to_vec(), RWEntry::Read(ptr, false));
-                        record
+                        let stored = RecordPointer::from_bytes(value_bytes);
+                        sec_rwset.insert(key_bytes.to_vec(), RWEntry::Read(stored, false));
+                        let kf = from_normalized_key(key_bytes, &sec_key_indexes, &sec_field_types)
+                            .unwrap();
+                        (kf, stored)
                     };
 
-                    // Hint repair: extract stored pointer, verify against primary.
-                    if value_bytes.len() >= 8 {
-                        let stored =
-                            RecordPointer::from_bytes(&value_bytes[value_bytes.len() - 8..]);
-                        let primary_key: Vec<Field> = primary_key_col_indices
-                            .iter()
-                            .map(|&i| record[i].clone())
-                            .collect();
-                        let primary_key_bytes = key_to_bytes(&primary_key);
+                    // Derive primary key from secondary key fields.
+                    let pk_fields: Vec<Field> = primary_key_col_indices
+                        .iter()
+                        .map(|&i| key_fields[i].clone())
+                        .collect();
+                    let primary_key_bytes = key_to_bytes(&pk_fields);
+
+                    // Dereference primary record (following tpcc pattern).
+                    let (val_fields, actual_ptr) = if let Some(entry) =
+                        pri_rwset.get(&primary_key_bytes)
+                    {
+                        match entry {
+                            RWEntry::Delete(_, _) => continue,
+                            RWEntry::Read(ptr, _) => {
+                                let pri_page =
+                                    pri_container.btree.traverse_to_leaf_for_read_with_hint(
+                                        &primary_key_bytes,
+                                        pri_container.hint_to_page_frame_key(Some(*ptr)),
+                                    );
+                                let actual = RecordPointer::new(
+                                    pri_page.page().get_id(),
+                                    pri_page.frame_id(),
+                                );
+                                let slot_id = pri_page
+                                    .upper_bound_slot_id(&BTreeKey::new(&primary_key_bytes))
+                                    - 1;
+                                let pri_record =
+                                    bytes_to_record(pri_page.get_val(slot_id), pri_schema);
+                                let fields: Vec<Field> = iter
+                                    .options
+                                    .cols
+                                    .iter()
+                                    .map(|&i| pri_record[i].clone())
+                                    .collect();
+                                (fields, actual)
+                            }
+                            RWEntry::Update(fields, ptr, _) | RWEntry::Insert(fields, ptr, _) => {
+                                let result = iter
+                                    .options
+                                    .cols
+                                    .iter()
+                                    .map(|&idx| fields[idx].clone())
+                                    .collect();
+                                (result, *ptr)
+                            }
+                        }
+                    } else {
+                        // Not in primary rwset — traverse, lock, read.
                         let pri_page = pri_container.btree.traverse_to_leaf_for_read_with_hint(
                             &primary_key_bytes,
-                            pri_container.hint_to_page_frame_key(Some(stored)),
+                            pri_container.hint_to_page_frame_key(Some(stored_ptr)),
                         );
                         let actual =
                             RecordPointer::new(pri_page.page().get_id(), pri_page.frame_id());
+                        let slot_id =
+                            pri_page.upper_bound_slot_id(&BTreeKey::new(&primary_key_bytes)) - 1;
+                        if slot_id == 0 || pri_page.get_raw_key(slot_id) != primary_key_bytes {
+                            err = Some(TxnStorageStatus::KeyNotFound);
+                            stopped = true;
+                            break;
+                        }
+
+                        let pri_locktable = &pri_container.locktable;
+                        if !pri_locktable.try_shared(primary_key_bytes.clone()) {
+                            err = Some(TxnStorageStatus::TxnConflict);
+                            stopped = true;
+                            break;
+                        }
+
+                        let pri_record = bytes_to_record(pri_page.get_val(slot_id), pri_schema);
+                        pri_rwset.insert(primary_key_bytes.clone(), RWEntry::Read(actual, false));
                         drop(pri_page);
 
-                        if stored != actual {
+                        // Queue hint repair if the stored pointer was stale.
+                        if stored_ptr != actual {
                             repairs.push((slot, actual.to_bytes()));
                         }
-                    }
 
-                    // Deserialize key/value fields and call user closure.
-                    let key_fields: Vec<Field> = sec_schema
-                        .key_indices()
-                        .iter()
-                        .map(|&i| record[i].clone())
-                        .collect();
-                    let val_fields: Vec<Field> = iter
-                        .options
-                        .cols
-                        .iter()
-                        .map(|&i| record[i].clone())
-                        .collect();
+                        let fields: Vec<Field> = iter
+                            .options
+                            .cols
+                            .iter()
+                            .map(|&i| pri_record[i].clone())
+                            .collect();
+                        (fields, actual)
+                    };
 
                     count += 1;
-                    if !f(&key_fields, &val_fields, ptr) {
+                    if !f(&key_fields, &val_fields, actual_ptr) {
                         stopped = true;
                         break;
                     }
                 }
 
                 // Phantom protection: lock the boundary key on the last page.
-                if last_page && err.is_none() {
+                if last_page && err.is_none() && !stopped {
                     let boundary_key = page.get_raw_key(end_slot);
-                    if rwset.get(boundary_key).is_none() {
+                    if sec_rwset.get(boundary_key).is_none() {
                         let locktable = &sec_container.locktable;
                         if !locktable.try_shared(boundary_key.to_vec()) {
                             err = Some(TxnStorageStatus::TxnConflict);
                             stopped = true;
                         } else {
-                            rwset.insert(
+                            sec_rwset.insert(
                                 boundary_key.to_vec(),
                                 RWEntry::Read(RecordPointer::new(0, 0), false),
                             );
@@ -519,7 +618,7 @@ impl<M: MemPool> TransactionalStorage<M> {
                     iter.finish();
                 }
 
-                // Phase 3: Apply batched repairs via single try_upgrade.
+                // Phase 3: Apply batched hint repairs via single try_upgrade.
                 let should_continue = !stopped && err.is_none();
                 if repairs.is_empty() {
                     return (page, should_continue);
@@ -692,14 +791,31 @@ impl<M: MemPool> FieldLeveLStorageTrait for TransactionalStorage<M> {
         record: Record,
     ) -> Result<RecordPointer, TxnStorageStatus> {
         let container = self.get_container(c_id)?;
-
-        // Extract primary key from record
         let key_bytes = record_to_key_bytes(&record.fields, container.options.schema());
-
-        // Serialize the record's fields
-        let value_bytes = record_to_bytes(&record.fields, container.options.schema());
+        let value_bytes = container.serialize_primary_value(&record.fields);
 
         // Directly insert into the container without any locking or transaction tracking
+        let pointer = container
+            .insert_with_hint(&key_bytes, &value_bytes, None)
+            .map_err(|e| match e {
+                AccessMethodError::KeyDuplicate => TxnStorageStatus::KeyExists,
+                _ => TxnStorageStatus::from(e),
+            })?;
+
+        Ok(pointer)
+    }
+
+    fn raw_insert_secondary_record(
+        &self,
+        _db_id: DatabaseId,
+        c_id: ContainerId,
+        record: Record,
+        primary_hint: RecordPointer,
+    ) -> Result<RecordPointer, TxnStorageStatus> {
+        let container = self.get_container(c_id)?;
+        let key_bytes = record_to_key_bytes(&record.fields, container.options.schema());
+        let value_bytes = container.serialize_secondary_value(Some(primary_hint));
+
         let pointer = container
             .insert_with_hint(&key_bytes, &value_bytes, None)
             .map_err(|e| match e {
@@ -1098,9 +1214,16 @@ impl<M: MemPool> FieldLeveLStorageTrait for TransactionalStorage<M> {
         } else {
             // Not in rwset, check storage
             let locktable = &container.locktable;
+            let (value_bytes, btree_hint) = match container.options.container_type() {
+                ContainerType::Secondary { .. } => {
+                    // hint = primary record pointer (for value), not a secondary B-tree hint
+                    (container.serialize_secondary_value(hint), None)
+                }
+                ContainerType::Primary => (container.serialize_primary_value(&record.fields), hint),
+            };
             let mut page = container.btree.traverse_to_leaf_for_write_with_hint(
                 &key_bytes,
-                container.hint_to_page_frame_key(hint),
+                container.hint_to_page_frame_key(btree_hint),
             );
             let slot_id = page.upper_bound_slot_id(&BTreeKey::new(&key_bytes)) - 1;
             if slot_id == 0 || page.get_raw_key(slot_id) != key_bytes {
@@ -1134,7 +1257,7 @@ impl<M: MemPool> FieldLeveLStorageTrait for TransactionalStorage<M> {
                             &mut page,
                             slot_id + 1,
                             &key_bytes,
-                            &record_to_bytes(&record.fields, container.options.schema()),
+                            &value_bytes,
                             true,
                         );
 
@@ -1152,7 +1275,7 @@ impl<M: MemPool> FieldLeveLStorageTrait for TransactionalStorage<M> {
                             &mut page,
                             slot_id + 1,
                             &key_bytes,
-                            &record_to_bytes(&record.fields, container.options.schema()),
+                            &value_bytes,
                             true,
                         );
                     }
@@ -1173,7 +1296,7 @@ impl<M: MemPool> FieldLeveLStorageTrait for TransactionalStorage<M> {
                             &mut page,
                             slot_id + 1,
                             &key_bytes,
-                            &record_to_bytes(&record.fields, container.options.schema()),
+                            &value_bytes,
                             true,
                         );
 
@@ -3157,15 +3280,15 @@ mod tests {
 
     #[test]
     fn test_secondary_scan_locks_boundary_key() {
-        // Schema: secondary index with (key_id: Int32, pointer: Pointer)
+        // Schema: secondary index with (key_id: Int32)
         // Primary: (key_id: Int32, name: String)
+        // The storage layer automatically appends 8-byte pointer to secondary values.
         let pri_schema = schema!(pk: [0], cols: [
             (false, DataType::Int32),   // id
             (false, DataType::String),  // name
         ]);
         let sec_schema = schema!(pk: [0], cols: [
             (false, DataType::Int32),   // key_id (same as primary key)
-            (false, DataType::Pointer), // pointer to primary record
         ]);
 
         let bp = get_test_bp(100);
@@ -3201,24 +3324,21 @@ mod tests {
                     record![field!(Int32 id), field!(String format!("name_{}", id))],
                 )
                 .unwrap();
-            // Insert secondary index entry pointing to primary
+            // Insert secondary index entry with primary pointer
             storage
-                .raw_insert_record(
-                    db_id,
-                    sec_cid,
-                    record![field!(Int32 id), Field::Pointer(Some(pri_ptr))],
-                )
+                .raw_insert_secondary_record(db_id, sec_cid, record![field!(Int32 id)], pri_ptr)
                 .unwrap();
         }
         storage.commit_txn(&txn_init, false).unwrap();
 
         // Txn1: Scan secondary index with upper bound key=4 (should see keys 1, 3)
+        // Project name (col 1) from primary record
         let txn1 = storage.begin_txn(db_id, TxnOptions::default()).unwrap();
         let iter = storage
             .scan_range(
                 &txn1,
                 sec_cid,
-                ScanOptions::new(&[1]) // request pointer field
+                ScanOptions::new(&[1]) // project name field from primary
                     .with_bounds(vec![field!(Int32 1)], vec![field!(Int32 4)]),
             )
             .unwrap();
@@ -3240,15 +3360,7 @@ mod tests {
         // Txn2: Try to insert key=2 into primary and secondary (within scan range)
         // This should conflict because key 5 (the boundary key >= 4) is locked
         let txn2 = storage.begin_txn(db_id, TxnOptions::default()).unwrap();
-        let result = storage.insert_record(
-            &txn2,
-            sec_cid,
-            record![
-                field!(Int32 2),
-                Field::Pointer(Some(RecordPointer::new(0, 0)))
-            ],
-            None,
-        );
+        let result = storage.insert_record(&txn2, sec_cid, record![field!(Int32 2)], None);
         assert!(
             matches!(result, Err(TxnStorageStatus::TxnConflict)),
             "Insert within scan range should conflict due to phantom protection"

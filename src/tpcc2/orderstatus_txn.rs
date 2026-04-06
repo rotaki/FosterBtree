@@ -70,16 +70,41 @@ pub fn run_orderstatus_txn_with_stats<M: MemPool>(
     let txn = storage.begin_txn(db_id, TxnOptions::default()).unwrap();
 
     // Find customer
-    let (c_id, c_key, c_secondary_key, c_hint, c_secondary_hint) = if let Some(c_id) = input.c_id {
+    let (c_id, c_first, c_middle, c_last, c_balance) = if let Some(c_id) = input.c_id {
         // Customer specified by ID
         let key = vec![
             Field::Uint16(Some(input.w_id)),
             Field::Uint8(Some(input.d_id)),
             Field::Uint32(Some(c_id)),
         ];
-        (c_id, key, None, None, None)
+        let res = storage.get_fields(
+            &txn,
+            containers.customer_cid,
+            key,
+            &[
+                customer_fields::C_FIRST,
+                customer_fields::C_MIDDLE,
+                customer_fields::C_LAST,
+                customer_fields::C_BALANCE,
+            ],
+            None,
+        );
+        if not_successful(&res) {
+            return (
+                helper.kill(&txn, &res, AbortID::OrderStatusGetCustomer),
+                None,
+            );
+        }
+        let (c_fields, _) = res.unwrap();
+        (
+            c_id,
+            get_string_field(&c_fields, 0),
+            get_string_field(&c_fields, 1),
+            get_string_field(&c_fields, 2),
+            get_f64_field(&c_fields, 3),
+        )
     } else if let Some(c_last) = &input.c_last {
-        // Customer specified by last name - need to scan secondary index
+        // Customer specified by last name - scan secondary index
         let scan_key_start = vec![
             Field::Uint16(Some(input.w_id)),
             Field::Uint8(Some(input.d_id)),
@@ -93,13 +118,18 @@ pub fn run_orderstatus_txn_with_stats<M: MemPool>(
             Field::Uint32(Some(u32::MAX)),
         ];
 
-        // Scan secondary index
-        let mut matching_customers = Vec::new();
+        // Scan secondary index - projects primary customer fields directly
+        let mut customer_recs: Vec<(u32, String, String, String, f64)> = Vec::new();
         let res = storage.scan_range(
             &txn,
             containers.customer_secondary_cid,
-            ScanOptions::new(&[customer_secondary_fields::C_POINTER])
-                .with_bounds(scan_key_start, scan_key_end),
+            ScanOptions::new(&[
+                customer_fields::C_FIRST,
+                customer_fields::C_MIDDLE,
+                customer_fields::C_LAST,
+                customer_fields::C_BALANCE,
+            ])
+            .with_bounds(scan_key_start, scan_key_end),
         );
         if not_successful(&res) {
             return (
@@ -110,13 +140,14 @@ pub fn run_orderstatus_txn_with_stats<M: MemPool>(
         let iter = res.unwrap();
 
         let fe_res =
-            storage.iter_for_each_fields(&txn, &iter, &mut |key_fields, value_fields, hint| {
+            storage.iter_for_each_fields(&txn, &iter, &mut |key_fields, value_fields, _| {
                 let c_id = get_u32_field(key_fields, 3);
-                matching_customers.push((
+                customer_recs.push((
                     c_id,
-                    key_fields.to_vec(),
-                    get_pointer_field(value_fields, 0),
-                    hint,
+                    get_string_field(value_fields, 0),
+                    get_string_field(value_fields, 1),
+                    get_string_field(value_fields, 2),
+                    get_f64_field(value_fields, 3),
                 ));
                 true
             });
@@ -128,7 +159,7 @@ pub fn run_orderstatus_txn_with_stats<M: MemPool>(
             );
         }
 
-        if matching_customers.is_empty() {
+        if customer_recs.is_empty() {
             return (
                 helper.kill::<()>(
                     &txn,
@@ -139,23 +170,10 @@ pub fn run_orderstatus_txn_with_stats<M: MemPool>(
             );
         }
 
-        // Select middle customer (TPC-C requirement)
-        matching_customers.sort_by_key(|(c_id, ..)| *c_id);
-        let middle_idx = matching_customers.len() / 2;
-        let selected_c = matching_customers.swap_remove(middle_idx);
-
-        let key = vec![
-            Field::Uint16(Some(input.w_id)),
-            Field::Uint8(Some(input.d_id)),
-            Field::Uint32(Some(selected_c.0)),
-        ];
-        (
-            selected_c.0,
-            key,
-            Some(selected_c.1),
-            Some(selected_c.2),
-            Some(selected_c.3),
-        )
+        // Sort by c_first and select the middle customer (TPC-C requirement)
+        customer_recs.sort_by(|a, b| a.1.cmp(&b.1));
+        let middle_idx = customer_recs.len().div_ceil(2) - 1;
+        customer_recs.swap_remove(middle_idx)
     } else {
         return (
             helper.kill::<()>(
@@ -166,32 +184,6 @@ pub fn run_orderstatus_txn_with_stats<M: MemPool>(
             None,
         );
     };
-
-    // Get customer info
-    let res = storage.get_fields(
-        &txn,
-        containers.customer_cid,
-        c_key,
-        &[
-            customer_fields::C_FIRST,
-            customer_fields::C_MIDDLE,
-            customer_fields::C_LAST,
-            customer_fields::C_BALANCE,
-        ],
-        c_hint,
-    );
-    if not_successful(&res) {
-        return (
-            helper.kill(&txn, &res, AbortID::OrderStatusGetCustomer),
-            None,
-        );
-    }
-    let (c_fields, c_actual_hint) = res.unwrap();
-
-    let c_first = get_string_field(&c_fields, 0);
-    let c_middle = get_string_field(&c_fields, 1);
-    let c_last = get_string_field(&c_fields, 2);
-    let c_balance = get_f64_field(&c_fields, 3);
 
     // Find the latest order for this customer using secondary index
     let scan_start = vec![
@@ -210,7 +202,12 @@ pub fn run_orderstatus_txn_with_stats<M: MemPool>(
     let res = storage.scan_range(
         &txn,
         containers.order_secondary_cid,
-        ScanOptions::new(&[order_secondary_fields::O_POINTER]).with_bounds(scan_start, scan_end),
+        ScanOptions::new(&[
+            order_fields::O_ENTRY_D,
+            order_fields::O_CARRIER_ID,
+            order_fields::O_OL_CNT,
+        ])
+        .with_bounds(scan_start, scan_end),
     );
     if not_successful(&res) {
         return (
@@ -221,12 +218,16 @@ pub fn run_orderstatus_txn_with_stats<M: MemPool>(
     let iter = res.unwrap();
 
     let mut latest_o_id = 0u32;
-    let mut latest_order_hint = None;
+    let mut latest_o_entry_d = 0u64;
+    let mut latest_o_carrier_id = None;
+    let mut latest_o_ol_cnt = 0u8;
     let fe_res = storage.iter_for_each_fields(&txn, &iter, &mut |key_fields, value_fields, _| {
         let o_id = get_u32_field(key_fields, 3);
         if o_id > latest_o_id {
             latest_o_id = o_id;
-            latest_order_hint = Some(get_pointer_field(value_fields, 0));
+            latest_o_entry_d = get_u64_field(value_fields, 0);
+            latest_o_carrier_id = get_optional_u8_field(value_fields, 1);
+            latest_o_ol_cnt = get_u8_field(value_fields, 2);
         }
         true
     });
@@ -249,32 +250,9 @@ pub fn run_orderstatus_txn_with_stats<M: MemPool>(
         );
     }
 
-    // Get order details
-    let o_key = vec![
-        Field::Uint16(Some(input.w_id)),
-        Field::Uint8(Some(input.d_id)),
-        Field::Uint32(Some(latest_o_id)),
-    ];
-
-    let res = storage.get_fields(
-        &txn,
-        containers.order_cid,
-        o_key,
-        &[
-            order_fields::O_ENTRY_D,
-            order_fields::O_CARRIER_ID,
-            order_fields::O_OL_CNT,
-        ],
-        latest_order_hint,
-    );
-    if not_successful(&res) {
-        return (helper.kill(&txn, &res, AbortID::OrderStatusGetOrder), None);
-    }
-    let (o_fields, o_actual_hint) = res.unwrap();
-
-    let o_entry_d = get_u64_field(&o_fields, 0);
-    let o_carrier_id = get_optional_u8_field(&o_fields, 1);
-    let o_ol_cnt = get_u8_field(&o_fields, 2);
+    let o_entry_d = latest_o_entry_d;
+    let o_carrier_id = latest_o_carrier_id;
+    let o_ol_cnt = latest_o_ol_cnt;
 
     // Get order lines using range scan
     let mut order_lines = Vec::with_capacity(o_ol_cnt as usize);

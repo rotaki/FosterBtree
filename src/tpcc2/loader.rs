@@ -270,11 +270,15 @@ impl<M: MemPool> TpccLoader<M> {
                                 .to_string(),
                         )),
                         Field::Uint32(Some(c_id as u32)),
-                        Field::Pointer(Some(customer_ptr)),
                     ],
                 };
                 self.storage
-                    .raw_insert_record(self.db_id, self.customer_secondary_cid, secondary_key)
+                    .raw_insert_secondary_record(
+                        self.db_id,
+                        self.customer_secondary_cid,
+                        secondary_key,
+                        customer_ptr,
+                    )
                     .unwrap();
             });
 
@@ -295,24 +299,28 @@ impl<M: MemPool> TpccLoader<M> {
                 let c_id = ((o_id - 1) % crate::tpcc::Customer::CUSTS_PER_DIST + 1) as u32;
                 let order = crate::tpcc::Order::generate(w_id, d_id, o_id as u32, c_id);
 
-                // Insert into primary order table and capture the record pointer
+                // Insert into primary order table
                 let order_ptr = self
                     .storage
                     .raw_insert_record(self.db_id, self.order_cid, order_to_record(&order))
                     .unwrap();
 
-                // Insert into secondary index (by customer) with pointer to primary record
+                // Insert into secondary index (by customer)
                 let secondary_key = Record {
                     fields: vec![
                         Field::Uint16(Some(w_id)),
                         Field::Uint8(Some(d_id)),
                         Field::Uint32(Some(c_id)),
                         Field::Uint32(Some(o_id as u32)),
-                        Field::Pointer(Some(order_ptr)),
                     ],
                 };
                 self.storage
-                    .raw_insert_record(self.db_id, self.order_secondary_cid, secondary_key)
+                    .raw_insert_secondary_record(
+                        self.db_id,
+                        self.order_secondary_cid,
+                        secondary_key,
+                        order_ptr,
+                    )
                     .unwrap();
 
                 // Insert new order if applicable

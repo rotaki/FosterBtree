@@ -90,17 +90,16 @@ pub fn customer_schema() -> Schema {
 }
 
 pub fn customer_secondary_schema() -> Schema {
-    // Secondary index on (w_id, d_id, c_last) - non-unique
-    // Stores primary key (w_id, d_id, c_id) and pointer to primary record
+    // Secondary index on (w_id, d_id, c_last, c_id).
+    // The storage layer automatically appends an 8-byte pointer to the primary record.
     Schema::with_primary_key(
         vec![
-            (false, DataType::Uint16),  // w_id (part of secondary key)
-            (false, DataType::Uint8),   // d_id (part of secondary key)
-            (false, DataType::String),  // c_last (part of secondary key - non-unique)
-            (false, DataType::Uint32),  // c_id (primary key for lookup - unique)
-            (false, DataType::Pointer), // pointer to primary record
+            (false, DataType::Uint16), // w_id
+            (false, DataType::Uint8),  // d_id
+            (false, DataType::String), // c_last (non-unique)
+            (false, DataType::Uint32), // c_id
         ],
-        vec![0, 1, 2, 3], // Secondary key indices: (w_id, d_id, c_last, c_id)
+        vec![0, 1, 2, 3],
     )
 }
 
@@ -139,17 +138,16 @@ pub fn order_schema() -> Schema {
 }
 
 pub fn order_secondary_schema() -> Schema {
-    // Secondary index on (w_id, d_id, c_id) - non-unique (multiple orders per customer)
-    // Stores primary key (o_id) and pointer to primary record
+    // Secondary index on (w_id, d_id, c_id, o_id).
+    // The storage layer automatically appends an 8-byte pointer to the primary record.
     Schema::with_primary_key(
         vec![
-            (false, DataType::Uint16),  // w_id (part of secondary key)
-            (false, DataType::Uint8),   // d_id (part of secondary key)
-            (false, DataType::Uint32),  // c_id (part of secondary key - non-unique)
-            (false, DataType::Uint32),  // o_id (primary key for lookup - unique)
-            (false, DataType::Pointer), // pointer to primary record
+            (false, DataType::Uint16), // w_id
+            (false, DataType::Uint8),  // d_id
+            (false, DataType::Uint32), // c_id (non-unique)
+            (false, DataType::Uint32), // o_id
         ],
-        vec![0, 1, 2, 3], // Secondary key indices: (w_id, d_id, c_id, o_id)
+        vec![0, 1, 2, 3],
     )
 }
 

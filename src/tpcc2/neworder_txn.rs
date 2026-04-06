@@ -193,14 +193,13 @@ pub fn run_neworder_txn_with_stats<M: MemPool>(
             Field::Uint8(Some(input.d_id)),
             Field::Uint32(Some(input.c_id)),
             Field::Uint32(Some(o_id)),
-            Field::Pointer(Some(order_hint)),
         ],
     };
     let res = storage.insert_record(
         &txn,
         containers.order_secondary_cid,
         order_secondary_record,
-        None,
+        Some(order_hint),
     );
     if not_successful(&res) {
         println!("Failed to insert order secondary record: {:?}", res);

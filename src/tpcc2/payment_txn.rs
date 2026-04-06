@@ -152,16 +152,10 @@ pub fn run_payment_txn_with_stats<M: MemPool>(
     let _d_address = string_to_address(&get_string_field(&d_fields, 1));
 
     // Find customer
-    let (c_id, c_key, c_secondary_key, c_hint, c_secondary_hint) = if let Some(c_id) = input.c_id {
-        // Customer specified by ID
-        let key = vec![
-            Field::Uint16(Some(input.c_w_id)),
-            Field::Uint8(Some(input.c_d_id)),
-            Field::Uint32(Some(c_id)),
-        ];
-        (c_id, key, None, None, None)
+    let c_id = if let Some(c_id) = input.c_id {
+        c_id
     } else if let Some(c_last) = &input.c_last {
-        // Customer specified by last name - need to scan secondary index
+        // Customer specified by last name - scan secondary index
         let scan_key_start = vec![
             Field::Uint16(Some(input.c_w_id)),
             Field::Uint8(Some(input.c_d_id)),
@@ -175,13 +169,12 @@ pub fn run_payment_txn_with_stats<M: MemPool>(
             Field::Uint32(Some(u32::MAX)),
         ];
 
-        // Scan secondary index
-        let mut matching_customers = Vec::new();
+        // Scan secondary index - project C_FIRST from primary for sorting
+        let mut customer_recs: Vec<(u32, String)> = Vec::new();
         let res = storage.scan_range(
             &txn,
             containers.customer_secondary_cid,
-            ScanOptions::new(&[customer_secondary_fields::C_POINTER])
-                .with_bounds(scan_key_start, scan_key_end),
+            ScanOptions::new(&[customer_fields::C_FIRST]).with_bounds(scan_key_start, scan_key_end),
         );
         if not_successful(&res) {
             return (
@@ -192,14 +185,10 @@ pub fn run_payment_txn_with_stats<M: MemPool>(
         let iter = res.unwrap();
 
         let fe_res =
-            storage.iter_for_each_fields(&txn, &iter, &mut |key_fields, value_fields, hint| {
+            storage.iter_for_each_fields(&txn, &iter, &mut |key_fields, value_fields, _| {
                 let c_id = get_u32_field(key_fields, 3);
-                matching_customers.push((
-                    c_id,
-                    key_fields.to_vec(),
-                    get_pointer_field(value_fields, 0),
-                    hint,
-                ));
+                let c_first = get_string_field(value_fields, 0);
+                customer_recs.push((c_id, c_first));
                 true
             });
         let _ = storage.drop_iterator_handle(iter);
@@ -210,7 +199,7 @@ pub fn run_payment_txn_with_stats<M: MemPool>(
             );
         }
 
-        if matching_customers.is_empty() {
+        if customer_recs.is_empty() {
             return (
                 helper.kill::<()>(
                     &txn,
@@ -221,24 +210,10 @@ pub fn run_payment_txn_with_stats<M: MemPool>(
             );
         }
 
-        // Select middle customer (TPC-C requirement)
-        matching_customers.sort_by_key(|(c_id, ..)| *c_id);
-        let middle_idx = matching_customers.len() / 2;
-        let selected_c = matching_customers.swap_remove(middle_idx);
-
-        // Find the pointer and secondary key for the selected customer
-        let key = vec![
-            Field::Uint16(Some(input.c_w_id)),
-            Field::Uint8(Some(input.c_d_id)),
-            Field::Uint32(Some(selected_c.0)),
-        ];
-        (
-            selected_c.0,
-            key,
-            Some(selected_c.1),
-            Some(selected_c.2),
-            Some(selected_c.3),
-        )
+        // Sort by c_first and select the middle customer (TPC-C requirement)
+        customer_recs.sort_by(|a, b| a.1.cmp(&b.1));
+        let middle_idx = customer_recs.len().div_ceil(2) - 1;
+        customer_recs.swap_remove(middle_idx).0
     } else {
         return (
             helper.kill::<()>(
@@ -249,6 +224,12 @@ pub fn run_payment_txn_with_stats<M: MemPool>(
             None,
         );
     };
+
+    let c_key = vec![
+        Field::Uint16(Some(input.c_w_id)),
+        Field::Uint8(Some(input.c_d_id)),
+        Field::Uint32(Some(c_id)),
+    ];
 
     // Get customer info
     let res = storage.get_fields(
@@ -270,7 +251,7 @@ pub fn run_payment_txn_with_stats<M: MemPool>(
             customer_fields::C_DATA,
             customer_fields::C_ADDRESS,
         ],
-        c_hint,
+        None,
     );
     if not_successful(&res) {
         return (helper.kill(&txn, &res, AbortID::PaymentGetCustomer), None);

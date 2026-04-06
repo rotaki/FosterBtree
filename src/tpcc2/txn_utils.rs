@@ -1,4 +1,4 @@
-use crate::txn_storage2::{field::Field, RecordPointer};
+use crate::txn_storage2::field::Field;
 
 use super::record_definitions::string_to_address;
 use crate::tpcc::record_definitions::Address;
@@ -74,16 +74,6 @@ pub fn get_f64_field_mut(fields: &mut [Field], index: usize) -> &mut f64 {
         Field::Float64(Some(v)) => v,
         other => panic!(
             "Expected Float64 field at index {}, found {:?}",
-            index, other
-        ),
-    }
-}
-
-pub fn get_pointer_field(fields: &[Field], index: usize) -> RecordPointer {
-    match &fields[index] {
-        Field::Pointer(Some(ptr)) => *ptr,
-        other => panic!(
-            "Expected Pointer field at index {}, found {:?}",
             index, other
         ),
     }
@@ -179,7 +169,6 @@ pub mod customer_secondary_fields {
     pub const C_D_ID: usize = 1;
     pub const C_LAST: usize = 2; // Secondary index on last name
     pub const C_ID: usize = 3; // Customer ID
-    pub const C_POINTER: usize = 4; // Pointer to the customer record
 }
 
 pub mod item_fields {
@@ -217,7 +206,6 @@ pub mod order_secondary_fields {
     pub const O_D_ID: usize = 1;
     pub const O_C_ID: usize = 2; // Secondary index on customer ID
     pub const O_ID: usize = 3; // Order ID
-    pub const O_POINTER: usize = 4; // Pointer to the order record
 }
 
 pub mod order_line_fields {
