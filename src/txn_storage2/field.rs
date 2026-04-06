@@ -169,6 +169,30 @@ pub enum DataType {
 }
 
 impl DataType {
+    /// Returns the fixed data size in a normalized key (excluding the 1-byte null indicator).
+    /// Returns `None` for variable-length types (String, VarBytes).
+    #[inline]
+    pub const fn normalized_key_data_size(&self) -> Option<usize> {
+        match self {
+            DataType::Bool | DataType::Int8 | DataType::Uint8 => Some(1),
+            DataType::Int16 | DataType::Uint16 => Some(2),
+            DataType::Int32
+            | DataType::Uint32
+            | DataType::Float32
+            | DataType::DateTime
+            | DataType::Months => Some(4),
+            DataType::Int64
+            | DataType::Uint64
+            | DataType::Float64
+            | DataType::Days
+            | DataType::Pointer => Some(8),
+            DataType::FixedBytes8 => Some(8),
+            DataType::FixedBytes16 => Some(16),
+            DataType::FixedBytes24 => Some(24),
+            DataType::String | DataType::VarBytes => None,
+        }
+    }
+
     #[inline]
     pub const fn as_byte(&self) -> u8 {
         match self {
@@ -819,6 +843,54 @@ pub fn to_normalized_key(fields: &[Field], key_indexes: &[(usize, bool, bool)]) 
     key
 }
 
+/// Pre-computed byte range (offset, length) for a field in a normalized key.
+/// Length includes the 1-byte null indicator + the data bytes.
+pub type NormalizedKeyFieldRange = (usize, usize);
+
+/// Pre-compute the byte offset and total length of each key column in a
+/// normalized key, given the data types of the key columns (in key order).
+///
+/// The normalized key layout for fixed-width fields is:
+///   [1-byte null indicator][N data bytes]  for each column, laid out sequentially.
+///
+/// Returns `None` if any column is variable-width (String/VarBytes), since
+/// their offsets depend on runtime data.
+pub fn precompute_normalized_key_field_ranges(
+    key_col_types: &[DataType],
+) -> Option<Vec<NormalizedKeyFieldRange>> {
+    let mut ranges = Vec::with_capacity(key_col_types.len());
+    let mut offset = 0;
+    for dt in key_col_types {
+        let data_size = dt.normalized_key_data_size()?;
+        let total = 1 + data_size;
+        ranges.push((offset, total));
+        offset += total;
+    }
+    Some(ranges)
+}
+
+/// Extract primary key bytes from a secondary normalized key by copying the
+/// relevant byte ranges directly, without deserializing to Field.
+///
+/// - `sec_key_bytes`: the full secondary normalized key bytes
+/// - `pk_col_indices`: which secondary key columns form the primary key
+///   (indices into the key column order, not schema column indices)
+/// - `field_ranges`: pre-computed from `precompute_normalized_key_field_ranges`
+#[inline]
+pub fn extract_pk_from_normalized_key(
+    sec_key_bytes: &[u8],
+    pk_col_indices: &[usize],
+    field_ranges: &[NormalizedKeyFieldRange],
+) -> Vec<u8> {
+    let total_len: usize = pk_col_indices.iter().map(|&i| field_ranges[i].1).sum();
+    let mut pk_bytes = Vec::with_capacity(total_len);
+    for &i in pk_col_indices {
+        let (offset, len) = field_ranges[i];
+        pk_bytes.extend_from_slice(&sec_key_bytes[offset..offset + len]);
+    }
+    pk_bytes
+}
+
 /// Helper function to decode bytes that were encoded with asc flag
 fn decode_bytes(bytes: &[u8], asc: bool) -> Vec<u8> {
     if asc {
@@ -1373,6 +1445,114 @@ pub fn bytes_to_record(bytes: &[u8], schema: &Schema) -> Vec<Field> {
     }
 
     all_fields
+}
+
+/// Compute the byte size of a serialized field in record value format WITHOUT
+/// constructing a `Field` object. Used by `bytes_to_record_projected` to skip
+/// over non-projected columns cheaply.
+#[inline(always)]
+fn skip_field_bytes(bytes: &[u8], is_nullable: bool, data_type: DataType) -> usize {
+    if is_nullable {
+        if bytes[0] == 0 {
+            return 1; // null: just the indicator byte
+        }
+        // non-null: 1 indicator byte + data
+        1 + match data_type.normalized_key_data_size() {
+            Some(size) => size,
+            None => {
+                // Variable-width: read 4-byte LE length prefix after the null indicator
+                let len = u32::from_le_bytes(bytes[1..5].try_into().unwrap()) as usize;
+                4 + len
+            }
+        }
+    } else {
+        match data_type.normalized_key_data_size() {
+            Some(size) => size,
+            None => {
+                // Variable-width: read 4-byte LE length prefix
+                let len = u32::from_le_bytes(bytes[0..4].try_into().unwrap()) as usize;
+                4 + len
+            }
+        }
+    }
+}
+
+/// Pre-computed projection plan. Sorts column indices for sequential byte scan
+/// and tracks the mapping back to the caller's original order. Computed once at
+/// scan setup time, reused for every row.
+pub struct SortedProjection {
+    /// Column indices sorted ascending (for sequential byte scan).
+    pub sorted_cols: Vec<usize>,
+    /// Maps each position in sorted_cols to its position in the output vec.
+    unsort_map: Vec<usize>,
+}
+
+impl SortedProjection {
+    pub fn new(projected_cols: &[usize]) -> Self {
+        // (schema_col_idx, original_output_position)
+        let mut indexed: Vec<(usize, usize)> = projected_cols
+            .iter()
+            .enumerate()
+            .map(|(pos, &col)| (col, pos))
+            .collect();
+        indexed.sort_unstable_by_key(|&(col, _)| col);
+        indexed.dedup_by_key(|entry| entry.0);
+
+        let sorted_cols = indexed.iter().map(|&(col, _)| col).collect();
+        let unsort_map = indexed.iter().map(|&(_, pos)| pos).collect();
+
+        SortedProjection {
+            sorted_cols,
+            unsort_map,
+        }
+    }
+
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.sorted_cols.len()
+    }
+}
+
+/// Deserialize only the projected columns from a record's byte representation.
+/// Uses a pre-computed `SortedProjection` to scan bytes sequentially, skipping
+/// non-projected columns without allocation. Returns fields in the caller's
+/// original column order.
+#[inline(always)]
+pub fn bytes_to_record_projected(
+    bytes: &[u8],
+    schema: &Schema,
+    projection: &SortedProjection,
+) -> Vec<Field> {
+    if projection.sorted_cols.is_empty() {
+        return Vec::new();
+    }
+
+    let n = projection.len();
+    let mut result: Vec<Field> = Vec::with_capacity(n);
+    // Pre-fill so we can write to arbitrary positions via unsort_map.
+    unsafe { result.set_len(n) };
+
+    let mut offset = 0;
+    let mut proj_idx = 0;
+
+    for (col_idx, &(is_nullable, data_type)) in schema.cols().iter().enumerate() {
+        if projection.sorted_cols[proj_idx] == col_idx {
+            let field = Field::from_bytes(&bytes[offset..], is_nullable, data_type);
+            offset += field.size(is_nullable);
+            // Write to the caller's expected output position.
+            let out_pos = projection.unsort_map[proj_idx];
+            // Safety: out_pos < n, and each position is written exactly once.
+            unsafe { std::ptr::write(result.as_mut_ptr().add(out_pos), field) };
+            proj_idx += 1;
+            if proj_idx >= n {
+                break;
+            }
+        } else {
+            offset += skip_field_bytes(&bytes[offset..], is_nullable, data_type);
+        }
+    }
+
+    result
 }
 
 #[cfg(test)]

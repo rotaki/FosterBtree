@@ -13,8 +13,10 @@ use crate::{
     txn_storage::locktable::ConcurrentLockTable as LockTable,
     txn_storage2::{
         field::{
-            bytes_to_record, from_normalized_key, key_to_bytes, record_to_bytes,
-            record_to_key_bytes, DataType, Field, Record, RecordPointer,
+            bytes_to_record, bytes_to_record_projected, extract_pk_from_normalized_key,
+            from_normalized_key, key_to_bytes, precompute_normalized_key_field_ranges,
+            record_to_bytes, record_to_key_bytes, DataType, Field, Record, RecordPointer,
+            SortedProjection,
         },
         field_level_storage_trait::{
             ContainerDS, ContainerOptions, ContainerType, DBOptions, FieldLeveLStorageTrait,
@@ -452,6 +454,18 @@ impl<M: MemPool> TransactionalStorage<M> {
             .collect();
         let sec_field_types: Vec<DataType> = sec_schema.cols().iter().map(|&(_, dt)| dt).collect();
 
+        // Pre-compute byte ranges for extracting PK directly from the
+        // secondary normalized key (avoids Field deserialization round-trip).
+        let sec_key_col_types: Vec<DataType> = sec_schema
+            .key_indices()
+            .iter()
+            .map(|&i| sec_schema.cols()[i].1)
+            .collect();
+        let pk_field_ranges = precompute_normalized_key_field_ranges(&sec_key_col_types);
+
+        // Pre-compute sorted projection plan for bytes_to_record_projected.
+        let projection = SortedProjection::new(&iter.options.cols);
+
         let mut count: u64 = 0;
         let mut err: Option<TxnStorageStatus> = None;
         let mut repairs: Vec<(u32, [u8; 8])> = Vec::new();
@@ -506,12 +520,18 @@ impl<M: MemPool> TransactionalStorage<M> {
                         (kf, stored)
                     };
 
-                    // Derive primary key from secondary key fields.
-                    let pk_fields: Vec<Field> = primary_key_col_indices
-                        .iter()
-                        .map(|&i| key_fields[i].clone())
-                        .collect();
-                    let primary_key_bytes = key_to_bytes(&pk_fields);
+                    // Derive primary key bytes from the secondary normalized key.
+                    let primary_key_bytes = if let Some(ref ranges) = pk_field_ranges {
+                        // Fast path: extract PK bytes directly (no Field round-trip).
+                        extract_pk_from_normalized_key(key_bytes, primary_key_col_indices, ranges)
+                    } else {
+                        // Fallback for variable-width key columns.
+                        let pk_fields: Vec<Field> = primary_key_col_indices
+                            .iter()
+                            .map(|&i| key_fields[i].clone())
+                            .collect();
+                        key_to_bytes(&pk_fields)
+                    };
 
                     // Dereference primary record (following tpcc pattern).
                     let (val_fields, actual_ptr) = if let Some(entry) =
@@ -532,14 +552,11 @@ impl<M: MemPool> TransactionalStorage<M> {
                                 let slot_id = pri_page
                                     .upper_bound_slot_id(&BTreeKey::new(&primary_key_bytes))
                                     - 1;
-                                let pri_record =
-                                    bytes_to_record(pri_page.get_val(slot_id), pri_schema);
-                                let fields: Vec<Field> = iter
-                                    .options
-                                    .cols
-                                    .iter()
-                                    .map(|&i| pri_record[i].clone())
-                                    .collect();
+                                let fields = bytes_to_record_projected(
+                                    pri_page.get_val(slot_id),
+                                    pri_schema,
+                                    &projection,
+                                );
                                 (fields, actual)
                             }
                             RWEntry::Update(fields, ptr, _) | RWEntry::Insert(fields, ptr, _) => {
@@ -575,7 +592,11 @@ impl<M: MemPool> TransactionalStorage<M> {
                             break;
                         }
 
-                        let pri_record = bytes_to_record(pri_page.get_val(slot_id), pri_schema);
+                        let fields = bytes_to_record_projected(
+                            pri_page.get_val(slot_id),
+                            pri_schema,
+                            &projection,
+                        );
                         pri_rwset.insert(primary_key_bytes.clone(), RWEntry::Read(actual, false));
                         drop(pri_page);
 
@@ -583,13 +604,6 @@ impl<M: MemPool> TransactionalStorage<M> {
                         if stored_ptr != actual {
                             repairs.push((slot, actual.to_bytes()));
                         }
-
-                        let fields: Vec<Field> = iter
-                            .options
-                            .cols
-                            .iter()
-                            .map(|&i| pri_record[i].clone())
-                            .collect();
                         (fields, actual)
                     };
 

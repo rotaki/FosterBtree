@@ -50,6 +50,10 @@ struct Args {
     /// Number of value columns in primary table (controls record width)
     #[arg(short = 'c', long, default_value_t = 5)]
     num_value_cols: usize,
+
+    /// Number of columns to project (0 = all value cols)
+    #[arg(short = 'p', long, default_value_t = 0)]
+    project_cols: usize,
 }
 
 // ── Formatting ──────────────────────────────────────────────────────────────
@@ -249,11 +253,10 @@ fn main() {
                         Field::Uint16(Some(sk_prefix)),
                         Field::Uint32(Some(sk_suffix)),
                         Field::Uint32(Some(i)),
-                        Field::Pointer(Some(pri_hint)),
                     ],
                 };
                 storage
-                    .raw_insert_record(db_id, sec_cid, sec_record)
+                    .raw_insert_secondary_record(db_id, sec_cid, sec_record, pri_hint)
                     .unwrap();
             }
             loaded = end;
@@ -290,7 +293,12 @@ fn main() {
     println!();
 
     // Deref column indices: all value columns
-    let deref_cols: Vec<usize> = (1..=args.num_value_cols).collect();
+    let project_count = if args.project_cols == 0 {
+        args.num_value_cols
+    } else {
+        args.project_cols.min(args.num_value_cols)
+    };
+    let deref_cols: Vec<usize> = (1..=project_count).collect();
 
     // ── Benchmark: iter_for_each (raw bytes) ───────────────────────────
     println!("--- iter_for_each (raw bytes, no field deser, no primary deref) ---");

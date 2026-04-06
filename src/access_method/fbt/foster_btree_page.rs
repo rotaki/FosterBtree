@@ -1186,6 +1186,8 @@ impl FosterBtreePage for Page {
         if let Some(slot_id) = slot_id {
             if slot_id == self.low_fence_slot_id() {
                 panic!("Cannot remove the low fence")
+            } else if slot_id == self.high_fence_slot_id() {
+                panic!("Cannot remove the high fence")
             } else {
                 self.remove_at(slot_id);
             }
