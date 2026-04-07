@@ -23,7 +23,7 @@ declare -a VARIANTS=(
     "bp_pt_bucket pt_counts|PT one-hash fp"
     "bp_pt2_bucket pt_counts|PT two-hash fp"
     "bp_pt4_bucket pt_counts|PT four-hash fp"
-    "bp_hashmap|HashMap"
+    "bp_dashmap|DashMap"
 )
 
 for entry in "${VARIANTS[@]}"; do
