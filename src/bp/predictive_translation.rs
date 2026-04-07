@@ -1041,6 +1041,89 @@ impl PredictiveTranslationBP {
             }
         }
     }
+
+    /// Like `create_new_page_for_write` but tries two preferred frames for
+    /// placement. Used by two-hash FP wrapper so that newly created pages can
+    /// land in either of the predicted positions.
+    pub(crate) fn create_new_page_for_write_two_hash(
+        &self,
+        c_key: ContainerKey,
+    ) -> Result<FWGuard, MemPoolStatus> {
+        let _macro_timer = macro_profile_scoped(BpMacroOp::CreateNewPage);
+        self.stats.inc_new_page();
+        self.ensure_free_frames()?;
+
+        let container = self.container_manager.get_container(c_key);
+        let page_id = container.inc_page_count(1) as PageId;
+        let page_key = PageKey::new(c_key, page_id);
+        let (p1, p2) = self.preferred_frames(&page_key);
+
+        // Pick the first free preferred frame, or fall back to p1.
+        let chosen_pref = if self.frame_is_free(p1) {
+            p1
+        } else if self.frame_is_free(p2) {
+            p2
+        } else {
+            p1
+        };
+
+        let mut victim = self
+            .choose_victim(Some(chosen_pref))
+            .ok_or(MemPoolStatus::CannotEvictPage)?;
+
+        debug_assert!(victim.page_key().is_none());
+        debug_assert!(!victim.dirty().load(Ordering::Acquire));
+
+        self.overflow.insert(page_key, victim.frame_id() as usize);
+
+        victim.set_id(page_id);
+        victim.set_page_key(Some(page_key));
+        victim.dirty().store(true, Ordering::Release);
+        victim.evict_info().reset();
+        self.used_frames.fetch_add(1, Ordering::AcqRel);
+
+        Ok(victim)
+    }
+
+    /// Like `create_new_page_for_write` but tries four preferred frames for
+    /// placement. Used by four-hash FP wrapper.
+    pub(crate) fn create_new_page_for_write_four_hash(
+        &self,
+        c_key: ContainerKey,
+    ) -> Result<FWGuard, MemPoolStatus> {
+        let _macro_timer = macro_profile_scoped(BpMacroOp::CreateNewPage);
+        self.stats.inc_new_page();
+        self.ensure_free_frames()?;
+
+        let container = self.container_manager.get_container(c_key);
+        let page_id = container.inc_page_count(1) as PageId;
+        let page_key = PageKey::new(c_key, page_id);
+        let prefs = self.preferred_frames_four(&page_key);
+
+        // Pick the first free preferred frame, or fall back to prefs[0].
+        let chosen_pref = prefs
+            .iter()
+            .find(|&&p| self.frame_is_free(p))
+            .copied()
+            .unwrap_or(prefs[0]);
+
+        let mut victim = self
+            .choose_victim(Some(chosen_pref))
+            .ok_or(MemPoolStatus::CannotEvictPage)?;
+
+        debug_assert!(victim.page_key().is_none());
+        debug_assert!(!victim.dirty().load(Ordering::Acquire));
+
+        self.overflow.insert(page_key, victim.frame_id() as usize);
+
+        victim.set_id(page_id);
+        victim.set_page_key(Some(page_key));
+        victim.dirty().store(true, Ordering::Release);
+        victim.evict_info().reset();
+        self.used_frames.fetch_add(1, Ordering::AcqRel);
+
+        Ok(victim)
+    }
 }
 
 // ===========================================================================

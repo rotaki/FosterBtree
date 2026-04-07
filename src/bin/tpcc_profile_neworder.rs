@@ -613,7 +613,11 @@ pub fn main() {
         );
     }
 
-    let num_frames = config.num_warehouses as usize * 1024 * 1024 * 1024 / PAGE_SIZE;
+    let num_frames = if config.bp_size > 0 {
+        config.bp_size * 1024 * 1024 * 1024 / PAGE_SIZE
+    } else {
+        config.num_warehouses as usize * 1024 * 1024 * 1024 / PAGE_SIZE
+    };
     println!(
         "BP size: {} GB",
         num_frames * PAGE_SIZE / (1024 * 1024 * 1024)

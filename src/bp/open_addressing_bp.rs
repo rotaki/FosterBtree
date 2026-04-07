@@ -211,26 +211,34 @@ impl OpenAddressingBP {
     // ------------------------------------------------------------------
 
     /// Search for `key` starting from its home frame.
-    /// Returns `Some(frame_index)` if found, `None` if we hit an empty slot.
+    /// Returns `Some(frame_index)` if found, `None` if we hit a truly empty slot.
+    /// Tombstoned slots are skipped (probe continues past them).
     fn probe_find(&self, key: &PageKey) -> Option<usize> {
         let start = self.home_frame(key);
         let mut idx = start;
+        let metas = unsafe { &*self.metas.get() };
         for _ in 0..self.num_frames {
+            if metas[idx].is_tombstone() {
+                // Tombstone: probe chain continues past deleted slots.
+                idx = self.next_index(idx);
+                continue;
+            }
             match self.frame_key(idx) {
                 Some(k) if k == *key => return Some(idx),
-                None => return None,
+                None => return None, // Truly empty → end of chain
                 _ => idx = self.next_index(idx),
             }
         }
         None // Full table, key not found
     }
 
-    /// Find the first empty slot starting from `start`.
+    /// Find the first empty or tombstoned slot starting from `start`.
     /// Returns `Some(frame_index)` or `None` if the table is completely full.
     fn probe_find_empty(&self, start: usize) -> Option<usize> {
         let mut idx = start;
+        let metas = unsafe { &*self.metas.get() };
         for _ in 0..self.num_frames {
-            if self.frame_key(idx).is_none() {
+            if self.frame_key(idx).is_none() || metas[idx].is_tombstone() {
                 return Some(idx);
             }
             idx = self.next_index(idx);
@@ -247,7 +255,13 @@ impl OpenAddressingBP {
         for _ in 0..self.num_frames {
             if let Some(slot) = self.probe_find_empty(start) {
                 if let Some(guard) = self.try_get_write_guard(slot, false) {
+                    // Accept both truly empty and tombstoned slots.
                     if guard.page_key().is_none() {
+                        // Clear tombstone state if present (now a clean empty slot).
+                        let metas = unsafe { &*self.metas.get() };
+                        if metas[slot].is_tombstone() {
+                            metas[slot].set_key(None); // EMPTY, not TOMBSTONE
+                        }
                         return Ok(guard);
                     }
                     // Slot was taken by a concurrent thread — continue from next.
@@ -298,9 +312,9 @@ impl OpenAddressingBP {
             let start = self.fetch_add_clock_hand(batch);
             for offset in 0..batch {
                 let idx = (start + offset) % self.num_frames;
-                let meta = &mut unsafe { &mut *self.metas.get() }[idx];
+                let meta = &unsafe { &*self.metas.get() }[idx];
 
-                if meta.key().is_none() || meta.latch.is_locked() {
+                if meta.key().is_none() || meta.is_tombstone() || meta.latch.is_locked() {
                     continue;
                 }
 
@@ -318,14 +332,11 @@ impl OpenAddressingBP {
                     }
                     // Flush if dirty.
                     self.write_to_disk_if_dirty_w(&guard).unwrap();
-                    // Clear the frame.
-                    guard.set_page_key(None);
+                    // Mark as tombstone to preserve probe chains.
+                    let meta = &unsafe { &*self.metas.get() }[idx];
+                    meta.set_tombstone();
                     guard.evict_info().reset();
                     evicted += 1;
-
-                    // Backward-shift deletion: fix probe chains broken by this hole.
-                    drop(guard);
-                    self.backward_shift(idx);
                 }
             }
             if evicted > 0 {
@@ -338,98 +349,6 @@ impl OpenAddressingBP {
             Err(MemPoolStatus::CannotEvictPage)
         } else {
             Ok(())
-        }
-    }
-
-    /// After clearing frame at `empty_idx`, shift subsequent displaced entries
-    /// backward to maintain probe-chain invariants.
-    ///
-    /// We walk forward from the hole.  For each occupied frame, if its home
-    /// index is at or before the hole (in probe-chain terms), we move it into
-    /// the hole and the moved-from slot becomes the new hole.  We stop when we
-    /// hit an empty slot.
-    fn backward_shift(&self, mut empty_idx: usize) {
-        let mut probe = self.next_index(empty_idx);
-        loop {
-            // If the next slot is empty, we're done — no chain crosses the hole.
-            let key = match self.frame_key(probe) {
-                None => break,
-                Some(k) => k,
-            };
-
-            let home = self.home_frame(&key);
-
-            // Should we shift `probe` into `empty_idx`?
-            // Yes if the home of `probe` is NOT strictly between `empty_idx`
-            // (exclusive) and `probe` (inclusive) in the circular order.
-            // Equivalently: if `empty_idx` sits on the probe chain from `home`
-            // to `probe`.
-            let should_shift = if empty_idx < probe {
-                // Normal order: home <= empty_idx  OR  home > probe
-                home <= empty_idx || home > probe
-            } else {
-                // Wrapped: home <= empty_idx AND home > probe
-                home <= empty_idx && home > probe
-            };
-
-            if should_shift {
-                // Move the page from `probe` into `empty_idx`.
-                // We need write latches on both frames.
-                let src_guard = match self.try_get_write_guard(probe, false) {
-                    Some(g) => g,
-                    None => {
-                        // Can't latch — stop shifting.  The chain may be
-                        // slightly longer for some lookups, but correctness
-                        // is maintained (we only lose the optimisation).
-                        break;
-                    }
-                };
-                let dst_guard = match self.try_get_write_guard(empty_idx, false) {
-                    Some(g) => g,
-                    None => {
-                        drop(src_guard);
-                        break;
-                    }
-                };
-
-                // Copy page data and metadata.
-                let src_page_key = src_guard.page_key();
-                let is_dirty = src_guard.dirty().load(Ordering::Acquire);
-
-                // Copy page bytes.
-                unsafe {
-                    let src_page = &*self.pages.get();
-                    let dst_page = &mut *self.pages.get();
-                    std::ptr::copy_nonoverlapping(
-                        src_page[probe].as_ref() as *const Page,
-                        dst_page[empty_idx].as_mut() as *mut Page,
-                        1,
-                    );
-                }
-
-                dst_guard.set_page_key(src_page_key);
-                dst_guard.dirty().store(is_dirty, Ordering::Release);
-                dst_guard.evict_info().reset();
-                if is_dirty {
-                    dst_guard.dirty().store(true, Ordering::Release);
-                }
-
-                // Clear source.
-                src_guard.set_page_key(None);
-                src_guard.dirty().store(false, Ordering::Release);
-                src_guard.evict_info().reset();
-
-                drop(src_guard);
-                drop(dst_guard);
-
-                empty_idx = probe;
-            }
-
-            probe = self.next_index(probe);
-            // Safety: if we've gone all the way around, stop.
-            if probe == empty_idx {
-                break;
-            }
         }
     }
 

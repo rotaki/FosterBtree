@@ -20,18 +20,20 @@ type DefaultEvictionPolicy = LRUEvictionPolicy;
 
 /// ───── sentinel & packing helpers ──────────────────────────────────────────
 const EMPTY: u64 = u64::MAX; // 0xFFFF_FFFF_FFFF_FFFF  ⇔  None
+const TOMBSTONE: u64 = u64::MAX - 1; // 0xFFFF_FFFF_FFFF_FFFE  ⇔  deleted (open addressing)
 
 #[inline(always)]
 fn pack(key: PageKey) -> u64 {
     //  ⟨c_key : u32⟩  ⟨page_id : u32⟩
     let raw = ((key.c_key.as_u32() as u64) << 32) | key.page_id as u64;
     debug_assert!(raw != EMPTY, "reserved for sentinel");
+    debug_assert!(raw != TOMBSTONE, "reserved for tombstone sentinel");
     raw
 }
 
 #[inline(always)]
 fn unpack(raw: u64) -> Option<PageKey> {
-    if raw == EMPTY {
+    if raw == EMPTY || raw == TOMBSTONE {
         None
     } else {
         Some(PageKey {
@@ -95,6 +97,24 @@ impl AtomicOptionKey {
             Err(r) => Err(unpack(r)),
         }
     }
+
+    /// Returns true if this slot is a tombstone (deleted but probe chains continue past it).
+    #[inline]
+    pub fn is_tombstone(&self) -> bool {
+        self.0.load(Ordering::Acquire) == TOMBSTONE
+    }
+
+    /// Mark this slot as a tombstone.
+    #[inline]
+    pub fn set_tombstone(&self) {
+        self.0.store(TOMBSTONE, Ordering::Release);
+    }
+
+    /// Returns true if the slot is truly empty (not occupied, not tombstone).
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.0.load(Ordering::Acquire) == EMPTY
+    }
 }
 
 #[repr(C, align(64))]
@@ -127,6 +147,18 @@ impl<T: EvictionPolicy> FrameMeta<T> {
     }
     pub fn set_key(&self, k: Option<PageKey>) {
         self.key.replace(k);
+    }
+    /// Returns true if this frame is a tombstone (open-addressing eviction marker).
+    pub fn is_tombstone(&self) -> bool {
+        self.key.is_tombstone()
+    }
+    /// Mark this frame as a tombstone.
+    pub fn set_tombstone(&self) {
+        self.key.set_tombstone();
+    }
+    /// Returns true if this frame is truly empty (no page, no tombstone).
+    pub fn is_empty(&self) -> bool {
+        self.key.is_empty()
     }
 }
 

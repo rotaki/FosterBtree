@@ -134,7 +134,7 @@ impl MemPool for PredictiveTranslationFPFourBP {
         self.inner.drop_container(c_key)
     }
     fn create_new_page_for_write(&self, c_key: ContainerKey) -> Result<FWGuard, MemPoolStatus> {
-        self.inner.create_new_page_for_write(c_key)
+        self.inner.create_new_page_for_write_four_hash(c_key)
     }
     fn create_new_pages_for_write(
         &self,
