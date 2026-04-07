@@ -634,14 +634,10 @@ impl PredictiveTranslationBP {
     ) -> Result<FWGuard, MemPoolStatus> {
         self.used_frames.fetch_add(1, Ordering::AcqRel);
 
-        // Pick the first free preferred frame, or fall back to prefs[0].
-        let chosen_pref = prefs
-            .iter()
-            .find(|&&p| self.frame_is_free(p))
-            .copied()
-            .unwrap_or(prefs[0]);
+        // Pick the first free preferred frame, or None to avoid latching occupied frames.
+        let chosen_pref = prefs.iter().find(|&&p| self.frame_is_free(p)).copied();
 
-        let mut victim = match self.choose_victim(Some(chosen_pref)) {
+        let mut victim = match self.choose_victim(chosen_pref) {
             Some(v) => v,
             None => {
                 self.used_frames.fetch_sub(1, Ordering::AcqRel);
@@ -1058,17 +1054,17 @@ impl PredictiveTranslationBP {
         let page_key = PageKey::new(c_key, page_id);
         let (p1, p2) = self.preferred_frames(&page_key);
 
-        // Pick the first free preferred frame, or fall back to p1.
+        // Pick the first free preferred frame, or None to avoid latching occupied frames.
         let chosen_pref = if self.frame_is_free(p1) {
-            p1
+            Some(p1)
         } else if self.frame_is_free(p2) {
-            p2
+            Some(p2)
         } else {
-            p1
+            None
         };
 
         let mut victim = self
-            .choose_victim(Some(chosen_pref))
+            .choose_victim(chosen_pref)
             .ok_or(MemPoolStatus::CannotEvictPage)?;
 
         debug_assert!(victim.page_key().is_none());
@@ -1100,15 +1096,11 @@ impl PredictiveTranslationBP {
         let page_key = PageKey::new(c_key, page_id);
         let prefs = self.preferred_frames_four(&page_key);
 
-        // Pick the first free preferred frame, or fall back to prefs[0].
-        let chosen_pref = prefs
-            .iter()
-            .find(|&&p| self.frame_is_free(p))
-            .copied()
-            .unwrap_or(prefs[0]);
+        // Pick the first free preferred frame, or None to avoid latching occupied frames.
+        let chosen_pref = prefs.iter().find(|&&p| self.frame_is_free(p)).copied();
 
         let mut victim = self
-            .choose_victim(Some(chosen_pref))
+            .choose_victim(chosen_pref)
             .ok_or(MemPoolStatus::CannotEvictPage)?;
 
         debug_assert!(victim.page_key().is_none());
