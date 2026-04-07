@@ -33,7 +33,7 @@ pub fn setup_simple_db() -> (
     let container_id = storage
         .create_container(
             db_id,
-            ContainerOptions::new("test_container", ContainerDS::BTree, schema),
+            ContainerOptions::primary("test_container", ContainerDS::BTree, schema),
         )
         .unwrap();
 
@@ -55,7 +55,7 @@ pub fn setup_db_with_schema(
     let container_id = storage
         .create_container(
             db_id,
-            ContainerOptions::new("test_container", ContainerDS::BTree, schema),
+            ContainerOptions::primary("test_container", ContainerDS::BTree, schema),
         )
         .unwrap();
 

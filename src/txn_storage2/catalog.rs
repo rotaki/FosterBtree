@@ -163,7 +163,7 @@ impl<S: FieldLeveLStorageTrait> Catalog<S> {
                     ],
                     vec![0],
                 );
-                let opts = ContainerOptions::new("__catalog__", ContainerDS::BTree, schema);
+                let opts = ContainerOptions::primary("__catalog__", ContainerDS::BTree, schema);
                 storage.create_container(db_id, opts)?
             }
         };
@@ -230,7 +230,7 @@ impl<S: FieldLeveLStorageTrait> Catalog<S> {
         let primary_schema = physical
             .primary_index
             .to_container_schema(&logical, pk_cols);
-        let primary_opts = ContainerOptions::new(
+        let primary_opts = ContainerOptions::primary(
             &format!("{}__pk__{}", name, physical.primary_index.name),
             ContainerDS::BTree,
             primary_schema,
@@ -241,7 +241,7 @@ impl<S: FieldLeveLStorageTrait> Catalog<S> {
         let mut secondary_cids = Vec::with_capacity(physical.secondary_indexes.len());
         for sec_idx in &physical.secondary_indexes {
             let sec_schema = sec_idx.to_container_schema(&logical, pk_cols);
-            let sec_opts = ContainerOptions::new(
+            let sec_opts = ContainerOptions::primary(
                 &format!("{}__idx__{}", name, sec_idx.name),
                 ContainerDS::BTree,
                 sec_schema,

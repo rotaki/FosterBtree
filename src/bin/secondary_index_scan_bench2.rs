@@ -207,7 +207,7 @@ fn main() {
     let pri_cid = storage
         .create_container(
             db_id,
-            ContainerOptions::new("primary", ContainerDS::BTree, pri_schema),
+            ContainerOptions::primary("primary", ContainerDS::BTree, pri_schema),
         )
         .unwrap();
     let sec_cid = storage
@@ -218,6 +218,7 @@ fn main() {
                 ContainerDS::BTree,
                 pri_cid,
                 SECONDARY_KEY_COLUMNS.to_vec(),
+                &primary_schema(args.num_value_cols),
             ),
         )
         .unwrap();

@@ -102,7 +102,7 @@ impl TPCCTxnProfile for StockLevelTxn {
 
         write_fields!(out, &count);
 
-        let duration = start.elapsed().unwrap().as_nanos() as u64;
+        let duration = start.elapsed().unwrap().as_micros() as u64;
         helper.commit(&txn, AbortID::Precommit as u8, duration)
     }
 }

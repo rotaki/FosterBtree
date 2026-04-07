@@ -7,10 +7,7 @@ use crate::{
     },
     bp::{ContainerId, ContainerKey, DatabaseId, MemPool, PageFrameKey},
     txn_storage2::{
-        field::{
-            bytes_to_record, key_to_bytes, record_to_bytes, record_to_key_bytes, Field, Record,
-            RecordHandle,
-        },
+        field::{key_to_bytes, record_to_key_bytes, Field, Record, RecordHandle},
         field_level_storage_trait::{
             ContainerDS, ContainerOptions, ContainerType, DBOptions, FieldLeveLStorageTrait,
             ScanOptions, TxnOptions, TxnStorageStatus,
@@ -57,6 +54,27 @@ unsafe impl<M: MemPool> Send for NonTransactionalStorage<M> {}
 struct ContainerInfo<M: MemPool> {
     options: ContainerOptions,
     btree: Arc<FosterBtree<M>>,
+}
+
+impl<M: MemPool> ContainerInfo<M> {
+    fn to_key_bytes(&self, record: &[Field]) -> Vec<u8> {
+        match self.options.container_type() {
+            ContainerType::Primary { schema, .. } => {
+                record_to_key_bytes(record, schema.key_indices())
+            }
+            ContainerType::Secondary { .. } => record_to_key_bytes(record, &[]),
+        }
+    }
+
+    fn fields_from_value(&self, value_bytes: &[u8], cols: &[usize]) -> Vec<Field> {
+        self.options
+            .container_type()
+            .fields_from_value(value_bytes, cols)
+    }
+
+    fn fields_to_value(&self, fields: &[Field]) -> Vec<u8> {
+        self.options.container_type().fields_to_value(fields)
+    }
 }
 
 // ============================================================================
@@ -319,12 +337,7 @@ impl<M: MemPool> FieldLeveLStorageTrait for NonTransactionalStorage<M> {
         } else {
             // We can get the key if it exists
             if leaf_page.get_raw_key(slot_id) == key {
-                let val = leaf_page.get_val(slot_id);
-                let record = bytes_to_record(&val, container.options.schema());
-                let fields = col_indices
-                    .iter()
-                    .map(|&idx| record[idx].clone())
-                    .collect::<Vec<_>>();
+                let fields = container.fields_from_value(leaf_page.get_val(slot_id), col_indices);
                 Ok((
                     fields,
                     RecordHandle::new(leaf_page.page().get_id(), leaf_page.frame_id()),
@@ -382,12 +395,11 @@ impl<M: MemPool> FieldLeveLStorageTrait for NonTransactionalStorage<M> {
         } else {
             // We can update the key if it exists
             if leaf_page.get_raw_key(slot_id) == key {
-                let mut record =
-                    bytes_to_record(&leaf_page.get_val(slot_id), container.options.schema());
+                let mut record = container.fields_from_value(leaf_page.get_val(slot_id), &[]);
                 for (col_idx, field) in fields {
                     record[col_idx] = field;
                 }
-                let value = record_to_bytes(&record, container.options.schema());
+                let value = container.fields_to_value(&record);
                 // Exact match
                 container
                     .btree
@@ -434,10 +446,9 @@ impl<M: MemPool> FieldLeveLStorageTrait for NonTransactionalStorage<M> {
         } else {
             // We can update the key if it exists
             if leaf_page.get_raw_key(slot_id) == key {
-                let mut record =
-                    bytes_to_record(&leaf_page.get_val(slot_id), container.options.schema());
+                let mut record = container.fields_from_value(leaf_page.get_val(slot_id), &[]);
                 func(&mut record[col_idx]);
-                let value = record_to_bytes(&record, container.options.schema());
+                let value = container.fields_to_value(&record);
                 // Exact match
                 container
                     .btree
@@ -448,6 +459,59 @@ impl<M: MemPool> FieldLeveLStorageTrait for NonTransactionalStorage<M> {
                 ))
             } else {
                 // Non-existent key
+                Err(TxnStorageStatus::KeyNotFound)
+            }
+        }
+    }
+
+    fn update_fields_with_func<F: FnOnce(&mut [Field])>(
+        &self,
+        _txn: &Self::TxnHandle,
+        c_id: ContainerId,
+        key: Vec<Field>,
+        col_indices: &[usize],
+        func: F,
+        hint: Option<RecordHandle>,
+    ) -> Result<RecordHandle, TxnStorageStatus> {
+        // SAFETY: We assume single-threaded access as per the requirements
+        let container = unsafe {
+            (*self.containers.get())
+                .get(&c_id)
+                .ok_or(TxnStorageStatus::ContainerNotFound)?
+        };
+
+        let key = key_to_bytes(&key);
+
+        let mut leaf_page = container.btree.traverse_to_leaf_for_write_with_hint(
+            &key,
+            hint.as_ref().map(|ptr| {
+                PageFrameKey::new_with_frame_id(container.btree.c_key, ptr.page_id, ptr.frame_id)
+            }),
+        );
+        let slot_id = leaf_page.upper_bound_slot_id(&BTreeKey::new(&key)) - 1;
+        if slot_id == 0 {
+            Err(TxnStorageStatus::KeyNotFound)
+        } else {
+            if leaf_page.get_raw_key(slot_id) == key {
+                const PLACEHOLDER: Field = Field::Bool(None);
+                let mut record = container.fields_from_value(leaf_page.get_val(slot_id), &[]);
+                let mut selected: Vec<Field> = col_indices
+                    .iter()
+                    .map(|&i| std::mem::replace(&mut record[i], PLACEHOLDER))
+                    .collect();
+                func(&mut selected);
+                for (j, &i) in col_indices.iter().enumerate() {
+                    record[i] = std::mem::replace(&mut selected[j], PLACEHOLDER);
+                }
+                let value = container.fields_to_value(&record);
+                container
+                    .btree
+                    .update_at_slot_or_split(&mut leaf_page, slot_id, &key, &value);
+                Ok(RecordHandle::new(
+                    leaf_page.page().get_id(),
+                    leaf_page.frame_id(),
+                ))
+            } else {
                 Err(TxnStorageStatus::KeyNotFound)
             }
         }
@@ -471,8 +535,8 @@ impl<M: MemPool> FieldLeveLStorageTrait for NonTransactionalStorage<M> {
                 .ok_or(TxnStorageStatus::ContainerNotFound)?
         };
 
-        let key = record_to_key_bytes(&record.fields, container.options.schema());
-        let value = record_to_bytes(&record.fields, container.options.schema());
+        let key = container.to_key_bytes(&record.fields);
+        let value = container.fields_to_value(&record.fields);
 
         let mut leaf_page = container.btree.traverse_to_leaf_for_write_with_hint(
             &key,
@@ -624,19 +688,12 @@ impl<M: MemPool> FieldLeveLStorageTrait for NonTransactionalStorage<M> {
                 .ok_or(TxnStorageStatus::ContainerNotFound)?
         };
 
-        let schema = container.options.schema();
+        let cols = &iter.options.cols;
         let mut count: u64 = 0;
         let scanner = unsafe { &mut *iter.scanner.get() };
 
         for (_, value_bytes) in scanner {
-            let record = bytes_to_record(&value_bytes, schema);
-
-            let fields: Vec<Field> = iter
-                .options
-                .cols
-                .iter()
-                .map(|&idx| record[idx].clone())
-                .collect();
+            let fields = container.fields_from_value(&value_bytes, cols);
 
             let ptr = RecordHandle::new(0, 0);
             count += 1;
@@ -680,7 +737,7 @@ mod tests {
         let container_id = storage
             .create_container(
                 db_id,
-                ContainerOptions::new("test", ContainerDS::BTree, schema),
+                ContainerOptions::primary("test", ContainerDS::BTree, schema),
             )
             .unwrap();
         let txn = storage.begin_txn(db_id, TxnOptions::default()).unwrap();
@@ -734,7 +791,7 @@ mod tests {
         let container_id = storage
             .create_container(
                 db_id,
-                ContainerOptions::new("test", ContainerDS::BTree, schema),
+                ContainerOptions::primary("test", ContainerDS::BTree, schema),
             )
             .unwrap();
         let txn = storage.begin_txn(db_id, TxnOptions::default()).unwrap();
@@ -795,9 +852,9 @@ mod tests {
 
         // Test creating containers
         let container1_options =
-            ContainerOptions::new("container1", ContainerDS::BTree, schema.clone());
+            ContainerOptions::primary("container1", ContainerDS::BTree, schema.clone());
         let container2_options =
-            ContainerOptions::new("container2", ContainerDS::BTree, schema.clone());
+            ContainerOptions::primary("container2", ContainerDS::BTree, schema.clone());
 
         let container1_id = storage
             .create_container(db_id, container1_options.clone())
@@ -834,7 +891,8 @@ mod tests {
             vec![(false, DataType::Int32), (true, DataType::String)],
             vec![0],
         );
-        let container_options = ContainerOptions::new("test_container", ContainerDS::BTree, schema);
+        let container_options =
+            ContainerOptions::primary("test_container", ContainerDS::BTree, schema);
         let container_id = storage.create_container(db_id, container_options).unwrap();
 
         let txn = storage.begin_txn(db_id, TxnOptions::default()).unwrap();
@@ -877,7 +935,7 @@ mod tests {
         let container_id = storage
             .create_container(
                 db_id,
-                ContainerOptions::new("test", ContainerDS::BTree, schema),
+                ContainerOptions::primary("test", ContainerDS::BTree, schema),
             )
             .unwrap();
         let txn = storage.begin_txn(db_id, TxnOptions::default()).unwrap();
@@ -927,7 +985,7 @@ mod tests {
         let container_id = storage
             .create_container(
                 db_id,
-                ContainerOptions::new("test", ContainerDS::BTree, schema),
+                ContainerOptions::primary("test", ContainerDS::BTree, schema),
             )
             .unwrap();
         let txn = storage.begin_txn(db_id, TxnOptions::default()).unwrap();
@@ -968,7 +1026,7 @@ mod tests {
         let container_id = storage
             .create_container(
                 db_id,
-                ContainerOptions::new("test", ContainerDS::BTree, schema),
+                ContainerOptions::primary("test", ContainerDS::BTree, schema),
             )
             .unwrap();
         let txn = storage.begin_txn(db_id, TxnOptions::default()).unwrap();
@@ -1049,7 +1107,7 @@ mod tests {
         let container_id = storage
             .create_container(
                 db_id,
-                ContainerOptions::new("test", ContainerDS::BTree, schema),
+                ContainerOptions::primary("test", ContainerDS::BTree, schema),
             )
             .unwrap();
 
@@ -1108,7 +1166,7 @@ mod tests {
         let container_id = storage
             .create_container(
                 db_id,
-                ContainerOptions::new("test", ContainerDS::BTree, schema),
+                ContainerOptions::primary("test", ContainerDS::BTree, schema),
             )
             .unwrap();
         let txn = storage.begin_txn(db_id, TxnOptions::default()).unwrap();
@@ -1163,7 +1221,7 @@ mod tests {
         let container_id = storage
             .create_container(
                 db_id,
-                ContainerOptions::new("test", ContainerDS::BTree, schema),
+                ContainerOptions::primary("test", ContainerDS::BTree, schema),
             )
             .unwrap();
         let txn = storage.begin_txn(db_id, TxnOptions::default()).unwrap();
@@ -1227,7 +1285,7 @@ mod tests {
         let container_id = storage
             .create_container(
                 db_id,
-                ContainerOptions::new("test", ContainerDS::BTree, schema),
+                ContainerOptions::primary("test", ContainerDS::BTree, schema),
             )
             .unwrap();
 
@@ -1278,7 +1336,7 @@ mod tests {
         let container_id = storage
             .create_container(
                 db_id,
-                ContainerOptions::new("test", ContainerDS::BTree, schema),
+                ContainerOptions::primary("test", ContainerDS::BTree, schema),
             )
             .unwrap();
 
@@ -1355,7 +1413,7 @@ mod tests {
         let container_id = storage
             .create_container(
                 db_id,
-                ContainerOptions::new("test", ContainerDS::BTree, schema),
+                ContainerOptions::primary("test", ContainerDS::BTree, schema),
             )
             .unwrap();
 
@@ -1424,7 +1482,7 @@ mod tests {
         let container_id = storage
             .create_container(
                 db_id,
-                ContainerOptions::new("test", ContainerDS::BTree, schema),
+                ContainerOptions::primary("test", ContainerDS::BTree, schema),
             )
             .unwrap();
 

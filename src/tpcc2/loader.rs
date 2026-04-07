@@ -49,35 +49,35 @@ impl<M: MemPool> TpccLoader<M> {
         let item_cid = storage
             .create_container(
                 db_id,
-                ContainerOptions::new(ITEM_TABLE, ContainerDS::BTree, item_schema()),
+                ContainerOptions::primary(ITEM_TABLE, ContainerDS::BTree, item_schema()),
             )
             .unwrap();
 
         let warehouse_cid = storage
             .create_container(
                 db_id,
-                ContainerOptions::new(WAREHOUSE_TABLE, ContainerDS::BTree, warehouse_schema()),
+                ContainerOptions::primary(WAREHOUSE_TABLE, ContainerDS::BTree, warehouse_schema()),
             )
             .unwrap();
 
         let stock_cid = storage
             .create_container(
                 db_id,
-                ContainerOptions::new(STOCK_TABLE, ContainerDS::BTree, stock_schema()),
+                ContainerOptions::primary(STOCK_TABLE, ContainerDS::BTree, stock_schema()),
             )
             .unwrap();
 
         let district_cid = storage
             .create_container(
                 db_id,
-                ContainerOptions::new(DISTRICT_TABLE, ContainerDS::BTree, district_schema()),
+                ContainerOptions::primary(DISTRICT_TABLE, ContainerDS::BTree, district_schema()),
             )
             .unwrap();
 
         let customer_cid = storage
             .create_container(
                 db_id,
-                ContainerOptions::new(CUSTOMER_TABLE, ContainerDS::BTree, customer_schema()),
+                ContainerOptions::primary(CUSTOMER_TABLE, ContainerDS::BTree, customer_schema()),
             )
             .unwrap();
 
@@ -94,6 +94,7 @@ impl<M: MemPool> TpccLoader<M> {
                         customer_fields::C_LAST,
                         customer_fields::C_ID,
                     ],
+                    &customer_schema(),
                 ),
             )
             .unwrap();
@@ -101,14 +102,14 @@ impl<M: MemPool> TpccLoader<M> {
         let history_cid = storage
             .create_container(
                 db_id,
-                ContainerOptions::new(HISTORY_TABLE, ContainerDS::BTree, history_schema()),
+                ContainerOptions::primary(HISTORY_TABLE, ContainerDS::BTree, history_schema()),
             )
             .unwrap();
 
         let order_cid = storage
             .create_container(
                 db_id,
-                ContainerOptions::new(ORDER_TABLE, ContainerDS::BTree, order_schema()),
+                ContainerOptions::primary(ORDER_TABLE, ContainerDS::BTree, order_schema()),
             )
             .unwrap();
 
@@ -125,6 +126,7 @@ impl<M: MemPool> TpccLoader<M> {
                         order_fields::O_C_ID,
                         order_fields::O_ID,
                     ],
+                    &order_schema(),
                 ),
             )
             .unwrap();
@@ -132,14 +134,18 @@ impl<M: MemPool> TpccLoader<M> {
         let new_order_cid = storage
             .create_container(
                 db_id,
-                ContainerOptions::new(NEW_ORDER_TABLE, ContainerDS::BTree, new_order_schema()),
+                ContainerOptions::primary(NEW_ORDER_TABLE, ContainerDS::BTree, new_order_schema()),
             )
             .unwrap();
 
         let order_line_cid = storage
             .create_container(
                 db_id,
-                ContainerOptions::new(ORDER_LINE_TABLE, ContainerDS::BTree, order_line_schema()),
+                ContainerOptions::primary(
+                    ORDER_LINE_TABLE,
+                    ContainerDS::BTree,
+                    order_line_schema(),
+                ),
             )
             .unwrap();
 

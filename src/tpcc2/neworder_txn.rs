@@ -91,18 +91,25 @@ pub fn run_neworder_txn_with_stats<M: MemPool>(
     let (w_fields, _w_hint) = res.unwrap();
     let w_tax = get_f64_field(&w_fields, 0);
 
-    // Get district info and increment next order id
+    // Get district info and increment next order id atomically under exclusive lock.
     let d_key = vec![
         Field::Uint16(Some(input.w_id)),
         Field::Uint8(Some(input.d_id)),
     ];
 
-    // Read district fields
-    let res = storage.get_fields(
+    let mut d_next_o_id = 0u32;
+    let mut d_tax = 0.0f64;
+    let res = storage.update_fields_with_func(
         &txn,
         containers.district_cid,
-        d_key.clone(),
+        d_key,
         &[district_fields::D_NEXT_O_ID, district_fields::D_TAX],
+        |fields| {
+            // fields[0] = D_NEXT_O_ID, fields[1] = D_TAX
+            d_next_o_id = get_u32_field(fields, 0);
+            d_tax = get_f64_field(fields, 1);
+            fields[0] = Field::Uint32(Some(d_next_o_id + 1));
+        },
         None,
     );
     if not_successful(&res) {
@@ -111,27 +118,7 @@ pub fn run_neworder_txn_with_stats<M: MemPool>(
             None,
         );
     }
-    let (d_fields, d_hint) = res.unwrap();
-
-    let d_next_o_id = get_u32_field(&d_fields, 0);
-    let d_tax = get_f64_field(&d_fields, 1);
     let o_id = d_next_o_id;
-
-    // Update district next order id
-    let res = storage.update_field(
-        &txn,
-        containers.district_cid,
-        d_key,
-        district_fields::D_NEXT_O_ID,
-        Field::Uint32(Some(d_next_o_id + 1)),
-        Some(d_hint),
-    );
-    if not_successful(&res) {
-        return (
-            helper.kill(&txn, &res, AbortID::NewOrderUpdateDistrict),
-            None,
-        );
-    }
 
     // Get customer info
     let c_key = vec![
@@ -268,17 +255,22 @@ pub fn run_neworder_txn_with_stats<M: MemPool>(
         let i_name = get_string_field(&i_fields, 1);
         let i_data = get_string_field(&i_fields, 2);
 
-        // Get and update stock
+        // Get and update stock atomically under exclusive lock.
         let s_key = vec![
             Field::Uint16(Some(item.supply_w_id)),
             Field::Uint32(Some(item.i_id)),
         ];
 
-        // Read stock fields
-        let res = storage.get_fields(
+        let is_remote = item.supply_w_id != input.w_id;
+        let ol_quantity = item.quantity;
+        let mut s_quantity = 0i16;
+        let mut s_dist_str = String::new();
+        let mut s_data = String::new();
+
+        let res = storage.update_fields_with_func(
             &txn,
             containers.stock_cid,
-            s_key.clone(),
+            s_key,
             &[
                 stock_fields::S_QUANTITY,
                 stock_fields::S_YTD,
@@ -287,58 +279,30 @@ pub fn run_neworder_txn_with_stats<M: MemPool>(
                 stock_fields::S_DIST,
                 stock_fields::S_DATA,
             ],
+            |fields| {
+                // fields[0]=S_QUANTITY, [1]=S_YTD, [2]=S_ORDER_CNT,
+                // [3]=S_REMOTE_CNT, [4]=S_DIST, [5]=S_DATA
+                let cur_qty = get_i16_field(fields, 0);
+                let cur_ytd = get_u32_field(fields, 1);
+                let cur_order_cnt = get_u16_field(fields, 2);
+                s_dist_str = get_string_field(fields, 4);
+                s_data = get_string_field(fields, 5);
+
+                s_quantity = if cur_qty >= ol_quantity as i16 + 10 {
+                    cur_qty - ol_quantity as i16
+                } else {
+                    cur_qty - ol_quantity as i16 + 91
+                };
+
+                fields[0] = Field::Int16(Some(s_quantity));
+                fields[1] = Field::Uint32(Some(cur_ytd + ol_quantity as u32));
+                fields[2] = Field::Uint16(Some(cur_order_cnt + 1));
+                if is_remote {
+                    let cur_remote_cnt = get_u16_field(fields, 3);
+                    fields[3] = Field::Uint16(Some(cur_remote_cnt + 1));
+                }
+            },
             None,
-        );
-        if not_successful(&res) {
-            return (helper.kill(&txn, &res, AbortID::NewOrderGetStock), None);
-        }
-        let (s_fields, s_hint) = res.unwrap();
-
-        let mut s_quantity = get_i16_field(&s_fields, 0);
-        let s_ytd = get_u32_field(&s_fields, 1);
-        let s_order_cnt = get_u16_field(&s_fields, 2);
-        let s_remote_cnt = get_u16_field(&s_fields, 3);
-        let s_dist_str = get_string_field(&s_fields, 4);
-        let s_data = get_string_field(&s_fields, 5);
-
-        // Update stock quantity
-        if s_quantity >= item.quantity as i16 + 10 {
-            s_quantity -= item.quantity as i16;
-        } else {
-            s_quantity = s_quantity - item.quantity as i16 + 91;
-        }
-
-        // Update stock fields
-        let updates = vec![
-            (stock_fields::S_QUANTITY, Field::Int16(Some(s_quantity))),
-            (
-                stock_fields::S_YTD,
-                Field::Uint32(Some(s_ytd + item.quantity as u32)),
-            ),
-            (
-                stock_fields::S_ORDER_CNT,
-                Field::Uint16(Some(s_order_cnt + 1)),
-            ),
-        ];
-
-        // Add remote count update if needed
-        let final_updates = if item.supply_w_id != input.w_id {
-            let mut u = updates;
-            u.push((
-                stock_fields::S_REMOTE_CNT,
-                Field::Uint16(Some(s_remote_cnt + 1)),
-            ));
-            u
-        } else {
-            updates
-        };
-
-        let res = storage.update_fields(
-            &txn,
-            containers.stock_cid,
-            s_key,
-            final_updates,
-            Some(s_hint),
         );
         if not_successful(&res) {
             return (helper.kill(&txn, &res, AbortID::NewOrderUpdateStock), None);

@@ -169,10 +169,10 @@ pub enum DataType {
 }
 
 impl DataType {
-    /// Returns the fixed data size in a normalized key (excluding the 1-byte null indicator).
-    /// Returns `None` for variable-length types (String, VarBytes).
+    /// Returns the fixed-width payload size for this type, excluding any
+    /// encoding-specific markers or prefixes.
     #[inline]
-    pub const fn normalized_key_data_size(&self) -> Option<usize> {
+    const fn fixed_width_payload_size(&self) -> Option<usize> {
         match self {
             DataType::Bool | DataType::Int8 | DataType::Uint8 => Some(1),
             DataType::Int16 | DataType::Uint16 => Some(2),
@@ -190,6 +190,27 @@ impl DataType {
             DataType::FixedBytes16 => Some(16),
             DataType::FixedBytes24 => Some(24),
             DataType::String | DataType::VarBytes => None,
+        }
+    }
+
+    /// Returns the total encoded size of a non-null fixed-width field in
+    /// normalized-key format, including the 1-byte null indicator.
+    #[inline]
+    pub const fn normalized_key_field_size(&self) -> Option<usize> {
+        match self.fixed_width_payload_size() {
+            Some(size) => Some(1 + size),
+            None => None,
+        }
+    }
+
+    /// Returns the total encoded size of a non-null fixed-width field in
+    /// record-value format, including the null indicator only for nullable
+    /// columns.
+    #[inline]
+    pub const fn record_value_field_size(&self, is_nullable: bool) -> Option<usize> {
+        match self.fixed_width_payload_size() {
+            Some(size) => Some((if is_nullable { 1 } else { 0 }) + size),
+            None => None,
         }
     }
 
@@ -858,52 +879,206 @@ pub fn to_normalized_key(fields: &[Field], key_indexes: &[(usize, bool, bool)]) 
     key
 }
 
-/// Pre-computed byte range (offset, length) for a field in a normalized key.
-/// Length includes the 1-byte null indicator + the data bytes.
+/// Pre-computed byte range (offset, length) for a fixed-layout encoded field.
 pub type NormalizedKeyFieldRange = (usize, usize);
 
 /// Pre-compute the byte offset and total length of each key column in a
-/// normalized key, given the data types of the key columns (in key order).
+/// normalized key, given the nullability and type of each key column in key
+/// order.
 ///
 /// The normalized key layout for fixed-width fields is:
 ///   [1-byte null indicator][N data bytes]  for each column, laid out sequentially.
 ///
-/// Returns `None` if any column is variable-width (String/VarBytes), since
-/// their offsets depend on runtime data.
-pub fn precompute_normalized_key_field_ranges(
-    key_col_types: &[DataType],
-) -> Option<Vec<NormalizedKeyFieldRange>> {
-    let mut ranges = Vec::with_capacity(key_col_types.len());
+/// Returns `None` if any column is variable-width or nullable, since their
+/// offsets depend on runtime data.
+pub fn precompute_normalized_key_field_ranges<I>(
+    key_cols: I,
+) -> Option<Vec<NormalizedKeyFieldRange>>
+where
+    I: IntoIterator<Item = (bool, DataType)>,
+    I::IntoIter: std::iter::ExactSizeIterator,
+{
+    let key_cols = key_cols.into_iter();
+    let mut ranges = Vec::with_capacity(key_cols.len());
     let mut offset = 0;
-    for dt in key_col_types {
-        let data_size = dt.normalized_key_data_size()?;
-        let total = 1 + data_size;
+    for (is_nullable, dt) in key_cols {
+        if is_nullable {
+            return None;
+        }
+        let total = dt.normalized_key_field_size()?;
         ranges.push((offset, total));
         offset += total;
     }
     Some(ranges)
 }
 
-/// Extract primary key bytes from a secondary normalized key by copying the
-/// relevant byte ranges directly, without deserializing to Field.
-///
-/// - `sec_key_bytes`: the full secondary normalized key bytes
-/// - `pk_col_indices`: which secondary key columns form the primary key
-///   (indices into the key column order, not schema column indices)
-/// - `field_ranges`: pre-computed from `precompute_normalized_key_field_ranges`
-#[inline]
-pub fn extract_pk_from_normalized_key(
-    sec_key_bytes: &[u8],
-    pk_col_indices: &[usize],
-    field_ranges: &[NormalizedKeyFieldRange],
-) -> Vec<u8> {
-    let total_len: usize = pk_col_indices.iter().map(|&i| field_ranges[i].1).sum();
-    let mut pk_bytes = Vec::with_capacity(total_len);
-    for &i in pk_col_indices {
-        let (offset, len) = field_ranges[i];
-        pk_bytes.extend_from_slice(&sec_key_bytes[offset..offset + len]);
+/// Returns `None` if any value column is variable-width or nullable, since
+/// record-value offsets then depend on runtime data.
+pub fn precompute_value_field_ranges(schema: &Schema) -> Option<Vec<NormalizedKeyFieldRange>> {
+    let mut ranges = Vec::with_capacity(schema.cols().len());
+    let mut offset = 0;
+    for &(is_nullable, dt) in schema.cols() {
+        if is_nullable {
+            return None;
+        }
+        let total = dt.record_value_field_size(false)?;
+        ranges.push((offset, total));
+        offset += total;
     }
-    pk_bytes
+    Some(ranges)
+}
+
+/// Extract only the requested fields from a normalized key via a single linear scan.
+///
+/// `key_col_types` lists the key columns in key order.
+/// `wanted` is a **sorted** slice of key-column indices to extract.
+/// Returns fields in the order they appear in `wanted`.
+///
+/// Assumes secondary-key conventions: `asc = true`, `null_first = false`.
+pub fn fields_from_normalized_key_projected(
+    key_bytes: &[u8],
+    key_col_types: &[(usize, DataType)],
+    wanted: &[usize],
+) -> Vec<Field> {
+    if wanted.is_empty() {
+        return Vec::new();
+    }
+
+    let num_cols = key_col_types.len();
+
+    // Count variable-width columns and parse their lengths from the trailer.
+    let num_var = key_col_types
+        .iter()
+        .filter(|(_, dt)| matches!(*dt, DataType::String | DataType::VarBytes))
+        .count();
+
+    // var_lengths[i] = data length for the i-th variable field in key order.
+    let (var_lengths, data_end) = if num_var == 0 {
+        (Vec::new(), key_bytes.len())
+    } else {
+        let var_info_size = num_var * 6; // 2-byte key_idx + 4-byte length each
+        let var_info_start = key_bytes.len() - var_info_size;
+        let mut lengths = Vec::with_capacity(num_var);
+        for i in 0..num_var {
+            let off = var_info_start + i * 6;
+            let len = u32::from_be_bytes(key_bytes[off + 2..off + 6].try_into().unwrap());
+            lengths.push(len as usize);
+        }
+        (lengths, var_info_start - 1) // -1 for separator byte
+    };
+
+    let mut result = Vec::with_capacity(wanted.len());
+    let mut pos: usize = 0;
+    let mut want_idx = 0;
+    let mut var_idx = 0;
+
+    for col in 0..num_cols {
+        if want_idx >= wanted.len() {
+            break;
+        }
+        let dt = key_col_types[col].1;
+        let is_var = matches!(dt, DataType::String | DataType::VarBytes);
+
+        // Null indicator: null_first=false → null = 255
+        let is_null = key_bytes[pos] == 255;
+        pos += 1;
+
+        if col == wanted[want_idx] {
+            // ── Extract this field ──
+            if is_null {
+                result.push(create_null_field(&dt));
+                if is_var {
+                    var_idx += 1;
+                }
+            } else if is_var {
+                let len = var_lengths[var_idx];
+                let data = &key_bytes[pos..pos + len];
+                result.push(match dt {
+                    DataType::String => {
+                        Field::String(Some(String::from_utf8(data.to_vec()).unwrap()))
+                    }
+                    DataType::VarBytes => Field::VarBytes(Some(data.to_vec())),
+                    _ => unreachable!(),
+                });
+                pos += len + 1; // +1 for terminator
+                var_idx += 1;
+            } else {
+                let size = dt.fixed_width_payload_size().unwrap();
+                result.push(decode_fixed_field(&key_bytes[pos..pos + size], dt));
+                pos += size;
+            }
+            want_idx += 1;
+        } else {
+            // ── Skip this field ──
+            if is_null {
+                if is_var {
+                    var_idx += 1;
+                }
+            } else if is_var {
+                pos += var_lengths[var_idx] + 1;
+                var_idx += 1;
+            } else {
+                pos += dt.fixed_width_payload_size().unwrap();
+            }
+        }
+    }
+
+    debug_assert!(pos <= data_end);
+    result
+}
+
+#[inline]
+pub(crate) fn field_from_normalized_key_bytes(bytes: &[u8], data_type: DataType) -> Field {
+    if bytes[0] == 255 {
+        return create_null_field(&data_type);
+    }
+    let payload_size = data_type.fixed_width_payload_size().unwrap();
+    decode_fixed_field(&bytes[1..1 + payload_size], data_type)
+}
+
+/// Decode a fixed-width field from raw normalized-key data bytes (asc=true).
+#[inline]
+fn decode_fixed_field(data: &[u8], dt: DataType) -> Field {
+    match dt {
+        DataType::Bool => Field::Bool(Some(data[0] != 0)),
+        DataType::Int8 => Field::Int8(Some(i8::from_be_bytes(data.try_into().unwrap()))),
+        DataType::Int16 => Field::Int16(Some(i16::from_be_bytes(data.try_into().unwrap()))),
+        DataType::Int32 => Field::Int32(Some(i32::from_be_bytes(data.try_into().unwrap()))),
+        DataType::Int64 => Field::Int64(Some(i64::from_be_bytes(data.try_into().unwrap()))),
+        DataType::Uint8 => Field::Uint8(Some(u8::from_be_bytes(data.try_into().unwrap()))),
+        DataType::Uint16 => Field::Uint16(Some(u16::from_be_bytes(data.try_into().unwrap()))),
+        DataType::Uint32 => Field::Uint32(Some(u32::from_be_bytes(data.try_into().unwrap()))),
+        DataType::Uint64 => Field::Uint64(Some(u64::from_be_bytes(data.try_into().unwrap()))),
+        DataType::Float32 => Field::Float32(Some(f32_from_order_preserving_bytes(
+            data.try_into().unwrap(),
+        ))),
+        DataType::Float64 => Field::Float64(Some(f64_from_order_preserving_bytes(
+            data.try_into().unwrap(),
+        ))),
+        DataType::FixedBytes8 => {
+            let mut arr = [0u8; 8];
+            arr.copy_from_slice(data);
+            Field::FixedBytes8(Some(arr))
+        }
+        DataType::FixedBytes16 => {
+            let mut arr = [0u8; 16];
+            arr.copy_from_slice(data);
+            Field::FixedBytes16(Some(arr))
+        }
+        DataType::FixedBytes24 => {
+            let mut arr = [0u8; 24];
+            arr.copy_from_slice(data);
+            Field::FixedBytes24(Some(arr))
+        }
+        DataType::DateTime => {
+            let days = i32::from_be_bytes(data.try_into().unwrap());
+            Field::Date(Some(NaiveDate::from_num_days_from_ce_opt(days).unwrap()))
+        }
+        DataType::Months => Field::Months(Some(i32::from_be_bytes(data.try_into().unwrap()))),
+        DataType::Days => Field::Days(Some(i64::from_be_bytes(data.try_into().unwrap()))),
+        DataType::Pointer => Field::Pointer(Some(RecordHandle::from_bytes(data))),
+        DataType::String | DataType::VarBytes => unreachable!(),
+    }
 }
 
 /// Helper function to decode bytes that were encoded with asc flag
@@ -966,7 +1141,7 @@ fn create_null_field(data_type: &DataType) -> Field {
 }
 
 /// Converts a normalized key back to fields using schema information
-pub fn from_normalized_key(
+fn from_normalized_key(
     normalized_key: &[u8],
     key_indexes: &[(usize, bool, bool)],
     field_types: &[DataType],
@@ -1402,26 +1577,20 @@ impl std::fmt::Display for Record {
 // ========================================================================
 
 #[inline(always)]
-pub fn key_to_bytes(key: &[Field]) -> Vec<u8> {
-    to_normalized_key(
-        key,
-        &key.iter()
-            .enumerate()
-            .map(|(i, _)| (i, true, false))
-            .collect::<Vec<_>>(),
-    )
+/// Encode fields into normalized key bytes.
+/// If `key_indices` is empty, all fields are treated as key columns.
+pub fn record_to_key_bytes(record: &[Field], key_indices: &[usize]) -> Vec<u8> {
+    let indices: Vec<(usize, bool, bool)> = if key_indices.is_empty() {
+        (0..record.len()).map(|i| (i, true, false)).collect()
+    } else {
+        key_indices.iter().map(|&i| (i, true, false)).collect()
+    };
+    to_normalized_key(record, &indices)
 }
 
-#[inline(always)]
-pub fn record_to_key_bytes(record: &[Field], schema: &Schema) -> Vec<u8> {
-    to_normalized_key(
-        &record,
-        &schema
-            .key_indices()
-            .iter()
-            .map(|&i| (i, true, false))
-            .collect::<Vec<_>>(),
-    )
+/// Shorthand: encode all fields as key columns.
+pub fn key_to_bytes(fields: &[Field]) -> Vec<u8> {
+    record_to_key_bytes(fields, &[])
 }
 
 #[inline(always)]
@@ -1436,7 +1605,7 @@ pub fn record_to_bytes(record: &[Field], schema: &Schema) -> Vec<u8> {
 }
 
 #[inline(always)]
-pub fn bytes_to_record(bytes: &[u8], schema: &Schema) -> Vec<Field> {
+fn bytes_to_record(bytes: &[u8], schema: &Schema) -> Vec<Field> {
     let mut all_fields = Vec::with_capacity(schema.cols().len());
     let mut offset = 0;
 
@@ -1466,22 +1635,22 @@ pub fn bytes_to_record(bytes: &[u8], schema: &Schema) -> Vec<Field> {
 /// constructing a `Field` object. Used by `bytes_to_record_projected` to skip
 /// over non-projected columns cheaply.
 #[inline(always)]
-fn skip_field_bytes(bytes: &[u8], is_nullable: bool, data_type: DataType) -> usize {
+pub fn skip_field_bytes(bytes: &[u8], is_nullable: bool, data_type: DataType) -> usize {
     if is_nullable {
         if bytes[0] == 0 {
             return 1; // null: just the indicator byte
         }
         // non-null: 1 indicator byte + data
-        1 + match data_type.normalized_key_data_size() {
+        match data_type.record_value_field_size(true) {
             Some(size) => size,
             None => {
                 // Variable-width: read 4-byte LE length prefix after the null indicator
                 let len = u32::from_le_bytes(bytes[1..5].try_into().unwrap()) as usize;
-                4 + len
+                1 + 4 + len
             }
         }
     } else {
-        match data_type.normalized_key_data_size() {
+        match data_type.record_value_field_size(false) {
             Some(size) => size,
             None => {
                 // Variable-width: read 4-byte LE length prefix
@@ -1490,84 +1659,6 @@ fn skip_field_bytes(bytes: &[u8], is_nullable: bool, data_type: DataType) -> usi
             }
         }
     }
-}
-
-/// Pre-computed projection plan. Sorts column indices for sequential byte scan
-/// and tracks the mapping back to the caller's original order. Computed once at
-/// scan setup time, reused for every row.
-pub struct SortedProjection {
-    /// Column indices sorted ascending (for sequential byte scan).
-    pub sorted_cols: Vec<usize>,
-    /// Maps each position in sorted_cols to its position in the output vec.
-    unsort_map: Vec<usize>,
-}
-
-impl SortedProjection {
-    pub fn new(projected_cols: &[usize]) -> Self {
-        // (schema_col_idx, original_output_position)
-        let mut indexed: Vec<(usize, usize)> = projected_cols
-            .iter()
-            .enumerate()
-            .map(|(pos, &col)| (col, pos))
-            .collect();
-        indexed.sort_unstable_by_key(|&(col, _)| col);
-        indexed.dedup_by_key(|entry| entry.0);
-
-        let sorted_cols = indexed.iter().map(|&(col, _)| col).collect();
-        let unsort_map = indexed.iter().map(|&(_, pos)| pos).collect();
-
-        SortedProjection {
-            sorted_cols,
-            unsort_map,
-        }
-    }
-
-    #[inline]
-    pub fn len(&self) -> usize {
-        self.sorted_cols.len()
-    }
-}
-
-/// Deserialize only the projected columns from a record's byte representation.
-/// Uses a pre-computed `SortedProjection` to scan bytes sequentially, skipping
-/// non-projected columns without allocation. Returns fields in the caller's
-/// original column order.
-#[inline(always)]
-pub fn bytes_to_record_projected(
-    bytes: &[u8],
-    schema: &Schema,
-    projection: &SortedProjection,
-) -> Vec<Field> {
-    if projection.sorted_cols.is_empty() {
-        return Vec::new();
-    }
-
-    let n = projection.len();
-    let mut result: Vec<Field> = Vec::with_capacity(n);
-    // Pre-fill so we can write to arbitrary positions via unsort_map.
-    unsafe { result.set_len(n) };
-
-    let mut offset = 0;
-    let mut proj_idx = 0;
-
-    for (col_idx, &(is_nullable, data_type)) in schema.cols().iter().enumerate() {
-        if projection.sorted_cols[proj_idx] == col_idx {
-            let field = Field::from_bytes(&bytes[offset..], is_nullable, data_type);
-            offset += field.size(is_nullable);
-            // Write to the caller's expected output position.
-            let out_pos = projection.unsort_map[proj_idx];
-            // Safety: out_pos < n, and each position is written exactly once.
-            unsafe { std::ptr::write(result.as_mut_ptr().add(out_pos), field) };
-            proj_idx += 1;
-            if proj_idx >= n {
-                break;
-            }
-        } else {
-            offset += skip_field_bytes(&bytes[offset..], is_nullable, data_type);
-        }
-    }
-
-    result
 }
 
 #[cfg(test)]

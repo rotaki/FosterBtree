@@ -12,12 +12,7 @@ use crate::{
     bp::{ContainerId, ContainerKey, DatabaseId, FrameReadGuard, MemPool, PageFrameKey},
     txn_storage::locktable::ConcurrentLockTable as LockTable,
     txn_storage2::{
-        field::{
-            bytes_to_record, bytes_to_record_projected, extract_pk_from_normalized_key,
-            from_normalized_key, key_to_bytes, precompute_normalized_key_field_ranges,
-            record_to_bytes, record_to_key_bytes, DataType, Field, Record, RecordHandle,
-            SortedProjection,
-        },
+        field::{key_to_bytes, record_to_key_bytes, DataType, Field, Record, RecordHandle},
         field_level_storage_trait::{
             ContainerDS, ContainerOptions, ContainerType, DBOptions, FieldLeveLStorageTrait,
             ScanOptions, TxnOptions, TxnStorageStatus,
@@ -211,9 +206,36 @@ struct ContainerInfo<M: MemPool> {
 }
 
 impl<M: MemPool> ContainerInfo<M> {
-    /// Serialize primary record value: full field-level encoding.
-    fn serialize_primary_value(&self, record: &[Field]) -> Vec<u8> {
-        record_to_bytes(record, self.options.schema())
+    /// Encode record fields into normalized key bytes.
+    fn to_key_bytes(&self, record: &[Field]) -> Vec<u8> {
+        match self.options.container_type() {
+            ContainerType::Primary { schema, .. } => {
+                record_to_key_bytes(record, schema.key_indices())
+            }
+            ContainerType::Secondary { .. } => record_to_key_bytes(record, &[]),
+        }
+    }
+
+    fn fields_from_key(&self, key_bytes: &[u8], wanted: &[usize]) -> Vec<Field> {
+        self.options
+            .container_type()
+            .fields_from_key(key_bytes, wanted)
+    }
+
+    fn fields_from_value(&self, value_bytes: &[u8], cols: &[usize]) -> Vec<Field> {
+        self.options
+            .container_type()
+            .fields_from_value(value_bytes, cols)
+    }
+
+    fn extract_primary_key_from_sec_key(&self, key_bytes: &[u8]) -> Vec<u8> {
+        self.options
+            .container_type()
+            .extract_primary_key_from_sec_key(key_bytes)
+    }
+
+    fn fields_to_value(&self, fields: &[Field]) -> Vec<u8> {
+        self.options.container_type().fields_to_value(fields)
     }
 
     /// Serialize secondary index value: just the 8-byte pointer to the primary
@@ -319,7 +341,7 @@ impl<M: MemPool> ContainerInfo<M> {
                         }
                         let value = match self.options.container_type() {
                             ContainerType::Secondary { .. } => self.serialize_secondary_value(None),
-                            ContainerType::Primary => self.serialize_primary_value(record),
+                            ContainerType::Primary { .. } => self.fields_to_value(record),
                         };
                         self.btree
                             .update_at_slot_or_split(&mut page, slot_id, key, &value);
@@ -419,66 +441,57 @@ impl<M: MemPool> TransactionalStorage<M> {
     }
 
     /// Secondary index scan with batch prefetch + hint repair.
-    /// Secondary values store only the 8-byte primary hint.
+    ///
+    /// Per page: (1) prefetch primary pages, (2) process entries, (3) batch hint repairs.
     fn iter_for_each_fields_secondary_impl(
         &self,
         txn: &TxnHandle,
         iter: &TxnIterator<M>,
         sec_container: &ContainerInfo<M>,
         primary_c_id: ContainerId,
-        primary_key_col_indices: &[usize],
-        sec_to_pri_col_map: &[usize],
         f: &mut dyn FnMut(&[Field], RecordHandle) -> bool,
     ) -> Result<u64, TxnStorageStatus> {
         let pri_container = self.get_container(primary_c_id)?;
-        let pri_schema = pri_container.options.schema();
-        let sec_schema = sec_container.options.schema();
-        // Pre-create both rwsets so that subsequent get_or_create_rwset calls
-        // don't trigger a HashMap resize that would invalidate references.
+
+        let ContainerType::Secondary { key_col_types, .. } = sec_container.options.container_type()
+        else {
+            unreachable!()
+        };
+
+        // Pre-create both rwsets to avoid HashMap resize invalidating references.
         txn.get_or_create_rwset(iter.c_id);
         txn.get_or_create_rwset(primary_c_id);
         let sec_rwset = txn.get_or_create_rwset(iter.c_id);
         let pri_rwset = txn.get_or_create_rwset(primary_c_id);
 
-        // Pre-compute from_normalized_key args for recovering key fields from
-        // the secondary B-tree key bytes.
-        let sec_key_indexes: Vec<(usize, bool, bool)> = sec_schema
-            .key_indices()
-            .iter()
-            .map(|&i| (i, true, false))
-            .collect();
-        let sec_field_types: Vec<DataType> = sec_schema.cols().iter().map(|&(_, dt)| dt).collect();
-
-        // Pre-compute byte ranges for extracting PK directly from the
-        // secondary normalized key (avoids Field deserialization round-trip).
-        let sec_key_col_types: Vec<DataType> = sec_schema
-            .key_indices()
-            .iter()
-            .map(|&i| sec_schema.cols()[i].1)
-            .collect();
-        let pk_field_ranges = precompute_normalized_key_field_ranges(&sec_key_col_types);
-
-        let mut output_cols = Vec::with_capacity(iter.options.cols.len());
-        let mut pri_only_cols = Vec::new();
+        // For each requested column, determine if it's in the secondary key.
+        // sec_col_map[i] = Some(sec_key_pos) if col i is in the secondary key.
+        let mut sec_col_map: Vec<Option<usize>> = Vec::with_capacity(iter.options.cols.len());
+        let mut sec_wanted: Vec<usize> = Vec::new();
+        let mut pri_only_cols: Vec<usize> = Vec::new();
         for &pri_col in &iter.options.cols {
-            if let Some(sec_col) = sec_to_pri_col_map.iter().position(|&sec| sec == pri_col) {
-                output_cols.push((true, sec_col));
+            if let Some(sec_pos) = key_col_types.iter().position(|&(col, _)| col == pri_col) {
+                sec_col_map.push(Some(sec_pos));
+                sec_wanted.push(sec_pos);
             } else {
-                output_cols.push((false, pri_only_cols.len()));
+                sec_col_map.push(None);
                 pri_only_cols.push(pri_col);
             }
         }
+        sec_wanted.sort();
+        sec_wanted.dedup();
         let need_primary = !pri_only_cols.is_empty();
-        let projection = SortedProjection::new(&pri_only_cols);
 
+        // ── Scan ───────────────────────────────────────────────────────────
         let mut count: u64 = 0;
         let mut err: Option<TxnStorageStatus> = None;
         let mut repairs: Vec<(u32, [u8; 8])> = Vec::new();
         let mut stopped = false;
+        let mut output: Vec<Field> = Vec::with_capacity(sec_col_map.len());
 
         iter.scanner
             .for_each_page(|page, start_slot, end_slot, last_page| {
-                // Phase 1: Prefetch primary pages for the batch.
+                // Phase 1: Prefetch primary pages.
                 for slot in start_slot..end_slot {
                     let value_bytes = page.get_val(slot);
                     if value_bytes.len() == 8 {
@@ -489,56 +502,41 @@ impl<M: MemPool> TransactionalStorage<M> {
                     }
                 }
 
-                // Phase 2: Process entries — secondary rwset, primary read, closure.
+                // Phase 2: Process each entry.
                 for slot in start_slot..end_slot {
                     let key_bytes = page.get_raw_key(slot);
                     let value_bytes = page.get_val(slot);
-                    let stored_ptr = RecordHandle::from_bytes(value_bytes);
+                    let primary_hint = RecordHandle::from_bytes(value_bytes);
+                    let sec_ptr = RecordHandle::new(page.page().get_id(), page.frame_id());
 
+                    // Lock secondary key in rwset.
                     if sec_rwset.get(key_bytes).is_none() {
-                        let locktable = &sec_container.locktable;
-                        if !locktable.try_shared(key_bytes.to_vec()) {
+                        if !sec_container.locktable.try_shared(key_bytes.to_vec()) {
                             err = Some(TxnStorageStatus::TxnConflict);
                             stopped = true;
                             break;
                         }
-                        sec_rwset.insert(key_bytes.to_vec(), RWEntry::Read(stored_ptr, false));
+                        sec_rwset.insert(key_bytes.to_vec(), RWEntry::Read(sec_ptr, false));
                     } else if matches!(sec_rwset.get(key_bytes), Some(RWEntry::Delete(_, _))) {
                         continue;
                     }
 
-                    let key_fields =
-                        from_normalized_key(key_bytes, &sec_key_indexes, &sec_field_types).unwrap();
-
+                    // Dereference primary record if needed.
                     let (pri_val_fields, actual_ptr) = if need_primary {
-                        let primary_key_bytes = if let Some(ref ranges) = pk_field_ranges {
-                            extract_pk_from_normalized_key(
-                                key_bytes,
-                                primary_key_col_indices,
-                                ranges,
-                            )
-                        } else {
-                            let pk_fields: Vec<Field> = primary_key_col_indices
-                                .iter()
-                                .map(|&i| key_fields[i].clone())
-                                .collect();
-                            key_to_bytes(&pk_fields)
-                        };
+                        let primary_key_bytes =
+                            sec_container.extract_primary_key_from_sec_key(key_bytes);
 
                         match pri_rwset.get(&primary_key_bytes) {
                             Some(RWEntry::Delete(_, _)) => continue,
                             Some(RWEntry::Update(fields, ptr, _))
                             | Some(RWEntry::Insert(fields, ptr, _)) => (
-                                pri_only_cols
-                                    .iter()
-                                    .map(|&idx| fields[idx].clone())
-                                    .collect(),
+                                pri_only_cols.iter().map(|&i| fields[i].clone()).collect(),
                                 *ptr,
                             ),
                             entry => {
                                 let hint = match entry {
                                     Some(RWEntry::Read(ptr, _)) => *ptr,
-                                    _ => stored_ptr,
+                                    _ => primary_hint,
                                 };
                                 let pri_page =
                                     pri_container.btree.traverse_to_leaf_for_read_with_hint(
@@ -552,6 +550,8 @@ impl<M: MemPool> TransactionalStorage<M> {
                                 let slot_id = pri_page
                                     .upper_bound_slot_id(&BTreeKey::new(&primary_key_bytes))
                                     - 1;
+
+                                // First time seeing this key — validate and lock.
                                 if entry.is_none() {
                                     if slot_id == 0
                                         || pri_page.get_raw_key(slot_id) != primary_key_bytes
@@ -572,30 +572,32 @@ impl<M: MemPool> TransactionalStorage<M> {
                                         primary_key_bytes.clone(),
                                         RWEntry::Read(actual, false),
                                     );
-                                    if stored_ptr != actual {
+                                    if primary_hint != actual {
                                         repairs.push((slot, actual.to_bytes()));
                                     }
                                 }
 
-                                let fields = bytes_to_record_projected(
-                                    pri_page.get_val(slot_id),
-                                    pri_schema,
-                                    &projection,
-                                );
+                                let fields = pri_container
+                                    .fields_from_value(pri_page.get_val(slot_id), &pri_only_cols);
                                 (fields, actual)
                             }
                         }
                     } else {
-                        (vec![], stored_ptr)
+                        (vec![], primary_hint)
                     };
 
-                    let output: Vec<Field> = output_cols
-                        .iter()
-                        .map(|(from_secondary, idx)| match from_secondary {
-                            true => key_fields[*idx].clone(),
-                            false => pri_val_fields[*idx].clone(),
-                        })
-                        .collect();
+                    // Assemble output from secondary key fields + primary value fields.
+                    let sec_fields = sec_container.fields_from_key(key_bytes, &sec_wanted);
+                    output.clear();
+                    let mut pri_idx = 0;
+                    for sec_pos in &sec_col_map {
+                        if let Some(pos) = sec_pos {
+                            output.push(sec_fields[sec_wanted.binary_search(pos).unwrap()].clone());
+                        } else {
+                            output.push(pri_val_fields[pri_idx].clone());
+                            pri_idx += 1;
+                        }
+                    }
 
                     count += 1;
                     if !f(&output, actual_ptr) {
@@ -604,12 +606,11 @@ impl<M: MemPool> TransactionalStorage<M> {
                     }
                 }
 
-                // Phantom protection: lock the boundary key on the last page.
+                // Phantom protection: lock boundary key on last page.
                 if last_page && err.is_none() && !stopped {
                     let boundary_key = page.get_raw_key(end_slot);
                     if sec_rwset.get(boundary_key).is_none() {
-                        let locktable = &sec_container.locktable;
-                        if !locktable.try_shared(boundary_key.to_vec()) {
+                        if !sec_container.locktable.try_shared(boundary_key.to_vec()) {
                             err = Some(TxnStorageStatus::TxnConflict);
                             stopped = true;
                         } else {
@@ -622,7 +623,7 @@ impl<M: MemPool> TransactionalStorage<M> {
                     iter.finish();
                 }
 
-                // Phase 3: Apply batched hint repairs via single try_upgrade.
+                // Phase 3: Batch hint repairs via single try_upgrade.
                 let should_continue = !stopped && err.is_none();
                 if repairs.is_empty() {
                     return (page, should_continue);
@@ -737,13 +738,6 @@ impl<M: MemPool> FieldLeveLStorageTrait for TransactionalStorage<M> {
             return Err(TxnStorageStatus::AbortFailed);
         }
 
-        // For secondary containers, derive the schema from the primary.
-        let mut options = options;
-        if let ContainerType::Secondary { primary_c_id, .. } = options.container_type() {
-            let pri_schema = self.get_container(*primary_c_id)?.options.schema().clone();
-            options.resolve_secondary_schema(&pri_schema);
-        }
-
         unsafe {
             let c_id = *self.next_container_id.get();
             *self.next_container_id.get() += 1;
@@ -802,8 +796,8 @@ impl<M: MemPool> FieldLeveLStorageTrait for TransactionalStorage<M> {
         record: Record,
     ) -> Result<RecordHandle, TxnStorageStatus> {
         let container = self.get_container(c_id)?;
-        let key_bytes = record_to_key_bytes(&record.fields, container.options.schema());
-        let value_bytes = container.serialize_primary_value(&record.fields);
+        let key_bytes = container.to_key_bytes(&record.fields);
+        let value_bytes = container.fields_to_value(&record.fields);
 
         // Directly insert into the container without any locking or transaction tracking
         let pointer = container
@@ -824,7 +818,7 @@ impl<M: MemPool> FieldLeveLStorageTrait for TransactionalStorage<M> {
         primary_hint: RecordHandle,
     ) -> Result<RecordHandle, TxnStorageStatus> {
         let container = self.get_container(c_id)?;
-        let key_bytes = record_to_key_bytes(&record.fields, container.options.schema());
+        let key_bytes = container.to_key_bytes(&record.fields);
         let value_bytes = container.serialize_secondary_value(Some(primary_hint));
 
         let pointer = container
@@ -979,12 +973,10 @@ impl<M: MemPool> FieldLeveLStorageTrait for TransactionalStorage<M> {
                         panic!("Key should exist in storage if in rwset");
                     }
                     *ptr = RecordHandle::new(page.page().get_id(), page.frame_id());
-                    let record = bytes_to_record(page.get_val(slot_id), container.options.schema());
-                    let fields = col_indices.iter().map(|&idx| record[idx].clone()).collect();
+                    let fields = container.fields_from_value(page.get_val(slot_id), col_indices);
                     Ok((fields, *ptr))
                 }
                 RWEntry::Update(fields, ptr, _) | RWEntry::Insert(fields, ptr, _) => {
-                    // Return the fields directly from rwset
                     let result = col_indices.iter().map(|&idx| fields[idx].clone()).collect();
                     Ok((result, *ptr))
                 }
@@ -1001,15 +993,12 @@ impl<M: MemPool> FieldLeveLStorageTrait for TransactionalStorage<M> {
             if slot_id == 0 || page.get_raw_key(slot_id) != key_bytes {
                 Err(TxnStorageStatus::KeyNotFound)
             } else {
-                // Lock the key
                 if !locktable.try_shared(key_bytes.clone()) {
                     return Err(TxnStorageStatus::TxnConflict);
                 }
-                // Insert into rwset as a read entry
                 let ptr = RecordHandle::new(page.page().get_id(), page.frame_id());
-                let record = bytes_to_record(page.get_val(slot_id), container.options.schema());
+                let fields = container.fields_from_value(page.get_val(slot_id), col_indices);
                 rwset.insert(key_bytes.clone(), RWEntry::Read(ptr, false));
-                let fields = col_indices.iter().map(|&idx| record[idx].clone()).collect();
                 Ok((fields, ptr))
             }
         }
@@ -1062,8 +1051,7 @@ impl<M: MemPool> FieldLeveLStorageTrait for TransactionalStorage<M> {
                         return Err(TxnStorageStatus::TxnConflict);
                     }
 
-                    let mut record =
-                        bytes_to_record(page.get_val(slot_id), container.options.schema());
+                    let mut record = container.fields_from_value(page.get_val(slot_id), &[]);
                     fields.into_iter().for_each(|(idx, new_field)| {
                         record[idx] = new_field;
                     });
@@ -1104,7 +1092,7 @@ impl<M: MemPool> FieldLeveLStorageTrait for TransactionalStorage<M> {
                 }
                 // Insert into rwset
                 let ptr = RecordHandle::new(page.page().get_id(), page.frame_id());
-                let mut record = bytes_to_record(page.get_val(slot_id), container.options.schema());
+                let mut record = container.fields_from_value(page.get_val(slot_id), &[]);
                 // Update fields
                 fields.into_iter().for_each(|(idx, new_field)| {
                     record[idx] = new_field;
@@ -1150,8 +1138,7 @@ impl<M: MemPool> FieldLeveLStorageTrait for TransactionalStorage<M> {
                     if !locktable.try_upgrade(key_bytes.clone()) {
                         return Err(TxnStorageStatus::TxnConflict);
                     }
-                    let mut record =
-                        bytes_to_record(page.get_val(slot_id), container.options.schema());
+                    let mut record = container.fields_from_value(page.get_val(slot_id), &[]);
                     func(&mut record[col_idx]);
                     *e = RWEntry::Update(record, ptr, *ghost);
                     Ok(ptr)
@@ -1184,9 +1171,101 @@ impl<M: MemPool> FieldLeveLStorageTrait for TransactionalStorage<M> {
                 }
                 // Insert into rwset
                 let ptr = RecordHandle::new(page.page().get_id(), page.frame_id());
-                let mut record = bytes_to_record(page.get_val(slot_id), container.options.schema());
+                let mut record = container.fields_from_value(page.get_val(slot_id), &[]);
                 // Update fields
                 func(&mut record[col_idx]);
+                rwset.insert(
+                    key_bytes.clone(),
+                    RWEntry::Update(record.clone(), ptr, false),
+                );
+                Ok(ptr)
+            }
+        }
+    }
+
+    fn update_fields_with_func<F: FnOnce(&mut [Field])>(
+        &self,
+        txn: &Self::TxnHandle,
+        c_id: ContainerId,
+        key: Vec<Field>,
+        col_indices: &[usize],
+        func: F,
+        hint: Option<RecordHandle>,
+    ) -> Result<RecordHandle, TxnStorageStatus> {
+        // Helper: swap selected fields out of record, call func, swap back.
+        // Placeholder used during swap; never observed outside this function.
+        const PLACEHOLDER: Field = Field::Bool(None);
+
+        #[inline]
+        fn apply_func<F2: FnOnce(&mut [Field])>(
+            record: &mut Vec<Field>,
+            col_indices: &[usize],
+            func: F2,
+        ) {
+            let mut selected: Vec<Field> = col_indices
+                .iter()
+                .map(|&i| std::mem::replace(&mut record[i], PLACEHOLDER))
+                .collect();
+            func(&mut selected);
+            for (j, &i) in col_indices.iter().enumerate() {
+                record[i] = std::mem::replace(&mut selected[j], PLACEHOLDER);
+            }
+        }
+
+        let rwset = txn.get_or_create_rwset(c_id);
+        let container = self.get_container(c_id)?;
+        let key_bytes = key_to_bytes(&key);
+
+        if let Some(e) = rwset.get_mut(&key_bytes) {
+            match e {
+                RWEntry::Delete(_, _) => Err(TxnStorageStatus::KeyNotFound),
+                RWEntry::Read(ptr, ghost) => {
+                    let page = container.btree.traverse_to_leaf_for_read_with_hint(
+                        &key_bytes,
+                        container.hint_to_page_frame_key(Some(*ptr)),
+                    );
+                    let slot_id = page.upper_bound_slot_id(&BTreeKey::new(&key_bytes)) - 1;
+                    if slot_id == 0 || page.get_raw_key(slot_id) != key_bytes {
+                        panic!("Key should exist in storage if in rwset");
+                    }
+
+                    let ptr = *ptr;
+                    let locktable = &container.locktable;
+                    if !locktable.try_upgrade(key_bytes.clone()) {
+                        return Err(TxnStorageStatus::TxnConflict);
+                    }
+                    let mut record = container.fields_from_value(page.get_val(slot_id), &[]);
+                    apply_func(&mut record, col_indices, func);
+                    *e = RWEntry::Update(record, ptr, *ghost);
+                    Ok(ptr)
+                }
+                RWEntry::Update(record, ptr, _) => {
+                    apply_func(record, col_indices, func);
+                    Ok(*ptr)
+                }
+                RWEntry::Insert(record, ptr, ghost) => {
+                    let ptr = *ptr;
+                    apply_func(record, col_indices, func);
+                    *e = RWEntry::Update(record.clone(), ptr, *ghost);
+                    Ok(ptr)
+                }
+            }
+        } else {
+            let locktable = &container.locktable;
+            let page = container.btree.traverse_to_leaf_for_read_with_hint(
+                &key_bytes,
+                container.hint_to_page_frame_key(hint),
+            );
+            let slot_id = page.upper_bound_slot_id(&BTreeKey::new(&key_bytes)) - 1;
+            if slot_id == 0 || page.get_raw_key(slot_id) != key_bytes {
+                Err(TxnStorageStatus::KeyNotFound)
+            } else {
+                if !locktable.try_exclusive(key_bytes.clone()) {
+                    return Err(TxnStorageStatus::TxnConflict);
+                }
+                let ptr = RecordHandle::new(page.page().get_id(), page.frame_id());
+                let mut record = container.fields_from_value(page.get_val(slot_id), &[]);
+                apply_func(&mut record, col_indices, func);
                 rwset.insert(
                     key_bytes.clone(),
                     RWEntry::Update(record.clone(), ptr, false),
@@ -1209,7 +1288,7 @@ impl<M: MemPool> FieldLeveLStorageTrait for TransactionalStorage<M> {
     ) -> Result<RecordHandle, TxnStorageStatus> {
         let rwset = txn.get_or_create_rwset(c_id);
         let container = self.get_container(c_id)?;
-        let key_bytes = record_to_key_bytes(&record.fields, container.options.schema());
+        let key_bytes = container.to_key_bytes(&record.fields);
 
         // Check if key already exists in rwset
         if let Some(entry) = rwset.get_mut(&key_bytes) {
@@ -1230,7 +1309,7 @@ impl<M: MemPool> FieldLeveLStorageTrait for TransactionalStorage<M> {
                     // hint = primary record pointer (for value), not a secondary B-tree hint
                     (container.serialize_secondary_value(hint), None)
                 }
-                ContainerType::Primary => (container.serialize_primary_value(&record.fields), hint),
+                ContainerType::Primary { .. } => (container.fields_to_value(&record.fields), hint),
             };
             let mut page = container.btree.traverse_to_leaf_for_write_with_hint(
                 &key_bytes,
@@ -1495,25 +1574,18 @@ impl<M: MemPool> FieldLeveLStorageTrait for TransactionalStorage<M> {
 
         // If this container is a secondary index, use the batch page path
         // with prefetch + hint repair.
-        if let ContainerType::Secondary {
-            primary_c_id,
-            ref primary_key_col_indices,
-            ref secondary_key_columns,
-        } = container.options.container_type()
-        {
+        if let ContainerType::Secondary { primary_c_id, .. } = container.options.container_type() {
             return self.iter_for_each_fields_secondary_impl(
                 txn,
                 iter,
                 container,
                 *primary_c_id,
-                primary_key_col_indices,
-                secondary_key_columns,
                 f,
             );
         }
 
         // Primary container: simple per-entry iteration.
-        let schema = container.options.schema();
+        let cols = &iter.options.cols;
         let rwset = txn.get_or_create_rwset(iter.c_id);
         let mut count: u64 = 0;
         let mut err: Option<TxnStorageStatus> = None;
@@ -1534,11 +1606,13 @@ impl<M: MemPool> FieldLeveLStorageTrait for TransactionalStorage<M> {
             }
 
             // Check rwset
-            let record = if let Some(entry) = rwset.get(key_bytes) {
+            let fields = if let Some(entry) = rwset.get(key_bytes) {
                 match entry {
                     RWEntry::Delete(_, _) => return true, // Skip deleted, continue
-                    RWEntry::Read(..) => bytes_to_record(value_bytes, schema),
-                    RWEntry::Update(record, _, _) | RWEntry::Insert(record, _, _) => record.clone(),
+                    RWEntry::Read(..) => container.fields_from_value(value_bytes, cols),
+                    RWEntry::Update(record, _, _) | RWEntry::Insert(record, _, _) => {
+                        cols.iter().map(|&i| record[i].clone()).collect()
+                    }
                 }
             } else {
                 // Lock the key
@@ -1547,17 +1621,10 @@ impl<M: MemPool> FieldLeveLStorageTrait for TransactionalStorage<M> {
                     err = Some(TxnStorageStatus::TxnConflict);
                     return false;
                 }
-                let record = bytes_to_record(value_bytes, schema);
+                let fields = container.fields_from_value(value_bytes, cols);
                 rwset.insert(key_bytes.to_vec(), RWEntry::Read(ptr, false));
-                record
+                fields
             };
-
-            let fields: Vec<Field> = iter
-                .options
-                .cols
-                .iter()
-                .map(|&i| record[i].clone())
-                .collect();
 
             count += 1;
             f(&fields, ptr)
@@ -1614,7 +1681,7 @@ mod tests {
         let container_id = storage
             .create_container(
                 db_id,
-                ContainerOptions::new("users", ContainerDS::BTree, schema),
+                ContainerOptions::primary("users", ContainerDS::BTree, schema),
             )
             .unwrap();
 
@@ -1675,7 +1742,7 @@ mod tests {
         let container_id = storage
             .create_container(
                 db_id,
-                ContainerOptions::new("test", ContainerDS::BTree, schema),
+                ContainerOptions::primary("test", ContainerDS::BTree, schema),
             )
             .unwrap();
 
@@ -1730,7 +1797,7 @@ mod tests {
         let container_id = storage
             .create_container(
                 db_id,
-                ContainerOptions::new("test", ContainerDS::BTree, schema),
+                ContainerOptions::primary("test", ContainerDS::BTree, schema),
             )
             .unwrap();
 
@@ -1786,7 +1853,7 @@ mod tests {
         let container_id = storage
             .create_container(
                 db_id,
-                ContainerOptions::new("test", ContainerDS::BTree, schema),
+                ContainerOptions::primary("test", ContainerDS::BTree, schema),
             )
             .unwrap();
 
@@ -1866,7 +1933,7 @@ mod tests {
         let container_id = storage
             .create_container(
                 db_id,
-                ContainerOptions::new("test", ContainerDS::BTree, schema),
+                ContainerOptions::primary("test", ContainerDS::BTree, schema),
             )
             .unwrap();
 
@@ -1918,7 +1985,7 @@ mod tests {
         let container_id = storage
             .create_container(
                 db_id,
-                ContainerOptions::new("test", ContainerDS::BTree, schema),
+                ContainerOptions::primary("test", ContainerDS::BTree, schema),
             )
             .unwrap();
 
@@ -2002,7 +2069,7 @@ mod tests {
         let container_id = storage
             .create_container(
                 db_id,
-                ContainerOptions::new("test", ContainerDS::BTree, schema),
+                ContainerOptions::primary("test", ContainerDS::BTree, schema),
             )
             .unwrap();
 
@@ -2065,7 +2132,7 @@ mod tests {
         let container_id = storage
             .create_container(
                 db_id,
-                ContainerOptions::new("test", ContainerDS::BTree, schema),
+                ContainerOptions::primary("test", ContainerDS::BTree, schema),
             )
             .unwrap();
 
@@ -2139,7 +2206,7 @@ mod tests {
         let container_id = storage
             .create_container(
                 db_id,
-                ContainerOptions::new("counters", ContainerDS::BTree, schema),
+                ContainerOptions::primary("counters", ContainerDS::BTree, schema),
             )
             .unwrap();
 
@@ -2213,7 +2280,7 @@ mod tests {
         let container_id = storage
             .create_container(
                 db_id,
-                ContainerOptions::new("test", ContainerDS::BTree, schema),
+                ContainerOptions::primary("test", ContainerDS::BTree, schema),
             )
             .unwrap();
 
@@ -2277,7 +2344,7 @@ mod tests {
         let container_id = storage
             .create_container(
                 db_id,
-                ContainerOptions::new("test", ContainerDS::BTree, schema),
+                ContainerOptions::primary("test", ContainerDS::BTree, schema),
             )
             .unwrap();
 
@@ -2352,7 +2419,7 @@ mod tests {
         let container_id = storage
             .create_container(
                 db_id,
-                ContainerOptions::new("users", ContainerDS::BTree, schema),
+                ContainerOptions::primary("users", ContainerDS::BTree, schema),
             )
             .unwrap();
 
@@ -2414,7 +2481,7 @@ mod tests {
         let container_id = storage
             .create_container(
                 db_id,
-                ContainerOptions::new("test", ContainerDS::BTree, schema),
+                ContainerOptions::primary("test", ContainerDS::BTree, schema),
             )
             .unwrap();
 
@@ -2470,7 +2537,7 @@ mod tests {
         let container_id = storage
             .create_container(
                 db_id,
-                ContainerOptions::new("test", ContainerDS::BTree, schema),
+                ContainerOptions::primary("test", ContainerDS::BTree, schema),
             )
             .unwrap();
 
@@ -2515,7 +2582,7 @@ mod tests {
         let container_id = storage
             .create_container(
                 db_id,
-                ContainerOptions::new("test", ContainerDS::BTree, schema),
+                ContainerOptions::primary("test", ContainerDS::BTree, schema),
             )
             .unwrap();
 
@@ -2597,7 +2664,7 @@ mod tests {
         let container_id = storage
             .create_container(
                 db_id,
-                ContainerOptions::new("test", ContainerDS::BTree, schema),
+                ContainerOptions::primary("test", ContainerDS::BTree, schema),
             )
             .unwrap();
 
@@ -2648,7 +2715,7 @@ mod tests {
         let container_id = storage
             .create_container(
                 db_id,
-                ContainerOptions::new("test", ContainerDS::BTree, schema),
+                ContainerOptions::primary("test", ContainerDS::BTree, schema),
             )
             .unwrap();
 
@@ -2700,7 +2767,7 @@ mod tests {
         let container_id = storage
             .create_container(
                 db_id,
-                ContainerOptions::new("test", ContainerDS::BTree, schema),
+                ContainerOptions::primary("test", ContainerDS::BTree, schema),
             )
             .unwrap();
 
@@ -2989,7 +3056,7 @@ mod tests {
         let container_id = storage
             .create_container(
                 db_id,
-                ContainerOptions::new("test", ContainerDS::BTree, schema),
+                ContainerOptions::primary("test", ContainerDS::BTree, schema),
             )
             .unwrap();
 
@@ -3067,7 +3134,7 @@ mod tests {
         let container_id = storage
             .create_container(
                 db_id,
-                ContainerOptions::new("test", ContainerDS::BTree, schema),
+                ContainerOptions::primary("test", ContainerDS::BTree, schema),
             )
             .unwrap();
 
@@ -3147,7 +3214,7 @@ mod tests {
         let container_id = storage
             .create_container(
                 db_id,
-                ContainerOptions::new("test", ContainerDS::BTree, schema),
+                ContainerOptions::primary("test", ContainerDS::BTree, schema),
             )
             .unwrap();
 
@@ -3229,7 +3296,7 @@ mod tests {
         let container_id = storage
             .create_container(
                 db_id,
-                ContainerOptions::new("test", ContainerDS::BTree, schema),
+                ContainerOptions::primary("test", ContainerDS::BTree, schema),
             )
             .unwrap();
 
@@ -3302,7 +3369,7 @@ mod tests {
         let pri_cid = storage
             .create_container(
                 db_id,
-                ContainerOptions::new("primary", ContainerDS::BTree, pri_schema),
+                ContainerOptions::primary("primary", ContainerDS::BTree, pri_schema),
             )
             .unwrap();
         let sec_cid = storage
@@ -3313,6 +3380,10 @@ mod tests {
                     ContainerDS::BTree,
                     pri_cid,
                     vec![0], // secondary key = primary col 0 (key_id)
+                    &schema!(pk: [0], cols: [
+                        (false, DataType::Int32),
+                        (false, DataType::String),
+                    ]),
                 ),
             )
             .unwrap();
