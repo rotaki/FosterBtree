@@ -460,6 +460,41 @@ impl Field {
         bytes
     }
 
+    /// Write the field's record-value encoding directly into `buf`.
+    /// Same format as `to_bytes` but avoids an intermediate allocation.
+    pub fn write_to(&self, buf: &mut Vec<u8>, is_nullable: bool) {
+        if is_nullable && self.is_null() {
+            buf.push(0);
+            return;
+        }
+        if is_nullable {
+            buf.push(1);
+        }
+        match self {
+            Field::Int8(Some(v)) => buf.extend_from_slice(&v.to_le_bytes()),
+            Field::Int16(Some(v)) => buf.extend_from_slice(&v.to_le_bytes()),
+            Field::Int32(Some(v)) => buf.extend_from_slice(&v.to_le_bytes()),
+            Field::Int64(Some(v)) => buf.extend_from_slice(&v.to_le_bytes()),
+            Field::Uint8(Some(v)) => buf.push(*v),
+            Field::Uint16(Some(v)) => buf.extend_from_slice(&v.to_le_bytes()),
+            Field::Uint32(Some(v)) => buf.extend_from_slice(&v.to_le_bytes()),
+            Field::Uint64(Some(v)) => buf.extend_from_slice(&v.to_le_bytes()),
+            Field::Float32(Some(v)) => buf.extend_from_slice(&v.to_le_bytes()),
+            Field::Float64(Some(v)) => buf.extend_from_slice(&v.to_le_bytes()),
+            Field::String(Some(s)) => Self::serialize_var_length(buf, s.as_bytes()),
+            Field::FixedBytes8(Some(arr)) => buf.extend_from_slice(arr),
+            Field::FixedBytes16(Some(arr)) => buf.extend_from_slice(arr),
+            Field::FixedBytes24(Some(arr)) => buf.extend_from_slice(arr),
+            Field::VarBytes(Some(vec)) => Self::serialize_var_length(buf, vec),
+            Field::Bool(Some(b)) => buf.push(if *b { 1 } else { 0 }),
+            Field::Date(Some(d)) => buf.extend_from_slice(&d.num_days_from_ce().to_le_bytes()),
+            Field::Months(Some(m)) => buf.extend_from_slice(&m.to_le_bytes()),
+            Field::Days(Some(d)) => buf.extend_from_slice(&d.to_le_bytes()),
+            Field::Pointer(Some(p)) => buf.extend_from_slice(&p.to_bytes()),
+            _ => unreachable!("Null check should have been handled above"),
+        }
+    }
+
     pub fn from_bytes(bytes: &[u8], is_nullable: bool, data_type: DataType) -> Self {
         let start_offset = if is_nullable {
             // Check for null indicator
@@ -914,10 +949,12 @@ where
 
 /// Returns `None` if any value column is variable-width or nullable, since
 /// record-value offsets then depend on runtime data.
-pub fn precompute_value_field_ranges(schema: &Schema) -> Option<Vec<NormalizedKeyFieldRange>> {
-    let mut ranges = Vec::with_capacity(schema.cols().len());
+pub fn precompute_value_field_ranges(
+    cols: &[(bool, DataType)],
+) -> Option<Vec<NormalizedKeyFieldRange>> {
+    let mut ranges = Vec::with_capacity(cols.len());
     let mut offset = 0;
-    for &(is_nullable, dt) in schema.cols() {
+    for &(is_nullable, dt) in cols {
         if is_nullable {
             return None;
         }
@@ -1595,11 +1632,10 @@ pub fn key_to_bytes(fields: &[Field]) -> Vec<u8> {
 
 #[inline(always)]
 pub fn record_to_bytes(record: &[Field], schema: &Schema) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(record.len() * 8); // Estimate size
+    let mut bytes = Vec::with_capacity(record.len() * 8);
     for (i, field) in record.iter().enumerate() {
         let (is_nullable, _) = &schema.cols()[i];
-        let field_bytes = field.to_bytes(*is_nullable);
-        bytes.extend_from_slice(&field_bytes);
+        field.write_to(&mut bytes, *is_nullable);
     }
     bytes
 }

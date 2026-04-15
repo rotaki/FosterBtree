@@ -14,8 +14,8 @@ use crate::{
     txn_storage2::{
         field::{key_to_bytes, record_to_key_bytes, DataType, Field, Record, RecordHandle},
         field_level_storage_trait::{
-            ContainerDS, ContainerOptions, ContainerType, DBOptions, FieldLeveLStorageTrait,
-            ScanOptions, TxnOptions, TxnStorageStatus,
+            ColSource, ContainerDS, ContainerOptions, ContainerType, DBOptions,
+            FieldLeveLStorageTrait, ScanOptions, TxnOptions, TxnStorageStatus,
         },
     },
 };
@@ -222,12 +222,6 @@ impl<M: MemPool> ContainerInfo<M> {
             .fields_from_key(key_bytes, wanted)
     }
 
-    fn fields_from_value(&self, value_bytes: &[u8], cols: &[usize]) -> Vec<Field> {
-        self.options
-            .container_type()
-            .fields_from_value(value_bytes, cols)
-    }
-
     fn extract_primary_key_from_sec_key(&self, key_bytes: &[u8]) -> Vec<u8> {
         self.options
             .container_type()
@@ -236,6 +230,12 @@ impl<M: MemPool> ContainerInfo<M> {
 
     fn fields_to_value(&self, fields: &[Field]) -> Vec<u8> {
         self.options.container_type().fields_to_value(fields)
+    }
+
+    fn get_fields(&self, key_bytes: &[u8], value_bytes: &[u8], cols: &[usize]) -> Vec<Field> {
+        self.options
+            .container_type()
+            .get_fields(key_bytes, value_bytes, cols)
     }
 
     /// Serialize secondary index value: just the 8-byte pointer to the primary
@@ -480,7 +480,32 @@ impl<M: MemPool> TransactionalStorage<M> {
         }
         sec_wanted.sort();
         sec_wanted.dedup();
+        // Direct lookup: sec key position → index in fields_from_key result.
+        let sec_pos_to_idx: Vec<usize> = {
+            let max_pos = sec_wanted.last().copied().unwrap_or(0);
+            let mut map = vec![0usize; max_pos + 1];
+            for (i, &pos) in sec_wanted.iter().enumerate() {
+                map[pos] = i;
+            }
+            map
+        };
         let need_primary = !pri_only_cols.is_empty();
+        // Precompute value-position indices for pri_only_cols (always value columns).
+        let pri_val_positions: Vec<usize> = if need_primary {
+            let ContainerType::Primary { col_source, .. } = pri_container.options.container_type()
+            else {
+                unreachable!()
+            };
+            pri_only_cols
+                .iter()
+                .map(|&c| match col_source[c] {
+                    ColSource::Value(pos) => pos,
+                    _ => unreachable!("pri_only_cols should only contain value columns"),
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
 
         // ── Scan ───────────────────────────────────────────────────────────
         let mut count: u64 = 0;
@@ -577,8 +602,11 @@ impl<M: MemPool> TransactionalStorage<M> {
                                     }
                                 }
 
-                                let fields = pri_container
-                                    .fields_from_value(pri_page.get_val(slot_id), &pri_only_cols);
+                                let fields =
+                                    pri_container.options.container_type().fields_from_value(
+                                        pri_page.get_val(slot_id),
+                                        &pri_val_positions,
+                                    );
                                 (fields, actual)
                             }
                         }
@@ -592,7 +620,7 @@ impl<M: MemPool> TransactionalStorage<M> {
                     let mut pri_idx = 0;
                     for sec_pos in &sec_col_map {
                         if let Some(pos) = sec_pos {
-                            output.push(sec_fields[sec_wanted.binary_search(pos).unwrap()].clone());
+                            output.push(sec_fields[sec_pos_to_idx[*pos]].clone());
                         } else {
                             output.push(pri_val_fields[pri_idx].clone());
                             pri_idx += 1;
@@ -973,7 +1001,8 @@ impl<M: MemPool> FieldLeveLStorageTrait for TransactionalStorage<M> {
                         panic!("Key should exist in storage if in rwset");
                     }
                     *ptr = RecordHandle::new(page.page().get_id(), page.frame_id());
-                    let fields = container.fields_from_value(page.get_val(slot_id), col_indices);
+                    let fields =
+                        container.get_fields(&key_bytes, page.get_val(slot_id), col_indices);
                     Ok((fields, *ptr))
                 }
                 RWEntry::Update(fields, ptr, _) | RWEntry::Insert(fields, ptr, _) => {
@@ -997,7 +1026,7 @@ impl<M: MemPool> FieldLeveLStorageTrait for TransactionalStorage<M> {
                     return Err(TxnStorageStatus::TxnConflict);
                 }
                 let ptr = RecordHandle::new(page.page().get_id(), page.frame_id());
-                let fields = container.fields_from_value(page.get_val(slot_id), col_indices);
+                let fields = container.get_fields(&key_bytes, page.get_val(slot_id), col_indices);
                 rwset.insert(key_bytes.clone(), RWEntry::Read(ptr, false));
                 Ok((fields, ptr))
             }
@@ -1051,7 +1080,7 @@ impl<M: MemPool> FieldLeveLStorageTrait for TransactionalStorage<M> {
                         return Err(TxnStorageStatus::TxnConflict);
                     }
 
-                    let mut record = container.fields_from_value(page.get_val(slot_id), &[]);
+                    let mut record = container.get_fields(&key_bytes, page.get_val(slot_id), &[]);
                     fields.into_iter().for_each(|(idx, new_field)| {
                         record[idx] = new_field;
                     });
@@ -1092,7 +1121,7 @@ impl<M: MemPool> FieldLeveLStorageTrait for TransactionalStorage<M> {
                 }
                 // Insert into rwset
                 let ptr = RecordHandle::new(page.page().get_id(), page.frame_id());
-                let mut record = container.fields_from_value(page.get_val(slot_id), &[]);
+                let mut record = container.get_fields(&key_bytes, page.get_val(slot_id), &[]);
                 // Update fields
                 fields.into_iter().for_each(|(idx, new_field)| {
                     record[idx] = new_field;
@@ -1138,7 +1167,7 @@ impl<M: MemPool> FieldLeveLStorageTrait for TransactionalStorage<M> {
                     if !locktable.try_upgrade(key_bytes.clone()) {
                         return Err(TxnStorageStatus::TxnConflict);
                     }
-                    let mut record = container.fields_from_value(page.get_val(slot_id), &[]);
+                    let mut record = container.get_fields(&key_bytes, page.get_val(slot_id), &[]);
                     func(&mut record[col_idx]);
                     *e = RWEntry::Update(record, ptr, *ghost);
                     Ok(ptr)
@@ -1171,7 +1200,7 @@ impl<M: MemPool> FieldLeveLStorageTrait for TransactionalStorage<M> {
                 }
                 // Insert into rwset
                 let ptr = RecordHandle::new(page.page().get_id(), page.frame_id());
-                let mut record = container.fields_from_value(page.get_val(slot_id), &[]);
+                let mut record = container.get_fields(&key_bytes, page.get_val(slot_id), &[]);
                 // Update fields
                 func(&mut record[col_idx]);
                 rwset.insert(
@@ -1234,7 +1263,7 @@ impl<M: MemPool> FieldLeveLStorageTrait for TransactionalStorage<M> {
                     if !locktable.try_upgrade(key_bytes.clone()) {
                         return Err(TxnStorageStatus::TxnConflict);
                     }
-                    let mut record = container.fields_from_value(page.get_val(slot_id), &[]);
+                    let mut record = container.get_fields(&key_bytes, page.get_val(slot_id), &[]);
                     apply_func(&mut record, col_indices, func);
                     *e = RWEntry::Update(record, ptr, *ghost);
                     Ok(ptr)
@@ -1264,7 +1293,7 @@ impl<M: MemPool> FieldLeveLStorageTrait for TransactionalStorage<M> {
                     return Err(TxnStorageStatus::TxnConflict);
                 }
                 let ptr = RecordHandle::new(page.page().get_id(), page.frame_id());
-                let mut record = container.fields_from_value(page.get_val(slot_id), &[]);
+                let mut record = container.get_fields(&key_bytes, page.get_val(slot_id), &[]);
                 apply_func(&mut record, col_indices, func);
                 rwset.insert(
                     key_bytes.clone(),
@@ -1609,7 +1638,7 @@ impl<M: MemPool> FieldLeveLStorageTrait for TransactionalStorage<M> {
             let fields = if let Some(entry) = rwset.get(key_bytes) {
                 match entry {
                     RWEntry::Delete(_, _) => return true, // Skip deleted, continue
-                    RWEntry::Read(..) => container.fields_from_value(value_bytes, cols),
+                    RWEntry::Read(..) => container.get_fields(key_bytes, value_bytes, cols),
                     RWEntry::Update(record, _, _) | RWEntry::Insert(record, _, _) => {
                         cols.iter().map(|&i| record[i].clone()).collect()
                     }
@@ -1621,7 +1650,7 @@ impl<M: MemPool> FieldLeveLStorageTrait for TransactionalStorage<M> {
                     err = Some(TxnStorageStatus::TxnConflict);
                     return false;
                 }
-                let fields = container.fields_from_value(value_bytes, cols);
+                let fields = container.get_fields(key_bytes, value_bytes, cols);
                 rwset.insert(key_bytes.to_vec(), RWEntry::Read(ptr, false));
                 fields
             };

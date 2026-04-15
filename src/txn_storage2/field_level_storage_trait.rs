@@ -103,21 +103,30 @@ impl ContainerDS {
     }
 }
 
+/// Maps a schema column index to its physical location in key or value bytes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ColSource {
+    /// Position within the key byte layout.
+    Key(usize),
+    /// Position within the value byte layout.
+    Value(usize),
+}
+
 /// Describes how a container relates to other containers.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ContainerType {
     /// A standalone primary container.
     Primary {
         schema: Schema,
-        /// Key Column types in key order, derived from schema for convenience.
+        /// Maps schema column index → key or value position.
+        col_source: Vec<ColSource>,
+        /// Key column types in key order: (schema_col_idx, type).
         key_col_types: Vec<(usize, DataType)>,
-        /// Value column types in column order, derived from schema for convenience.
+        /// Non-key column types in schema order: (schema_col_idx, type).
         value_col_types: Vec<(usize, DataType)>,
         /// Key byte ranges for each key column in the normalized key.
-        /// None unless every key column is fixed-width and non-nullable.
         key_field_ranges: Option<Vec<NormalizedKeyFieldRange>>,
-        /// Value byte ranges for the serialized record value.
-        /// None unless every value column is fixed-width and non-nullable.
+        /// Value byte ranges for each non-key column in the record value.
         value_field_ranges: Option<Vec<NormalizedKeyFieldRange>>,
     },
     /// A secondary index that references a primary container.
@@ -139,6 +148,7 @@ pub enum ContainerType {
 impl ContainerType {
     /// Extract projected fields from normalized key bytes.
     /// `wanted` is a sorted slice of key-column indices to extract.
+    /// Empty `wanted` = all key columns.
     pub fn fields_from_key(&self, key_bytes: &[u8], wanted: &[usize]) -> Vec<Field> {
         let (key_col_types, key_field_ranges) = match self {
             ContainerType::Primary {
@@ -151,6 +161,14 @@ impl ContainerType {
                 key_field_ranges,
                 ..
             } => (key_col_types, key_field_ranges.as_deref()),
+        };
+
+        let all_pos;
+        let wanted = if wanted.is_empty() {
+            all_pos = (0..key_col_types.len()).collect::<Vec<_>>();
+            &all_pos
+        } else {
+            wanted
         };
 
         // When key layout is fully fixed, decode each requested field by slicing directly.
@@ -174,11 +192,12 @@ impl ContainerType {
         )
     }
 
-    /// Extract fields from a primary record's value bytes at the given column indices.
-    /// If `cols` is empty, returns all columns.
-    /// Returns one Field per entry in `cols`, in the same order (duplicates allowed).
+    /// Extract fields from value bytes at given value-position indices.
+    /// `positions` are indices into `value_col_types` (NOT schema column indices).
+    /// Empty `positions` = all value columns.
+    /// Positions must be unique.
     /// Panics on secondary containers.
-    pub fn fields_from_value(&self, value_bytes: &[u8], cols: &[usize]) -> Vec<Field> {
+    pub(crate) fn fields_from_value(&self, value_bytes: &[u8], positions: &[usize]) -> Vec<Field> {
         let ContainerType::Primary {
             schema,
             value_col_types,
@@ -188,24 +207,9 @@ impl ContainerType {
         else {
             panic!("fields_from_value called on secondary container")
         };
-        let value_field_ranges = value_field_ranges.as_deref();
 
-        // Stable value offsets let us decode by direct slicing instead of scanning.
-        if cols.is_empty() {
-            if let Some(ranges) = value_field_ranges {
-                return value_col_types
-                    .iter()
-                    .map(|&(col_idx, data_type)| {
-                        let (offset, len) = ranges[col_idx];
-                        Field::from_bytes(
-                            &value_bytes[offset..offset + len],
-                            schema.cols()[col_idx].0,
-                            data_type,
-                        )
-                    })
-                    .collect();
-            }
-
+        // Empty = all value columns.
+        if positions.is_empty() {
             let mut result = Vec::with_capacity(value_col_types.len());
             let mut offset = 0;
             for &(col_idx, data_type) in value_col_types {
@@ -217,40 +221,42 @@ impl ContainerType {
             return result;
         }
 
-        let is_sorted_dedup = cols.windows(2).all(|w| w[0] < w[1]);
-        let mut sorted = Vec::new();
-        let sorted_cols = if is_sorted_dedup {
-            cols
+        // Sort positions for sequential scan.
+        let is_sorted = positions.windows(2).all(|w| w[0] < w[1]);
+        let mut sorted_buf = Vec::new();
+        let sorted = if is_sorted {
+            positions
         } else {
-            sorted = cols.to_vec();
-            sorted.sort();
-            sorted.dedup();
-            &sorted
+            sorted_buf = positions.to_vec();
+            sorted_buf.sort();
+            &sorted_buf
         };
 
+        // Fast path: precomputed ranges available.
         let decoded = if let Some(ranges) = value_field_ranges {
-            sorted_cols
+            sorted
                 .iter()
-                .map(|&col_idx| {
-                    let (offset, len) = ranges[col_idx];
+                .map(|&pos| {
+                    let (col_idx, data_type) = value_col_types[pos];
+                    let (offset, len) = ranges[pos];
                     Field::from_bytes(
                         &value_bytes[offset..offset + len],
                         schema.cols()[col_idx].0,
-                        value_col_types[col_idx].1,
+                        data_type,
                     )
                 })
                 .collect()
         } else {
-            // Fallback: single forward scan, skipping non-projected columns cheaply.
-            let mut result = Vec::with_capacity(sorted_cols.len());
+            // Forward scan, skip non-requested positions.
+            let mut result = Vec::with_capacity(sorted.len());
             let mut offset = 0;
             let mut proj_idx = 0;
-            for &(col_idx, data_type) in value_col_types {
-                if proj_idx >= sorted_cols.len() {
+            for (pos, &(col_idx, data_type)) in value_col_types.iter().enumerate() {
+                if proj_idx >= sorted.len() {
                     break;
                 }
                 let is_nullable = schema.cols()[col_idx].0;
-                if col_idx == sorted_cols[proj_idx] {
+                if pos == sorted[proj_idx] {
                     let field = Field::from_bytes(&value_bytes[offset..], is_nullable, data_type);
                     offset += field.size(is_nullable);
                     result.push(field);
@@ -266,12 +272,14 @@ impl ContainerType {
             result
         };
 
-        if is_sorted_dedup {
+        if is_sorted {
             return decoded;
         }
 
-        cols.iter()
-            .map(|&col_idx| decoded[sorted.binary_search(&col_idx).unwrap()].clone())
+        // Reorder to caller's requested order.
+        positions
+            .iter()
+            .map(|&pos| decoded[sorted_buf.binary_search(&pos).unwrap()].clone())
             .collect()
     }
 
@@ -301,13 +309,95 @@ impl ContainerType {
         crate::txn_storage2::field::key_to_bytes(&pk_fields)
     }
 
-    /// Serialize fields into value bytes.
+    /// Serialize a full record's non-key fields into value bytes.
+    /// `fields` is indexed by schema column order (full record).
     /// Panics on secondary containers.
     pub fn fields_to_value(&self, fields: &[Field]) -> Vec<u8> {
-        let ContainerType::Primary { schema, .. } = self else {
+        let ContainerType::Primary {
+            schema,
+            value_col_types,
+            ..
+        } = self
+        else {
             panic!("fields_to_value called on secondary container")
         };
-        crate::txn_storage2::field::record_to_bytes(fields, schema)
+        let mut bytes = Vec::new();
+        for &(col_idx, _) in value_col_types {
+            let (is_nullable, _) = schema.cols()[col_idx];
+            fields[col_idx].write_to(&mut bytes, is_nullable);
+        }
+        bytes
+    }
+
+    /// Get projected fields from both key and value bytes.
+    /// `cols` uses schema column indices (must be unique, no duplicates).
+    /// Empty `cols` = all columns.
+    /// Panics on secondary containers.
+    pub fn get_fields(&self, key_bytes: &[u8], value_bytes: &[u8], cols: &[usize]) -> Vec<Field> {
+        let ContainerType::Primary { col_source, .. } = self else {
+            panic!("get_fields called on secondary container")
+        };
+
+        // Fast path: all columns — no sorting, no binary search.
+        if cols.is_empty() {
+            let mut key_fields = self.fields_from_key(key_bytes, &[]);
+            let mut val_fields = self.fields_from_value(value_bytes, &[]);
+            let mut ki = 0;
+            let mut vi = 0;
+            return col_source
+                .iter()
+                .map(|src| match src {
+                    ColSource::Key(_) => {
+                        let f = std::mem::replace(&mut key_fields[ki], Field::Int8(None));
+                        ki += 1;
+                        f
+                    }
+                    ColSource::Value(_) => {
+                        let f = std::mem::replace(&mut val_fields[vi], Field::Int8(None));
+                        vi += 1;
+                        f
+                    }
+                })
+                .collect();
+        }
+
+        // Projected path: split cols into key/value, batch extract, merge.
+        let mut key_wanted: Vec<usize> = Vec::new();
+        let mut val_wanted: Vec<usize> = Vec::new();
+        for &c in cols {
+            match col_source[c] {
+                ColSource::Key(pos) => key_wanted.push(pos),
+                ColSource::Value(pos) => val_wanted.push(pos),
+            }
+        }
+        key_wanted.sort();
+        val_wanted.sort();
+
+        let mut key_fields = if key_wanted.is_empty() {
+            Vec::new()
+        } else {
+            self.fields_from_key(key_bytes, &key_wanted)
+        };
+        let mut val_fields = if val_wanted.is_empty() {
+            Vec::new()
+        } else {
+            self.fields_from_value(value_bytes, &val_wanted)
+        };
+
+        let mut result = Vec::with_capacity(cols.len());
+        for &c in cols {
+            match col_source[c] {
+                ColSource::Key(pos) => {
+                    let idx = key_wanted.binary_search(&pos).unwrap();
+                    result.push(std::mem::replace(&mut key_fields[idx], Field::Int8(None)));
+                }
+                ColSource::Value(pos) => {
+                    let idx = val_wanted.binary_search(&pos).unwrap();
+                    result.push(std::mem::replace(&mut val_fields[idx], Field::Int8(None)));
+                }
+            }
+        }
+        result
     }
 }
 
@@ -320,26 +410,53 @@ pub struct ContainerOptions {
 
 impl ContainerOptions {
     pub fn primary(name: &str, c_ds: ContainerDS, schema: Schema) -> Self {
+        let key_set: std::collections::HashSet<usize> =
+            schema.key_indices().iter().copied().collect();
+
+        // Build col_source mapping and split columns into key vs value.
+        let mut key_col_types: Vec<(usize, DataType)> = Vec::new();
+        let mut value_col_types: Vec<(usize, DataType)> = Vec::new();
+        let mut col_source: Vec<ColSource> = Vec::with_capacity(schema.cols().len());
+        for (i, &(_, dt)) in schema.cols().iter().enumerate() {
+            if key_set.contains(&i) {
+                col_source.push(ColSource::Key(key_col_types.len()));
+                key_col_types.push((i, dt));
+            } else {
+                col_source.push(ColSource::Value(value_col_types.len()));
+                value_col_types.push((i, dt));
+            }
+        }
+
+        // Note: key_col_types is in schema order here, but the normalized key
+        // uses key_indices order. Reorder to match.
         let key_col_types: Vec<(usize, DataType)> = schema
             .key_indices()
             .iter()
             .map(|&i| (i, schema.cols()[i].1))
             .collect();
-        let value_col_types: Vec<(usize, DataType)> = schema
-            .cols()
-            .iter()
-            .enumerate()
-            .map(|(i, &(_, dt))| (i, dt))
-            .collect();
+        // Rebuild col_source key positions to use key_indices order.
+        for &ki in schema.key_indices() {
+            let key_pos = key_col_types.iter().position(|&(i, _)| i == ki).unwrap();
+            col_source[ki] = ColSource::Key(key_pos);
+        }
+
         let key_field_ranges = crate::txn_storage2::field::precompute_normalized_key_field_ranges(
-            schema.key_indices().iter().map(|&i| schema.cols()[i]),
+            key_col_types.iter().map(|&(_, dt)| (false, dt)),
         );
-        let value_field_ranges = crate::txn_storage2::field::precompute_value_field_ranges(&schema);
+
+        let val_cols: Vec<(bool, DataType)> = value_col_types
+            .iter()
+            .map(|&(i, _)| schema.cols()[i])
+            .collect();
+        let value_field_ranges =
+            crate::txn_storage2::field::precompute_value_field_ranges(&val_cols);
+
         ContainerOptions {
             name: String::from(name),
             c_ds,
             c_type: ContainerType::Primary {
                 schema,
+                col_source,
                 key_col_types,
                 value_col_types,
                 key_field_ranges,

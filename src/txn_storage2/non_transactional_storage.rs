@@ -66,14 +66,14 @@ impl<M: MemPool> ContainerInfo<M> {
         }
     }
 
-    fn fields_from_value(&self, value_bytes: &[u8], cols: &[usize]) -> Vec<Field> {
-        self.options
-            .container_type()
-            .fields_from_value(value_bytes, cols)
-    }
-
     fn fields_to_value(&self, fields: &[Field]) -> Vec<u8> {
         self.options.container_type().fields_to_value(fields)
+    }
+
+    fn get_fields(&self, key_bytes: &[u8], value_bytes: &[u8], cols: &[usize]) -> Vec<Field> {
+        self.options
+            .container_type()
+            .get_fields(key_bytes, value_bytes, cols)
     }
 }
 
@@ -337,7 +337,7 @@ impl<M: MemPool> FieldLeveLStorageTrait for NonTransactionalStorage<M> {
         } else {
             // We can get the key if it exists
             if leaf_page.get_raw_key(slot_id) == key {
-                let fields = container.fields_from_value(leaf_page.get_val(slot_id), col_indices);
+                let fields = container.get_fields(&key, leaf_page.get_val(slot_id), col_indices);
                 Ok((
                     fields,
                     RecordHandle::new(leaf_page.page().get_id(), leaf_page.frame_id()),
@@ -395,7 +395,7 @@ impl<M: MemPool> FieldLeveLStorageTrait for NonTransactionalStorage<M> {
         } else {
             // We can update the key if it exists
             if leaf_page.get_raw_key(slot_id) == key {
-                let mut record = container.fields_from_value(leaf_page.get_val(slot_id), &[]);
+                let mut record = container.get_fields(&key, leaf_page.get_val(slot_id), &[]);
                 for (col_idx, field) in fields {
                     record[col_idx] = field;
                 }
@@ -446,7 +446,7 @@ impl<M: MemPool> FieldLeveLStorageTrait for NonTransactionalStorage<M> {
         } else {
             // We can update the key if it exists
             if leaf_page.get_raw_key(slot_id) == key {
-                let mut record = container.fields_from_value(leaf_page.get_val(slot_id), &[]);
+                let mut record = container.get_fields(&key, leaf_page.get_val(slot_id), &[]);
                 func(&mut record[col_idx]);
                 let value = container.fields_to_value(&record);
                 // Exact match
@@ -494,7 +494,7 @@ impl<M: MemPool> FieldLeveLStorageTrait for NonTransactionalStorage<M> {
         } else {
             if leaf_page.get_raw_key(slot_id) == key {
                 const PLACEHOLDER: Field = Field::Bool(None);
-                let mut record = container.fields_from_value(leaf_page.get_val(slot_id), &[]);
+                let mut record = container.get_fields(&key, leaf_page.get_val(slot_id), &[]);
                 let mut selected: Vec<Field> = col_indices
                     .iter()
                     .map(|&i| std::mem::replace(&mut record[i], PLACEHOLDER))
@@ -692,8 +692,8 @@ impl<M: MemPool> FieldLeveLStorageTrait for NonTransactionalStorage<M> {
         let mut count: u64 = 0;
         let scanner = unsafe { &mut *iter.scanner.get() };
 
-        for (_, value_bytes) in scanner {
-            let fields = container.fields_from_value(&value_bytes, cols);
+        for (key_bytes, value_bytes) in scanner {
+            let fields = container.get_fields(&key_bytes, &value_bytes, cols);
 
             let ptr = RecordHandle::new(0, 0);
             count += 1;
