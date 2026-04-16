@@ -947,22 +947,34 @@ where
     Some(ranges)
 }
 
-/// Returns `None` if any value column is variable-width or nullable, since
-/// record-value offsets then depend on runtime data.
+/// Returns per-field byte ranges for value columns.
+/// Fixed-size non-nullable fields in the contiguous prefix get `Some((offset, len))`.
+/// Once a nullable or variable-width field is encountered, it and all subsequent
+/// fields get `None` (their offsets depend on runtime data).
 pub fn precompute_value_field_ranges(
     cols: &[(bool, DataType)],
-) -> Option<Vec<NormalizedKeyFieldRange>> {
+) -> Vec<Option<NormalizedKeyFieldRange>> {
     let mut ranges = Vec::with_capacity(cols.len());
     let mut offset = 0;
+    let mut fixed = true;
     for &(is_nullable, dt) in cols {
-        if is_nullable {
-            return None;
+        if !fixed || is_nullable {
+            fixed = false;
+            ranges.push(None);
+            continue;
         }
-        let total = dt.record_value_field_size(false)?;
-        ranges.push((offset, total));
-        offset += total;
+        match dt.record_value_field_size(false) {
+            Some(size) => {
+                ranges.push(Some((offset, size)));
+                offset += size;
+            }
+            None => {
+                fixed = false;
+                ranges.push(None);
+            }
+        }
     }
-    Some(ranges)
+    ranges
 }
 
 /// Extract only the requested fields from a normalized key via a single linear scan.

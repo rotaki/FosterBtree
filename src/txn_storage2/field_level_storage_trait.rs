@@ -126,8 +126,10 @@ pub enum ContainerType {
         value_col_types: Vec<(usize, DataType)>,
         /// Key byte ranges for each key column in the normalized key.
         key_field_ranges: Option<Vec<NormalizedKeyFieldRange>>,
-        /// Value byte ranges for each non-key column in the record value.
-        value_field_ranges: Option<Vec<NormalizedKeyFieldRange>>,
+        /// Per-field byte ranges for value columns. `Some((offset, len))` for
+        /// fixed-size non-nullable fields in the contiguous prefix, `None` for
+        /// nullable or variable-width fields (and everything after them).
+        value_field_ranges: Vec<Option<NormalizedKeyFieldRange>>,
     },
     /// A secondary index that references a primary container.
     ///
@@ -209,14 +211,24 @@ impl ContainerType {
         };
 
         // Empty = all value columns.
+        // Use precomputed ranges for the fixed prefix, sequential scan for the rest.
         if positions.is_empty() {
             let mut result = Vec::with_capacity(value_col_types.len());
             let mut offset = 0;
-            for &(col_idx, data_type) in value_col_types {
+            for (pos, &(col_idx, data_type)) in value_col_types.iter().enumerate() {
                 let is_nullable = schema.cols()[col_idx].0;
-                let field = Field::from_bytes(&value_bytes[offset..], is_nullable, data_type);
-                offset += field.size(is_nullable);
-                result.push(field);
+                if let Some((off, len)) = value_field_ranges[pos] {
+                    result.push(Field::from_bytes(
+                        &value_bytes[off..off + len],
+                        is_nullable,
+                        data_type,
+                    ));
+                    offset = off + len;
+                } else {
+                    let field = Field::from_bytes(&value_bytes[offset..], is_nullable, data_type);
+                    offset += field.size(is_nullable);
+                    result.push(field);
+                }
             }
             return result;
         }
@@ -232,45 +244,54 @@ impl ContainerType {
             &sorted_buf
         };
 
-        // Fast path: precomputed ranges available.
-        let decoded = if let Some(ranges) = value_field_ranges {
-            sorted
-                .iter()
-                .map(|&pos| {
-                    let (col_idx, data_type) = value_col_types[pos];
-                    let (offset, len) = ranges[pos];
-                    Field::from_bytes(
-                        &value_bytes[offset..offset + len],
-                        schema.cols()[col_idx].0,
-                        data_type,
-                    )
-                })
-                .collect()
+        // Hybrid access: use O(1) direct slicing for fields with precomputed
+        // ranges, fall back to sequential scan for the rest.
+        // Since precomputed fields form a contiguous prefix, sorted iteration
+        // naturally processes all O(1) fields first, then sequential fields.
+        let boundary_pos = value_field_ranges
+            .iter()
+            .position(|r| r.is_none())
+            .unwrap_or(value_field_ranges.len());
+        let boundary_offset = if boundary_pos > 0 {
+            let (off, len) = value_field_ranges[boundary_pos - 1].unwrap();
+            off + len
         } else {
-            // Forward scan, skip non-requested positions.
-            let mut result = Vec::with_capacity(sorted.len());
-            let mut offset = 0;
-            let mut proj_idx = 0;
-            for (pos, &(col_idx, data_type)) in value_col_types.iter().enumerate() {
-                if proj_idx >= sorted.len() {
-                    break;
-                }
-                let is_nullable = schema.cols()[col_idx].0;
-                if pos == sorted[proj_idx] {
-                    let field = Field::from_bytes(&value_bytes[offset..], is_nullable, data_type);
-                    offset += field.size(is_nullable);
-                    result.push(field);
-                    proj_idx += 1;
-                } else {
-                    offset += crate::txn_storage2::field::skip_field_bytes(
-                        &value_bytes[offset..],
+            0
+        };
+
+        let mut decoded = Vec::with_capacity(sorted.len());
+        let mut seq_offset = boundary_offset;
+        let mut seq_col = boundary_pos;
+
+        for &pos in sorted {
+            if let Some((offset, len)) = value_field_ranges[pos] {
+                // O(1) direct access for fixed-prefix fields.
+                let (col_idx, data_type) = value_col_types[pos];
+                decoded.push(Field::from_bytes(
+                    &value_bytes[offset..offset + len],
+                    schema.cols()[col_idx].0,
+                    data_type,
+                ));
+            } else {
+                // Sequential scan from boundary to reach this position.
+                while seq_col < pos {
+                    let (col_idx, data_type) = value_col_types[seq_col];
+                    let is_nullable = schema.cols()[col_idx].0;
+                    seq_offset += crate::txn_storage2::field::skip_field_bytes(
+                        &value_bytes[seq_offset..],
                         is_nullable,
                         data_type,
                     );
+                    seq_col += 1;
                 }
+                let (col_idx, data_type) = value_col_types[pos];
+                let is_nullable = schema.cols()[col_idx].0;
+                let field = Field::from_bytes(&value_bytes[seq_offset..], is_nullable, data_type);
+                seq_offset += field.size(is_nullable);
+                seq_col += 1;
+                decoded.push(field);
             }
-            result
-        };
+        }
 
         if is_sorted {
             return decoded;
