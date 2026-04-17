@@ -19,9 +19,9 @@ SUMMARY="$OUTDIR/summary_${TIMESTAMP}.txt"
 
 declare -a VARIANTS=(
     "bp_clock|LIPAH"
-    "bp_pt_bucket pt_counts|PT-FP-1"
-    "bp_pt2_bucket pt_counts|PT-FP-2"
-    "bp_pt4_bucket pt_counts|PT-FP-4"
+    "bp_pt_bucket|PT-FP-1"
+    "bp_pt2_bucket|PT-FP-2"
+    "bp_pt4_bucket|PT-FP-4"
 )
 
 echo "=== PT 40w40t benchmark ===" | tee "$SUMMARY"
