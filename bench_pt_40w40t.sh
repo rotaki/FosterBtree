@@ -20,7 +20,8 @@ SUMMARY="$OUTDIR/summary_${TIMESTAMP}.txt"
 declare -a VARIANTS=(
     "bp_clock|LIPAH"
     "bp_pt_bucket|PT-FP-1"
-    "bp_pt2_bucket|PT-FP-2"
+    "bp_pt_tlb|PT-TLB"
+    "bp_pt_tlb_only|TLB-Only"
     "bp_pt4_bucket|PT-FP-4"
 )
 
