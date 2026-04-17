@@ -36,7 +36,7 @@ use super::{
     buffer_pool::BPStats,
     eviction_policy::{ClockEvictionPolicy, EvictionPolicy},
     frame_guards::{FrameMeta, FrameReadGuard, FrameWriteGuard},
-    hash::{hash_page_key, hash_page_key_2, hash_page_key_3, hash_page_key_4},
+    hash::{hash_page_key, hash_page_key_2, hash_page_key_3, hash_page_key_4, hash_page_key_u128},
     macro_profile::{report as macro_profile_report, scoped as macro_profile_scoped, BpMacroOp},
     mem_pool_trait::{ContainerKey, MemPool, MemPoolStatus, MemoryStats, PageFrameKey, PageKey},
 };
@@ -298,19 +298,29 @@ use super::overflow_table::OverflowTable;
 /// Map a 64-bit hash uniformly to `[0, n)` without division.
 ///
 /// Uses the "fastrange" trick (Lemire): `(hash * n) >> 64`.
-/// A single widening multiply + shift (~3-4 cycles) vs `div` (~20-30 cycles).
+/// Widening u64×u64 → u128 multiply + shift (~3-4 cycles) vs `div`.
 #[inline(always)]
-fn fastmod(hash: u64, n: u64) -> usize {
-    ((hash as u128 * n as u128) >> 64) as usize
+fn fastmod(hash: u64, n: u64) -> u32 {
+    (((hash as u128).wrapping_mul(n as u128)) >> 64) as u32
+}
+
+/// Like `fastmod` but for 32-bit hashes and 32-bit ranges.
+///
+/// Uses a u32×u32 → u64 widening multiply — a single `mul` instruction on
+/// x86_64, cheaper than the u64 version which needs a 128-bit widening mul.
+#[inline(always)]
+pub(crate) fn fastmod32(hash: u32, n: u32) -> u32 {
+    (((hash as u64).wrapping_mul(n as u64)) >> 32) as u32
 }
 
 /// Buffer pool using predictive translation.
 pub struct PredictiveTranslationBP {
     pub(crate) num_frames: usize,
-    num_frames_u64: u64, // cached as u64 for fastmod
-    used_frames: AtomicUsize,
+    num_frames_u64: u64, // cached as u64 for 64-bit fastmod
+    num_frames_u32: u32, // cached as u32 for 32-bit fastmod (single-hash variant)
+    pub(crate) used_frames: AtomicUsize,
     clock_hand: AtomicUsize,
-    container_manager: Arc<ContainerManager>,
+    pub(crate) container_manager: Arc<ContainerManager>,
     /// Free-frame hint queue. Metadata is the source of truth; the queue is only a hint.
     free_list: ConcurrentQueue<usize>,
     /// The actual page data for each frame.
@@ -373,9 +383,15 @@ impl PredictiveTranslationBP {
                 .collect(),
         );
 
+        debug_assert!(
+            num_frames <= u32::MAX as usize,
+            "num_frames must fit in u32 (frame ids are u32)"
+        );
+
         Ok(Self {
             num_frames,
             num_frames_u64: num_frames as u64,
+            num_frames_u32: num_frames as u32,
             used_frames: AtomicUsize::new(0),
             clock_hand: AtomicUsize::new(0),
             container_manager,
@@ -395,22 +411,26 @@ impl PredictiveTranslationBP {
     // ------------------------------------------------------------------
 
     /// Compute the preferred frame index for a page key (single hash).
+    ///
+    /// Returns `u32` because frame ids are `u32`; cast to `usize` at indexing
+    /// sites.
     #[inline]
-    pub(crate) fn preferred_frame(&self, key: &PageKey) -> usize {
+    pub(crate) fn preferred_frame(&self, key: &PageKey) -> u32 {
         fastmod(hash_page_key(key), self.num_frames_u64)
     }
 
     /// Compute two preferred frame indices for a page key (two hashes).
     #[inline]
-    pub(crate) fn preferred_frames(&self, key: &PageKey) -> (usize, usize) {
+    pub(crate) fn preferred_frames(&self, key: &PageKey) -> (u32, u32) {
         let p1 = fastmod(hash_page_key(key), self.num_frames_u64);
         let p2 = fastmod(hash_page_key_2(key), self.num_frames_u64);
         (p1, p2)
     }
 
-    /// Compute four preferred frame indices for a page key (four hashes).
+    /// Compute four preferred frame indices for a page key using **four**
+    /// independent 64-bit hashes.
     #[inline]
-    pub(crate) fn preferred_frames_four(&self, key: &PageKey) -> [usize; 4] {
+    pub(crate) fn preferred_frames_four(&self, key: &PageKey) -> [u32; 4] {
         let n = self.num_frames_u64;
         [
             fastmod(hash_page_key(key), n),
@@ -420,9 +440,31 @@ impl PredictiveTranslationBP {
         ]
     }
 
+    /// Compute four preferred frame indices for a page key using **one**
+    /// 128-bit hash split into four u32 chunks.
+    ///
+    /// Expected to be faster than `preferred_frames_four`:
+    ///   * 1 u64 mix + 1 widening u64×u128 mul (~4 `mul` instructions total)
+    ///   * 4 cheap u32 `fastmod`s (1 `mul` each)
+    ///
+    /// vs `preferred_frames_four`:
+    ///   * 4 u64 mixes (~8 `mul` total)
+    ///   * 4 u64 `fastmod`s (each needing a 128-bit widening mul, ~2 `mul` each)
+    #[inline]
+    pub(crate) fn preferred_frames_four_single_hash(&self, key: &PageKey) -> [u32; 4] {
+        let h128 = hash_page_key_u128(key);
+        let n = self.num_frames_u32;
+        [
+            fastmod32(h128 as u32, n),
+            fastmod32((h128 >> 32) as u32, n),
+            fastmod32((h128 >> 64) as u32, n),
+            fastmod32((h128 >> 96) as u32, n),
+        ]
+    }
+
     /// Returns true if frame `idx` has no page (key is None). Lock-free read of atomic key.
     #[inline]
-    fn frame_is_free(&self, idx: usize) -> bool {
+    pub(crate) fn frame_is_free(&self, idx: usize) -> bool {
         let metas = unsafe { &*self.metas.get() };
         metas[idx].key().is_none()
     }
@@ -504,13 +546,13 @@ impl PredictiveTranslationBP {
 
     /// Return frame `idx` to the free-frame hint queue.
     #[inline]
-    fn enqueue_free_frame(&self, idx: usize) {
+    pub(crate) fn enqueue_free_frame(&self, idx: usize) {
         self.free_list.push(idx).ok();
     }
 
     /// Try to get a free frame. If `preferred` is Some(p), try to take that frame first
     /// (so pages are placed in their preferred frame when free — paper §3.1).
-    fn choose_victim(&self, preferred: Option<usize>) -> Option<FWGuard> {
+    pub(crate) fn choose_victim(&self, preferred: Option<usize>) -> Option<FWGuard> {
         // Prefer the preferred frame when it is free.
         if let Some(p) = preferred {
             if let Some(guard) = self.try_get_write_guard(p, false) {
@@ -1053,6 +1095,7 @@ impl PredictiveTranslationBP {
         let page_id = container.inc_page_count(1) as PageId;
         let page_key = PageKey::new(c_key, page_id);
         let (p1, p2) = self.preferred_frames(&page_key);
+        let (p1, p2) = (p1 as usize, p2 as usize);
 
         // Pick the first free preferred frame, or None to avoid latching occupied frames.
         let chosen_pref = if self.frame_is_free(p1) {
@@ -1097,7 +1140,10 @@ impl PredictiveTranslationBP {
         let prefs = self.preferred_frames_four(&page_key);
 
         // Pick the first free preferred frame, or None to avoid latching occupied frames.
-        let chosen_pref = prefs.iter().find(|&&p| self.frame_is_free(p)).copied();
+        let chosen_pref = prefs
+            .iter()
+            .find(|&&p| self.frame_is_free(p as usize))
+            .map(|&p| p as usize);
 
         let mut victim = self
             .choose_victim(chosen_pref)
@@ -1145,7 +1191,7 @@ impl MemPool for PredictiveTranslationBP {
         let container = self.container_manager.get_container(c_key);
         let page_id = container.inc_page_count(1) as PageId;
         let page_key = PageKey::new(c_key, page_id);
-        let pref = self.preferred_frame(&page_key);
+        let pref = self.preferred_frame(&page_key) as usize;
         let mut victim = self
             .choose_victim(Some(pref))
             .ok_or(MemPoolStatus::CannotEvictPage)?;
@@ -1201,7 +1247,7 @@ impl MemPool for PredictiveTranslationBP {
         self.profile.total_writes.fetch_add(1, Ordering::Relaxed);
 
         let page_key = key.p_key();
-        let pref = self.preferred_frame(&page_key);
+        let pref = self.preferred_frame(&page_key) as usize;
 
         #[cfg(not(feature = "pt_no_prefetch"))]
         self.prefetch_predicted_frames(pref, pref);
@@ -1219,7 +1265,7 @@ impl MemPool for PredictiveTranslationBP {
         self.profile.total_reads.fetch_add(1, Ordering::Relaxed);
 
         let page_key = key.p_key();
-        let pref = self.preferred_frame(&page_key);
+        let pref = self.preferred_frame(&page_key) as usize;
 
         #[cfg(not(feature = "pt_no_prefetch"))]
         self.prefetch_predicted_frames(pref, pref);

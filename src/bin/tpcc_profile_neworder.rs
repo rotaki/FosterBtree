@@ -22,6 +22,7 @@ use fbtree::{
     random::gen_truncated_randomized_exponential_backoff,
     txn_storage::NoWaitTxnStorage,
 };
+use hdrhistogram::Histogram;
 use memchr::memmem;
 
 // ── Per-operation timing accumulator ────────────────────────────────────────
@@ -77,7 +78,7 @@ impl OpTiming {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct NewOrderProfile {
     total: OpTiming,
     begin_txn: OpTiming,
@@ -95,6 +96,8 @@ struct NewOrderProfile {
     orderline_loop: OpTiming,
     num_commits: u64,
     num_aborts: u64,
+    /// Latency distribution for committed NewOrder transactions (nanoseconds).
+    latency_hist: Histogram<u64>,
 }
 
 impl NewOrderProfile {
@@ -115,6 +118,8 @@ impl NewOrderProfile {
             orderline_loop: OpTiming::new(),
             num_commits: 0,
             num_aborts: 0,
+            // 3 significant digits, max trackable = 60 s in microseconds
+            latency_hist: Histogram::<u64>::new_with_bounds(1, 60_000_000, 3).unwrap(),
         }
     }
 
@@ -135,6 +140,7 @@ impl NewOrderProfile {
         self.orderline_loop.merge(&other.orderline_loop);
         self.num_commits += other.num_commits;
         self.num_aborts += other.num_aborts;
+        self.latency_hist.add(&other.latency_hist).unwrap();
     }
 }
 
@@ -222,6 +228,73 @@ fn print_tree(profile: &NewOrderProfile) {
     );
     println!("│");
     print_op("└── ", "Commit", &profile.commit, total_avg);
+    println!("================================================================================");
+}
+
+// ── Latency distribution ───────────────────────────────────────────────────
+
+fn print_latency_distribution(hist: &Histogram<u64>) {
+    if hist.is_empty() {
+        return;
+    }
+    println!();
+    println!("NewOrder Latency Distribution (µs)");
+    println!("================================================================================");
+
+    // Percentiles
+    for &p in &[50.0, 75.0, 90.0, 95.0, 99.0, 99.5, 99.9, 99.99] {
+        let v = hist.value_at_percentile(p);
+        println!("  p{:<5}  {:>10} µs", p, v);
+    }
+    println!("  min    {:>10} µs", hist.min());
+    println!("  max    {:>10} µs", hist.max());
+    println!("  mean   {:>10.1} µs", hist.mean());
+    println!("  stdev  {:>10.1} µs", hist.stdev());
+    println!("  count  {:>10}", hist.len());
+
+    // ASCII log-scale histogram using power-of-2 buckets
+    println!();
+    println!("  Log-scale histogram (each row = 2x bucket width):");
+    println!(
+        "  {:>12}  {:>12}  {:>8}  {}",
+        "from (µs)", "to (µs)", "count", ""
+    );
+
+    let mut buckets: Vec<(u64, u64, u64)> = Vec::new();
+    let min_val = hist.min();
+    let max_val = hist.max();
+    // Start from the largest power of 2 <= min_val (at least 1)
+    let mut lo = 1u64;
+    while lo * 2 <= min_val {
+        lo *= 2;
+    }
+    while lo <= max_val {
+        let hi = lo.saturating_mul(2).saturating_sub(1).min(u64::MAX);
+        let cnt = hist.count_between(lo, hi);
+        if cnt > 0 {
+            buckets.push((lo, hi, cnt));
+        }
+        lo = hi.saturating_add(1);
+        if lo == 0 {
+            break;
+        }
+    }
+    if buckets.is_empty() {
+        return;
+    }
+
+    let max_cnt = buckets.iter().map(|b| b.2).max().unwrap_or(1);
+    let bar_width = 50;
+
+    for &(lo, hi, cnt) in &buckets {
+        let bar_len = if max_cnt > 0 {
+            ((cnt as f64 / max_cnt as f64) * bar_width as f64) as usize
+        } else {
+            0
+        };
+        let bar: String = "#".repeat(bar_len);
+        println!("  {:>12}  {:>12}  {:>8}  {}", lo, hi, cnt, bar);
+    }
     println!("================================================================================");
 }
 
@@ -478,6 +551,8 @@ fn run_profiled_neworder<T: TxnStorageTrait>(
         Ok(_) => {
             let total_elapsed = txn_start.elapsed().as_nanos() as u64;
             profile.total.record(total_elapsed);
+            // Record in histogram as microseconds.
+            let _ = profile.latency_hist.record((total_elapsed / 1000).max(1));
             profile.num_commits += 1;
         }
         Err(_) => {
@@ -795,6 +870,9 @@ pub fn main() {
 
     // Print merged tree
     print_tree(&merged);
+
+    // Print latency distribution
+    print_latency_distribution(&merged.latency_hist);
 
     println!("\nBP stats:\n{}", unsafe { bp.stats() });
 

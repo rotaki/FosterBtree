@@ -75,7 +75,7 @@ impl MemPool for PredictiveTranslationFPBP {
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         let page_key = key.p_key();
-        let pref = self.preferred_frame(&page_key);
+        let pref = self.preferred_frame(&page_key) as usize;
 
         // Inlined fast path: check preferred frame metadata before slow path.
         let metas = unsafe { &*self.metas.get() };
@@ -107,7 +107,7 @@ impl MemPool for PredictiveTranslationFPBP {
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         let page_key = key.p_key();
-        let pref = self.preferred_frame(&page_key);
+        let pref = self.preferred_frame(&page_key) as usize;
 
         // Inlined fast path.
         let metas = unsafe { &*self.metas.get() };

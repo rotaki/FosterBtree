@@ -47,3 +47,24 @@ pub(crate) fn hash_page_key_4(key: &PageKey) -> u64 {
     let packed = (key.c_key.as_u32() as u64) << 32 | key.page_id as u64;
     hash_u64(packed ^ 0x6c62_272e_07bb_0142u64)
 }
+
+/// Hash a `PageKey` into a 128-bit value using **one** u64 mix followed by a
+/// single u64 × u128 widening multiply.
+///
+/// On x86_64 this lowers to 2 `mul` instructions for the widening step plus the
+/// two multiplies inside `hash_u64`, so the whole thing is ~4 `mul` total — vs
+/// ~8 `mul` for four independent `hash_page_key_*` calls.
+///
+/// The resulting 128-bit value is intended to be split into four u32 slices
+/// (low → high) and fed into a u32 `fastmod` to produce four candidate frame
+/// indices.
+#[inline(always)]
+pub(crate) fn hash_page_key_u128(key: &PageKey) -> u128 {
+    let packed = (key.c_key.as_u32() as u64) << 32 | key.page_id as u64;
+    let h = hash_u64(packed);
+    // Widening multiply by a 128-bit mixer constant. `h as u128` has zero high
+    // bits, so the multiply compiles to two u64×u64 multiplies (low result +
+    // high lanes).
+    const MIX: u128 = 0xbf58_476d_1ce4_e5b9_94d0_49bb_1331_11eb_u128;
+    (h as u128).wrapping_mul(MIX)
+}

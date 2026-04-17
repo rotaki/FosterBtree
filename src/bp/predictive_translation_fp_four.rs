@@ -61,6 +61,7 @@ impl MemPool for PredictiveTranslationFPFourBP {
 
         let page_key = key.p_key();
         let [p0, p1, p2, p3] = self.preferred_frames_four(&page_key);
+        let (p0, p1, p2, p3) = (p0 as usize, p1 as usize, p2 as usize, p3 as usize);
 
         // Manually unrolled fast path: check all four preferred frames.
         let metas = unsafe { &*self.metas.get() };
@@ -100,6 +101,7 @@ impl MemPool for PredictiveTranslationFPFourBP {
 
         let page_key = key.p_key();
         let [p0, p1, p2, p3] = self.preferred_frames_four(&page_key);
+        let (p0, p1, p2, p3) = (p0 as usize, p1 as usize, p2 as usize, p3 as usize);
 
         // Manually unrolled fast path.
         let metas = unsafe { &*self.metas.get() };

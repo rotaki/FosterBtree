@@ -65,6 +65,7 @@ impl MemPool for PredictiveTranslationTwoBP {
 
         let page_key = key.p_key();
         let (pref1, pref2) = self.preferred_frames(&page_key);
+        let (pref1, pref2) = (pref1 as usize, pref2 as usize);
 
         #[cfg(not(feature = "pt_no_prefetch"))]
         self.prefetch_predicted_frames(pref1, pref2);
@@ -84,6 +85,7 @@ impl MemPool for PredictiveTranslationTwoBP {
 
         let page_key = key.p_key();
         let (pref1, pref2) = self.preferred_frames(&page_key);
+        let (pref1, pref2) = (pref1 as usize, pref2 as usize);
 
         #[cfg(not(feature = "pt_no_prefetch"))]
         self.prefetch_predicted_frames(pref1, pref2);

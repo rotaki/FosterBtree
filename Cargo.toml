@@ -105,3 +105,7 @@ harness = false
 [[bench]]
 name = "hash_index_insert"
 harness = false
+
+[[bench]]
+name = "preferred_frames_four"
+harness = false
