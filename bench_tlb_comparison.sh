@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
-# 40 warehouses, 40 threads, 40 GB BP (fully in-memory)
-# Comparing LIPAH, PT-FP-1, TLB-Only
+# Compare LIPAH, PT-FP-1, TLB-only
+# Local: 10w10t. Server (40w40t): edit W/T below.
 set -euo pipefail
 
-W=40
-T=40
-BP=40
-WARMUP=5
-EXEC=30
+W=10
+T=10
+BP=0  # 0 = 1GB per warehouse
+WARMUP=3
+EXEC=15
 BIN_SRC="tpcc_profile_neworder"
 
 TARGET="./target/release"
-OUTDIR="bench_pt_40w40t_results"
+OUTDIR="bench_tlb_results"
 mkdir -p "$OUTDIR"
 
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
@@ -20,15 +20,15 @@ SUMMARY="$OUTDIR/summary_${TIMESTAMP}.txt"
 declare -a VARIANTS=(
     "bp_clock|LIPAH"
     "bp_pt_bucket|PT-FP-1"
-    "bp_pt_tlb_only|TLB-Only"
+    "bp_pt_tlb_only|TLB-only"
 )
 
-echo "=== TLB 40w40t benchmark ===" | tee "$SUMMARY"
-echo "Config: w=$W t=$T bp=${BP}GB warmup=${WARMUP}s exec=${EXEC}s" | tee -a "$SUMMARY"
+echo "=== TLB Comparison ===" | tee "$SUMMARY"
+echo "Config: w=$W t=$T warmup=${WARMUP}s exec=${EXEC}s" | tee -a "$SUMMARY"
 echo "Date: $(date)" | tee -a "$SUMMARY"
 echo "" | tee -a "$SUMMARY"
 
-# Build each variant (show errors instead of hiding them)
+# Build each variant
 for entry in "${VARIANTS[@]}"; do
     IFS='|' read -r features label <<< "$entry"
     tag=$(echo "$label" | tr -d ' -' | tr 'A-Z' 'a-z')
@@ -51,7 +51,12 @@ for entry in "${VARIANTS[@]}"; do
     LOGFILE="$OUTDIR/${tag}_${TIMESTAMP}.log"
 
     echo "Running $label..." | tee -a "$SUMMARY"
-    "$BIN" -w "$W" -t "$T" -b "$BP" -d "$WARMUP" -D "$EXEC" >"$LOGFILE" 2>&1 || true
+
+    if [ "$BP" -eq 0 ]; then
+        "$BIN" -w "$W" -t "$T" -d "$WARMUP" -D "$EXEC" >"$LOGFILE" 2>&1 || true
+    else
+        "$BIN" -w "$W" -t "$T" -b "$BP" -d "$WARMUP" -D "$EXEC" >"$LOGFILE" 2>&1 || true
+    fi
 
     commits=$(grep "^NewOrder" "$LOGFILE" | grep -oP 'commits: \K[0-9,]+' | tr -d ',' || echo "N/A")
     avg=$(grep "^  mean" "$LOGFILE" | grep -oP '[0-9.]+' | head -1 || echo "N/A")

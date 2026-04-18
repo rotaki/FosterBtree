@@ -40,8 +40,8 @@ pub use predictive_translation::PredictiveTranslationBP;
 pub use predictive_translation_fp::PredictiveTranslationFPBP;
 pub use predictive_translation_fp_four::PredictiveTranslationFPFourBP;
 pub use predictive_translation_fp_tlb::PredictiveTranslationFPTlbBP;
-pub use predictive_translation_tlb_only::PredictiveTranslationTlbOnlyBP;
 pub use predictive_translation_fp_two::PredictiveTranslationFPTwoBP;
+pub use predictive_translation_tlb_only::PredictiveTranslationTlbOnlyBP;
 pub use predictive_translation_two::PredictiveTranslationTwoBP;
 pub use vmcache::VMCachePool;
 

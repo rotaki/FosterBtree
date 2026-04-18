@@ -47,7 +47,10 @@ struct TlbEntry {
 }
 
 impl TlbEntry {
-    const EMPTY: Self = Self { tag: 0, frame_id: 0 };
+    const EMPTY: Self = Self {
+        tag: 0,
+        frame_id: 0,
+    };
 }
 
 /// Hash a PageKey into a slot index + tag pair.

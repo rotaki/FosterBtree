@@ -190,11 +190,20 @@ fn main() {
         println!("=== Results ===");
         println!("Duration:    {:.2}s", elapsed.as_secs_f64());
         println!("Total ops:   {}", total_ops);
-        println!("Throughput:  {:.0} ops/s ({:.2} Mops/s)", throughput, throughput / 1_000_000.0);
+        println!(
+            "Throughput:  {:.0} ops/s ({:.2} Mops/s)",
+            throughput,
+            throughput / 1_000_000.0
+        );
         println!("Avg latency: {:.1} ns/op (per thread)", avg_ns);
 
         for (i, &o) in ops.iter().enumerate() {
-            println!("  Thread {}: {} ops ({:.2} Mops/s)", i, o, o as f64 / elapsed.as_secs_f64() / 1_000_000.0);
+            println!(
+                "  Thread {}: {} ops ({:.2} Mops/s)",
+                i,
+                o,
+                o as f64 / elapsed.as_secs_f64() / 1_000_000.0
+            );
         }
 
         ops

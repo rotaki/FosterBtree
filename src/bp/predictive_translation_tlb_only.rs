@@ -12,7 +12,6 @@ use std::sync::Arc;
 
 use super::{
     eviction_policy::{ClockEvictionPolicy, EvictionPolicy},
-    macro_profile::{scoped as macro_profile_scoped, BpMacroOp},
     mem_pool_trait::{ContainerKey, MemPool, MemPoolStatus, MemoryStats, PageFrameKey, PageKey},
     predictive_translation::PredictiveTranslationBP,
     FrameReadGuard, FrameWriteGuard,
@@ -68,6 +67,49 @@ fn entry_frame(entry: u32) -> usize {
 #[thread_local]
 static mut TLB: [[u32; TLB_WAYS]; TLB_SETS] = [[0; TLB_WAYS]; TLB_SETS];
 
+const _: [(); TLB_WAYS] = [(); 4];
+
+#[inline(always)]
+fn tlb_insert_front(ways: &mut [u32; TLB_WAYS], entry: u32) {
+    ways[3] = ways[2];
+    ways[2] = ways[1];
+    ways[1] = ways[0];
+    ways[0] = entry;
+}
+
+macro_rules! tlb_probe_4way {
+    ($bp:expr, $ways:expr, $page_key:expr, $tag:expr, $guard_fn:ident $(, $guard_arg:expr)*) => {{
+        let ways = $ways;
+        let wanted_key = Some($page_key);
+        let metas = unsafe { &*($bp).metas.get() };
+
+        macro_rules! probe_way {
+            ($w:expr) => {{
+                let entry = ways[$w];
+                if entry_tag(entry) == $tag {
+                    let frame_id = entry_frame(entry);
+                    if metas[frame_id].key() == wanted_key {
+                        if let Some(g) = ($bp).$guard_fn(frame_id $(, $guard_arg)*) {
+                            if g.page_key() == wanted_key {
+                                g.evict_info().update();
+                                if $w != 0 {
+                                    ways.swap(0, $w);
+                                }
+                                return Some(g);
+                            }
+                        }
+                    }
+                }
+            }};
+        }
+
+        probe_way!(0);
+        probe_way!(1);
+        probe_way!(2);
+        probe_way!(3);
+        None
+    }};
+}
 
 // ---------------------------------------------------------------------------
 // Buffer pool wrapper
@@ -98,6 +140,26 @@ impl PredictiveTranslationTlbOnlyBP {
             inner: PredictiveTranslationBP::new(num_frames, container_manager)?,
         })
     }
+
+    #[inline(always)]
+    fn tlb_read_hit(
+        &self,
+        ways: &mut [u32; TLB_WAYS],
+        tag: u32,
+        page_key: PageKey,
+    ) -> Option<FRGuard> {
+        tlb_probe_4way!(self, ways, page_key, tag, try_get_read_guard)
+    }
+
+    #[inline(always)]
+    fn tlb_write_hit(
+        &self,
+        ways: &mut [u32; TLB_WAYS],
+        tag: u32,
+        page_key: PageKey,
+    ) -> Option<FWGuard> {
+        tlb_probe_4way!(self, ways, page_key, tag, try_get_write_guard, true)
+    }
 }
 
 impl Drop for PredictiveTranslationTlbOnlyBP {
@@ -112,25 +174,10 @@ impl MemPool for PredictiveTranslationTlbOnlyBP {
         let page_key = key.p_key();
         let set = tlb_set_index(&page_key);
         let tag = tlb_tag(&page_key);
-        let metas = unsafe { &*self.metas.get() };
 
         let ways = unsafe { &mut *TLB.get_unchecked_mut(set) };
-        for w in 0..TLB_WAYS {
-            if entry_tag(ways[w]) != tag {
-                continue; // tag mismatch — skip without pointer chase
-            }
-            let frame_id = entry_frame(ways[w]);
-            if metas[frame_id].key() == Some(page_key) {
-                if let Some(g) = self.try_get_read_guard(frame_id) {
-                    if g.page_key() == Some(page_key) {
-                        g.evict_info().update();
-                        if w > 0 {
-                            ways.swap(0, w);
-                        }
-                        return Ok(g);
-                    }
-                }
-            }
+        if let Some(g) = self.tlb_read_hit(ways, tag, page_key) {
+            return Ok(g);
         }
 
         // Miss — overflow lookup (no preferred frame).
@@ -141,10 +188,7 @@ impl MemPool for PredictiveTranslationTlbOnlyBP {
                     if g.page_key() == Some(page_key) {
                         g.evict_info().update();
                         let ways = unsafe { &mut *TLB.get_unchecked_mut(set) };
-                        for i in (1..TLB_WAYS).rev() {
-                            ways[i] = ways[i - 1];
-                        }
-                        ways[0] = pack_entry(tag, idx as u32);
+                        tlb_insert_front(ways, pack_entry(tag, idx as u32));
                         return Ok(g);
                     }
                 } else if self.overflow.lookup(&page_key) == Some(idx) {
@@ -155,10 +199,7 @@ impl MemPool for PredictiveTranslationTlbOnlyBP {
             match self.handle_page_fault_write(page_key, []) {
                 Ok(victim) => {
                     let ways = unsafe { &mut *TLB.get_unchecked_mut(set) };
-                    for i in (1..TLB_WAYS).rev() {
-                        ways[i] = ways[i - 1];
-                    }
-                    ways[0] = pack_entry(tag, victim.frame_id());
+                    tlb_insert_front(ways, pack_entry(tag, victim.frame_id()));
                     return Ok(victim.downgrade());
                 }
                 Err(MemPoolStatus::RetryPageFault) => continue,
@@ -172,25 +213,10 @@ impl MemPool for PredictiveTranslationTlbOnlyBP {
         let page_key = key.p_key();
         let set = tlb_set_index(&page_key);
         let tag = tlb_tag(&page_key);
-        let metas = unsafe { &*self.metas.get() };
 
         let ways = unsafe { &mut *TLB.get_unchecked_mut(set) };
-        for w in 0..TLB_WAYS {
-            if entry_tag(ways[w]) != tag {
-                continue;
-            }
-            let frame_id = entry_frame(ways[w]);
-            if metas[frame_id].key() == Some(page_key) {
-                if let Some(g) = self.try_get_write_guard(frame_id, true) {
-                    if g.page_key() == Some(page_key) {
-                        g.evict_info().update();
-                        if w > 0 {
-                            ways.swap(0, w);
-                        }
-                        return Ok(g);
-                    }
-                }
-            }
+        if let Some(g) = self.tlb_write_hit(ways, tag, page_key) {
+            return Ok(g);
         }
 
         // Miss — overflow lookup (no preferred frame).
@@ -201,10 +227,7 @@ impl MemPool for PredictiveTranslationTlbOnlyBP {
                     if g.page_key() == Some(page_key) {
                         g.evict_info().update();
                         let ways = unsafe { &mut *TLB.get_unchecked_mut(set) };
-                        for i in (1..TLB_WAYS).rev() {
-                            ways[i] = ways[i - 1];
-                        }
-                        ways[0] = pack_entry(tag, idx as u32);
+                        tlb_insert_front(ways, pack_entry(tag, idx as u32));
                         return Ok(g);
                     }
                 } else if self.overflow.lookup(&page_key) == Some(idx) {
@@ -215,10 +238,7 @@ impl MemPool for PredictiveTranslationTlbOnlyBP {
             match self.handle_page_fault_write(page_key, []) {
                 Ok(g) => {
                     let ways = unsafe { &mut *TLB.get_unchecked_mut(set) };
-                    for i in (1..TLB_WAYS).rev() {
-                        ways[i] = ways[i - 1];
-                    }
-                    ways[0] = pack_entry(tag, g.frame_id());
+                    tlb_insert_front(ways, pack_entry(tag, g.frame_id()));
                     return Ok(g);
                 }
                 Err(MemPoolStatus::RetryPageFault) => continue,
