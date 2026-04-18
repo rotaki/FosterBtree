@@ -9,7 +9,6 @@
 //!
 //! Single-hash variant (one preferred frame per page).
 
-use std::cell::RefCell;
 use std::sync::Arc;
 
 use super::{
@@ -77,11 +76,9 @@ struct ThreadTlb {
 }
 
 impl ThreadTlb {
-    fn new() -> Self {
-        Self {
-            entries: [TlbEntry::EMPTY; TLB_SIZE],
-        }
-    }
+    const NEW: Self = Self {
+        entries: [TlbEntry::EMPTY; TLB_SIZE],
+    };
 
     #[inline(always)]
     fn lookup(&self, key: &PageKey) -> Option<u32> {
@@ -112,9 +109,8 @@ impl ThreadTlb {
     }
 }
 
-thread_local! {
-    static THREAD_TLB: RefCell<ThreadTlb> = RefCell::new(ThreadTlb::new());
-}
+#[thread_local]
+static mut THREAD_TLB: ThreadTlb = ThreadTlb::NEW;
 
 // ---------------------------------------------------------------------------
 // Buffer pool wrapper
@@ -171,9 +167,10 @@ impl MemPool for PredictiveTranslationFPTlbBP {
 
         let page_key = key.p_key();
 
-        // TLB fast path: check per-thread L1-resident cache first.
-        let tlb_hit = THREAD_TLB.with(|tlb| tlb.borrow().lookup(&page_key));
-        if let Some(frame_id) = tlb_hit {
+        let tlb = unsafe { &mut THREAD_TLB };
+
+        // TLB fast path.
+        if let Some(frame_id) = tlb.lookup(&page_key) {
             let idx = frame_id as usize;
             if let Some(g) = self.try_get_read_guard(idx) {
                 if g.page_key() == Some(page_key) {
@@ -185,21 +182,17 @@ impl MemPool for PredictiveTranslationFPTlbBP {
                     return Ok(g);
                 }
             }
-            // TLB entry is stale — invalidate it.
-            THREAD_TLB.with(|tlb| tlb.borrow_mut().invalidate(&page_key));
+            tlb.invalidate(&page_key);
         }
 
-        // Preferred-frame fast path (same as FP).
+        // Preferred-frame fast path.
         let pref = self.preferred_frame(&page_key) as usize;
         let metas = unsafe { &*self.metas.get() };
         if metas[pref].key() == Some(page_key) {
             if let Some(g) = self.try_get_read_guard(pref) {
                 if g.page_key() == Some(page_key) {
                     g.evict_info().update();
-                    // Populate TLB on preferred-frame hit.
-                    THREAD_TLB.with(|tlb| {
-                        tlb.borrow_mut().insert(&page_key, pref as u32);
-                    });
+                    tlb.insert(&page_key, pref as u32);
                     #[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
                     self.profile
                         .preferred_frame_hits
@@ -209,13 +202,11 @@ impl MemPool for PredictiveTranslationFPTlbBP {
             }
         }
 
-        // Slow path: overflow lookup, page fault.
+        // Slow path.
         let result = self.get_page_for_read_slow(page_key, [pref]);
 
-        // Populate TLB on slow-path success.
         if let Ok(ref g) = result {
-            let fid = g.frame_id();
-            THREAD_TLB.with(|tlb| tlb.borrow_mut().insert(&page_key, fid));
+            tlb.insert(&page_key, g.frame_id());
         }
 
         result
@@ -233,9 +224,10 @@ impl MemPool for PredictiveTranslationFPTlbBP {
 
         let page_key = key.p_key();
 
+        let tlb = unsafe { &mut THREAD_TLB };
+
         // TLB fast path.
-        let tlb_hit = THREAD_TLB.with(|tlb| tlb.borrow().lookup(&page_key));
-        if let Some(frame_id) = tlb_hit {
+        if let Some(frame_id) = tlb.lookup(&page_key) {
             let idx = frame_id as usize;
             if let Some(g) = self.try_get_write_guard(idx, true) {
                 if g.page_key() == Some(page_key) {
@@ -247,8 +239,7 @@ impl MemPool for PredictiveTranslationFPTlbBP {
                     return Ok(g);
                 }
             }
-            // Stale — invalidate.
-            THREAD_TLB.with(|tlb| tlb.borrow_mut().invalidate(&page_key));
+            tlb.invalidate(&page_key);
         }
 
         // Preferred-frame fast path.
@@ -258,9 +249,7 @@ impl MemPool for PredictiveTranslationFPTlbBP {
             if let Some(g) = self.try_get_write_guard(pref, true) {
                 if g.page_key() == Some(page_key) {
                     g.evict_info().update();
-                    THREAD_TLB.with(|tlb| {
-                        tlb.borrow_mut().insert(&page_key, pref as u32);
-                    });
+                    tlb.insert(&page_key, pref as u32);
                     #[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
                     self.profile
                         .preferred_frame_hits
@@ -273,10 +262,8 @@ impl MemPool for PredictiveTranslationFPTlbBP {
         // Slow path.
         let result = self.get_page_for_write_slow(page_key, [pref]);
 
-        // Populate TLB on slow-path success.
         if let Ok(ref g) = result {
-            let fid = g.frame_id();
-            THREAD_TLB.with(|tlb| tlb.borrow_mut().insert(&page_key, fid as u32));
+            tlb.insert(&page_key, g.frame_id() as u32);
         }
 
         result

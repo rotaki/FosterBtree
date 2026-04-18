@@ -106,8 +106,20 @@ impl OverflowTable {
     }
 
     #[inline]
+    pub(crate) fn bucket_index_pub(&self, key: &PageKey) -> usize {
+        fastmod(hash_page_key(key), self.num_buckets_u64)
+    }
+
+    #[inline]
     fn bucket_index(&self, key: &PageKey) -> usize {
         fastmod(hash_page_key(key), self.num_buckets_u64)
+    }
+
+    /// Return a raw pointer to the bucket for a given index, for prefetching.
+    #[inline(always)]
+    pub(crate) fn bucket_ptr(&self, bucket_idx: usize) -> *const u8 {
+        let idx = bucket_idx % self.num_buckets;
+        &self.buckets[idx] as *const Bucket as *const u8
     }
 
     /// Lock-free lookup using a precomputed bucket index.

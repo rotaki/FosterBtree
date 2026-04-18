@@ -1,3 +1,5 @@
+#![feature(thread_local)]
+
 pub mod access_method;
 pub mod affinity;
 pub mod bench_utils;

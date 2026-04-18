@@ -2,13 +2,12 @@
 //!
 //! Every page is tracked in the overflow table (like base PT). There is no
 //! preferred frame check or promotion/demotion. Instead, a per-thread
-//! L1-resident TLB (32 entries, 512 bytes) caches recent translations to
-//! skip the overflow table lookup on hot pages.
+//! L1-resident TLB caches recent translations to skip the overflow table
+//! lookup on hot pages.
 //!
-//! This isolates the TLB benefit from the preferred-frame mechanism.
+//! 4-way set-associative, 1024 sets, 5-bit tag pre-filter.
+//! Total: 4096 entries × 4 bytes = 16 KB.
 
-use std::cell::RefCell;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use super::{
@@ -25,81 +24,55 @@ type FRGuard = FrameReadGuard<EvictionPolicyImpl>;
 type FWGuard = FrameWriteGuard<EvictionPolicyImpl>;
 
 // ---------------------------------------------------------------------------
-// Per-thread TLB (same as predictive_translation_fp_tlb.rs)
+// Per-thread TLB: 4-way set-associative with 5-bit tag pre-filter.
 // ---------------------------------------------------------------------------
 
-const TLB_SIZE: usize = 64;
+const TLB_SETS: usize = 1024;
+const TLB_WAYS: usize = 4;
+const TLB_SET_MASK: usize = TLB_SETS - 1;
 
-#[derive(Clone, Copy)]
-#[repr(C)]
-struct TlbEntry {
-    tag: u32,
-    frame_id: u32,
-}
+// Bit layout per entry: [tag:5 | frame_id:27]
+const FRAME_BITS: u32 = 27;
+const FRAME_MASK: u32 = (1 << FRAME_BITS) - 1; // 27-bit = 128M frames = 2 TB
+const TAG_SHIFT: u32 = FRAME_BITS;
 
-impl TlbEntry {
-    const EMPTY: Self = Self { tag: 0, frame_id: 0 };
+#[inline(always)]
+fn tlb_set_index(key: &PageKey) -> usize {
+    let c_hash = key.c_key.as_u32().wrapping_mul(2654435761);
+    (c_hash as usize).wrapping_add(key.page_id as usize) & TLB_SET_MASK
 }
 
 #[inline(always)]
-fn tlb_slot_and_tag(key: &PageKey) -> (usize, u32) {
+fn tlb_tag(key: &PageKey) -> u32 {
     let packed = (key.c_key.as_u32() as u64) << 32 | key.page_id as u64;
-    let slot_hash = packed ^ (packed >> 17);
-    let slot = (slot_hash as usize) % TLB_SIZE;
-    let tag_hash = packed ^ (packed >> 13);
-    let tag = ((tag_hash >> 32) as u32) | 1;
-    (slot, tag)
+    let h = packed.wrapping_mul(0x9e3779b97f4a7c15);
+    let t = ((h >> 59) as u32) | 1; // 5 bits, non-zero
+    t << TAG_SHIFT
 }
 
-struct ThreadTlb {
-    entries: [TlbEntry; TLB_SIZE],
+#[inline(always)]
+fn pack_entry(tag: u32, frame_id: u32) -> u32 {
+    tag | (frame_id & FRAME_MASK)
 }
 
-impl ThreadTlb {
-    fn new() -> Self {
-        Self {
-            entries: [TlbEntry::EMPTY; TLB_SIZE],
-        }
-    }
-
-    #[inline(always)]
-    fn lookup(&self, key: &PageKey) -> Option<u32> {
-        let (slot, tag) = tlb_slot_and_tag(key);
-        let entry = unsafe { self.entries.get_unchecked(slot) };
-        if entry.tag == tag {
-            Some(entry.frame_id)
-        } else {
-            None
-        }
-    }
-
-    #[inline(always)]
-    fn insert(&mut self, key: &PageKey, frame_id: u32) {
-        let (slot, tag) = tlb_slot_and_tag(key);
-        let entry = unsafe { self.entries.get_unchecked_mut(slot) };
-        entry.tag = tag;
-        entry.frame_id = frame_id;
-    }
-
-    #[inline(always)]
-    fn invalidate(&mut self, key: &PageKey) {
-        let (slot, tag) = tlb_slot_and_tag(key);
-        let entry = unsafe { self.entries.get_unchecked_mut(slot) };
-        if entry.tag == tag {
-            entry.tag = 0;
-        }
-    }
+#[inline(always)]
+fn entry_tag(entry: u32) -> u32 {
+    entry & !FRAME_MASK
 }
 
-thread_local! {
-    static THREAD_TLB: RefCell<ThreadTlb> = RefCell::new(ThreadTlb::new());
+#[inline(always)]
+fn entry_frame(entry: u32) -> usize {
+    (entry & FRAME_MASK) as usize
 }
+
+#[thread_local]
+static mut TLB: [[u32; TLB_WAYS]; TLB_SETS] = [[0; TLB_WAYS]; TLB_SETS];
+
 
 // ---------------------------------------------------------------------------
 // Buffer pool wrapper
 // ---------------------------------------------------------------------------
 
-/// Buffer pool with TLB + overflow table only (no preferred frame).
 #[repr(transparent)]
 pub struct PredictiveTranslationTlbOnlyBP {
     inner: PredictiveTranslationBP,
@@ -136,86 +109,122 @@ impl MemPool for PredictiveTranslationTlbOnlyBP {
 
     #[inline(always)]
     fn get_page_for_read(&self, key: PageFrameKey) -> Result<FRGuard, MemPoolStatus> {
-        let _macro_timer = macro_profile_scoped(BpMacroOp::GetPageRead);
-        self.stats.inc_read_count();
-
-        #[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
-        self.profile
-            .total_reads
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-
         let page_key = key.p_key();
+        let set = tlb_set_index(&page_key);
+        let tag = tlb_tag(&page_key);
+        let metas = unsafe { &*self.metas.get() };
 
-        // TLB fast path: L1-resident lookup.
-        let tlb_hit = THREAD_TLB.with(|tlb| tlb.borrow().lookup(&page_key));
-        if let Some(frame_id) = tlb_hit {
-            let idx = frame_id as usize;
-            if let Some(g) = self.try_get_read_guard(idx) {
-                if g.page_key() == Some(page_key) {
-                    g.evict_info().update();
-                    #[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
-                    self.profile
-                        .preferred_frame_hits
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    return Ok(g);
+        let ways = unsafe { &mut *TLB.get_unchecked_mut(set) };
+        for w in 0..TLB_WAYS {
+            if entry_tag(ways[w]) != tag {
+                continue; // tag mismatch — skip without pointer chase
+            }
+            let frame_id = entry_frame(ways[w]);
+            if metas[frame_id].key() == Some(page_key) {
+                if let Some(g) = self.try_get_read_guard(frame_id) {
+                    if g.page_key() == Some(page_key) {
+                        g.evict_info().update();
+                        if w > 0 {
+                            ways.swap(0, w);
+                        }
+                        return Ok(g);
+                    }
                 }
             }
-            THREAD_TLB.with(|tlb| tlb.borrow_mut().invalidate(&page_key));
         }
 
-        // No preferred frame check — go straight to overflow table slow path.
-        let pref = self.preferred_frame(&page_key) as usize;
-        let result = self.get_page_for_read_slow(page_key, [pref]);
-
-        // Populate TLB on success.
-        if let Ok(ref g) = result {
-            let fid = g.frame_id();
-            THREAD_TLB.with(|tlb| tlb.borrow_mut().insert(&page_key, fid));
+        // Miss — overflow lookup (no preferred frame).
+        self.ensure_free_frames()?;
+        loop {
+            if let Some(idx) = self.overflow.lookup(&page_key) {
+                if let Some(g) = self.try_get_read_guard(idx) {
+                    if g.page_key() == Some(page_key) {
+                        g.evict_info().update();
+                        let ways = unsafe { &mut *TLB.get_unchecked_mut(set) };
+                        for i in (1..TLB_WAYS).rev() {
+                            ways[i] = ways[i - 1];
+                        }
+                        ways[0] = pack_entry(tag, idx as u32);
+                        return Ok(g);
+                    }
+                } else if self.overflow.lookup(&page_key) == Some(idx) {
+                    return Err(MemPoolStatus::FrameReadLatchGrantFailed);
+                }
+                continue;
+            }
+            match self.handle_page_fault_write(page_key, []) {
+                Ok(victim) => {
+                    let ways = unsafe { &mut *TLB.get_unchecked_mut(set) };
+                    for i in (1..TLB_WAYS).rev() {
+                        ways[i] = ways[i - 1];
+                    }
+                    ways[0] = pack_entry(tag, victim.frame_id());
+                    return Ok(victim.downgrade());
+                }
+                Err(MemPoolStatus::RetryPageFault) => continue,
+                Err(e) => return Err(e),
+            }
         }
-
-        result
     }
 
     #[inline(always)]
     fn get_page_for_write(&self, key: PageFrameKey) -> Result<FWGuard, MemPoolStatus> {
-        let _macro_timer = macro_profile_scoped(BpMacroOp::GetPageWrite);
-        self.stats.inc_write_count();
-
-        #[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
-        self.profile
-            .total_writes
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-
         let page_key = key.p_key();
+        let set = tlb_set_index(&page_key);
+        let tag = tlb_tag(&page_key);
+        let metas = unsafe { &*self.metas.get() };
 
-        // TLB fast path.
-        let tlb_hit = THREAD_TLB.with(|tlb| tlb.borrow().lookup(&page_key));
-        if let Some(frame_id) = tlb_hit {
-            let idx = frame_id as usize;
-            if let Some(g) = self.try_get_write_guard(idx, true) {
-                if g.page_key() == Some(page_key) {
-                    g.evict_info().update();
-                    #[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
-                    self.profile
-                        .preferred_frame_hits
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    return Ok(g);
+        let ways = unsafe { &mut *TLB.get_unchecked_mut(set) };
+        for w in 0..TLB_WAYS {
+            if entry_tag(ways[w]) != tag {
+                continue;
+            }
+            let frame_id = entry_frame(ways[w]);
+            if metas[frame_id].key() == Some(page_key) {
+                if let Some(g) = self.try_get_write_guard(frame_id, true) {
+                    if g.page_key() == Some(page_key) {
+                        g.evict_info().update();
+                        if w > 0 {
+                            ways.swap(0, w);
+                        }
+                        return Ok(g);
+                    }
                 }
             }
-            THREAD_TLB.with(|tlb| tlb.borrow_mut().invalidate(&page_key));
         }
 
-        // No preferred frame check — straight to overflow slow path.
-        let pref = self.preferred_frame(&page_key) as usize;
-        let result = self.get_page_for_write_slow(page_key, [pref]);
-
-        // Populate TLB on success.
-        if let Ok(ref g) = result {
-            let fid = g.frame_id();
-            THREAD_TLB.with(|tlb| tlb.borrow_mut().insert(&page_key, fid as u32));
+        // Miss — overflow lookup (no preferred frame).
+        self.ensure_free_frames()?;
+        loop {
+            if let Some(idx) = self.overflow.lookup(&page_key) {
+                if let Some(g) = self.try_get_write_guard(idx, true) {
+                    if g.page_key() == Some(page_key) {
+                        g.evict_info().update();
+                        let ways = unsafe { &mut *TLB.get_unchecked_mut(set) };
+                        for i in (1..TLB_WAYS).rev() {
+                            ways[i] = ways[i - 1];
+                        }
+                        ways[0] = pack_entry(tag, idx as u32);
+                        return Ok(g);
+                    }
+                } else if self.overflow.lookup(&page_key) == Some(idx) {
+                    return Err(MemPoolStatus::FrameWriteLatchGrantFailed);
+                }
+                continue;
+            }
+            match self.handle_page_fault_write(page_key, []) {
+                Ok(g) => {
+                    let ways = unsafe { &mut *TLB.get_unchecked_mut(set) };
+                    for i in (1..TLB_WAYS).rev() {
+                        ways[i] = ways[i - 1];
+                    }
+                    ways[0] = pack_entry(tag, g.frame_id());
+                    return Ok(g);
+                }
+                Err(MemPoolStatus::RetryPageFault) => continue,
+                Err(e) => return Err(e),
+            }
         }
-
-        result
     }
 
     // ----- delegated methods -------------------------------------------------
