@@ -47,6 +47,7 @@ bp_pt_tlb_only = ["no_bp_hint"] # TLB + overflow only (no preferred frame check)
 bp_pt_tlb_only_keys = ["no_bp_hint"] # Experimental TLB + overflow only with separate key array
 bp_tlb = ["no_bp_hint"] # Standalone TLB BP with unified hash (no PT dependency)
 tlb_victim_cache = [] # Use direct-mapped + 16-entry victim cache instead of 4-way
+tlb_prefetch = [] # Prefetch neighbor page data during range prefill
 pt_counts = []    # Lightweight PT hit/fallback counters without timing detail
 pt_profile = ["bp_pt"]  # Enables sub-step timing within PT page accesses
 pt_no_prefetch = []     # Disable PT speculative prefetch for comparison runs

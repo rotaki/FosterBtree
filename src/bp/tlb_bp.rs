@@ -360,7 +360,7 @@ impl TlbBP {
                     tlb_insert(set, entry);
                 }
                 // Prefetch the neighbor's metadata and page data into cache.
-                #[cfg(target_arch = "x86_64")]
+                #[cfg(all(target_arch = "x86_64", feature = "tlb_prefetch"))]
                 {
                     let pages = &*self.pages.get();
                     let metas = &*self.metas.get();
