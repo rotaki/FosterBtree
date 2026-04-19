@@ -696,13 +696,38 @@ impl MemPool for TlbBP {
         let tag = hk.tlb_tag();
         let metas = unsafe { &*self.metas.get() };
 
-        if let Some(frame_id) = unsafe { tlb_probe(set, tag) } {
-            if metas[frame_id].key() == Some(page_key) {
-                if let Some(g) = self.try_get_read_guard(frame_id) {
-                    if g.page_key() == Some(page_key) {
-                        g.evict_info().update();
-                        unsafe { TLB_HITS += 1; }
-                        return Ok(g);
+        #[cfg(feature = "tlb_victim_cache")]
+        {
+            if let Some(frame_id) = unsafe { tlb_probe(set, tag) } {
+                if metas[frame_id].key() == Some(page_key) {
+                    if let Some(g) = self.try_get_read_guard(frame_id) {
+                        if g.page_key() == Some(page_key) {
+                            g.evict_info().update();
+                            unsafe { TLB_HITS += 1; }
+                            return Ok(g);
+                        }
+                    }
+                }
+            }
+        }
+        #[cfg(not(feature = "tlb_victim_cache"))]
+        {
+            let ways = unsafe { &mut *TLB.get_unchecked_mut(set) };
+            for w in 0..TLB_WAYS {
+                if entry_tag(ways[w]) != tag {
+                    continue;
+                }
+                let frame_id = entry_frame(ways[w]);
+                if metas[frame_id].key() == Some(page_key) {
+                    if let Some(g) = self.try_get_read_guard(frame_id) {
+                        if g.page_key() == Some(page_key) {
+                            g.evict_info().update();
+                            if w > 0 {
+                                ways.swap(0, w);
+                            }
+                            unsafe { TLB_HITS += 1; }
+                            return Ok(g);
+                        }
                     }
                 }
             }
@@ -756,13 +781,38 @@ impl MemPool for TlbBP {
         let tag = hk.tlb_tag();
         let metas = unsafe { &*self.metas.get() };
 
-        if let Some(frame_id) = unsafe { tlb_probe(set, tag) } {
-            if metas[frame_id].key() == Some(page_key) {
-                if let Some(g) = self.try_get_write_guard(frame_id, true) {
-                    if g.page_key() == Some(page_key) {
-                        g.evict_info().update();
-                        unsafe { TLB_HITS += 1; }
-                        return Ok(g);
+        #[cfg(feature = "tlb_victim_cache")]
+        {
+            if let Some(frame_id) = unsafe { tlb_probe(set, tag) } {
+                if metas[frame_id].key() == Some(page_key) {
+                    if let Some(g) = self.try_get_write_guard(frame_id, true) {
+                        if g.page_key() == Some(page_key) {
+                            g.evict_info().update();
+                            unsafe { TLB_HITS += 1; }
+                            return Ok(g);
+                        }
+                    }
+                }
+            }
+        }
+        #[cfg(not(feature = "tlb_victim_cache"))]
+        {
+            let ways = unsafe { &mut *TLB.get_unchecked_mut(set) };
+            for w in 0..TLB_WAYS {
+                if entry_tag(ways[w]) != tag {
+                    continue;
+                }
+                let frame_id = entry_frame(ways[w]);
+                if metas[frame_id].key() == Some(page_key) {
+                    if let Some(g) = self.try_get_write_guard(frame_id, true) {
+                        if g.page_key() == Some(page_key) {
+                            g.evict_info().update();
+                            if w > 0 {
+                                ways.swap(0, w);
+                            }
+                            unsafe { TLB_HITS += 1; }
+                            return Ok(g);
+                        }
                     }
                 }
             }
