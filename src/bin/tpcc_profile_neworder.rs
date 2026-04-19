@@ -636,6 +636,16 @@ pub fn get_bp(num_frames: usize) -> Arc<impl MemPool> {
         use fbtree::bp::get_test_pt_tlb_only;
         return get_test_pt_tlb_only(num_frames);
     }
+    #[cfg(feature = "bp_pt_tlb_only_keys")]
+    {
+        use fbtree::bp::get_test_pt_tlb_only_keys;
+        return get_test_pt_tlb_only_keys(num_frames);
+    }
+    #[cfg(feature = "bp_tlb")]
+    {
+        use fbtree::bp::get_test_tlb_bp;
+        return get_test_tlb_bp(num_frames);
+    }
     #[cfg(feature = "bp_pt")]
     {
         use fbtree::bp::get_test_pt;
@@ -671,6 +681,8 @@ pub fn get_bp(num_frames: usize) -> Arc<impl MemPool> {
         feature = "bp_pt4_bucket",
         feature = "bp_pt_tlb",
         feature = "bp_pt_tlb_only",
+        feature = "bp_pt_tlb_only_keys",
+        feature = "bp_tlb",
         feature = "bp_overflow",
         feature = "bp_open_addressing",
         feature = "bp_dashmap",

@@ -37,29 +37,30 @@ Total size:    16 KB (fits in L1 data cache, typically 32-48 KB)
 - **27-bit frame_id**: supports up to 128M frames = 2 TB buffer pool at 16 KB pages
 - **5-bit tag**: hash of PageKey, used to filter non-matching ways without pointer chase. 1/32 false positive rate per way. Tag is non-zero (OR'd with 1) so 0 = empty entry.
 
-### Set index computation
+### Hash strategy: `hash_u64(c_key) + page_id`
+
+All TLB operations derive from a single 64-bit value:
 
 ```rust
-fn tlb_set_index(key: &PageKey) -> usize {
-    let c_hash = key.c_key.as_u32().wrapping_mul(2654435761); // Knuth multiplicative hash
-    (c_hash as usize).wrapping_add(key.page_id as usize) & TLB_SET_MASK
-}
+let c_hash = hash_u64(c_key as u64);  // Stafford Mix13 on container key
+let val = c_hash.wrapping_add(page_id as u64);
 ```
 
-Only the container key is hashed; the page_id is added directly. This preserves spatial locality: adjacent pages within the same container (e.g., B-tree siblings) map to adjacent TLB sets. This matters for scan-like access patterns.
+- **Set index**: `val & TLB_SET_MASK` (low 10 bits)
+- **Tag**: `(val >> 54) & 0x1F | 1` (high 5 bits, non-zero)
+- **Overflow bucket** (on miss only): `hash_page_key(key)` via standard `fastmod` — must match the overflow table's own bucket computation, so this uses the canonical hash, not `val`.
 
-### Tag computation
+This design preserves **spatial locality**: adjacent page_ids within the same container produce adjacent `val` values, mapping to adjacent TLB sets. This matters for B-tree scans where sibling leaf pages have sequential page_ids.
 
-```rust
-fn tlb_tag(key: &PageKey) -> u32 {
-    let packed = (key.c_key.as_u32() as u64) << 32 | key.page_id as u64;
-    let h = packed.wrapping_mul(0x9e3779b97f4a7c15); // Fibonacci hash
-    let t = ((h >> 59) as u32) | 1; // 5 bits, non-zero
-    t << TAG_SHIFT
-}
-```
+#### Hash unification trade-off
 
-Uses a different hash than the set index to ensure independence between set selection and tag verification.
+We tested computing TLB set, tag, and overflow bucket all from a single `hash_page_key()` call. This eliminated the rehash on miss (~5 ns savings on 8% miss rate = 0.4 ns average) but destroyed spatial locality in set indexing (Stafford Mix13 scrambles adjacent page_ids to distant values). Result: ~2 µs regression on TPC-C from increased TLB conflict misses.
+
+The current design uses two hash computations:
+1. `hash_u64(c_key) + page_id` — for TLB set + tag (spatial locality preserved)
+2. `hash_page_key()` — for overflow bucket (only on miss, matches overflow table)
+
+The miss-path rehash costs ~5 ns but occurs only on ~8% of accesses. The spatial locality benefit on the hit path more than compensates.
 
 ## Hit Path
 
@@ -90,9 +91,10 @@ The TLB hit path is genuinely faster because it avoids the hash computation that
 
 ## Miss Path
 
-On TLB miss, falls through to `overflow.lookup(&page_key)` which:
-1. Computes `hash_page_key()` + `fastmod()` internally
-2. Reads the overflow bucket (version check, inlined slot, chain walk)
+On TLB miss, computes `hash_page_key()` for the overflow bucket index and calls `overflow.lookup_with_bucket()`:
+
+1. `hash_page_key()` + `fastmod()` — bucket index (~5 ns)
+2. Read overflow bucket (version check, inlined slot, chain walk)
 3. Returns `Some(frame_id)` or `None`
 
 On overflow hit: latch frame, verify, populate TLB, return.
@@ -179,6 +181,72 @@ TLB wins when working set <= ~2000 pages. Loses at larger working sets due to mi
 | TLB-only | 625,076 | 74.2 us | 92.2% |
 
 TLB is 1.4 us behind PT-FP-1 despite higher hit rate (92% vs 91%). The gap comes from the miss path: TLB calls `overflow.lookup()` which recomputes the hash, while PT-FP-1 reuses the precomputed preferred frame index as the bucket index.
+
+## Optimization History
+
+### TLB access mechanism
+
+| Approach | Uniform 100K | Notes |
+|---|---:|---|
+| `thread_local!` + `RefCell` (16B entries) | 265 ns | `.with()` closure + borrow check on every access |
+| `#[thread_local]` + `UnsafeCell` (8B tag+fid) | 137 ns | Eliminated closure overhead |
+| `#[thread_local]` bare `u32[128]` (no tag) | 123 ns | No struct, no tag comparison, just metadata verify |
+| + overflow bucket prefetch | 128/132 ns | Helped zipfian, hurt uniform (prefetch instruction overhead) |
+| + page prefetch | 168 ns | Too many prefetches, counterproductive |
+
+**Lesson**: `thread_local!` macro overhead (~130 ns) dominated early versions. `#[thread_local]` (nightly) is essential.
+
+### Associativity
+
+| Config | Entries | Size | TPC-C Hit Rate | TPC-C Latency |
+|---|---:|---:|---:|---:|
+| Direct-mapped 128 | 128 | 512 B | 89.5% | 48.7 us |
+| Direct-mapped 1024 | 1,024 | 4 KB | — | 50.9 us |
+| Direct-mapped 4096 | 4,096 | 16 KB | 74.1% | 76.6 us |
+| 2-way 2048x2 | 4,096 | 16 KB | 77.9% | 77.7 us |
+| 2-way 4096x2 | 8,192 | 32 KB | 80.1% | 78.7 us |
+| 4-way 1024x4 (no tag) | 4,096 | 16 KB | 92.1% | 78.1 us |
+| **4-way 1024x4 (5-bit tag)** | **4,096** | **16 KB** | **92.2%** | **74.2 us** |
+| 4-way 2048x4 | 8,192 | 32 KB | 94.4% | 78.8 us |
+| 4-way 512x4 | 2,048 | 8 KB | 88.5% | 78.5 us |
+
+**Lessons**:
+
+- Conflict misses dominate: 4-way dramatically improves hit rate over direct-mapped at same entry count (74% → 92%).
+- Tag pre-filter is critical: without it, 4-way is slower than direct-mapped despite higher hit rate (78.1 vs 76.6 us). With tags, 4-way wins (74.2 us).
+- 32 KB TLB hurts: uses entire L1, evicts other hot data. 16 KB is the sweet spot.
+- Direct-mapped 128 entries at 512 B had the best latency on small workloads (48.7 us) but scales poorly to TPC-C.
+
+### Eviction policy
+
+| Policy | TPC-C Hit Rate | TPC-C Latency |
+|---|---:|---:|
+| LRU (swap on hit, shift on insert) | 92.2% | 74.2 us |
+| Clock (1-bit, scan on evict) | 92.3% | 75.0 us |
+
+**Lesson**: With only 4 ways, LRU shift (3 u32 copies) is cheaper than clock's branch-heavy scan. Clock adds ~0.8 us per transaction.
+
+### Hash design
+
+| Hash Strategy | TPC-C Latency | Notes |
+|---|---:|---|
+| Separate hashes (c_key×const + page_id for set, fibonacci for tag) | **75.2 us** | Best: spatial locality preserved |
+| Single `hash_page_key()`, high bits for set | 78.1 us | Spatial locality destroyed |
+| Single `hash_page_key()`, low bits for set | 76.8 us | Still worse — Mix13 scrambles low bits too |
+| `hash_u64(c_key) + page_id` for set+tag, `hash_page_key` for overflow | 77.2 us | Spatial locality restored but two hashes |
+
+**Lesson**: Spatial locality in set indexing matters more than saving a hash computation on the miss path. Adjacent pages within a container should map to adjacent TLB sets for B-tree scan performance. Pure hash functions (Stafford Mix13) destroy this property. The best set index is `hash(c_key) + page_id` where page_id is added directly without hashing.
+
+### Code layout
+
+| Approach | Latency | Notes |
+|---|---:|---|
+| Miss path inline in `get_page_for_read` | 120 ns | Best — compiler optimizes across hit/miss boundary |
+| Miss path `#[cold] #[inline(never)]` | 137 ns | Function call overhead (~17 ns) |
+| Miss path `#[cold]` (no inline hint) | 140 ns | Compiler still didn't inline well |
+| Delegate to PT's `get_page_for_read_slow` | 134 ns | Extra indirection through PT's slow path |
+
+**Lesson**: Inlining the miss path in the same function body is faster despite bloating i-cache. Extracting to a cold function costs ~15 ns in function call + register save/restore overhead. At ~10% miss rate, this is ~1.5 ns average — small but measurable.
 
 ## Potential Improvements
 

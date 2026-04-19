@@ -44,6 +44,8 @@ bp_pt2_bucket = ["no_bp_hint"] # PT variant: two hashes + metadata verify-and-fa
 bp_pt4_bucket = ["no_bp_hint"] # PT variant: four hashes + metadata verify-and-fast-return
 bp_pt_tlb = ["no_bp_hint"]    # PT variant: per-thread L1-resident translation cache
 bp_pt_tlb_only = ["no_bp_hint"] # TLB + overflow only (no preferred frame check)
+bp_pt_tlb_only_keys = ["no_bp_hint"] # Experimental TLB + overflow only with separate key array
+bp_tlb = ["no_bp_hint"] # Standalone TLB BP with unified hash (no PT dependency)
 pt_counts = []    # Lightweight PT hit/fallback counters without timing detail
 pt_profile = ["bp_pt"]  # Enables sub-step timing within PT page accesses
 pt_no_prefetch = []     # Disable PT speculative prefetch for comparison runs
@@ -73,6 +75,7 @@ io-uring = {version = "0.7.4"}
 libc = {version = "0.2.169"}
 memchr = "2.7.4"
 crossbeam-epoch = "0.9"
+congee = "0.3"
 dashmap = "6.1"
 arc-swap = "1.7"
 criterion = { version = "0.5", features = ["html_reports"]}

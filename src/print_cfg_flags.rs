@@ -39,6 +39,28 @@ pub fn print_cfg_flags() {
     {
         println!("Using Predictive Translation (PT) two-hash bucket-validate-first buffer pool");
     }
+    #[cfg(feature = "bp_pt4_bucket")]
+    {
+        println!("Using Predictive Translation (PT) four-hash bucket-validate-first buffer pool");
+    }
+    #[cfg(feature = "bp_pt_tlb")]
+    {
+        println!("Using Predictive Translation (PT) TLB-assisted buffer pool");
+    }
+    #[cfg(feature = "bp_pt_tlb_only")]
+    {
+        println!("Using Predictive Translation (PT) TLB-only buffer pool");
+    }
+    #[cfg(feature = "bp_pt_tlb_only_keys")]
+    {
+        println!(
+            "Using Predictive Translation (PT) TLB-only experimental separate-key buffer pool"
+        );
+    }
+    #[cfg(feature = "bp_tlb")]
+    {
+        println!("Using standalone TLB buffer pool (unified hash)");
+    }
     #[cfg(feature = "bp_overflow")]
     {
         println!("Using OverflowTable (custom HT) buffer pool");
@@ -58,6 +80,11 @@ pub fn print_cfg_flags() {
         feature = "bp_pt2",
         feature = "bp_pt_bucket",
         feature = "bp_pt2_bucket",
+        feature = "bp_pt4_bucket",
+        feature = "bp_pt_tlb",
+        feature = "bp_pt_tlb_only",
+        feature = "bp_pt_tlb_only_keys",
+        feature = "bp_tlb",
         feature = "bp_overflow",
         feature = "bp_dashmap",
         feature = "bp_hashmap"

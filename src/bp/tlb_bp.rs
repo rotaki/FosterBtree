@@ -1,0 +1,883 @@
+//! Standalone TLB + overflow buffer pool.
+//!
+//! TLB: 4-way set-associative, 1024 sets, 5-bit tag pre-filter (16 KB).
+//! Overflow: Congee (concurrent ART tree) — ordered by PageKey, enabling
+//! future range-prefill of TLB entries for sequential scans.
+
+#[allow(unused_imports)]
+use crate::log;
+
+use super::{
+    buffer_pool::BPStats,
+    eviction_policy::{ClockEvictionPolicy, EvictionPolicy},
+    frame_guards::{box_as_mut_ptr, FrameMeta, FrameReadGuard, FrameWriteGuard},
+    mem_pool_trait::{ContainerKey, MemPool, MemPoolStatus, MemoryStats, PageFrameKey, PageKey},
+};
+use crate::{
+    container::ContainerManager,
+    log_debug, log_warn,
+    page::{Page, PageId},
+};
+
+use std::{
+    cell::UnsafeCell,
+    collections::BTreeMap,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
+};
+
+use concurrent_queue::ConcurrentQueue;
+use congee::Congee;
+use rayon::iter::{IntoParallelIterator, ParallelIterator};
+
+type EvictionPolicyImpl = ClockEvictionPolicy;
+type FMeta = FrameMeta<EvictionPolicyImpl>;
+type FRGuard = FrameReadGuard<EvictionPolicyImpl>;
+type FWGuard = FrameWriteGuard<EvictionPolicyImpl>;
+
+// ===========================================================================
+// PageKey <-> u64 packing
+// ===========================================================================
+
+/// Pack PageKey into a usize for use as congee key.
+/// Layout: [c_key: 32 bits | page_id: 32 bits]
+/// This preserves ordering: pages within the same container are adjacent.
+#[inline(always)]
+fn pack_page_key(key: &PageKey) -> usize {
+    ((key.c_key.as_u32() as usize) << 32) | key.page_id as usize
+}
+
+#[inline(always)]
+fn unpack_page_key(packed: usize) -> PageKey {
+    let c_key_u32 = (packed >> 32) as u32;
+    let page_id = packed as u32;
+    PageKey::new(ContainerKey::from_u32(c_key_u32), page_id)
+}
+
+// ===========================================================================
+// TLB hash
+// ===========================================================================
+
+struct HashedKey {
+    val: u64,
+}
+
+impl HashedKey {
+    #[inline(always)]
+    fn new(key: &PageKey) -> Self {
+        let c_hash = super::hash::hash_u64(key.c_key.as_u32() as u64);
+        Self {
+            val: c_hash.wrapping_add(key.page_id as u64),
+        }
+    }
+
+    #[inline(always)]
+    fn tlb_set(&self) -> usize {
+        (self.val as usize) & TLB_SET_MASK
+    }
+
+    #[inline(always)]
+    fn tlb_tag(&self) -> u32 {
+        let t = ((self.val >> 10) as u32 & 0x1F) | 1;
+        t << TAG_SHIFT
+    }
+}
+
+// ===========================================================================
+// TLB constants and helpers
+// ===========================================================================
+
+const TLB_SETS: usize = 1024;
+const TLB_WAYS: usize = 4;
+const TLB_SET_MASK: usize = TLB_SETS - 1;
+
+const FRAME_BITS: u32 = 27;
+const FRAME_MASK: u32 = (1 << FRAME_BITS) - 1;
+const TAG_SHIFT: u32 = FRAME_BITS;
+
+const PREFILL_COUNT: usize = 8; // target + 7 forward neighbors
+
+#[inline(always)]
+fn pack_entry(tag: u32, frame_id: u32) -> u32 {
+    tag | (frame_id & FRAME_MASK)
+}
+
+#[inline(always)]
+fn entry_tag(entry: u32) -> u32 {
+    entry & !FRAME_MASK
+}
+
+#[inline(always)]
+fn entry_frame(entry: u32) -> usize {
+    (entry & FRAME_MASK) as usize
+}
+
+#[thread_local]
+static mut TLB: [[u32; TLB_WAYS]; TLB_SETS] = [[0; TLB_WAYS]; TLB_SETS];
+
+#[thread_local]
+static mut TLB_HITS: u64 = 0;
+#[thread_local]
+static mut TLB_MISSES: u64 = 0;
+#[thread_local]
+static mut TLB_PREFILLS: u64 = 0;
+/// Last missed packed PageKey — used to detect sequential access pattern.
+#[thread_local]
+static mut LAST_MISS_KEY: usize = 0;
+
+// ===========================================================================
+// Buffer pool
+// ===========================================================================
+
+pub struct TlbBP {
+    num_frames: usize,
+    used_frames: AtomicUsize,
+    clock_hand: AtomicUsize,
+    container_manager: Arc<ContainerManager>,
+    free_list: ConcurrentQueue<usize>,
+    #[allow(clippy::vec_box)]
+    pages: UnsafeCell<Vec<Box<Page>>>,
+    #[allow(clippy::vec_box)]
+    metas: UnsafeCell<Vec<Box<FMeta>>>,
+    /// Overflow: concurrent ART tree mapping packed PageKey (usize) -> frame_id (usize).
+    overflow: Congee<usize, usize>,
+    stats: BPStats,
+}
+
+unsafe impl Sync for TlbBP {}
+unsafe impl Send for TlbBP {}
+
+impl TlbBP {
+    pub fn new(
+        num_frames: usize,
+        container_manager: Arc<ContainerManager>,
+    ) -> Result<Self, MemPoolStatus> {
+        log_debug!("TlbBP created: num_frames={}", num_frames);
+
+        let free_list = ConcurrentQueue::bounded(num_frames);
+        for i in 0..num_frames {
+            free_list.push(i).unwrap();
+        }
+
+        let pages: UnsafeCell<Vec<Box<Page>>> = UnsafeCell::new(
+            (0..num_frames)
+                .into_par_iter()
+                .map(|_| Box::new(Page::new_empty()))
+                .collect(),
+        );
+
+        let metas: UnsafeCell<Vec<Box<FMeta>>> = UnsafeCell::new(
+            (0..num_frames)
+                .into_par_iter()
+                .map(|i| Box::new(FMeta::new(i as u32)))
+                .collect(),
+        );
+
+        debug_assert!(
+            num_frames <= u32::MAX as usize,
+            "num_frames must fit in u32"
+        );
+
+        Ok(Self {
+            num_frames,
+            used_frames: AtomicUsize::new(0),
+            clock_hand: AtomicUsize::new(0),
+            container_manager,
+            free_list,
+            pages,
+            metas,
+            overflow: Congee::default(),
+            stats: BPStats::new(),
+        })
+    }
+
+    // ------------------------------------------------------------------
+    // Overflow helpers (thin wrappers around congee)
+    // ------------------------------------------------------------------
+
+    #[inline]
+    fn overflow_lookup(&self, key: &PageKey) -> Option<usize> {
+        let guard = self.overflow.pin();
+        self.overflow.get(&pack_page_key(key), &guard)
+    }
+
+    /// Range-scan the overflow for `page_key` and up to PREFILL_COUNT-1 forward
+    /// neighbors. Returns `Some(frame_id)` for the target if found. As a side
+    /// effect, populates TLB entries for any neighbors found.
+    #[inline]
+    fn overflow_range_lookup(&self, page_key: &PageKey) -> Option<usize> {
+        let guard = self.overflow.pin();
+        let packed_target = pack_page_key(page_key);
+        let packed_end = packed_target + PREFILL_COUNT;
+        let mut buf = [(0usize, 0usize); PREFILL_COUNT];
+        let count = self.overflow.range(&packed_target, &packed_end, &mut buf, &guard);
+
+        let mut target_frame: Option<usize> = None;
+
+        for i in 0..count {
+            let (packed_key, frame_id) = buf[i];
+            if packed_key == packed_target {
+                target_frame = Some(frame_id);
+                continue; // caller handles TLB insert for target
+            }
+            // Prefill neighbor into TLB
+            let neighbor_key = unpack_page_key(packed_key);
+            let hk = HashedKey::new(&neighbor_key);
+            let set = hk.tlb_set();
+            let tag = hk.tlb_tag();
+            let ways = unsafe { &mut *TLB.get_unchecked_mut(set) };
+            let mut inserted = false;
+            for w in 0..TLB_WAYS {
+                if ways[w] == 0 {
+                    ways[w] = pack_entry(tag, frame_id as u32);
+                    inserted = true;
+                    break;
+                }
+            }
+            if !inserted {
+                ways[3] = ways[2];
+                ways[2] = ways[1];
+                ways[1] = ways[0];
+                ways[0] = pack_entry(tag, frame_id as u32);
+            }
+            unsafe { TLB_PREFILLS += 1; }
+        }
+
+        target_frame
+    }
+
+    #[inline]
+    fn overflow_insert(&self, key: PageKey, frame_id: usize) {
+        let guard = self.overflow.pin();
+        let _ = self.overflow.insert(pack_page_key(&key), frame_id, &guard);
+    }
+
+    /// Atomic try-insert: insert only if absent. Returns Err(existing) if present.
+    #[inline]
+    fn overflow_try_insert(&self, key: PageKey, frame_id: usize) -> Result<(), usize> {
+        let guard = self.overflow.pin();
+        let packed = pack_page_key(&key);
+        let mut was_present = false;
+        let mut existing_val = 0usize;
+        let _ = self.overflow.compute_or_insert(
+            packed,
+            |existing| match existing {
+                None => frame_id,
+                Some(v) => {
+                    was_present = true;
+                    existing_val = v;
+                    v
+                }
+            },
+            &guard,
+        );
+        if was_present {
+            Err(existing_val)
+        } else {
+            Ok(())
+        }
+    }
+
+    #[inline]
+    fn overflow_remove(&self, key: &PageKey) -> Option<usize> {
+        let guard = self.overflow.pin();
+        self.overflow.remove(&pack_page_key(key), &guard)
+    }
+
+    fn overflow_contains_key(&self, key: &PageKey) -> bool {
+        self.overflow_lookup(key).is_some()
+    }
+
+    fn overflow_get_page_keys(&self, c_key: ContainerKey) -> Vec<PageFrameKey> {
+        let guard = self.overflow.pin();
+        let start = (c_key.as_u32() as usize) << 32;
+        let end = start | 0xFFFF_FFFF;
+        let mut buf = vec![(0usize, 0usize); 4096];
+        let mut out = Vec::new();
+        let mut scan_start = start;
+        loop {
+            let count = self.overflow.range(&scan_start, &end, &mut buf, &guard);
+            if count == 0 {
+                break;
+            }
+            for &(packed, frame_id) in &buf[..count] {
+                let pk = unpack_page_key(packed);
+                out.push(PageFrameKey::new_with_frame_id(
+                    pk.c_key,
+                    pk.page_id,
+                    frame_id as u32,
+                ));
+            }
+            if count < buf.len() {
+                break;
+            }
+            scan_start = buf[count - 1].0 + 1;
+        }
+        out
+    }
+
+    // ------------------------------------------------------------------
+    // Frame access
+    // ------------------------------------------------------------------
+
+    #[inline]
+    fn try_get_read_guard(&self, index: usize) -> Option<FRGuard> {
+        let metas = unsafe { &mut *self.metas.get() };
+        let pages = unsafe { &mut *self.pages.get() };
+        FRGuard::try_new_with_key_slot(
+            box_as_mut_ptr(&mut metas[index]),
+            box_as_mut_ptr(&mut pages[index]),
+            std::ptr::null_mut(),
+        )
+    }
+
+    #[inline]
+    fn try_get_write_guard(&self, index: usize, make_dirty: bool) -> Option<FWGuard> {
+        let metas = unsafe { &mut *self.metas.get() };
+        let pages = unsafe { &mut *self.pages.get() };
+        FWGuard::try_new_with_key_slot(
+            box_as_mut_ptr(&mut metas[index]),
+            box_as_mut_ptr(&mut pages[index]),
+            std::ptr::null_mut(),
+            make_dirty,
+        )
+    }
+
+    // ------------------------------------------------------------------
+    // Eviction
+    // ------------------------------------------------------------------
+
+    #[inline]
+    fn enqueue_free_frame(&self, idx: usize) {
+        self.free_list.push(idx).ok();
+    }
+
+    fn choose_victim(&self) -> Option<FWGuard> {
+        while let Ok(idx) = self.free_list.pop() {
+            if let Some(guard) = self.try_get_write_guard(idx, false) {
+                if guard.page_key().is_none() {
+                    return Some(guard);
+                }
+            }
+        }
+        for idx in 0..self.num_frames {
+            if let Some(guard) = self.try_get_write_guard(idx, false) {
+                if guard.page_key().is_none() {
+                    return Some(guard);
+                }
+            }
+        }
+        None
+    }
+
+    fn ensure_free_frames(&self) -> Result<(), MemPoolStatus> {
+        let used = self.used_frames.load(Ordering::Acquire);
+        let ratio = used as f64 / self.num_frames as f64;
+        if ratio > 0.95 {
+            log_warn!(
+                "[TLB-EVICT] Used frames: {}/{} ({:.1}%). Evicting...",
+                used,
+                self.num_frames,
+                ratio * 100.0,
+            );
+            self.evict_batch()
+        } else {
+            Ok(())
+        }
+    }
+
+    fn fetch_add_clock_hand(&self, increment: usize) -> usize {
+        self.clock_hand
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |cur| {
+                Some((cur + increment) % self.num_frames)
+            })
+            .expect("clock hand update should not fail")
+    }
+
+    fn evict_batch(&self) -> Result<(), MemPoolStatus> {
+        let batch = std::cmp::min(self.num_frames, 64);
+        let max_iter = 2 * self.num_frames / batch;
+        let mut evicted = 0usize;
+
+        for _ in 0..max_iter {
+            let start = self.fetch_add_clock_hand(batch);
+            for offset in 0..batch {
+                let idx = (start + offset) % self.num_frames;
+                let meta = &mut unsafe { &mut *self.metas.get() }[idx];
+
+                if meta.key().is_none() || meta.latch.is_locked() {
+                    continue;
+                }
+
+                if meta.evict_info.score() > 0 {
+                    meta.evict_info.update();
+                    meta.evict_info.reset();
+                    continue;
+                }
+
+                if let Some(guard) = self.try_get_write_guard(idx, false) {
+                    if guard.page_key().is_none() {
+                        continue;
+                    }
+                    self.write_to_disk_if_dirty_w(&guard).unwrap();
+                    if let Some(pk) = guard.page_key() {
+                        if self.overflow_lookup(&pk) == Some(idx) {
+                            self.overflow_remove(&pk);
+                        }
+                    }
+                    guard.set_page_key(None);
+                    guard.evict_info().reset();
+                    self.enqueue_free_frame(idx);
+                    evicted += 1;
+                }
+            }
+            if evicted > 0 {
+                self.used_frames.fetch_sub(evicted, Ordering::AcqRel);
+                return Ok(());
+            }
+        }
+
+        if evicted == 0 {
+            Err(MemPoolStatus::CannotEvictPage)
+        } else {
+            Ok(())
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Page fault
+    // ------------------------------------------------------------------
+
+    fn handle_page_fault(
+        &self,
+        page_key: PageKey,
+    ) -> Result<FWGuard, MemPoolStatus> {
+        self.used_frames.fetch_add(1, Ordering::AcqRel);
+
+        let mut victim = match self.choose_victim() {
+            Some(v) => v,
+            None => {
+                self.used_frames.fetch_sub(1, Ordering::AcqRel);
+                return Err(MemPoolStatus::CannotEvictPage);
+            }
+        };
+
+        debug_assert!(victim.page_key().is_none());
+
+        if self
+            .overflow_try_insert(page_key, victim.frame_id() as usize)
+            .is_err()
+        {
+            self.enqueue_free_frame(victim.frame_id() as usize);
+            self.used_frames.fetch_sub(1, Ordering::AcqRel);
+            return Err(MemPoolStatus::RetryPageFault);
+        }
+
+        victim.set_page_key(Some(page_key));
+
+        if let Err(e) = self
+            .container_manager
+            .get_container(page_key.c_key)
+            .read_page(page_key.page_id, &mut victim)
+        {
+            victim.set_page_key(None);
+            self.overflow_remove(&page_key);
+            self.enqueue_free_frame(victim.frame_id() as usize);
+            self.used_frames.fetch_sub(1, Ordering::AcqRel);
+            return Err(MemPoolStatus::FileManagerError(e.to_string()));
+        }
+
+        victim.evict_info().reset();
+        victim.dirty().store(true, Ordering::Release);
+
+        Ok(victim)
+    }
+
+    // ------------------------------------------------------------------
+    // Disk I/O
+    // ------------------------------------------------------------------
+
+    fn write_to_disk_if_dirty_w(&self, guard: &FWGuard) -> Result<(), MemPoolStatus> {
+        if let Some(key) = guard.page_key() {
+            if guard
+                .dirty()
+                .compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                let container = self.container_manager.get_container(key.c_key);
+                container.write_page(key.page_id, guard)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn write_to_disk_if_dirty_r(&self, guard: &FRGuard) -> Result<(), MemPoolStatus> {
+        if let Some(key) = guard.page_key() {
+            if guard
+                .dirty()
+                .compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                let container = self.container_manager.get_container(key.c_key);
+                container.write_page(key.page_id, guard)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Drop for TlbBP {
+    fn drop(&mut self) {
+        let hits = unsafe { TLB_HITS };
+        let misses = unsafe { TLB_MISSES };
+        let prefills = unsafe { TLB_PREFILLS };
+        let total = hits + misses;
+        if total > 0 {
+            eprintln!(
+                "TLB stats: hits={}, misses={}, total={}, hit_rate={:.2}%, prefills={}",
+                hits, misses, total,
+                hits as f64 / total as f64 * 100.0,
+                prefills
+            );
+        }
+
+        if self.container_manager.remove_dir_on_drop() {
+            // Test mode — directory will be cleaned up by ContainerManager.
+        } else {
+            self.flush_all_and_reset().unwrap();
+        }
+    }
+}
+
+// ===========================================================================
+// MemPool trait
+// ===========================================================================
+
+impl MemPool for TlbBP {
+    type EP = EvictionPolicyImpl;
+
+    // ----- TLB fast path: get_page_for_read --------------------------------
+
+    #[inline(always)]
+    fn get_page_for_read(&self, key: PageFrameKey) -> Result<FRGuard, MemPoolStatus> {
+        let page_key = key.p_key();
+        let hk = HashedKey::new(&page_key);
+        let set = hk.tlb_set();
+        let tag = hk.tlb_tag();
+        let metas = unsafe { &*self.metas.get() };
+
+        let ways = unsafe { &mut *TLB.get_unchecked_mut(set) };
+        for w in 0..TLB_WAYS {
+            if entry_tag(ways[w]) != tag {
+                continue;
+            }
+            let frame_id = entry_frame(ways[w]);
+            if metas[frame_id].key() == Some(page_key) {
+                if let Some(g) = self.try_get_read_guard(frame_id) {
+                    if g.page_key() == Some(page_key) {
+                        g.evict_info().update();
+                        if w > 0 {
+                            ways.swap(0, w);
+                        }
+                        unsafe { TLB_HITS += 1; }
+                        return Ok(g);
+                    }
+                }
+            }
+        }
+
+        // Miss path — use range prefill if sequential pattern detected.
+        unsafe { TLB_MISSES += 1; }
+        let packed = pack_page_key(&page_key);
+        let use_range = unsafe {
+            let prev = LAST_MISS_KEY;
+            LAST_MISS_KEY = packed;
+            packed.wrapping_sub(prev) <= PREFILL_COUNT
+        };
+        self.ensure_free_frames()?;
+        loop {
+            let lookup = if use_range {
+                self.overflow_range_lookup(&page_key)
+            } else {
+                self.overflow_lookup(&page_key)
+            };
+            if let Some(idx) = lookup {
+                if let Some(g) = self.try_get_read_guard(idx) {
+                    if g.page_key() == Some(page_key) {
+                        g.evict_info().update();
+                        let ways = unsafe { &mut *TLB.get_unchecked_mut(set) };
+                        ways[3] = ways[2];
+                        ways[2] = ways[1];
+                        ways[1] = ways[0];
+                        ways[0] = pack_entry(tag, idx as u32);
+                        return Ok(g);
+                    }
+                } else if self.overflow_lookup(&page_key) == Some(idx) {
+                    return Err(MemPoolStatus::FrameReadLatchGrantFailed);
+                }
+                continue;
+            }
+            match self.handle_page_fault(page_key) {
+                Ok(victim) => {
+                    let ways = unsafe { &mut *TLB.get_unchecked_mut(set) };
+                    ways[3] = ways[2];
+                    ways[2] = ways[1];
+                    ways[1] = ways[0];
+                    ways[0] = pack_entry(tag, victim.frame_id());
+                    return Ok(victim.downgrade());
+                }
+                Err(MemPoolStatus::RetryPageFault) => continue,
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
+    // ----- TLB fast path: get_page_for_write --------------------------------
+
+    #[inline(always)]
+    fn get_page_for_write(&self, key: PageFrameKey) -> Result<FWGuard, MemPoolStatus> {
+        let page_key = key.p_key();
+        let hk = HashedKey::new(&page_key);
+        let set = hk.tlb_set();
+        let tag = hk.tlb_tag();
+        let metas = unsafe { &*self.metas.get() };
+
+        let ways = unsafe { &mut *TLB.get_unchecked_mut(set) };
+        for w in 0..TLB_WAYS {
+            if entry_tag(ways[w]) != tag {
+                continue;
+            }
+            let frame_id = entry_frame(ways[w]);
+            if metas[frame_id].key() == Some(page_key) {
+                if let Some(g) = self.try_get_write_guard(frame_id, true) {
+                    if g.page_key() == Some(page_key) {
+                        g.evict_info().update();
+                        if w > 0 {
+                            ways.swap(0, w);
+                        }
+                        unsafe { TLB_HITS += 1; }
+                        return Ok(g);
+                    }
+                }
+            }
+        }
+
+        unsafe { TLB_MISSES += 1; }
+        let packed = pack_page_key(&page_key);
+        let use_range = unsafe {
+            let prev = LAST_MISS_KEY;
+            LAST_MISS_KEY = packed;
+            packed.wrapping_sub(prev) <= PREFILL_COUNT
+        };
+        self.ensure_free_frames()?;
+        loop {
+            let lookup = if use_range {
+                self.overflow_range_lookup(&page_key)
+            } else {
+                self.overflow_lookup(&page_key)
+            };
+            if let Some(idx) = lookup {
+                if let Some(g) = self.try_get_write_guard(idx, true) {
+                    if g.page_key() == Some(page_key) {
+                        g.evict_info().update();
+                        let ways = unsafe { &mut *TLB.get_unchecked_mut(set) };
+                        ways[3] = ways[2];
+                        ways[2] = ways[1];
+                        ways[1] = ways[0];
+                        ways[0] = pack_entry(tag, idx as u32);
+                        return Ok(g);
+                    }
+                } else if self.overflow_lookup(&page_key) == Some(idx) {
+                    return Err(MemPoolStatus::FrameWriteLatchGrantFailed);
+                }
+                continue;
+            }
+            match self.handle_page_fault(page_key) {
+                Ok(g) => {
+                    let ways = unsafe { &mut *TLB.get_unchecked_mut(set) };
+                    ways[3] = ways[2];
+                    ways[2] = ways[1];
+                    ways[1] = ways[0];
+                    ways[0] = pack_entry(tag, g.frame_id());
+                    return Ok(g);
+                }
+                Err(MemPoolStatus::RetryPageFault) => continue,
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
+    // ----- create pages -----------------------------------------------------
+
+    fn create_new_page_for_write(&self, c_key: ContainerKey) -> Result<FWGuard, MemPoolStatus> {
+        self.stats.inc_new_page();
+        self.ensure_free_frames()?;
+
+        let container = self.container_manager.get_container(c_key);
+        let page_id = container.inc_page_count(1) as PageId;
+        let page_key = PageKey::new(c_key, page_id);
+
+        let mut victim = self
+            .choose_victim()
+            .ok_or(MemPoolStatus::CannotEvictPage)?;
+
+        debug_assert!(victim.page_key().is_none());
+
+        self.overflow_insert(page_key, victim.frame_id() as usize);
+
+        victim.set_id(page_id);
+        victim.set_page_key(Some(page_key));
+        victim.dirty().store(true, Ordering::Release);
+        victim.evict_info().reset();
+        self.used_frames.fetch_add(1, Ordering::AcqRel);
+
+        Ok(victim)
+    }
+
+    fn create_new_pages_for_write(
+        &self,
+        c_key: ContainerKey,
+        num_pages: usize,
+    ) -> Result<Vec<FWGuard>, MemPoolStatus> {
+        let mut guards = Vec::with_capacity(num_pages);
+        for _ in 0..num_pages {
+            match self.create_new_page_for_write(c_key) {
+                Ok(g) => guards.push(g),
+                Err(_) => break,
+            }
+        }
+        Ok(guards)
+    }
+
+    // ----- container ops ----------------------------------------------------
+
+    fn create_container(&self, _c_key: ContainerKey, _is_temp: bool) -> Result<(), MemPoolStatus> {
+        Ok(())
+    }
+
+    fn drop_container(&self, _c_key: ContainerKey) -> Result<(), MemPoolStatus> {
+        Ok(())
+    }
+
+    // ----- page presence ----------------------------------------------------
+
+    fn is_in_mem(&self, key: PageFrameKey) -> bool {
+        self.overflow_contains_key(&key.p_key())
+    }
+
+    fn get_page_keys_in_mem(&self, c_key: ContainerKey) -> Vec<PageFrameKey> {
+        self.overflow_get_page_keys(c_key)
+    }
+
+    // ----- misc -------------------------------------------------------------
+
+    fn prefetch_page(&self, _key: PageFrameKey) -> Result<(), MemPoolStatus> {
+        Ok(())
+    }
+
+    fn flush_all(&self) -> Result<(), MemPoolStatus> {
+        (0..self.num_frames).into_par_iter().for_each(|i| {
+            let frame = loop {
+                if let Some(g) = self.try_get_read_guard(i) {
+                    break g;
+                }
+                std::hint::spin_loop();
+            };
+            self.write_to_disk_if_dirty_r(&frame).unwrap();
+        });
+        self.container_manager.flush_all()?;
+        Ok(())
+    }
+
+    fn flush_all_and_reset(&self) -> Result<(), MemPoolStatus> {
+        (0..self.num_frames).into_par_iter().for_each(|i| {
+            let mut frame = loop {
+                if let Some(g) = self.try_get_write_guard(i, false) {
+                    break g;
+                }
+                std::hint::spin_loop();
+            };
+            self.write_to_disk_if_dirty_w(&frame).unwrap();
+            if let Some(pk) = frame.page_key() {
+                if self.overflow_lookup(&pk) == Some(i) {
+                    self.overflow_remove(&pk);
+                }
+            }
+            frame.clear();
+        });
+
+        self.container_manager.flush_all()?;
+
+        while self.free_list.pop().is_ok() {}
+        for i in 0..self.num_frames {
+            self.free_list.push(i).unwrap();
+        }
+        self.used_frames.store(0, Ordering::Release);
+
+        Ok(())
+    }
+
+    fn clear_dirty_flags(&self) -> Result<(), MemPoolStatus> {
+        (0..self.num_frames).into_par_iter().for_each(|i| {
+            let meta = &mut unsafe { &mut *self.metas.get() }[i];
+            meta.is_dirty.store(false, Ordering::Release);
+        });
+        self.container_manager.flush_all()?;
+        Ok(())
+    }
+
+    fn fast_evict(&self, _frame_id: u32) -> Result<(), MemPoolStatus> {
+        Ok(())
+    }
+
+    unsafe fn stats(&self) -> MemoryStats {
+        let new_page = self.stats.new_page();
+        let read_count = self.stats.read_count();
+        let read_count_waiting = self.stats.read_request_waiting_for_write_count();
+        let write_count = self.stats.write_count();
+
+        let mut num_frames_per_container = BTreeMap::new();
+        let metas = &*self.metas.get();
+        for i in 0..self.num_frames {
+            if let Some(key) = metas[i].key() {
+                *num_frames_per_container.entry(key.c_key).or_insert(0) += 1;
+            }
+        }
+
+        let mut disk_io_per_container = BTreeMap::new();
+        for (c_key, (count, file_stats)) in &self.container_manager.get_stats() {
+            disk_io_per_container.insert(
+                *c_key,
+                (
+                    *count as i64,
+                    file_stats.read_count() as i64,
+                    file_stats.write_count() as i64,
+                ),
+            );
+        }
+        let (total_created, total_read, total_write) = disk_io_per_container
+            .iter()
+            .fold((0, 0, 0), |acc, (_, (c, r, w))| {
+                (acc.0 + c, acc.1 + r, acc.2 + w)
+            });
+
+        MemoryStats {
+            bp_num_frames_in_mem: self.num_frames,
+            bp_new_page: new_page,
+            bp_read_frame: read_count,
+            bp_read_frame_wait: read_count_waiting,
+            bp_write_frame: write_count,
+            bp_num_frames_per_container: num_frames_per_container,
+            disk_created: total_created as usize,
+            disk_read: total_read as usize,
+            disk_write: total_write as usize,
+            disk_io_per_container,
+        }
+    }
+
+    unsafe fn reset_stats(&self) {
+        self.stats.clear();
+    }
+}

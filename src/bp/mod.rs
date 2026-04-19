@@ -19,6 +19,7 @@ mod predictive_translation_fp_two;
 pub mod predictive_translation_tlb_only;
 mod predictive_translation_two;
 mod resident_set;
+pub mod tlb_bp;
 mod vmcache;
 
 use std::sync::Arc;
@@ -42,6 +43,7 @@ pub use predictive_translation_fp_four::PredictiveTranslationFPFourBP;
 pub use predictive_translation_fp_tlb::PredictiveTranslationFPTlbBP;
 pub use predictive_translation_fp_two::PredictiveTranslationFPTwoBP;
 pub use predictive_translation_tlb_only::PredictiveTranslationTlbOnlyBP;
+pub use tlb_bp::TlbBP;
 pub use predictive_translation_two::PredictiveTranslationTwoBP;
 pub use vmcache::VMCachePool;
 
@@ -109,6 +111,12 @@ pub fn get_test_pt_tlb_only(num_frames: usize) -> Arc<PredictiveTranslationTlbOn
     let base_dir = gen_random_pathname(Some("test_pt_tlb_only_direct"));
     let cm = Arc::new(ContainerManager::new(base_dir, true, true).unwrap());
     Arc::new(PredictiveTranslationTlbOnlyBP::new(num_frames, cm).unwrap())
+}
+
+pub fn get_test_tlb_bp(num_frames: usize) -> Arc<TlbBP> {
+    let base_dir = gen_random_pathname(Some("test_tlb_bp_direct"));
+    let cm = Arc::new(ContainerManager::new(base_dir, true, true).unwrap());
+    Arc::new(TlbBP::new(num_frames, cm).unwrap())
 }
 
 pub fn get_test_pt_fp_four_hash(num_frames: usize) -> Arc<PredictiveTranslationFPFourBP> {

@@ -45,6 +45,10 @@ struct Args {
     /// Warmup seconds.
     #[arg(short = 'w', long, default_value_t = 2)]
     warmup: u64,
+
+    /// Use sequential access pattern (scan simulation).
+    #[arg(long, default_value_t = false)]
+    sequential: bool,
 }
 
 fn get_bp(num_frames: usize) -> Arc<impl MemPool> {
@@ -68,6 +72,16 @@ fn get_bp(num_frames: usize) -> Arc<impl MemPool> {
         use fbtree::bp::get_test_pt_tlb_only;
         return get_test_pt_tlb_only(num_frames);
     }
+    #[cfg(feature = "bp_pt_tlb_only_keys")]
+    {
+        use fbtree::bp::get_test_pt_tlb_only_keys;
+        return get_test_pt_tlb_only_keys(num_frames);
+    }
+    #[cfg(feature = "bp_tlb")]
+    {
+        use fbtree::bp::get_test_tlb_bp;
+        return get_test_tlb_bp(num_frames);
+    }
     #[cfg(feature = "bp_pt")]
     {
         use fbtree::bp::get_test_pt;
@@ -78,6 +92,8 @@ fn get_bp(num_frames: usize) -> Arc<impl MemPool> {
         feature = "bp_pt_bucket",
         feature = "bp_pt_tlb",
         feature = "bp_pt_tlb_only",
+        feature = "bp_pt_tlb_only_keys",
+        feature = "bp_tlb",
         feature = "bp_pt",
     )))]
     {
@@ -92,8 +108,8 @@ fn main() {
 
     println!("=== BP Translation Micro-Benchmark ===");
     println!(
-        "pages={} frames={} threads={} seconds={} theta={} warmup={}",
-        args.num_pages, args.num_frames, args.threads, args.seconds, args.theta, args.warmup
+        "pages={} frames={} threads={} seconds={} theta={} warmup={} sequential={}",
+        args.num_pages, args.num_frames, args.threads, args.seconds, args.theta, args.warmup, args.sequential
     );
 
     // Create BP and pre-populate pages.
@@ -119,11 +135,19 @@ fn main() {
                 let keys = &keys;
                 let flag = &flag;
                 let barrier = &barrier;
+                let sequential = args.sequential;
                 s.spawn(move || {
                     let mut rng = small_thread_rng();
+                    let mut seq_idx: usize = 0;
                     barrier.wait();
                     while flag.load(Ordering::Relaxed) {
-                        let idx = (rng.next_u64() as usize) % num_pages;
+                        let idx = if sequential {
+                            let i = seq_idx;
+                            seq_idx = (seq_idx + 1) % num_pages;
+                            i
+                        } else {
+                            (rng.next_u64() as usize) % num_pages
+                        };
                         let _ = bp.get_page_for_read(keys[idx]);
                     }
                 });
@@ -147,6 +171,7 @@ fn main() {
             let flag = &flag;
             let barrier = &barrier;
             let theta = args.theta;
+            let sequential = args.sequential;
 
             let h = s.spawn(move || {
                 let rng = small_thread_rng();
@@ -156,12 +181,17 @@ fn main() {
                     None
                 };
                 let mut uniform_rng = small_thread_rng();
+                let mut seq_idx: usize = 0;
                 let mut ops: u64 = 0;
 
                 barrier.wait();
 
                 while flag.load(Ordering::Relaxed) {
-                    let idx = if let Some(ref mut z) = zipf {
+                    let idx = if sequential {
+                        let i = seq_idx;
+                        seq_idx = (seq_idx + 1) % num_pages;
+                        i
+                    } else if let Some(ref mut z) = zipf {
                         z.sample()
                     } else {
                         (uniform_rng.next_u64() as usize) % num_pages
