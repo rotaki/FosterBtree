@@ -879,6 +879,8 @@ impl PredictiveTranslationBP {
             .ensure_free_ns
             .fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
 
+        let pref_free_hint = prefs.iter().any(|&p| self.frame_is_free(p));
+
         loop {
             #[cfg(feature = "pt_profile")]
             let t2 = std::time::Instant::now();
@@ -911,6 +913,36 @@ impl PredictiveTranslationBP {
                             self.profile
                                 .overflow_chain_hits
                                 .fetch_add(1, Ordering::Relaxed);
+                        }
+
+                        // Promotion on read path (paper §3.2, Listing 3 line 25):
+                        // if page is in overflow, probabilistically promote.
+                        if !prefs.contains(&idx) {
+                            let denom = if pref_free_hint {
+                                Self::PROMOTE_PROB_NO_DEMOTE
+                            } else {
+                                Self::PROMOTE_PROB_DEMOTE
+                            };
+                            #[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
+                            self.profile
+                                .promotions_attempted
+                                .fetch_add(1, Ordering::Relaxed);
+
+                            if Self::promote_roll(denom) {
+                                #[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
+                                self.profile
+                                    .promotions_fired
+                                    .fetch_add(1, Ordering::Relaxed);
+                                // Upgrade read → write, promote, downgrade back.
+                                if let Ok(wg) = g.try_upgrade(false) {
+                                    let wg = self.try_promote(wg, page_key, prefs)?;
+                                    return Ok(wg.downgrade());
+                                } else {
+                                    // Upgrade failed — another thread holds it.
+                                    // Page was already returned by try_upgrade's Err.
+                                    continue;
+                                }
+                            }
                         }
                         return Ok(g);
                     }

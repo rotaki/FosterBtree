@@ -150,6 +150,12 @@ static mut TLB_HITS: u64 = 0;
 static mut TLB_MISSES: u64 = 0;
 #[thread_local]
 static mut TLB_PREFILLS: u64 = 0;
+#[thread_local]
+static mut OVERFLOW_HITS: u64 = 0;
+#[thread_local]
+static mut PAGE_FAULTS: u64 = 0;
+#[thread_local]
+static mut TLB_FALSE_HITS: u64 = 0;
 /// Last missed packed PageKey — used to detect sequential access pattern.
 #[thread_local]
 static mut LAST_MISS_KEY: usize = 0;
@@ -369,7 +375,7 @@ impl TlbBP {
                     core::arch::x86_64::_mm_prefetch(meta_ptr, core::arch::x86_64::_MM_HINT_T0);
                     core::arch::x86_64::_mm_prefetch(page_ptr, core::arch::x86_64::_MM_HINT_T0);
                 }
-                TLB_PREFILLS += 1;
+                unsafe { TLB_PREFILLS += 1; }
             }
         }
 
@@ -660,14 +666,17 @@ impl Drop for TlbBP {
     fn drop(&mut self) {
         let hits = unsafe { TLB_HITS };
         let misses = unsafe { TLB_MISSES };
+        let false_hits = unsafe { TLB_FALSE_HITS };
         let prefills = unsafe { TLB_PREFILLS };
-        let total = hits + misses;
+        let overflow_hits = unsafe { OVERFLOW_HITS };
+        let page_faults = unsafe { PAGE_FAULTS };
+        let total = hits + misses + false_hits;
         if total > 0 {
             eprintln!(
-                "TLB stats: hits={}, misses={}, total={}, hit_rate={:.2}%, prefills={}",
-                hits, misses, total,
+                "TLB stats: hits={}, false_hits={}, misses={}, total={}, hit_rate={:.2}%, prefills={}, overflow_hits={}, page_faults={}",
+                hits, false_hits, misses, total,
                 hits as f64 / total as f64 * 100.0,
-                prefills
+                prefills, overflow_hits, page_faults
             );
         }
 
@@ -708,15 +717,18 @@ impl MemPool for TlbBP {
                         }
                     }
                 }
+                unsafe { TLB_FALSE_HITS += 1; }
             }
         }
         #[cfg(not(feature = "tlb_victim_cache"))]
         {
             let ways = unsafe { &mut *TLB.get_unchecked_mut(set) };
+            let mut had_tag_match = false;
             for w in 0..TLB_WAYS {
                 if entry_tag(ways[w]) != tag {
                     continue;
                 }
+                had_tag_match = true;
                 let frame_id = entry_frame(ways[w]);
                 if metas[frame_id].key() == Some(page_key) {
                     if let Some(g) = self.try_get_read_guard(frame_id) {
@@ -730,6 +742,9 @@ impl MemPool for TlbBP {
                         }
                     }
                 }
+            }
+            if had_tag_match {
+                unsafe { TLB_FALSE_HITS += 1; }
             }
         }
 
@@ -752,7 +767,10 @@ impl MemPool for TlbBP {
                 if let Some(g) = self.try_get_read_guard(idx) {
                     if g.page_key() == Some(page_key) {
                         g.evict_info().update();
-                        unsafe { tlb_insert(set, pack_entry(tag, idx as u32)); }
+                        unsafe {
+                            tlb_insert(set, pack_entry(tag, idx as u32));
+                            unsafe { OVERFLOW_HITS += 1; }
+                        }
                         return Ok(g);
                     }
                 } else if self.overflow_lookup(&page_key) == Some(idx) {
@@ -762,7 +780,10 @@ impl MemPool for TlbBP {
             }
             match self.handle_page_fault(page_key) {
                 Ok(victim) => {
-                    unsafe { tlb_insert(set, pack_entry(tag, victim.frame_id())); }
+                    unsafe {
+                        tlb_insert(set, pack_entry(tag, victim.frame_id()));
+                        unsafe { PAGE_FAULTS += 1; }
+                    }
                     return Ok(victim.downgrade());
                 }
                 Err(MemPoolStatus::RetryPageFault) => continue,
@@ -793,15 +814,18 @@ impl MemPool for TlbBP {
                         }
                     }
                 }
+                unsafe { TLB_FALSE_HITS += 1; }
             }
         }
         #[cfg(not(feature = "tlb_victim_cache"))]
         {
             let ways = unsafe { &mut *TLB.get_unchecked_mut(set) };
+            let mut had_tag_match = false;
             for w in 0..TLB_WAYS {
                 if entry_tag(ways[w]) != tag {
                     continue;
                 }
+                had_tag_match = true;
                 let frame_id = entry_frame(ways[w]);
                 if metas[frame_id].key() == Some(page_key) {
                     if let Some(g) = self.try_get_write_guard(frame_id, true) {
@@ -815,6 +839,9 @@ impl MemPool for TlbBP {
                         }
                     }
                 }
+            }
+            if had_tag_match {
+                unsafe { TLB_FALSE_HITS += 1; }
             }
         }
 
@@ -836,7 +863,10 @@ impl MemPool for TlbBP {
                 if let Some(g) = self.try_get_write_guard(idx, true) {
                     if g.page_key() == Some(page_key) {
                         g.evict_info().update();
-                        unsafe { tlb_insert(set, pack_entry(tag, idx as u32)); }
+                        unsafe {
+                            tlb_insert(set, pack_entry(tag, idx as u32));
+                            unsafe { OVERFLOW_HITS += 1; }
+                        }
                         return Ok(g);
                     }
                 } else if self.overflow_lookup(&page_key) == Some(idx) {
@@ -846,7 +876,10 @@ impl MemPool for TlbBP {
             }
             match self.handle_page_fault(page_key) {
                 Ok(g) => {
-                    unsafe { tlb_insert(set, pack_entry(tag, g.frame_id())); }
+                    unsafe {
+                        tlb_insert(set, pack_entry(tag, g.frame_id()));
+                        unsafe { PAGE_FAULTS += 1; }
+                    }
                     return Ok(g);
                 }
                 Err(MemPoolStatus::RetryPageFault) => continue,
