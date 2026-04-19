@@ -21,6 +21,7 @@ declare -a VARIANTS=(
     "bp_clock|LIPAH"
     "bp_pt_bucket|PT-FP-1"
     "bp_pt_tlb_only|TLB-only"
+    "bp_tlb|TLB-congee"
 )
 
 echo "=== TLB Comparison ===" | tee "$SUMMARY"
