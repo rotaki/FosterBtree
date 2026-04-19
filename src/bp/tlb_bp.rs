@@ -89,8 +89,19 @@ impl HashedKey {
 // TLB constants and helpers
 // ===========================================================================
 
+// --- TLB layout: direct-mapped + victim cache, or 4-way set-associative ---
+#[cfg(feature = "tlb_victim_cache")]
+const TLB_ENTRIES: usize = 4096; // direct-mapped primary
+#[cfg(feature = "tlb_victim_cache")]
+const TLB_SET_MASK: usize = TLB_ENTRIES - 1;
+#[cfg(feature = "tlb_victim_cache")]
+const VICTIM_SIZE: usize = 16; // fully-associative victim cache
+
+#[cfg(not(feature = "tlb_victim_cache"))]
 const TLB_SETS: usize = 1024;
+#[cfg(not(feature = "tlb_victim_cache"))]
 const TLB_WAYS: usize = 4;
+#[cfg(not(feature = "tlb_victim_cache"))]
 const TLB_SET_MASK: usize = TLB_SETS - 1;
 
 const FRAME_BITS: u32 = 27;
@@ -114,6 +125,22 @@ fn entry_frame(entry: u32) -> usize {
     (entry & FRAME_MASK) as usize
 }
 
+// --- Direct-mapped + victim cache ---
+#[cfg(feature = "tlb_victim_cache")]
+#[thread_local]
+static mut TLB: [u32; TLB_ENTRIES] = [0; TLB_ENTRIES];
+#[cfg(feature = "tlb_victim_cache")]
+#[thread_local]
+static mut VICTIM: [u32; VICTIM_SIZE] = [0; VICTIM_SIZE];
+#[cfg(feature = "tlb_victim_cache")]
+#[thread_local]
+static mut VICTIM_SETS: [u16; VICTIM_SIZE] = [0; VICTIM_SIZE]; // store set index for each victim entry
+#[cfg(feature = "tlb_victim_cache")]
+#[thread_local]
+static mut VICTIM_HEAD: usize = 0; // FIFO insertion pointer
+
+// --- 4-way set-associative ---
+#[cfg(not(feature = "tlb_victim_cache"))]
 #[thread_local]
 static mut TLB: [[u32; TLB_WAYS]; TLB_SETS] = [[0; TLB_WAYS]; TLB_SETS];
 
@@ -126,6 +153,106 @@ static mut TLB_PREFILLS: u64 = 0;
 /// Last missed packed PageKey — used to detect sequential access pattern.
 #[thread_local]
 static mut LAST_MISS_KEY: usize = 0;
+
+// ===========================================================================
+// TLB operations (abstracted over layout)
+// ===========================================================================
+
+/// Probe the TLB for a matching entry. Returns Some(frame_id) if found.
+#[inline(always)]
+unsafe fn tlb_probe(set: usize, tag: u32) -> Option<usize> {
+    #[cfg(feature = "tlb_victim_cache")]
+    {
+        // 1. Check direct-mapped primary
+        let entry = *TLB.get_unchecked(set);
+        if entry_tag(entry) == tag {
+            return Some(entry_frame(entry));
+        }
+        // 2. Check victim cache (fully associative)
+        for v in 0..VICTIM_SIZE {
+            if VICTIM_SETS[v] == set as u16 && entry_tag(VICTIM[v]) == tag {
+                // Promote: swap victim entry into primary, evicted primary goes to victim slot
+                let victim_entry = VICTIM[v];
+                VICTIM[v] = entry; // old primary (possibly 0) goes to this victim slot
+                VICTIM_SETS[v] = set as u16;
+                *TLB.get_unchecked_mut(set) = victim_entry;
+                return Some(entry_frame(victim_entry));
+            }
+        }
+        None
+    }
+    #[cfg(not(feature = "tlb_victim_cache"))]
+    {
+        let ways = &mut *TLB.get_unchecked_mut(set);
+        for w in 0..TLB_WAYS {
+            if entry_tag(ways[w]) == tag {
+                let frame_id = entry_frame(ways[w]);
+                if w > 0 {
+                    ways.swap(0, w);
+                }
+                return Some(frame_id);
+            }
+        }
+        None
+    }
+}
+
+/// Insert an entry into the TLB (shift-down / evict as needed).
+#[inline(always)]
+unsafe fn tlb_insert(set: usize, entry: u32) {
+    #[cfg(feature = "tlb_victim_cache")]
+    {
+        // Evict current primary to victim cache (FIFO), then write new entry
+        let old = *TLB.get_unchecked(set);
+        if old != 0 {
+            let head = VICTIM_HEAD;
+            VICTIM[head] = old;
+            VICTIM_SETS[head] = set as u16;
+            VICTIM_HEAD = (head + 1) % VICTIM_SIZE;
+        }
+        *TLB.get_unchecked_mut(set) = entry;
+    }
+    #[cfg(not(feature = "tlb_victim_cache"))]
+    {
+        let ways = &mut *TLB.get_unchecked_mut(set);
+        ways[3] = ways[2];
+        ways[2] = ways[1];
+        ways[1] = ways[0];
+        ways[0] = entry;
+    }
+}
+
+/// Insert an entry only if there's space (for prefill — less aggressive).
+#[inline(always)]
+unsafe fn tlb_insert_if_empty(set: usize, entry: u32) -> bool {
+    #[cfg(feature = "tlb_victim_cache")]
+    {
+        if *TLB.get_unchecked(set) == 0 {
+            *TLB.get_unchecked_mut(set) = entry;
+            return true;
+        }
+        // Check if any victim slot is empty
+        for v in 0..VICTIM_SIZE {
+            if VICTIM[v] == 0 {
+                VICTIM[v] = entry;
+                VICTIM_SETS[v] = set as u16;
+                return true;
+            }
+        }
+        false
+    }
+    #[cfg(not(feature = "tlb_victim_cache"))]
+    {
+        let ways = &mut *TLB.get_unchecked_mut(set);
+        for w in 0..TLB_WAYS {
+            if ways[w] == 0 {
+                ways[w] = entry;
+                return true;
+            }
+        }
+        false
+    }
+}
 
 // ===========================================================================
 // Buffer pool
@@ -222,27 +349,28 @@ impl TlbBP {
                 target_frame = Some(frame_id);
                 continue; // caller handles TLB insert for target
             }
-            // Prefill neighbor into TLB
+            // Prefill neighbor into TLB + prefetch page data
             let neighbor_key = unpack_page_key(packed_key);
             let hk = HashedKey::new(&neighbor_key);
             let set = hk.tlb_set();
             let tag = hk.tlb_tag();
-            let ways = unsafe { &mut *TLB.get_unchecked_mut(set) };
-            let mut inserted = false;
-            for w in 0..TLB_WAYS {
-                if ways[w] == 0 {
-                    ways[w] = pack_entry(tag, frame_id as u32);
-                    inserted = true;
-                    break;
+            let entry = pack_entry(tag, frame_id as u32);
+            unsafe {
+                if !tlb_insert_if_empty(set, entry) {
+                    tlb_insert(set, entry);
                 }
+                // Prefetch the neighbor's metadata and page data into cache.
+                #[cfg(target_arch = "x86_64")]
+                {
+                    let pages = &*self.pages.get();
+                    let metas = &*self.metas.get();
+                    let meta_ptr = (&*metas[frame_id]) as *const FMeta as *const i8;
+                    let page_ptr = (&*pages[frame_id]) as *const Page as *const i8;
+                    core::arch::x86_64::_mm_prefetch(meta_ptr, core::arch::x86_64::_MM_HINT_T0);
+                    core::arch::x86_64::_mm_prefetch(page_ptr, core::arch::x86_64::_MM_HINT_T0);
+                }
+                TLB_PREFILLS += 1;
             }
-            if !inserted {
-                ways[3] = ways[2];
-                ways[2] = ways[1];
-                ways[1] = ways[0];
-                ways[0] = pack_entry(tag, frame_id as u32);
-            }
-            unsafe { TLB_PREFILLS += 1; }
         }
 
         target_frame
@@ -568,19 +696,11 @@ impl MemPool for TlbBP {
         let tag = hk.tlb_tag();
         let metas = unsafe { &*self.metas.get() };
 
-        let ways = unsafe { &mut *TLB.get_unchecked_mut(set) };
-        for w in 0..TLB_WAYS {
-            if entry_tag(ways[w]) != tag {
-                continue;
-            }
-            let frame_id = entry_frame(ways[w]);
+        if let Some(frame_id) = unsafe { tlb_probe(set, tag) } {
             if metas[frame_id].key() == Some(page_key) {
                 if let Some(g) = self.try_get_read_guard(frame_id) {
                     if g.page_key() == Some(page_key) {
                         g.evict_info().update();
-                        if w > 0 {
-                            ways.swap(0, w);
-                        }
                         unsafe { TLB_HITS += 1; }
                         return Ok(g);
                     }
@@ -607,11 +727,7 @@ impl MemPool for TlbBP {
                 if let Some(g) = self.try_get_read_guard(idx) {
                     if g.page_key() == Some(page_key) {
                         g.evict_info().update();
-                        let ways = unsafe { &mut *TLB.get_unchecked_mut(set) };
-                        ways[3] = ways[2];
-                        ways[2] = ways[1];
-                        ways[1] = ways[0];
-                        ways[0] = pack_entry(tag, idx as u32);
+                        unsafe { tlb_insert(set, pack_entry(tag, idx as u32)); }
                         return Ok(g);
                     }
                 } else if self.overflow_lookup(&page_key) == Some(idx) {
@@ -621,11 +737,7 @@ impl MemPool for TlbBP {
             }
             match self.handle_page_fault(page_key) {
                 Ok(victim) => {
-                    let ways = unsafe { &mut *TLB.get_unchecked_mut(set) };
-                    ways[3] = ways[2];
-                    ways[2] = ways[1];
-                    ways[1] = ways[0];
-                    ways[0] = pack_entry(tag, victim.frame_id());
+                    unsafe { tlb_insert(set, pack_entry(tag, victim.frame_id())); }
                     return Ok(victim.downgrade());
                 }
                 Err(MemPoolStatus::RetryPageFault) => continue,
@@ -644,19 +756,11 @@ impl MemPool for TlbBP {
         let tag = hk.tlb_tag();
         let metas = unsafe { &*self.metas.get() };
 
-        let ways = unsafe { &mut *TLB.get_unchecked_mut(set) };
-        for w in 0..TLB_WAYS {
-            if entry_tag(ways[w]) != tag {
-                continue;
-            }
-            let frame_id = entry_frame(ways[w]);
+        if let Some(frame_id) = unsafe { tlb_probe(set, tag) } {
             if metas[frame_id].key() == Some(page_key) {
                 if let Some(g) = self.try_get_write_guard(frame_id, true) {
                     if g.page_key() == Some(page_key) {
                         g.evict_info().update();
-                        if w > 0 {
-                            ways.swap(0, w);
-                        }
                         unsafe { TLB_HITS += 1; }
                         return Ok(g);
                     }
@@ -682,11 +786,7 @@ impl MemPool for TlbBP {
                 if let Some(g) = self.try_get_write_guard(idx, true) {
                     if g.page_key() == Some(page_key) {
                         g.evict_info().update();
-                        let ways = unsafe { &mut *TLB.get_unchecked_mut(set) };
-                        ways[3] = ways[2];
-                        ways[2] = ways[1];
-                        ways[1] = ways[0];
-                        ways[0] = pack_entry(tag, idx as u32);
+                        unsafe { tlb_insert(set, pack_entry(tag, idx as u32)); }
                         return Ok(g);
                     }
                 } else if self.overflow_lookup(&page_key) == Some(idx) {
@@ -696,11 +796,7 @@ impl MemPool for TlbBP {
             }
             match self.handle_page_fault(page_key) {
                 Ok(g) => {
-                    let ways = unsafe { &mut *TLB.get_unchecked_mut(set) };
-                    ways[3] = ways[2];
-                    ways[2] = ways[1];
-                    ways[1] = ways[0];
-                    ways[0] = pack_entry(tag, g.frame_id());
+                    unsafe { tlb_insert(set, pack_entry(tag, g.frame_id())); }
                     return Ok(g);
                 }
                 Err(MemPoolStatus::RetryPageFault) => continue,

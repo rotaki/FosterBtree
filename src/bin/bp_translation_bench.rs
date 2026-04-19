@@ -196,7 +196,13 @@ fn main() {
                     } else {
                         (uniform_rng.next_u64() as usize) % num_pages
                     };
-                    let _ = bp.get_page_for_read(keys[idx]);
+                    let g = bp.get_page_for_read(keys[idx]).unwrap();
+                    // Touch the page data to force cache load.
+                    unsafe {
+                        let ptr = &*g as *const _ as *const u8;
+                        std::ptr::read_volatile(ptr);
+                    }
+                    drop(g);
                     ops += 1;
                 }
                 ops
