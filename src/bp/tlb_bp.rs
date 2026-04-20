@@ -593,7 +593,32 @@ impl TlbBP {
 
         debug_assert!(victim.page_key().is_none());
 
-        self.overflow_insert(page_key, victim.frame_id() as usize);
+        // Atomic insert-if-absent via congee compute_or_insert.
+        let guard = self.overflow.pin();
+        let packed = pack_page_key(&page_key);
+        let frame_id = victim.frame_id() as usize;
+        let mut existing_frame: Option<usize> = None;
+        let _ = self.overflow.compute_or_insert(
+            packed,
+            |existing| match existing {
+                None => frame_id,
+                Some(v) => {
+                    existing_frame = Some(v);
+                    v
+                }
+            },
+            &guard,
+        );
+        drop(guard);
+
+        if let Some(idx) = existing_frame {
+            // Another thread already faulted this page. Free our victim, latch theirs.
+            self.enqueue_free_frame(frame_id);
+            self.used_frames.fetch_sub(1, Ordering::AcqRel);
+            return self
+                .try_get_write_guard(idx, true)
+                .ok_or(MemPoolStatus::FrameWriteLatchGrantFailed);
+        }
 
         victim.set_page_key(Some(page_key));
 
@@ -743,39 +768,31 @@ impl MemPool for TlbBP {
             packed.wrapping_sub(prev) <= PREFILL_COUNT
         };
         self.ensure_free_frames()?;
-        loop {
-            let lookup = if use_range {
-                self.overflow_range_lookup(&page_key)
-            } else {
-                self.overflow_lookup(&page_key)
-            };
-            if let Some(idx) = lookup {
-                if let Some(g) = self.try_get_read_guard(idx) {
-                    if g.page_key() == Some(page_key) {
-                        g.evict_info().update();
-                        unsafe {
-                            tlb_insert(set, pack_entry(tag, idx as u32));
-                            unsafe { OVERFLOW_HITS += 1; }
-                        }
-                        return Ok(g);
-                    }
-                } else if self.overflow_lookup(&page_key) == Some(idx) {
-                    return Err(MemPoolStatus::FrameReadLatchGrantFailed);
-                }
-                continue;
-            }
-            match self.handle_page_fault(page_key) {
-                Ok(victim) => {
+        let lookup = if use_range {
+            self.overflow_range_lookup(&page_key)
+        } else {
+            self.overflow_lookup(&page_key)
+        };
+        if let Some(idx) = lookup {
+            if let Some(g) = self.try_get_read_guard(idx) {
+                if g.page_key() == Some(page_key) {
+                    g.evict_info().update();
                     unsafe {
-                        tlb_insert(set, pack_entry(tag, victim.frame_id()));
-                        unsafe { PAGE_FAULTS += 1; }
+                        tlb_insert(set, pack_entry(tag, idx as u32));
+                        OVERFLOW_HITS += 1;
                     }
-                    return Ok(victim.downgrade());
+                    return Ok(g);
                 }
-                Err(MemPoolStatus::RetryPageFault) => continue,
-                Err(e) => return Err(e),
             }
+            return Err(MemPoolStatus::FrameReadLatchGrantFailed);
         }
+        // Not in overflow — page fault.
+        let victim = self.handle_page_fault(page_key)?;
+        unsafe {
+            tlb_insert(set, pack_entry(tag, victim.frame_id()));
+            PAGE_FAULTS += 1;
+        }
+        Ok(victim.downgrade())
     }
 
     // ----- TLB fast path: get_page_for_write --------------------------------
@@ -839,39 +856,31 @@ impl MemPool for TlbBP {
             packed.wrapping_sub(prev) <= PREFILL_COUNT
         };
         self.ensure_free_frames()?;
-        loop {
-            let lookup = if use_range {
-                self.overflow_range_lookup(&page_key)
-            } else {
-                self.overflow_lookup(&page_key)
-            };
-            if let Some(idx) = lookup {
-                if let Some(g) = self.try_get_write_guard(idx, true) {
-                    if g.page_key() == Some(page_key) {
-                        g.evict_info().update();
-                        unsafe {
-                            tlb_insert(set, pack_entry(tag, idx as u32));
-                            unsafe { OVERFLOW_HITS += 1; }
-                        }
-                        return Ok(g);
-                    }
-                } else if self.overflow_lookup(&page_key) == Some(idx) {
-                    return Err(MemPoolStatus::FrameWriteLatchGrantFailed);
-                }
-                continue;
-            }
-            match self.handle_page_fault(page_key) {
-                Ok(g) => {
+        let lookup = if use_range {
+            self.overflow_range_lookup(&page_key)
+        } else {
+            self.overflow_lookup(&page_key)
+        };
+        if let Some(idx) = lookup {
+            if let Some(g) = self.try_get_write_guard(idx, true) {
+                if g.page_key() == Some(page_key) {
+                    g.evict_info().update();
                     unsafe {
-                        tlb_insert(set, pack_entry(tag, g.frame_id()));
-                        unsafe { PAGE_FAULTS += 1; }
+                        tlb_insert(set, pack_entry(tag, idx as u32));
+                        OVERFLOW_HITS += 1;
                     }
                     return Ok(g);
                 }
-                Err(MemPoolStatus::RetryPageFault) => continue,
-                Err(e) => return Err(e),
             }
+            return Err(MemPoolStatus::FrameWriteLatchGrantFailed);
         }
+        // Not in overflow — page fault.
+        let g = self.handle_page_fault(page_key)?;
+        unsafe {
+            tlb_insert(set, pack_entry(tag, g.frame_id()));
+            PAGE_FAULTS += 1;
+        }
+        Ok(g)
     }
 
     // ----- create pages -----------------------------------------------------
