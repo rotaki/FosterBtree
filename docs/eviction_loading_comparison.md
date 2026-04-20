@@ -54,3 +54,24 @@ LIPAH uses a different eviction implementation. Key differences from PT/TLB-BP:
 | Translation | DashMap hierarchy | Overflow hash table / Congee ART |
 
 These differences mean LIPAH is **not** a controlled comparison for eviction behavior. PT vs TLB-BP is the fair comparison.
+
+## Verified Identical (method-by-method audit)
+
+Every method below was compared line-by-line between PT and TLB-BP. The only differences are overflow table method call style (direct vs wrapper) and log message prefixes.
+
+- `try_get_read_guard` / `try_get_write_guard` — both resolve to `try_new_with_key_slot(meta, page, null)`
+- `ensure_free_frames` — identical (95% threshold, calls evict_batch)
+- `evict_batch` — identical clock logic, batch size, max iterations, eviction order
+- `handle_page_fault` — identical except PT passes preferred frame to choose_victim
+- `write_to_disk_if_dirty_w` / `_r` — character-for-character identical CAS logic
+- `flush_all` — identical (parallel read-latch + CAS flush)
+- `flush_all_and_reset` — identical (parallel write-latch + flush + clear + repopulate free list)
+- `create_new_pages_for_write` — identical (loop over create_new_page_for_write)
+- `create_new_page_for_write` — identical except PT passes preferred frame to choose_victim
+- `fast_evict` — both no-op
+- `stats()` / `reset_stats()` — identical output
+- `Drop` — both call flush_all_and_reset if not test mode
+- `create_container` / `drop_container` — both no-op
+- `is_in_mem` / `get_page_keys_in_mem` — same semantics via different overflow types
+
+**Conclusion:** PT and TLB-BP differ ONLY in the three intentional design choices: translation mechanism, preferred frame placement, and promotion.
