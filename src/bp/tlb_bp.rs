@@ -29,7 +29,7 @@ use std::{
 };
 
 use concurrent_queue::ConcurrentQueue;
-use congee::CongeeRaw;
+use congee::Congee;
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 
 type EvictionPolicyImpl = ClockEvictionPolicy;
@@ -294,7 +294,7 @@ pub struct TlbBP {
     #[allow(clippy::vec_box)]
     metas: UnsafeCell<Vec<Box<FMeta>>>,
     /// Overflow: concurrent ART tree mapping packed PageKey (usize) -> frame_id (usize).
-    overflow: CongeeRaw<usize, usize>,
+    overflow: Congee<usize, usize>,
     stats: BPStats,
 }
 
@@ -340,7 +340,7 @@ impl TlbBP {
             free_list,
             pages,
             metas,
-            overflow: CongeeRaw::default(),
+            overflow: Congee::default(),
             stats: BPStats::new(),
         })
     }
@@ -355,36 +355,37 @@ impl TlbBP {
         self.overflow.get(&pack_page_key(key), &guard)
     }
 
-    /// Lookup + stash siblings into thread-local PREFILL_BUF.
+    /// Lookup + range scan for siblings, stash into PREFILL_BUF.
     /// Caller flushes the buffer to TLB after successful latch.
     #[inline]
     fn overflow_lookup_with_sibling_stash(&self, page_key: &PageKey) -> Option<usize> {
         let guard = self.overflow.pin();
         let packed = pack_page_key(page_key);
-        let num_frames = self.num_frames;
-        self.overflow.get_with_siblings(
-            &packed,
-            |frame_id, view| {
-                let mut i = 0;
-                for (_byte, neighbor_frame) in view.siblings_after().take(PREFILL_COUNT) {
-                    if neighbor_frame >= num_frames {
-                        continue;
-                    }
-                    let neighbor_packed = (packed & !0xFF) | (_byte as usize);
-                    let neighbor_key = unpack_page_key(neighbor_packed);
-                    let hk = HashedKey::new(&neighbor_key);
-                    let set = hk.tlb_set();
-                    let tag = hk.tlb_tag();
-                    unsafe {
-                        PREFILL_BUF[i] = (set, pack_entry(tag, neighbor_frame as u32));
-                    }
-                    i += 1;
-                }
-                unsafe { PREFILL_BUF_LEN = i; }
-                frame_id
-            },
-            &guard,
-        )
+        let packed_end = packed + PREFILL_COUNT;
+        let mut buf = [(0usize, 0usize); PREFILL_COUNT];
+        let count = self.overflow.range(&packed, &packed_end, &mut buf, &guard);
+
+        let mut target_frame: Option<usize> = None;
+        let mut prefill_idx = 0;
+
+        for i in 0..count {
+            let (key, frame_id) = buf[i];
+            if key == packed {
+                target_frame = Some(frame_id);
+                continue;
+            }
+            let neighbor_key = unpack_page_key(key);
+            let hk = HashedKey::new(&neighbor_key);
+            let set = hk.tlb_set();
+            let tag = hk.tlb_tag();
+            unsafe {
+                PREFILL_BUF[prefill_idx] = (set, pack_entry(tag, frame_id as u32));
+            }
+            prefill_idx += 1;
+        }
+        unsafe { PREFILL_BUF_LEN = prefill_idx; }
+
+        target_frame
     }
 
 
@@ -901,7 +902,7 @@ impl MemPool for TlbBP {
         };
 
         if let Some(idx) = found_idx {
-            let guard = self.try_get_write_guard(idx, true);
+            let guard: Option<FrameWriteGuard<ClockEvictionPolicy>> = self.try_get_write_guard(idx, true);
             return guard
                 .inspect(|g| {
                     g.evict_info().update();
