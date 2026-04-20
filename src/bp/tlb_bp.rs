@@ -684,7 +684,8 @@ impl TlbBP {
         }
 
         victim.evict_info().reset();
-        victim.dirty().store(true, Ordering::Release);
+        // Don't mark dirty here — read faults should stay clean.
+        // The write path marks dirty via the write guard.
 
         Ok(victim)
     }
@@ -759,6 +760,7 @@ impl MemPool for TlbBP {
 
     #[inline(always)]
     fn get_page_for_read(&self, key: PageFrameKey) -> Result<FRGuard, MemPoolStatus> {
+        self.stats.inc_read_count();
         let page_key = key.p_key();
         let hk = HashedKey::new(&page_key);
         let set = hk.tlb_set();
@@ -853,6 +855,7 @@ impl MemPool for TlbBP {
 
     #[inline(always)]
     fn get_page_for_write(&self, key: PageFrameKey) -> Result<FWGuard, MemPoolStatus> {
+        self.stats.inc_write_count();
         let page_key = key.p_key();
         let hk = HashedKey::new(&page_key);
         let set = hk.tlb_set();
@@ -934,6 +937,7 @@ impl MemPool for TlbBP {
             }
             // Not in overflow — page fault.
             let g = self.handle_page_fault(page_key)?;
+            g.dirty().store(true, Ordering::Release);
             unsafe {
                 tlb_insert(set, pack_entry(tag, g.frame_id()));
                 PAGE_FAULTS += 1;

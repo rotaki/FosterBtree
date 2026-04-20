@@ -749,7 +749,8 @@ impl PredictiveTranslationBP {
         }
 
         victim.evict_info().reset();
-        victim.dirty().store(true, Ordering::Release);
+        // Don't mark dirty here — read faults should stay clean.
+        // The write path marks dirty via the caller.
 
         Ok(victim)
     }
@@ -1122,6 +1123,7 @@ impl PredictiveTranslationBP {
 
             match self.handle_page_fault_write(page_key, prefs) {
                 Ok(g) => {
+                    g.dirty().store(true, Ordering::Release);
                     #[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
                     self.profile.page_faults.fetch_add(1, Ordering::Relaxed);
                     #[cfg(feature = "pt_profile")]
