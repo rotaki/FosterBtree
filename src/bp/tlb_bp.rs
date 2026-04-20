@@ -408,10 +408,9 @@ impl TlbBP {
     fn try_get_read_guard(&self, index: usize) -> Option<FRGuard> {
         let metas = unsafe { &mut *self.metas.get() };
         let pages = unsafe { &mut *self.pages.get() };
-        FRGuard::try_new_with_key_slot(
+        FRGuard::try_new(
             box_as_mut_ptr(&mut metas[index]),
             box_as_mut_ptr(&mut pages[index]),
-            std::ptr::null_mut(),
         )
     }
 
@@ -419,10 +418,9 @@ impl TlbBP {
     fn try_get_write_guard(&self, index: usize, make_dirty: bool) -> Option<FWGuard> {
         let metas = unsafe { &mut *self.metas.get() };
         let pages = unsafe { &mut *self.pages.get() };
-        FWGuard::try_new_with_key_slot(
+        FWGuard::try_new(
             box_as_mut_ptr(&mut metas[index]),
             box_as_mut_ptr(&mut pages[index]),
-            std::ptr::null_mut(),
             make_dirty,
         )
     }

@@ -188,7 +188,6 @@ where
     upgraded: AtomicBool,
     meta: NonNull<FrameMeta<T>>,
     page: NonNull<Page>,
-    key_slot: Option<NonNull<AtomicU64>>,
     _marker: std::marker::PhantomData<*mut ()>,
 }
 
@@ -197,47 +196,27 @@ unsafe impl<T: EvictionPolicy> Send for FrameReadGuard<T> {}
 
 impl<T: EvictionPolicy> FrameReadGuard<T> {
     pub fn new(meta: *mut FrameMeta<T>, page: *mut Page) -> Self {
-        Self::new_with_key_slot(meta, page, std::ptr::null_mut())
-    }
-
-    pub fn new_with_key_slot(
-        meta: *mut FrameMeta<T>,
-        page: *mut Page,
-        key_slot: *mut AtomicU64,
-    ) -> Self {
         let upgraded = AtomicBool::new(false);
         let meta = NonNull::new(meta).expect("Meta pointer is null");
         let page = NonNull::new(page).expect("Page pointer is null");
-        let key_slot = NonNull::new(key_slot);
         unsafe { meta.as_ref().latch.shared() };
         FrameReadGuard {
             upgraded,
             meta,
             page,
-            key_slot,
             _marker: std::marker::PhantomData,
         }
     }
 
     pub fn try_new(meta: *mut FrameMeta<T>, page: *mut Page) -> Option<Self> {
-        Self::try_new_with_key_slot(meta, page, std::ptr::null_mut())
-    }
-
-    pub fn try_new_with_key_slot(
-        meta: *mut FrameMeta<T>,
-        page: *mut Page,
-        key_slot: *mut AtomicU64,
-    ) -> Option<Self> {
         let upgraded = AtomicBool::new(false);
         let meta = NonNull::new(meta).expect("Meta pointer is null");
         let page = NonNull::new(page).expect("Page pointer is null");
-        let key_slot = NonNull::new(key_slot);
         if unsafe { meta.as_ref().latch.try_shared() } {
             Some(FrameReadGuard {
                 upgraded,
                 meta,
                 page,
-                key_slot,
                 _marker: std::marker::PhantomData,
             })
         } else {
@@ -266,10 +245,7 @@ impl<T: EvictionPolicy> FrameReadGuard<T> {
     }
 
     pub fn page_key(&self) -> Option<PageKey> {
-        match self.key_slot {
-            Some(slot) => load_page_key_slot(unsafe { slot.as_ref() }),
-            None => unsafe { self.meta.as_ref().key() },
-        }
+        unsafe { self.meta.as_ref().key() }
     }
 
     pub fn page_frame_key(&self) -> Option<PageFrameKey> {
@@ -293,7 +269,6 @@ impl<T: EvictionPolicy> FrameReadGuard<T> {
                 downgraded: AtomicBool::new(false),
                 meta: self.meta,
                 page: self.page,
-                key_slot: self.key_slot,
                 _marker: std::marker::PhantomData,
             })
         } else {
@@ -335,25 +310,14 @@ where
     downgraded: AtomicBool,
     meta: NonNull<FrameMeta<T>>,
     page: NonNull<Page>,
-    key_slot: Option<NonNull<AtomicU64>>,
     _marker: std::marker::PhantomData<*mut ()>,
 }
 
 impl<T: EvictionPolicy> FrameWriteGuard<T> {
     pub fn new(meta: *mut FrameMeta<T>, page: *mut Page, make_dirty: bool) -> Self {
-        Self::new_with_key_slot(meta, page, std::ptr::null_mut(), make_dirty)
-    }
-
-    pub fn new_with_key_slot(
-        meta: *mut FrameMeta<T>,
-        page: *mut Page,
-        key_slot: *mut AtomicU64,
-        make_dirty: bool,
-    ) -> Self {
         let downgraded = AtomicBool::new(false);
         let meta = NonNull::new(meta).expect("Meta pointer is null");
         let page = NonNull::new(page).expect("Page pointer is null");
-        let key_slot = NonNull::new(key_slot);
         unsafe { meta.as_ref().latch.exclusive() };
         if make_dirty {
             unsafe {
@@ -364,25 +328,14 @@ impl<T: EvictionPolicy> FrameWriteGuard<T> {
             downgraded,
             meta,
             page,
-            key_slot,
             _marker: std::marker::PhantomData,
         }
     }
 
     pub fn try_new(meta: *mut FrameMeta<T>, page: *mut Page, make_dirty: bool) -> Option<Self> {
-        Self::try_new_with_key_slot(meta, page, std::ptr::null_mut(), make_dirty)
-    }
-
-    pub fn try_new_with_key_slot(
-        meta: *mut FrameMeta<T>,
-        page: *mut Page,
-        key_slot: *mut AtomicU64,
-        make_dirty: bool,
-    ) -> Option<Self> {
         let downgraded = AtomicBool::new(false);
         let meta = NonNull::new(meta).expect("Meta pointer is null");
         let page = NonNull::new(page).expect("Page pointer is null");
-        let key_slot = NonNull::new(key_slot);
         if unsafe { meta.as_ref().latch.try_exclusive() } {
             if make_dirty {
                 unsafe {
@@ -393,7 +346,6 @@ impl<T: EvictionPolicy> FrameWriteGuard<T> {
                 downgraded,
                 meta,
                 page,
-                key_slot,
                 _marker: std::marker::PhantomData,
             })
         } else {
@@ -422,19 +374,11 @@ impl<T: EvictionPolicy> FrameWriteGuard<T> {
     }
 
     pub fn page_key(&self) -> Option<PageKey> {
-        match self.key_slot {
-            Some(slot) => load_page_key_slot(unsafe { slot.as_ref() }),
-            None => unsafe { self.meta.as_ref().key() },
-        }
+        unsafe { self.meta.as_ref().key() }
     }
 
     pub fn set_page_key(&self, page_key: Option<PageKey>) {
-        match self.key_slot {
-            Some(slot) => {
-                replace_page_key_slot(unsafe { slot.as_ref() }, page_key);
-            }
-            None => unsafe { self.meta.as_ref().set_key(page_key) },
-        }
+        unsafe { self.meta.as_ref().set_key(page_key) }
     }
 
     pub fn page_frame_key(&self) -> Option<PageFrameKey> {
@@ -460,7 +404,6 @@ impl<T: EvictionPolicy> FrameWriteGuard<T> {
             upgraded: AtomicBool::new(false),
             meta: self.meta,
             page: self.page,
-            key_slot: self.key_slot,
             _marker: std::marker::PhantomData,
         }
     }
