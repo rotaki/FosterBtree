@@ -150,9 +150,28 @@ static mut TLB_HITS: u64 = 0;
 static mut TLB_MISSES: u64 = 0;
 #[thread_local]
 static mut TLB_PREFILLS: u64 = 0;
-/// Last missed packed PageKey — used to detect sequential access for sibling prefill.
+/// Last missed packed PageKey — detect sequential access for sibling prefill.
 #[thread_local]
 static mut LAST_MISS_KEY: usize = 0;
+/// Thread-local buffer for sibling prefill entries: (tlb_set, packed_entry).
+/// Filled during overflow lookup, flushed to TLB after successful latch.
+#[thread_local]
+static mut PREFILL_BUF: [(usize, u32); PREFILL_COUNT] = [(0, 0); PREFILL_COUNT];
+#[thread_local]
+static mut PREFILL_BUF_LEN: usize = 0;
+
+/// Flush stashed sibling entries into TLB.
+#[inline(always)]
+unsafe fn flush_prefill_buf() {
+    for i in 0..PREFILL_BUF_LEN {
+        let (set, entry) = PREFILL_BUF[i];
+        if !tlb_insert_if_empty(set, entry) {
+            tlb_insert(set, entry);
+        }
+        TLB_PREFILLS += 1;
+    }
+    PREFILL_BUF_LEN = 0;
+}
 #[thread_local]
 static mut OVERFLOW_HITS: u64 = 0;
 #[thread_local]
@@ -336,15 +355,17 @@ impl TlbBP {
         self.overflow.get(&pack_page_key(key), &guard)
     }
 
-    /// Lookup with sibling prefill in a single ART traversal.
+    /// Lookup + stash siblings into thread-local PREFILL_BUF.
+    /// Caller flushes the buffer to TLB after successful latch.
     #[inline]
-    fn overflow_lookup_with_prefill(&self, page_key: &PageKey) -> Option<usize> {
+    fn overflow_lookup_with_sibling_stash(&self, page_key: &PageKey) -> Option<usize> {
         let guard = self.overflow.pin();
         let packed = pack_page_key(page_key);
         let num_frames = self.num_frames;
         self.overflow.get_with_siblings(
             &packed,
             |frame_id, view| {
+                let mut i = 0;
                 for (_byte, neighbor_frame) in view.siblings_after().take(PREFILL_COUNT) {
                     if neighbor_frame >= num_frames {
                         continue;
@@ -354,19 +375,18 @@ impl TlbBP {
                     let hk = HashedKey::new(&neighbor_key);
                     let set = hk.tlb_set();
                     let tag = hk.tlb_tag();
-                    let entry = pack_entry(tag, neighbor_frame as u32);
                     unsafe {
-                        if !tlb_insert_if_empty(set, entry) {
-                            tlb_insert(set, entry);
-                        }
-                        TLB_PREFILLS += 1;
+                        PREFILL_BUF[i] = (set, pack_entry(tag, neighbor_frame as u32));
                     }
+                    i += 1;
                 }
+                unsafe { PREFILL_BUF_LEN = i; }
                 frame_id
             },
             &guard,
         )
     }
+
 
     #[inline]
     fn overflow_insert(&self, key: PageKey, frame_id: usize) {
@@ -771,7 +791,7 @@ impl MemPool for TlbBP {
             }
         }
 
-        // Miss path — prefill siblings only if sequential pattern detected.
+        // Miss path
         unsafe { TLB_MISSES += 1; }
         let packed = pack_page_key(&page_key);
         let use_prefill = unsafe {
@@ -780,36 +800,35 @@ impl MemPool for TlbBP {
             packed.wrapping_sub(prev) <= PREFILL_COUNT
         };
         self.ensure_free_frames()?;
-        loop {
-            let lookup = if use_prefill {
-                self.overflow_lookup_with_prefill(&page_key)
-            } else {
-                self.overflow_lookup(&page_key)
-            };
-            if let Some(idx) = lookup {
-                if let Some(g) = self.try_get_read_guard(idx) {
-                    if g.page_key() == Some(page_key) {
-                        g.evict_info().update();
-                        unsafe {
-                            tlb_insert(set, pack_entry(tag, idx as u32));
-                            OVERFLOW_HITS += 1;
-                        }
-                        return Ok(g);
+
+        // Step 1: Lookup in overflow. Stash siblings for sequential access.
+        let found_idx = if use_prefill {
+            self.overflow_lookup_with_sibling_stash(&page_key)
+        } else {
+            self.overflow_lookup(&page_key)
+        };
+
+        if let Some(idx) = found_idx {
+            let guard = self.try_get_read_guard(idx);
+            return guard
+                .inspect(|g| {
+                    g.evict_info().update();
+                    unsafe {
+                        tlb_insert(set, pack_entry(tag, idx as u32));
+                        OVERFLOW_HITS += 1;
+                        flush_prefill_buf();
                     }
-                    // Stale mapping — frame was reused. Retry.
-                    continue;
-                } else {
-                    return Err(MemPoolStatus::FrameReadLatchGrantFailed);
-                }
-            }
-            // Not in overflow — page fault.
-            let victim = self.handle_page_fault(page_key)?;
-            unsafe {
-                tlb_insert(set, pack_entry(tag, victim.frame_id()));
-                PAGE_FAULTS += 1;
-            }
-            return Ok(victim.downgrade());
+                })
+                .ok_or(MemPoolStatus::FrameReadLatchGrantFailed);
         }
+
+        // Step 2: Not in overflow — page fault (like LIPAH's Vacant arm).
+        let victim = self.handle_page_fault(page_key)?;
+        unsafe {
+            tlb_insert(set, pack_entry(tag, victim.frame_id()));
+            PAGE_FAULTS += 1;
+        }
+        Ok(victim.downgrade())
     }
 
     // ----- TLB fast path: get_page_for_write --------------------------------
@@ -874,37 +893,35 @@ impl MemPool for TlbBP {
             packed.wrapping_sub(prev) <= PREFILL_COUNT
         };
         self.ensure_free_frames()?;
-        loop {
-            let lookup = if use_prefill {
-                self.overflow_lookup_with_prefill(&page_key)
-            } else {
-                self.overflow_lookup(&page_key)
-            };
-            if let Some(idx) = lookup {
-                if let Some(g) = self.try_get_write_guard(idx, true) {
-                    if g.page_key() == Some(page_key) {
-                        g.evict_info().update();
-                        unsafe {
-                            tlb_insert(set, pack_entry(tag, idx as u32));
-                            OVERFLOW_HITS += 1;
-                        }
-                        return Ok(g);
+
+        let found_idx = if use_prefill {
+            self.overflow_lookup_with_sibling_stash(&page_key)
+        } else {
+            self.overflow_lookup(&page_key)
+        };
+
+        if let Some(idx) = found_idx {
+            let guard = self.try_get_write_guard(idx, true);
+            return guard
+                .inspect(|g| {
+                    g.evict_info().update();
+                    unsafe {
+                        tlb_insert(set, pack_entry(tag, idx as u32));
+                        OVERFLOW_HITS += 1;
+                        flush_prefill_buf();
                     }
-                    // Stale mapping — frame was reused. Retry.
-                    continue;
-                } else {
-                    return Err(MemPoolStatus::FrameWriteLatchGrantFailed);
-                }
-            }
-            // Not in overflow — page fault.
-            let g = self.handle_page_fault(page_key)?;
-            g.dirty().store(true, Ordering::Release);
-            unsafe {
-                tlb_insert(set, pack_entry(tag, g.frame_id()));
-                PAGE_FAULTS += 1;
-            }
-            return Ok(g);
+                })
+                .ok_or(MemPoolStatus::FrameWriteLatchGrantFailed);
         }
+
+        // Step 2: Not in overflow — page fault.
+        let g = self.handle_page_fault(page_key)?;
+        g.dirty().store(true, Ordering::Release);
+        unsafe {
+            tlb_insert(set, pack_entry(tag, g.frame_id()));
+            PAGE_FAULTS += 1;
+        }
+        Ok(g)
     }
 
     // ----- create pages -----------------------------------------------------
