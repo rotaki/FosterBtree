@@ -35,14 +35,13 @@ use crate::log;
 use super::{
     buffer_pool::BPStats,
     eviction_policy::{ClockEvictionPolicy, EvictionPolicy},
-    frame_guards::{FrameMeta, FrameReadGuard, FrameWriteGuard},
+    frame_guards::{box_as_mut_ptr, FrameMeta, FrameReadGuard, FrameWriteGuard},
     hash::{hash_page_key, hash_page_key_2, hash_page_key_3, hash_page_key_4, hash_page_key_u128},
     macro_profile::{report as macro_profile_report, scoped as macro_profile_scoped, BpMacroOp},
     mem_pool_trait::{ContainerKey, MemPool, MemPoolStatus, MemoryStats, PageFrameKey, PageKey},
 };
 use crate::random::small_thread_rng;
 use crate::{
-    bp::frame_guards::box_as_mut_ptr,
     container::ContainerManager,
     log_debug, log_warn,
     page::{Page, PageId},
@@ -599,9 +598,21 @@ impl PredictiveTranslationBP {
     fn evict_batch(&self) -> Result<(), MemPoolStatus> {
         let batch = std::cmp::min(self.num_frames, 64);
         let max_iter = 2 * self.num_frames / batch;
-        let mut evicted = 0usize;
 
-        for _ in 0..max_iter {
+        // Scratch space for multi-stage eviction.
+        let mut clean_pages: Vec<(usize, *mut FMeta)> = Vec::new();
+        let mut dirty_pages: Vec<(usize, FRGuard)> = Vec::new();
+        let mut to_evict: Vec<(usize, FWGuard)> = Vec::new();
+
+        // ─── 1. Collect candidates via clock scan ────────────────────
+        let mut iters = 0;
+        while clean_pages.len() + dirty_pages.len() < batch {
+            if iters > max_iter {
+                if clean_pages.is_empty() && dirty_pages.is_empty() {
+                    return Err(MemPoolStatus::CannotEvictPage);
+                }
+                break;
+            }
             let start = self.fetch_add_clock_hand(batch);
             for offset in 0..batch {
                 let idx = (start + offset) % self.num_frames;
@@ -611,42 +622,72 @@ impl PredictiveTranslationBP {
                     continue;
                 }
 
-                // Clock: if marked, clear mark and skip.  If unmarked, evict.
+                // Clock: if marked, clear mark and skip. If unmarked, candidate.
                 if meta.evict_info.score() > 0 {
                     meta.evict_info.reset();
                     continue;
                 }
 
-                // Try to write-latch the frame for eviction.
-                if let Some(guard) = self.try_get_write_guard(idx, false) {
-                    if guard.page_key().is_none() {
-                        continue;
-                    }
-                    // Flush if dirty.
-                    self.write_to_disk_if_dirty_w(&guard).unwrap();
-                    // Unified: every resident page is in overflow; remove when we evict.
-                    if let Some(pk) = guard.page_key() {
-                        if self.overflow.lookup(&pk) == Some(idx) {
-                            self.overflow.remove(&pk);
+                let is_dirty = meta.is_dirty.load(Ordering::Acquire);
+                if is_dirty {
+                    if let Some(g) = self.try_get_read_guard(idx) {
+                        if g.page_key().is_some() {
+                            dirty_pages.push((idx, g));
                         }
                     }
-                    // Clear the frame.
-                    guard.set_page_key(None);
-                    guard.evict_info().reset();
-                    self.enqueue_free_frame(idx);
-                    evicted += 1;
+                } else {
+                    clean_pages.push((idx, box_as_mut_ptr(meta)));
                 }
             }
-            if evicted > 0 {
-                self.used_frames.fetch_sub(evicted, Ordering::AcqRel);
-                return Ok(());
+            iters += 1;
+        }
+
+        // ─── 2. Flush dirty pages under read latch ───────────────────
+        for (_, g) in &dirty_pages {
+            self.write_to_disk_if_dirty_r(g).unwrap();
+        }
+
+        // ─── 3. Latch clean pages for eviction ──────────────────────
+        for (idx, meta) in clean_pages.drain(..) {
+            if let Some(g) = FWGuard::try_new(
+                meta,
+                box_as_mut_ptr(&mut unsafe { &mut *self.pages.get() }[idx]),
+                false,
+            ) {
+                if g.page_key().is_none() {
+                    continue;
+                }
+                self.write_to_disk_if_dirty_w(&g).unwrap();
+                to_evict.push((idx, g));
             }
         }
 
-        if evicted == 0 {
-            Err(MemPoolStatus::CannotEvictPage)
-        } else {
+        // ─── 4. Upgrade dirty page latches (read → write) ───────────
+        for (idx, g) in dirty_pages.drain(..) {
+            if let Ok(gw) = g.try_upgrade(false) {
+                to_evict.push((idx, gw));
+            }
+        }
+
+        // ─── 5. Remove from overflow and finalize ───────────────────
+        let mut freed = 0;
+        for (idx, g) in to_evict.drain(..) {
+            if let Some(pk) = g.page_key() {
+                if self.overflow.lookup(&pk) == Some(idx) {
+                    self.overflow.remove(&pk);
+                }
+            }
+            g.set_page_key(None);
+            g.evict_info().reset();
+            self.enqueue_free_frame(idx);
+            freed += 1;
+        }
+
+        if freed > 0 {
+            self.used_frames.fetch_sub(freed, Ordering::AcqRel);
             Ok(())
+        } else {
+            Err(MemPoolStatus::CannotEvictPage)
         }
     }
 
@@ -680,7 +721,17 @@ impl PredictiveTranslationBP {
 
         debug_assert!(victim.page_key().is_none());
 
-        self.overflow.insert(page_key, victim.frame_id() as usize);
+        // Atomic insert-if-absent: if another thread already faulted this
+        // page, keep existing and retry.
+        if self
+            .overflow
+            .try_insert(page_key, victim.frame_id() as usize)
+            .is_err()
+        {
+            self.enqueue_free_frame(victim.frame_id() as usize);
+            self.used_frames.fetch_sub(1, Ordering::AcqRel);
+            return Err(MemPoolStatus::RetryPageFault);
+        }
 
         victim.set_page_key(Some(page_key));
 
