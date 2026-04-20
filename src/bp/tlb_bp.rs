@@ -29,7 +29,7 @@ use std::{
 };
 
 use concurrent_queue::ConcurrentQueue;
-use congee::Congee;
+use congee::CongeeRaw;
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 
 type EvictionPolicyImpl = ClockEvictionPolicy;
@@ -156,9 +156,6 @@ static mut OVERFLOW_HITS: u64 = 0;
 static mut PAGE_FAULTS: u64 = 0;
 #[thread_local]
 static mut TLB_FALSE_HITS: u64 = 0;
-/// Last missed packed PageKey — used to detect sequential access pattern.
-#[thread_local]
-static mut LAST_MISS_KEY: usize = 0;
 
 // ===========================================================================
 // TLB operations (abstracted over layout)
@@ -275,7 +272,7 @@ pub struct TlbBP {
     #[allow(clippy::vec_box)]
     metas: UnsafeCell<Vec<Box<FMeta>>>,
     /// Overflow: concurrent ART tree mapping packed PageKey (usize) -> frame_id (usize).
-    overflow: Congee<usize, usize>,
+    overflow: CongeeRaw<usize, usize>,
     stats: BPStats,
 }
 
@@ -321,7 +318,7 @@ impl TlbBP {
             free_list,
             pages,
             metas,
-            overflow: Congee::default(),
+            overflow: CongeeRaw::default(),
             stats: BPStats::new(),
         })
     }
@@ -336,50 +333,46 @@ impl TlbBP {
         self.overflow.get(&pack_page_key(key), &guard)
     }
 
-    /// Range-scan the overflow for `page_key` and up to PREFILL_COUNT-1 forward
-    /// neighbors. Returns `Some(frame_id)` for the target if found. As a side
-    /// effect, populates TLB entries for any neighbors found.
+    /// Lookup the target page in overflow AND prefill TLB with sibling entries,
+    /// all in a single locked ART traversal. Returns `Some(frame_id)` if found.
     #[inline]
-    fn overflow_range_lookup(&self, page_key: &PageKey) -> Option<usize> {
+    fn overflow_lookup_with_prefill(&self, page_key: &PageKey) -> Option<usize> {
         let guard = self.overflow.pin();
-        let packed_target = pack_page_key(page_key);
-        let packed_end = packed_target + PREFILL_COUNT;
-        let mut buf = [(0usize, 0usize); PREFILL_COUNT];
-        let count = self.overflow.range(&packed_target, &packed_end, &mut buf, &guard);
-
-        let mut target_frame: Option<usize> = None;
-
-        for i in 0..count {
-            let (packed_key, frame_id) = buf[i];
-            if packed_key == packed_target {
-                target_frame = Some(frame_id);
-                continue; // caller handles TLB insert for target
-            }
-            // Prefill neighbor into TLB + prefetch page data
-            let neighbor_key = unpack_page_key(packed_key);
-            let hk = HashedKey::new(&neighbor_key);
-            let set = hk.tlb_set();
-            let tag = hk.tlb_tag();
-            let entry = pack_entry(tag, frame_id as u32);
-            unsafe {
-                if !tlb_insert_if_empty(set, entry) {
-                    tlb_insert(set, entry);
+        let packed = pack_page_key(page_key);
+        let num_frames = self.num_frames;
+        self.overflow.get_with_siblings_locked(
+            &packed,
+            |frame_id, view| {
+                // Prefill TLB with forward siblings (adjacent page_ids).
+                for (_byte, neighbor_frame) in view.siblings_after().take(PREFILL_COUNT) {
+                    if neighbor_frame >= num_frames {
+                        continue;
+                    }
+                    // Reconstruct the neighbor's packed key from the byte offset.
+                    // Siblings share the ART prefix; the byte is the differing part.
+                    // For TLB insertion we need the full HashedKey, so reconstruct
+                    // the page_key from the packed value.
+                    // Note: _byte is the last-level ART byte, not the full packed key.
+                    // We can compute the neighbor's packed key as:
+                    //   packed_base (target with last byte zeroed) | _byte
+                    // But this only works within the same 256-aligned bucket.
+                    let neighbor_packed = (packed & !0xFF) | (_byte as usize);
+                    let neighbor_key = unpack_page_key(neighbor_packed);
+                    let hk = HashedKey::new(&neighbor_key);
+                    let set = hk.tlb_set();
+                    let tag = hk.tlb_tag();
+                    let entry = pack_entry(tag, neighbor_frame as u32);
+                    unsafe {
+                        if !tlb_insert_if_empty(set, entry) {
+                            tlb_insert(set, entry);
+                        }
+                        TLB_PREFILLS += 1;
+                    }
                 }
-                // Prefetch the neighbor's metadata and page data into cache.
-                #[cfg(all(target_arch = "x86_64", feature = "tlb_prefetch"))]
-                {
-                    let pages = &*self.pages.get();
-                    let metas = &*self.metas.get();
-                    let meta_ptr = (&*metas[frame_id]) as *const FMeta as *const i8;
-                    let page_ptr = (&*pages[frame_id]) as *const Page as *const i8;
-                    core::arch::x86_64::_mm_prefetch(meta_ptr, core::arch::x86_64::_MM_HINT_T0);
-                    core::arch::x86_64::_mm_prefetch(page_ptr, core::arch::x86_64::_MM_HINT_T0);
-                }
-                unsafe { TLB_PREFILLS += 1; }
-            }
-        }
-
-        target_frame
+                frame_id
+            },
+            &guard,
+        )
     }
 
     #[inline]
@@ -388,31 +381,6 @@ impl TlbBP {
         let _ = self.overflow.insert(pack_page_key(&key), frame_id, &guard);
     }
 
-    /// Atomic try-insert: insert only if absent. Returns Err(existing) if present.
-    #[inline]
-    fn overflow_try_insert(&self, key: PageKey, frame_id: usize) -> Result<(), usize> {
-        let guard = self.overflow.pin();
-        let packed = pack_page_key(&key);
-        let mut was_present = false;
-        let mut existing_val = 0usize;
-        let _ = self.overflow.compute_or_insert(
-            packed,
-            |existing| match existing {
-                None => frame_id,
-                Some(v) => {
-                    was_present = true;
-                    existing_val = v;
-                    v
-                }
-            },
-            &guard,
-        );
-        if was_present {
-            Err(existing_val)
-        } else {
-            Ok(())
-        }
-    }
 
     #[inline]
     fn overflow_remove(&self, key: &PageKey) -> Option<usize> {
@@ -810,22 +778,11 @@ impl MemPool for TlbBP {
             }
         }
 
-        // Miss path — use range prefill if sequential pattern detected.
+        // Miss path — lookup with sibling prefill in one ART traversal.
         unsafe { TLB_MISSES += 1; }
-        let packed = pack_page_key(&page_key);
-        let use_range = unsafe {
-            let prev = LAST_MISS_KEY;
-            LAST_MISS_KEY = packed;
-            packed.wrapping_sub(prev) <= PREFILL_COUNT
-        };
         self.ensure_free_frames()?;
         loop {
-            let lookup = if use_range {
-                self.overflow_range_lookup(&page_key)
-            } else {
-                self.overflow_lookup(&page_key)
-            };
-            if let Some(idx) = lookup {
+            if let Some(idx) = self.overflow_lookup_with_prefill(&page_key) {
                 if let Some(g) = self.try_get_read_guard(idx) {
                     if g.page_key() == Some(page_key) {
                         g.evict_info().update();
@@ -906,20 +863,9 @@ impl MemPool for TlbBP {
         }
 
         unsafe { TLB_MISSES += 1; }
-        let packed = pack_page_key(&page_key);
-        let use_range = unsafe {
-            let prev = LAST_MISS_KEY;
-            LAST_MISS_KEY = packed;
-            packed.wrapping_sub(prev) <= PREFILL_COUNT
-        };
         self.ensure_free_frames()?;
         loop {
-            let lookup = if use_range {
-                self.overflow_range_lookup(&page_key)
-            } else {
-                self.overflow_lookup(&page_key)
-            };
-            if let Some(idx) = lookup {
+            if let Some(idx) = self.overflow_lookup_with_prefill(&page_key) {
                 if let Some(g) = self.try_get_write_guard(idx, true) {
                     if g.page_key() == Some(page_key) {
                         g.evict_info().update();
