@@ -10,7 +10,7 @@
 //!   cargo run --release --bin bp_translation_bench --features bp_clock \
 //!     -- --num-pages 100000 --num-frames 200000 --threads 1 --seconds 5 --theta 0.8
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier};
 use std::time::Instant;
 
@@ -49,6 +49,11 @@ struct Args {
     /// Use sequential access pattern (scan simulation).
     #[arg(long, default_value_t = false)]
     sequential: bool,
+
+    /// Workload phase shift: split benchmark into two halves, each accessing
+    /// a different half of the pages. Simulates hot-set migration.
+    #[arg(long, default_value_t = false)]
+    phase_shift: bool,
 }
 
 fn get_bp(num_frames: usize) -> Arc<impl MemPool> {
@@ -108,8 +113,8 @@ fn main() {
 
     println!("=== BP Translation Micro-Benchmark ===");
     println!(
-        "pages={} frames={} threads={} seconds={} theta={} warmup={} sequential={}",
-        args.num_pages, args.num_frames, args.threads, args.seconds, args.theta, args.warmup, args.sequential
+        "pages={} frames={} threads={} seconds={} theta={} warmup={} sequential={} phase_shift={}",
+        args.num_pages, args.num_frames, args.threads, args.seconds, args.theta, args.warmup, args.sequential, args.phase_shift
     );
 
     // Create BP and pre-populate pages.
@@ -161,6 +166,8 @@ fn main() {
 
     // Benchmark
     let flag = Arc::new(AtomicBool::new(true));
+    // Phase: 0 = first half of pages, 1 = second half. Only used with --phase-shift.
+    let phase = Arc::new(AtomicUsize::new(0));
     let barrier = Arc::new(Barrier::new(args.threads + 1));
 
     let results: Vec<u64> = std::thread::scope(|s| {
@@ -169,14 +176,17 @@ fn main() {
             let bp = &bp;
             let keys = &keys;
             let flag = &flag;
+            let phase = &phase;
             let barrier = &barrier;
             let theta = args.theta;
             let sequential = args.sequential;
+            let phase_shift = args.phase_shift;
+            let half = num_pages / 2;
 
             let h = s.spawn(move || {
                 let rng = small_thread_rng();
                 let mut zipf = if theta > 0.0 {
-                    Some(FastZipf::new(rng, theta, num_pages))
+                    Some(FastZipf::new(rng, theta, if phase_shift { half } else { num_pages }))
                 } else {
                     None
                 };
@@ -187,14 +197,21 @@ fn main() {
                 barrier.wait();
 
                 while flag.load(Ordering::Relaxed) {
+                    let base = if phase_shift {
+                        phase.load(Ordering::Relaxed) * half
+                    } else {
+                        0
+                    };
+                    let range = if phase_shift { half } else { num_pages };
+
                     let idx = if sequential {
                         let i = seq_idx;
-                        seq_idx = (seq_idx + 1) % num_pages;
-                        i
+                        seq_idx = (seq_idx + 1) % range;
+                        base + i
                     } else if let Some(ref mut z) = zipf {
-                        z.sample()
+                        base + z.sample()
                     } else {
-                        (uniform_rng.next_u64() as usize) % num_pages
+                        base + (uniform_rng.next_u64() as usize) % range
                     };
                     let g = bp.get_page_for_read(keys[idx]).unwrap();
                     // Touch the page data to force cache load.
@@ -212,7 +229,16 @@ fn main() {
 
         barrier.wait();
         let start = Instant::now();
-        std::thread::sleep(std::time::Duration::from_secs(args.seconds));
+        if args.phase_shift {
+            // Phase 1: first half of pages
+            std::thread::sleep(std::time::Duration::from_secs(args.seconds / 2));
+            println!("--- Phase shift: switching to second half of pages ---");
+            phase.store(1, Ordering::Relaxed);
+            // Phase 2: second half of pages
+            std::thread::sleep(std::time::Duration::from_secs(args.seconds - args.seconds / 2));
+        } else {
+            std::thread::sleep(std::time::Duration::from_secs(args.seconds));
+        }
         flag.store(false, Ordering::Relaxed);
         let elapsed = start.elapsed();
 
