@@ -150,6 +150,9 @@ static mut TLB_HITS: u64 = 0;
 static mut TLB_MISSES: u64 = 0;
 #[thread_local]
 static mut TLB_PREFILLS: u64 = 0;
+/// Last missed packed PageKey — used to detect sequential access for sibling prefill.
+#[thread_local]
+static mut LAST_MISS_KEY: usize = 0;
 #[thread_local]
 static mut OVERFLOW_HITS: u64 = 0;
 #[thread_local]
@@ -333,29 +336,19 @@ impl TlbBP {
         self.overflow.get(&pack_page_key(key), &guard)
     }
 
-    /// Lookup the target page in overflow AND prefill TLB with sibling entries,
-    /// all in a single locked ART traversal. Returns `Some(frame_id)` if found.
+    /// Lookup with sibling prefill in a single ART traversal.
     #[inline]
     fn overflow_lookup_with_prefill(&self, page_key: &PageKey) -> Option<usize> {
         let guard = self.overflow.pin();
         let packed = pack_page_key(page_key);
         let num_frames = self.num_frames;
-        self.overflow.get_with_siblings_locked(
+        self.overflow.get_with_siblings(
             &packed,
             |frame_id, view| {
-                // Prefill TLB with forward siblings (adjacent page_ids).
                 for (_byte, neighbor_frame) in view.siblings_after().take(PREFILL_COUNT) {
                     if neighbor_frame >= num_frames {
                         continue;
                     }
-                    // Reconstruct the neighbor's packed key from the byte offset.
-                    // Siblings share the ART prefix; the byte is the differing part.
-                    // For TLB insertion we need the full HashedKey, so reconstruct
-                    // the page_key from the packed value.
-                    // Note: _byte is the last-level ART byte, not the full packed key.
-                    // We can compute the neighbor's packed key as:
-                    //   packed_base (target with last byte zeroed) | _byte
-                    // But this only works within the same 256-aligned bucket.
                     let neighbor_packed = (packed & !0xFF) | (_byte as usize);
                     let neighbor_key = unpack_page_key(neighbor_packed);
                     let hk = HashedKey::new(&neighbor_key);
@@ -778,11 +771,22 @@ impl MemPool for TlbBP {
             }
         }
 
-        // Miss path — lookup with sibling prefill in one ART traversal.
+        // Miss path — prefill siblings only if sequential pattern detected.
         unsafe { TLB_MISSES += 1; }
+        let packed = pack_page_key(&page_key);
+        let use_prefill = unsafe {
+            let prev = LAST_MISS_KEY;
+            LAST_MISS_KEY = packed;
+            packed.wrapping_sub(prev) <= PREFILL_COUNT
+        };
         self.ensure_free_frames()?;
         loop {
-            if let Some(idx) = self.overflow_lookup_with_prefill(&page_key) {
+            let lookup = if use_prefill {
+                self.overflow_lookup_with_prefill(&page_key)
+            } else {
+                self.overflow_lookup(&page_key)
+            };
+            if let Some(idx) = lookup {
                 if let Some(g) = self.try_get_read_guard(idx) {
                     if g.page_key() == Some(page_key) {
                         g.evict_info().update();
@@ -863,9 +867,20 @@ impl MemPool for TlbBP {
         }
 
         unsafe { TLB_MISSES += 1; }
+        let packed = pack_page_key(&page_key);
+        let use_prefill = unsafe {
+            let prev = LAST_MISS_KEY;
+            LAST_MISS_KEY = packed;
+            packed.wrapping_sub(prev) <= PREFILL_COUNT
+        };
         self.ensure_free_frames()?;
         loop {
-            if let Some(idx) = self.overflow_lookup_with_prefill(&page_key) {
+            let lookup = if use_prefill {
+                self.overflow_lookup_with_prefill(&page_key)
+            } else {
+                self.overflow_lookup(&page_key)
+            };
+            if let Some(idx) = lookup {
                 if let Some(g) = self.try_get_write_guard(idx, true) {
                     if g.page_key() == Some(page_key) {
                         g.evict_info().update();
