@@ -561,16 +561,8 @@ impl PredictiveTranslationBP {
                 }
             }
         }
-        // Otherwise pop hint frames until we get a usable free frame.
+        // Pop from free list hints until we get a usable free frame.
         while let Ok(idx) = self.free_list.pop() {
-            if let Some(guard) = self.try_get_write_guard(idx, false) {
-                if guard.page_key().is_none() {
-                    return Some(guard);
-                }
-            }
-        }
-        // Fallback: scan all frames for a free one (free_list hints may be stale).
-        for idx in 0..self.num_frames {
             if let Some(guard) = self.try_get_write_guard(idx, false) {
                 if guard.page_key().is_none() {
                     return Some(guard);
@@ -688,19 +680,7 @@ impl PredictiveTranslationBP {
 
         debug_assert!(victim.page_key().is_none());
 
-        // Atomic try-insert: claims the page in the overflow table under the
-        // bucket lock. If another thread already faulted this page, try_insert
-        // returns Err and we retry. This replaces the old fault_in_progress
-        // DashMap + 4 separate overflow verification lookups (§4.1-4.2).
-        if self
-            .overflow
-            .try_insert(page_key, victim.frame_id() as usize)
-            .is_err()
-        {
-            self.enqueue_free_frame(victim.frame_id() as usize);
-            self.used_frames.fetch_sub(1, Ordering::AcqRel);
-            return Err(MemPoolStatus::RetryPageFault);
-        }
+        self.overflow.insert(page_key, victim.frame_id() as usize);
 
         victim.set_page_key(Some(page_key));
 

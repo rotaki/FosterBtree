@@ -496,13 +496,6 @@ impl TlbBP {
                 }
             }
         }
-        for idx in 0..self.num_frames {
-            if let Some(guard) = self.try_get_write_guard(idx, false) {
-                if guard.page_key().is_none() {
-                    return Some(guard);
-                }
-            }
-        }
         None
     }
 
@@ -600,14 +593,7 @@ impl TlbBP {
 
         debug_assert!(victim.page_key().is_none());
 
-        if self
-            .overflow_try_insert(page_key, victim.frame_id() as usize)
-            .is_err()
-        {
-            self.enqueue_free_frame(victim.frame_id() as usize);
-            self.used_frames.fetch_sub(1, Ordering::AcqRel);
-            return Err(MemPoolStatus::RetryPageFault);
-        }
+        self.overflow_insert(page_key, victim.frame_id() as usize);
 
         victim.set_page_key(Some(page_key));
 
