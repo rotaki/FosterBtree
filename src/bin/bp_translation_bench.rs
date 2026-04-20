@@ -114,7 +114,14 @@ fn main() {
     println!("=== BP Translation Micro-Benchmark ===");
     println!(
         "pages={} frames={} threads={} seconds={} theta={} warmup={} sequential={} phase_shift={}",
-        args.num_pages, args.num_frames, args.threads, args.seconds, args.theta, args.warmup, args.sequential, args.phase_shift
+        args.num_pages,
+        args.num_frames,
+        args.threads,
+        args.seconds,
+        args.theta,
+        args.warmup,
+        args.sequential,
+        args.phase_shift
     );
 
     // Create BP and pre-populate pages.
@@ -186,7 +193,11 @@ fn main() {
             let h = s.spawn(move || {
                 let rng = small_thread_rng();
                 let mut zipf = if theta > 0.0 {
-                    Some(FastZipf::new(rng, theta, if phase_shift { half } else { num_pages }))
+                    Some(FastZipf::new(
+                        rng,
+                        theta,
+                        if phase_shift { half } else { num_pages },
+                    ))
                 } else {
                     None
                 };
@@ -238,7 +249,9 @@ fn main() {
             println!("--- Phase shift: switching to second half of pages ---");
             phase.store(1, Ordering::Relaxed);
             // Phase 2: second half of pages
-            std::thread::sleep(std::time::Duration::from_secs(args.seconds - args.seconds / 2));
+            std::thread::sleep(std::time::Duration::from_secs(
+                args.seconds - args.seconds / 2,
+            ));
         } else {
             std::thread::sleep(std::time::Duration::from_secs(args.seconds));
         }

@@ -67,7 +67,6 @@ use core::arch::x86_64::{_mm_prefetch, _MM_HINT_T0};
 // Sub-step profiling / counters (feature = "pt_profile" / "pt_counts")
 // ---------------------------------------------------------------------------
 
-#[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
 use std::sync::atomic::AtomicU64;
 
 /// Cumulative counters for sub-step timing within PT page accesses.
@@ -336,6 +335,12 @@ pub struct PredictiveTranslationBP {
     /// PT access counters; timing fields are only active with `pt_profile`.
     #[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
     pub profile: PTProfileCounters,
+    /// Diagnostic counters for create_new_page_for_write to detect page_id leaks
+    /// under retry from the caller (B-tree). Always-on, cheap.
+    pub(crate) create_attempts: AtomicU64,
+    pub(crate) create_failed_ensure_free: AtomicU64,
+    pub(crate) create_failed_choose_victim: AtomicU64,
+    pub(crate) create_succeeded: AtomicU64,
 }
 
 // SAFETY: synchronisation is done via per-frame latches and the translation table.
@@ -344,6 +349,21 @@ unsafe impl Send for PredictiveTranslationBP {}
 
 impl Drop for PredictiveTranslationBP {
     fn drop(&mut self) {
+        let attempts = self.create_attempts.load(Ordering::Relaxed);
+        if attempts > 0 {
+            let succ = self.create_succeeded.load(Ordering::Relaxed);
+            let fail_ensure = self.create_failed_ensure_free.load(Ordering::Relaxed);
+            let fail_victim = self.create_failed_choose_victim.load(Ordering::Relaxed);
+            eprintln!(
+                "PT create_new_page_for_write: attempts={} succeeded={} ({:.1}%) failed_ensure_free={} failed_choose_victim={} (page_id leaks={})",
+                attempts,
+                succ,
+                succ as f64 / attempts as f64 * 100.0,
+                fail_ensure,
+                fail_victim,
+                fail_victim,
+            );
+        }
         if self.container_manager.remove_dir_on_drop() {
             // Test mode — directory will be cleaned up by ContainerManager.
         } else {
@@ -402,6 +422,10 @@ impl PredictiveTranslationBP {
             stats: BPStats::new(),
             #[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
             profile: PTProfileCounters::new(),
+            create_attempts: AtomicU64::new(0),
+            create_failed_ensure_free: AtomicU64::new(0),
+            create_failed_choose_victim: AtomicU64::new(0),
+            create_succeeded: AtomicU64::new(0),
         })
     }
 
@@ -551,16 +575,10 @@ impl PredictiveTranslationBP {
 
     /// Try to get a free frame. If `preferred` is Some(p), try to take that frame first
     /// (so pages are placed in their preferred frame when free — paper §3.1).
-    pub(crate) fn choose_victim(&self, preferred: Option<usize>) -> Option<FWGuard> {
-        // Prefer the preferred frame when it is free.
-        if let Some(p) = preferred {
-            if let Some(guard) = self.try_get_write_guard(p, false) {
-                if guard.page_key().is_none() {
-                    return Some(guard);
-                }
-            }
-        }
-        // Pop from free list hints until we get a usable free frame.
+    pub(crate) fn choose_victim(&self) -> Option<FWGuard> {
+        // free_list is a best-effort hint, not a strict invariant. Entries
+        // can be stale because try_promote grabs preferred frames by direct
+        // index (without popping). Skip both latch-fail and stale entries.
         while let Ok(idx) = self.free_list.pop() {
             if let Some(guard) = self.try_get_write_guard(idx, false) {
                 if guard.page_key().is_none() {
@@ -683,12 +701,12 @@ impl PredictiveTranslationBP {
             freed += 1;
         }
 
-        if freed > 0 {
-            self.used_frames.fetch_sub(freed, Ordering::AcqRel);
-            Ok(())
-        } else {
-            Err(MemPoolStatus::CannotEvictPage)
-        }
+        // Always decrement used_frames (no-op if freed == 0) and always return
+        // Ok if collect found any candidates. Matches LIPAH's finalize_eviction:
+        // failure to evict propagates via choose_victim returning None later,
+        // not via evict_batch returning Err.
+        self.used_frames.fetch_sub(freed, Ordering::AcqRel);
+        Ok(())
     }
 
     // ------------------------------------------------------------------
@@ -698,20 +716,18 @@ impl PredictiveTranslationBP {
     /// Load a page from disk into a frame.  Returns a write guard on the
     /// newly-loaded frame.
     ///
-    /// We obtain a frame via `choose_victim(Some(pref))`, so we use the preferred
-    /// frame when it's free (paper §3.1). Otherwise we take any free frame and
-    /// add to the overflow table.
+    /// On a race with another faulter, returns a write guard on the winning
+    /// thread's frame (matches TLB-BP's pattern) — no RetryPageFault loop.
+    /// The `prefs` argument is retained for API compatibility with wrappers
+    /// but no longer influences victim selection (see choose_victim).
     pub(crate) fn handle_page_fault_write<const N: usize>(
         &self,
         page_key: PageKey,
-        prefs: [usize; N],
+        _prefs: [usize; N],
     ) -> Result<FWGuard, MemPoolStatus> {
         self.used_frames.fetch_add(1, Ordering::AcqRel);
 
-        // Pick the first free preferred frame, or None to avoid latching occupied frames.
-        let chosen_pref = prefs.iter().find(|&&p| self.frame_is_free(p)).copied();
-
-        let mut victim = match self.choose_victim(chosen_pref) {
+        let mut victim = match self.choose_victim() {
             Some(v) => v,
             None => {
                 self.used_frames.fetch_sub(1, Ordering::AcqRel);
@@ -721,16 +737,18 @@ impl PredictiveTranslationBP {
 
         debug_assert!(victim.page_key().is_none());
 
-        // Atomic insert-if-absent: if another thread already faulted this
-        // page, keep existing and retry.
-        if self
+        // Atomic insert-if-absent. On race, free our victim and try to latch
+        // the winner's frame; bail out to the caller if its write latch is
+        // busy (winner is loading). Matches TLB-BP's handle_page_fault pattern.
+        if let Err(existing_idx) = self
             .overflow
             .try_insert(page_key, victim.frame_id() as usize)
-            .is_err()
         {
             self.enqueue_free_frame(victim.frame_id() as usize);
             self.used_frames.fetch_sub(1, Ordering::AcqRel);
-            return Err(MemPoolStatus::RetryPageFault);
+            return self
+                .try_get_write_guard(existing_idx, true)
+                .ok_or(MemPoolStatus::FrameWriteLatchGrantFailed);
         }
 
         victim.set_page_key(Some(page_key));
@@ -1003,13 +1021,6 @@ impl PredictiveTranslationBP {
                         .fetch_add(t6.elapsed().as_nanos() as u64, Ordering::Relaxed);
                     return Ok(victim.downgrade());
                 }
-                Err(MemPoolStatus::RetryPageFault) => {
-                    #[cfg(feature = "pt_profile")]
-                    self.profile
-                        .fault_ns
-                        .fetch_add(t6.elapsed().as_nanos() as u64, Ordering::Relaxed);
-                    continue;
-                }
                 Err(e) => return Err(e),
             }
         }
@@ -1132,13 +1143,6 @@ impl PredictiveTranslationBP {
                         .fetch_add(t6.elapsed().as_nanos() as u64, Ordering::Relaxed);
                     return Ok(g);
                 }
-                Err(MemPoolStatus::RetryPageFault) => {
-                    #[cfg(feature = "pt_profile")]
-                    self.profile
-                        .fault_ns
-                        .fetch_add(t6.elapsed().as_nanos() as u64, Ordering::Relaxed);
-                    continue;
-                }
                 Err(e) => return Err(e),
             }
         }
@@ -1153,26 +1157,27 @@ impl PredictiveTranslationBP {
     ) -> Result<FWGuard, MemPoolStatus> {
         let _macro_timer = macro_profile_scoped(BpMacroOp::CreateNewPage);
         self.stats.inc_new_page();
-        self.ensure_free_frames()?;
+        self.create_attempts.fetch_add(1, Ordering::Relaxed);
+        if let Err(e) = self.ensure_free_frames() {
+            self.create_failed_ensure_free
+                .fetch_add(1, Ordering::Relaxed);
+            return Err(e);
+        }
+
+        // Get a victim BEFORE allocating page_id to avoid leaking page_ids on
+        // retry (B-tree spins on CannotEvictPage).
+        let mut victim = match self.choose_victim() {
+            Some(v) => v,
+            None => {
+                self.create_failed_choose_victim
+                    .fetch_add(1, Ordering::Relaxed);
+                return Err(MemPoolStatus::CannotEvictPage);
+            }
+        };
 
         let container = self.container_manager.get_container(c_key);
         let page_id = container.inc_page_count(1) as PageId;
         let page_key = PageKey::new(c_key, page_id);
-        let (p1, p2) = self.preferred_frames(&page_key);
-        let (p1, p2) = (p1 as usize, p2 as usize);
-
-        // Pick the first free preferred frame, or None to avoid latching occupied frames.
-        let chosen_pref = if self.frame_is_free(p1) {
-            Some(p1)
-        } else if self.frame_is_free(p2) {
-            Some(p2)
-        } else {
-            None
-        };
-
-        let mut victim = self
-            .choose_victim(chosen_pref)
-            .ok_or(MemPoolStatus::CannotEvictPage)?;
 
         debug_assert!(victim.page_key().is_none());
         debug_assert!(!victim.dirty().load(Ordering::Acquire));
@@ -1184,6 +1189,7 @@ impl PredictiveTranslationBP {
         victim.dirty().store(true, Ordering::Release);
         victim.evict_info().reset();
         self.used_frames.fetch_add(1, Ordering::AcqRel);
+        self.create_succeeded.fetch_add(1, Ordering::Relaxed);
 
         Ok(victim)
     }
@@ -1196,22 +1202,26 @@ impl PredictiveTranslationBP {
     ) -> Result<FWGuard, MemPoolStatus> {
         let _macro_timer = macro_profile_scoped(BpMacroOp::CreateNewPage);
         self.stats.inc_new_page();
-        self.ensure_free_frames()?;
+        self.create_attempts.fetch_add(1, Ordering::Relaxed);
+        if let Err(e) = self.ensure_free_frames() {
+            self.create_failed_ensure_free
+                .fetch_add(1, Ordering::Relaxed);
+            return Err(e);
+        }
+
+        // Get a victim BEFORE allocating page_id to avoid page_id leaks on retry.
+        let mut victim = match self.choose_victim() {
+            Some(v) => v,
+            None => {
+                self.create_failed_choose_victim
+                    .fetch_add(1, Ordering::Relaxed);
+                return Err(MemPoolStatus::CannotEvictPage);
+            }
+        };
 
         let container = self.container_manager.get_container(c_key);
         let page_id = container.inc_page_count(1) as PageId;
         let page_key = PageKey::new(c_key, page_id);
-        let prefs = self.preferred_frames_four(&page_key);
-
-        // Pick the first free preferred frame, or None to avoid latching occupied frames.
-        let chosen_pref = prefs
-            .iter()
-            .find(|&&p| self.frame_is_free(p as usize))
-            .map(|&p| p as usize);
-
-        let mut victim = self
-            .choose_victim(chosen_pref)
-            .ok_or(MemPoolStatus::CannotEvictPage)?;
 
         debug_assert!(victim.page_key().is_none());
         debug_assert!(!victim.dirty().load(Ordering::Acquire));
@@ -1223,6 +1233,7 @@ impl PredictiveTranslationBP {
         victim.dirty().store(true, Ordering::Release);
         victim.evict_info().reset();
         self.used_frames.fetch_add(1, Ordering::AcqRel);
+        self.create_succeeded.fetch_add(1, Ordering::Relaxed);
 
         Ok(victim)
     }
@@ -1250,15 +1261,29 @@ impl MemPool for PredictiveTranslationBP {
     fn create_new_page_for_write(&self, c_key: ContainerKey) -> Result<FWGuard, MemPoolStatus> {
         let _macro_timer = macro_profile_scoped(BpMacroOp::CreateNewPage);
         self.stats.inc_new_page();
-        self.ensure_free_frames()?;
+        self.create_attempts.fetch_add(1, Ordering::Relaxed);
+        if let Err(e) = self.ensure_free_frames() {
+            self.create_failed_ensure_free
+                .fetch_add(1, Ordering::Relaxed);
+            return Err(e);
+        }
+
+        // Get a victim BEFORE allocating page_id. If we allocate page_id first
+        // and choose_victim then fails, the page_id is leaked (B-tree retries
+        // burn one id per attempt). Match LIPAH's order. Promotion later moves
+        // the page to its preferred frame on subsequent accesses.
+        let mut victim = match self.choose_victim() {
+            Some(v) => v,
+            None => {
+                self.create_failed_choose_victim
+                    .fetch_add(1, Ordering::Relaxed);
+                return Err(MemPoolStatus::CannotEvictPage);
+            }
+        };
 
         let container = self.container_manager.get_container(c_key);
         let page_id = container.inc_page_count(1) as PageId;
         let page_key = PageKey::new(c_key, page_id);
-        let pref = self.preferred_frame(&page_key) as usize;
-        let mut victim = self
-            .choose_victim(Some(pref))
-            .ok_or(MemPoolStatus::CannotEvictPage)?;
 
         debug_assert!(victim.page_key().is_none());
         debug_assert!(!victim.dirty().load(Ordering::Acquire));
@@ -1272,6 +1297,7 @@ impl MemPool for PredictiveTranslationBP {
         victim.dirty().store(true, Ordering::Release);
         victim.evict_info().reset();
         self.used_frames.fetch_add(1, Ordering::AcqRel);
+        self.create_succeeded.fetch_add(1, Ordering::Relaxed);
 
         Ok(victim)
     }

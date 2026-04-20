@@ -153,25 +153,6 @@ static mut TLB_PREFILLS: u64 = 0;
 /// Last missed packed PageKey — detect sequential access for sibling prefill.
 #[thread_local]
 static mut LAST_MISS_KEY: usize = 0;
-/// Thread-local buffer for sibling prefill entries: (tlb_set, packed_entry).
-/// Filled during overflow lookup, flushed to TLB after successful latch.
-#[thread_local]
-static mut PREFILL_BUF: [(usize, u32); PREFILL_COUNT] = [(0, 0); PREFILL_COUNT];
-#[thread_local]
-static mut PREFILL_BUF_LEN: usize = 0;
-
-/// Flush stashed sibling entries into TLB.
-#[inline(always)]
-unsafe fn flush_prefill_buf() {
-    for i in 0..PREFILL_BUF_LEN {
-        let (set, entry) = PREFILL_BUF[i];
-        if !tlb_insert_if_empty(set, entry) {
-            tlb_insert(set, entry);
-        }
-        TLB_PREFILLS += 1;
-    }
-    PREFILL_BUF_LEN = 0;
-}
 #[thread_local]
 static mut OVERFLOW_HITS: u64 = 0;
 #[thread_local]
@@ -360,7 +341,6 @@ impl TlbBP {
         let guard = crossbeam_epoch::pin();
         let _ = self.overflow.insert(pack_page_key(&key), frame_id, &guard);
     }
-
 
     #[inline]
     fn overflow_remove(&self, key: &PageKey) -> Option<usize> {
@@ -572,10 +552,7 @@ impl TlbBP {
     // Page fault
     // ------------------------------------------------------------------
 
-    fn handle_page_fault(
-        &self,
-        page_key: PageKey,
-    ) -> Result<FWGuard, MemPoolStatus> {
+    fn handle_page_fault(&self, page_key: PageKey) -> Result<FWGuard, MemPoolStatus> {
         self.used_frames.fetch_add(1, Ordering::AcqRel);
 
         let mut victim = match self.choose_victim() {
@@ -720,12 +697,16 @@ impl MemPool for TlbBP {
                     if let Some(g) = self.try_get_read_guard(frame_id) {
                         if g.page_key() == Some(page_key) {
                             g.evict_info().update();
-                            unsafe { TLB_HITS += 1; }
+                            unsafe {
+                                TLB_HITS += 1;
+                            }
                             return Ok(g);
                         }
                     }
                 }
-                unsafe { TLB_FALSE_HITS += 1; }
+                unsafe {
+                    TLB_FALSE_HITS += 1;
+                }
             }
         }
         #[cfg(not(feature = "tlb_victim_cache"))]
@@ -745,19 +726,25 @@ impl MemPool for TlbBP {
                             if w > 0 {
                                 ways.swap(0, w);
                             }
-                            unsafe { TLB_HITS += 1; }
+                            unsafe {
+                                TLB_HITS += 1;
+                            }
                             return Ok(g);
                         }
                     }
                 }
             }
             if had_tag_match {
-                unsafe { TLB_FALSE_HITS += 1; }
+                unsafe {
+                    TLB_FALSE_HITS += 1;
+                }
             }
         }
 
         // Miss path
-        unsafe { TLB_MISSES += 1; }
+        unsafe {
+            TLB_MISSES += 1;
+        }
         let packed = pack_page_key(&page_key);
         let use_prefill = unsafe {
             let prev = LAST_MISS_KEY;
@@ -766,29 +753,32 @@ impl MemPool for TlbBP {
         };
         self.ensure_free_frames()?;
 
-        // Atomic lookup + latch + sibling stash via get_apply_with_siblings.
+        // Atomic lookup + latch + sibling prefill via get_apply_with_siblings.
         let guard = crossbeam_epoch::pin();
         let result = self.overflow.get_apply_with_siblings(
             &packed,
             |frame_id, view| {
                 match self.try_get_read_guard(frame_id) {
                     Some(g) => {
-                        // Latch succeeded — stash siblings for TLB prefill.
+                        // Latch succeeded — write siblings directly into TLB.
                         if use_prefill {
                             // All siblings share the same c_key; hoist hash.
                             let c_hash = super::hash::hash_u64((packed >> 32) as u64);
                             let pid_prefix = (packed as u32) & !0xFFu32;
-                            let mut i = 0;
                             unsafe {
-                                for (byte, sibling_frame) in view.siblings_after().take(PREFILL_COUNT) {
-                                    let val = c_hash.wrapping_add((pid_prefix | byte as u32) as u64);
-                                    let set = (val as usize) & TLB_SET_MASK;
-                                    let entry = (((val >> 10) as u32 & 0x1F) | 1) << TAG_SHIFT
+                                for (byte, sibling_frame) in
+                                    view.siblings_after().take(PREFILL_COUNT)
+                                {
+                                    let val =
+                                        c_hash.wrapping_add((pid_prefix | byte as u32) as u64);
+                                    let s_set = (val as usize) & TLB_SET_MASK;
+                                    let s_entry = (((val >> 10) as u32 & 0x1F) | 1) << TAG_SHIFT
                                         | (sibling_frame as u32 & FRAME_MASK);
-                                    PREFILL_BUF[i] = (set, entry);
-                                    i += 1;
+                                    if !tlb_insert_if_empty(s_set, s_entry) {
+                                        tlb_insert(s_set, s_entry);
+                                    }
+                                    TLB_PREFILLS += 1;
                                 }
-                                PREFILL_BUF_LEN = i;
                             }
                         }
                         Some(g)
@@ -806,9 +796,6 @@ impl MemPool for TlbBP {
                 unsafe {
                     tlb_insert(set, pack_entry(tag, g.frame_id()));
                     OVERFLOW_HITS += 1;
-                    if use_prefill {
-                        flush_prefill_buf();
-                    }
                 }
                 Ok(g)
             }
@@ -846,12 +833,16 @@ impl MemPool for TlbBP {
                     if let Some(g) = self.try_get_write_guard(frame_id, true) {
                         if g.page_key() == Some(page_key) {
                             g.evict_info().update();
-                            unsafe { TLB_HITS += 1; }
+                            unsafe {
+                                TLB_HITS += 1;
+                            }
                             return Ok(g);
                         }
                     }
                 }
-                unsafe { TLB_FALSE_HITS += 1; }
+                unsafe {
+                    TLB_FALSE_HITS += 1;
+                }
             }
         }
         #[cfg(not(feature = "tlb_victim_cache"))]
@@ -871,18 +862,24 @@ impl MemPool for TlbBP {
                             if w > 0 {
                                 ways.swap(0, w);
                             }
-                            unsafe { TLB_HITS += 1; }
+                            unsafe {
+                                TLB_HITS += 1;
+                            }
                             return Ok(g);
                         }
                     }
                 }
             }
             if had_tag_match {
-                unsafe { TLB_FALSE_HITS += 1; }
+                unsafe {
+                    TLB_FALSE_HITS += 1;
+                }
             }
         }
 
-        unsafe { TLB_MISSES += 1; }
+        unsafe {
+            TLB_MISSES += 1;
+        }
         let packed = pack_page_key(&page_key);
         let use_prefill = unsafe {
             let prev = LAST_MISS_KEY;
@@ -891,33 +888,31 @@ impl MemPool for TlbBP {
         };
         self.ensure_free_frames()?;
 
-        // Atomic lookup + latch + sibling stash via get_apply_with_siblings.
+        // Atomic lookup + latch + sibling prefill via get_apply_with_siblings.
         let guard = crossbeam_epoch::pin();
         let result = self.overflow.get_apply_with_siblings(
             &packed,
-            |frame_id, view| {
-                match self.try_get_write_guard(frame_id, true) {
-                    Some(g) => {
-                        if use_prefill {
-                            let c_hash = super::hash::hash_u64((packed >> 32) as u64);
-                            let pid_prefix = (packed as u32) & !0xFFu32;
-                            let mut i = 0;
-                            unsafe {
-                                for (byte, sibling_frame) in view.siblings_after().take(PREFILL_COUNT) {
-                                    let val = c_hash.wrapping_add((pid_prefix | byte as u32) as u64);
-                                    let set = (val as usize) & TLB_SET_MASK;
-                                    let entry = (((val >> 10) as u32 & 0x1F) | 1) << TAG_SHIFT
-                                        | (sibling_frame as u32 & FRAME_MASK);
-                                    PREFILL_BUF[i] = (set, entry);
-                                    i += 1;
+            |frame_id, view| match self.try_get_write_guard(frame_id, true) {
+                Some(g) => {
+                    if use_prefill {
+                        let c_hash = super::hash::hash_u64((packed >> 32) as u64);
+                        let pid_prefix = (packed as u32) & !0xFFu32;
+                        unsafe {
+                            for (byte, sibling_frame) in view.siblings_after().take(PREFILL_COUNT) {
+                                let val = c_hash.wrapping_add((pid_prefix | byte as u32) as u64);
+                                let s_set = (val as usize) & TLB_SET_MASK;
+                                let s_entry = (((val >> 10) as u32 & 0x1F) | 1) << TAG_SHIFT
+                                    | (sibling_frame as u32 & FRAME_MASK);
+                                if !tlb_insert_if_empty(s_set, s_entry) {
+                                    tlb_insert(s_set, s_entry);
                                 }
-                                PREFILL_BUF_LEN = i;
+                                TLB_PREFILLS += 1;
                             }
                         }
-                        Some(g)
                     }
-                    None => None,
+                    Some(g)
                 }
+                None => None,
             },
             &guard,
         );
@@ -928,15 +923,10 @@ impl MemPool for TlbBP {
                 unsafe {
                     tlb_insert(set, pack_entry(tag, g.frame_id()));
                     OVERFLOW_HITS += 1;
-                    if use_prefill {
-                        flush_prefill_buf();
-                    }
                 }
                 Ok(g)
             }
-            Some(None) => {
-                Err(MemPoolStatus::FrameWriteLatchGrantFailed)
-            }
+            Some(None) => Err(MemPoolStatus::FrameWriteLatchGrantFailed),
             None => {
                 // Not in overflow — page fault.
                 let g = self.handle_page_fault(page_key)?;
@@ -960,9 +950,7 @@ impl MemPool for TlbBP {
         let page_id = container.inc_page_count(1) as PageId;
         let page_key = PageKey::new(c_key, page_id);
 
-        let mut victim = self
-            .choose_victim()
-            .ok_or(MemPoolStatus::CannotEvictPage)?;
+        let mut victim = self.choose_victim().ok_or(MemPoolStatus::CannotEvictPage)?;
 
         debug_assert!(victim.page_key().is_none());
 
