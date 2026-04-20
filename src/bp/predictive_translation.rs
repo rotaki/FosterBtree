@@ -621,7 +621,6 @@ impl PredictiveTranslationBP {
 
                 // Clock: if marked, clear mark and skip.  If unmarked, evict.
                 if meta.evict_info.score() > 0 {
-                    meta.evict_info.update(); // For clock this sets mark; we want to *reset*.
                     meta.evict_info.reset();
                     continue;
                 }

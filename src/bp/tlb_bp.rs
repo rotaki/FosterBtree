@@ -545,8 +545,8 @@ impl TlbBP {
                     continue;
                 }
 
+                // Clock: if marked, clear mark and skip. If unmarked, evict.
                 if meta.evict_info.score() > 0 {
-                    meta.evict_info.update();
                     meta.evict_info.reset();
                     continue;
                 }
