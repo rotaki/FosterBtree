@@ -768,31 +768,36 @@ impl MemPool for TlbBP {
             packed.wrapping_sub(prev) <= PREFILL_COUNT
         };
         self.ensure_free_frames()?;
-        let lookup = if use_range {
-            self.overflow_range_lookup(&page_key)
-        } else {
-            self.overflow_lookup(&page_key)
-        };
-        if let Some(idx) = lookup {
-            if let Some(g) = self.try_get_read_guard(idx) {
-                if g.page_key() == Some(page_key) {
-                    g.evict_info().update();
-                    unsafe {
-                        tlb_insert(set, pack_entry(tag, idx as u32));
-                        OVERFLOW_HITS += 1;
+        loop {
+            let lookup = if use_range {
+                self.overflow_range_lookup(&page_key)
+            } else {
+                self.overflow_lookup(&page_key)
+            };
+            if let Some(idx) = lookup {
+                if let Some(g) = self.try_get_read_guard(idx) {
+                    if g.page_key() == Some(page_key) {
+                        g.evict_info().update();
+                        unsafe {
+                            tlb_insert(set, pack_entry(tag, idx as u32));
+                            OVERFLOW_HITS += 1;
+                        }
+                        return Ok(g);
                     }
-                    return Ok(g);
+                    // Stale mapping — frame was reused. Retry.
+                    continue;
+                } else {
+                    return Err(MemPoolStatus::FrameReadLatchGrantFailed);
                 }
             }
-            return Err(MemPoolStatus::FrameReadLatchGrantFailed);
+            // Not in overflow — page fault.
+            let victim = self.handle_page_fault(page_key)?;
+            unsafe {
+                tlb_insert(set, pack_entry(tag, victim.frame_id()));
+                PAGE_FAULTS += 1;
+            }
+            return Ok(victim.downgrade());
         }
-        // Not in overflow — page fault.
-        let victim = self.handle_page_fault(page_key)?;
-        unsafe {
-            tlb_insert(set, pack_entry(tag, victim.frame_id()));
-            PAGE_FAULTS += 1;
-        }
-        Ok(victim.downgrade())
     }
 
     // ----- TLB fast path: get_page_for_write --------------------------------
@@ -856,31 +861,36 @@ impl MemPool for TlbBP {
             packed.wrapping_sub(prev) <= PREFILL_COUNT
         };
         self.ensure_free_frames()?;
-        let lookup = if use_range {
-            self.overflow_range_lookup(&page_key)
-        } else {
-            self.overflow_lookup(&page_key)
-        };
-        if let Some(idx) = lookup {
-            if let Some(g) = self.try_get_write_guard(idx, true) {
-                if g.page_key() == Some(page_key) {
-                    g.evict_info().update();
-                    unsafe {
-                        tlb_insert(set, pack_entry(tag, idx as u32));
-                        OVERFLOW_HITS += 1;
+        loop {
+            let lookup = if use_range {
+                self.overflow_range_lookup(&page_key)
+            } else {
+                self.overflow_lookup(&page_key)
+            };
+            if let Some(idx) = lookup {
+                if let Some(g) = self.try_get_write_guard(idx, true) {
+                    if g.page_key() == Some(page_key) {
+                        g.evict_info().update();
+                        unsafe {
+                            tlb_insert(set, pack_entry(tag, idx as u32));
+                            OVERFLOW_HITS += 1;
+                        }
+                        return Ok(g);
                     }
-                    return Ok(g);
+                    // Stale mapping — frame was reused. Retry.
+                    continue;
+                } else {
+                    return Err(MemPoolStatus::FrameWriteLatchGrantFailed);
                 }
             }
-            return Err(MemPoolStatus::FrameWriteLatchGrantFailed);
+            // Not in overflow — page fault.
+            let g = self.handle_page_fault(page_key)?;
+            unsafe {
+                tlb_insert(set, pack_entry(tag, g.frame_id()));
+                PAGE_FAULTS += 1;
+            }
+            return Ok(g);
         }
-        // Not in overflow — page fault.
-        let g = self.handle_page_fault(page_key)?;
-        unsafe {
-            tlb_insert(set, pack_entry(tag, g.frame_id()));
-            PAGE_FAULTS += 1;
-        }
-        Ok(g)
     }
 
     // ----- create pages -----------------------------------------------------
