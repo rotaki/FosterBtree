@@ -389,6 +389,32 @@ impl TlbBP {
     }
 
 
+    /// Range scan for siblings only (target already found). Stashes into PREFILL_BUF.
+    #[inline]
+    fn stash_siblings_via_range(&self, page_key: &PageKey) {
+        let guard = self.overflow.pin();
+        let packed = pack_page_key(page_key);
+        // Scan from packed+1 to skip the target itself.
+        let start = packed + 1;
+        let end = packed + PREFILL_COUNT;
+        let mut buf = [(0usize, 0usize); PREFILL_COUNT];
+        let count = self.overflow.range(&start, &end, &mut buf, &guard);
+
+        let mut prefill_idx = 0;
+        for i in 0..count {
+            let (key, frame_id) = buf[i];
+            let neighbor_key = unpack_page_key(key);
+            let hk = HashedKey::new(&neighbor_key);
+            let set = hk.tlb_set();
+            let tag = hk.tlb_tag();
+            unsafe {
+                PREFILL_BUF[prefill_idx] = (set, pack_entry(tag, frame_id as u32));
+            }
+            prefill_idx += 1;
+        }
+        unsafe { PREFILL_BUF_LEN = prefill_idx; }
+    }
+
     #[inline]
     fn overflow_insert(&self, key: PageKey, frame_id: usize) {
         let guard = self.overflow.pin();
@@ -802,28 +828,45 @@ impl MemPool for TlbBP {
         };
         self.ensure_free_frames()?;
 
-        // Step 1: Lookup in overflow. Stash siblings for sequential access.
-        let found_idx = if use_prefill {
-            self.overflow_lookup_with_sibling_stash(&page_key)
-        } else {
-            self.overflow_lookup(&page_key)
-        };
+        // Atomic lookup + latch inside compute_if_present.
+        // The congee leaf lock ensures the mapping is stable during latch attempt.
+        let guard = self.overflow.pin();
+        let mut latched: Option<FRGuard> = None;
+        let latched_ptr = &mut latched as *mut Option<FRGuard>;
+        let found = self.overflow.compute_if_present(
+            &packed,
+            |frame_id| {
+                // Under congee leaf lock — mapping can't change.
+                // try_get_read_guard is a non-blocking CAS, safe to call here.
+                if let Some(g) = self.try_get_read_guard(frame_id) {
+                    unsafe { *latched_ptr = Some(g); }
+                }
+                Some(frame_id) // keep mapping unchanged
+            },
+            &guard,
+        );
+        drop(guard);
 
-        if let Some(idx) = found_idx {
-            let guard = self.try_get_read_guard(idx);
-            return guard
-                .inspect(|g| {
-                    g.evict_info().update();
-                    unsafe {
-                        tlb_insert(set, pack_entry(tag, idx as u32));
-                        OVERFLOW_HITS += 1;
-                        flush_prefill_buf();
-                    }
-                })
-                .ok_or(MemPoolStatus::FrameReadLatchGrantFailed);
+        if let Some(g) = latched {
+            g.evict_info().update();
+            unsafe {
+                tlb_insert(set, pack_entry(tag, found.unwrap().0 as u32));
+                OVERFLOW_HITS += 1;
+            }
+            // Prefill siblings lazily (outside the lock).
+            if use_prefill {
+                self.stash_siblings_via_range(&page_key);
+                unsafe { flush_prefill_buf(); }
+            }
+            return Ok(g);
         }
 
-        // Step 2: Not in overflow — page fault (like LIPAH's Vacant arm).
+        if found.is_some() {
+            // Page was in overflow but latch failed.
+            return Err(MemPoolStatus::FrameReadLatchGrantFailed);
+        }
+
+        // Not in overflow — page fault.
         let victim = self.handle_page_fault(page_key)?;
         unsafe {
             tlb_insert(set, pack_entry(tag, victim.frame_id()));
@@ -895,27 +938,40 @@ impl MemPool for TlbBP {
         };
         self.ensure_free_frames()?;
 
-        let found_idx = if use_prefill {
-            self.overflow_lookup_with_sibling_stash(&page_key)
-        } else {
-            self.overflow_lookup(&page_key)
-        };
+        // Atomic lookup + latch inside compute_if_present.
+        let guard = self.overflow.pin();
+        let mut latched: Option<FWGuard> = None;
+        let latched_ptr = &mut latched as *mut Option<FWGuard>;
+        let found = self.overflow.compute_if_present(
+            &packed,
+            |frame_id| {
+                if let Some(g) = self.try_get_write_guard(frame_id, true) {
+                    unsafe { *latched_ptr = Some(g); }
+                }
+                Some(frame_id)
+            },
+            &guard,
+        );
+        drop(guard);
 
-        if let Some(idx) = found_idx {
-            let guard: Option<FrameWriteGuard<ClockEvictionPolicy>> = self.try_get_write_guard(idx, true);
-            return guard
-                .inspect(|g| {
-                    g.evict_info().update();
-                    unsafe {
-                        tlb_insert(set, pack_entry(tag, idx as u32));
-                        OVERFLOW_HITS += 1;
-                        flush_prefill_buf();
-                    }
-                })
-                .ok_or(MemPoolStatus::FrameWriteLatchGrantFailed);
+        if let Some(g) = latched {
+            g.evict_info().update();
+            unsafe {
+                tlb_insert(set, pack_entry(tag, found.unwrap().0 as u32));
+                OVERFLOW_HITS += 1;
+            }
+            if use_prefill {
+                self.stash_siblings_via_range(&page_key);
+                unsafe { flush_prefill_buf(); }
+            }
+            return Ok(g);
         }
 
-        // Step 2: Not in overflow — page fault.
+        if found.is_some() {
+            return Err(MemPoolStatus::FrameWriteLatchGrantFailed);
+        }
+
+        // Not in overflow — page fault.
         let g = self.handle_page_fault(page_key)?;
         g.dirty().store(true, Ordering::Release);
         unsafe {
