@@ -530,9 +530,8 @@ dependencies = [
 
 [[package]]
 name = "congee"
-version = "0.3.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f2ca0e17406c6049cd9c2809f8d53804c7309cfaa9c41833626650fdad5e105d"
+version = "0.4.1"
+source = "git+https://github.com/rotaki/congee.git?branch=main#90c46666d80a4a4d832575f3b4dd4ff41f4ba304"
 dependencies = [
  "crossbeam-epoch",
 ]

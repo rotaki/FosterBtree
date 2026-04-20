@@ -20,7 +20,9 @@ SUMMARY="$OUTDIR/summary_${TIMESTAMP}.txt"
 declare -a VARIANTS=(
     "bp_clock|LIPAH"
     "bp_pt_bucket|PT-FP-1"
-    "bp_pt_tlb_only|TLB-Only"
+    "bp_pt_tlb_only|TLB-only"
+    "bp_tlb|TLB-congee"
+    "bp_tlb,tlb_victim_cache|TLB-victim"
 )
 
 echo "=== TLB 40w40t benchmark ===" | tee "$SUMMARY"
