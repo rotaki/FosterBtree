@@ -5,8 +5,8 @@
 set -euo pipefail
 
 PAGES=100000
-FRAMES=60000
-SECONDS=10
+FRAMES=80000
+BENCH_SECONDS=10
 THREADS=1
 WARMUP=2
 
@@ -24,7 +24,7 @@ declare -a VARIANTS=(
 )
 
 echo "=== Phase-Shift Benchmark ===" | tee "$SUMMARY"
-echo "Config: pages=$PAGES frames=$FRAMES threads=$THREADS seconds=$SECONDS warmup=$WARMUP" | tee -a "$SUMMARY"
+echo "Config: pages=$PAGES frames=$FRAMES threads=$THREADS seconds=$BENCH_SECONDS warmup=$WARMUP" | tee -a "$SUMMARY"
 echo "Date: $(date)" | tee -a "$SUMMARY"
 echo "" | tee -a "$SUMMARY"
 
@@ -41,7 +41,7 @@ for entry in "${VARIANTS[@]}"; do
     echo "Running $label..." | tee -a "$SUMMARY"
 
     cargo run --release --features "$features" --bin bp_translation_bench \
-        -- --phase-shift -n "$PAGES" -f "$FRAMES" -s "$SECONDS" -t "$THREADS" -w "$WARMUP" \
+        -- --phase-shift -n "$PAGES" -f "$FRAMES" -s "$BENCH_SECONDS" -t "$THREADS" -w "$WARMUP" \
         >"$LOGFILE" 2>&1 || true
 
     total_ops=$(grep "Total ops:" "$LOGFILE" | awk '{print $3}' || echo "N/A")

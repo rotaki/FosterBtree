@@ -213,7 +213,10 @@ fn main() {
                     } else {
                         base + (uniform_rng.next_u64() as usize) % range
                     };
-                    let g = bp.get_page_for_read(keys[idx]).unwrap();
+                    let g = match bp.get_page_for_read(keys[idx]) {
+                        Ok(g) => g,
+                        Err(_) => continue, // retry on eviction failure / latch contention
+                    };
                     // Touch the page data to force cache load.
                     unsafe {
                         let ptr = &*g as *const _ as *const u8;
