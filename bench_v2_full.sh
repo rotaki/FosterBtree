@@ -15,8 +15,8 @@
 #
 # Env overrides:
 #   CORES=<N>          (default: 40)           used for TPC-C 40/40 if your box has <40 cores
-#   WARMUP_TPCC=<s>    (default: 5)
-#   EXEC_TPCC=<s>      (default: 20)
+#   WARMUP_TPCC=<s>    (default: 30)
+#   EXEC_TPCC=<s>      (default: 200)
 #   SCAN_PAGES=<N>     (default: 100000)
 #   SCAN_FRAMES=<N>    (default: 80000)
 #   SCAN_THREADS=<N>   (default: 40)
@@ -39,8 +39,8 @@ TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 SUMMARY="$OUTDIR/summary_${TIMESTAMP}.txt"
 
 CORES="${CORES:-40}"
-WARMUP_TPCC="${WARMUP_TPCC:-5}"
-EXEC_TPCC="${EXEC_TPCC:-20}"
+WARMUP_TPCC="${WARMUP_TPCC:-30}"
+EXEC_TPCC="${EXEC_TPCC:-200}"
 SCAN_PAGES="${SCAN_PAGES:-100000}"
 SCAN_FRAMES="${SCAN_FRAMES:-80000}"
 SCAN_THREADS="${SCAN_THREADS:-40}"

@@ -37,15 +37,18 @@ bp_open_addressing = ["no_bp_hint"] # open_addressing_bp: frame array IS the has
 bp_dashmap = []   # dashmap module: DashMap (sharded) + clock; concurrent translation
 bp_hashmap = []   # hashmap module: single RwLock<HashMap>; paper "traditional" baseline
 bp_clock = []
+bp_clock_v2 = [] # Shadow LIPAH on top of FrameManager — should match bp_clock semantics
 bp_pt = ["no_bp_hint"]
 bp_pt2 = ["no_bp_hint"]       # predictive_translation_two module: PT with two hash predictions
 bp_pt_bucket = ["no_bp_hint"] # PT variant: validate preferred frame via bucket head before lookup
+bp_pt_bucket_v2 = ["no_bp_hint"] # Shadow PT-FP-1 on FrameManager — should match bp_pt_bucket semantics
 bp_pt2_bucket = ["no_bp_hint"] # PT variant: two hashes + metadata verify-and-fast-return
 bp_pt4_bucket = ["no_bp_hint"] # PT variant: four hashes + metadata verify-and-fast-return
 bp_pt_tlb = ["no_bp_hint"]    # PT variant: per-thread L1-resident translation cache
 bp_pt_tlb_only = ["no_bp_hint"] # TLB + overflow only (no preferred frame check)
 bp_pt_tlb_only_keys = ["no_bp_hint"] # Experimental TLB + overflow only with separate key array
 bp_tlb = ["no_bp_hint"] # Standalone TLB BP with unified hash (no PT dependency)
+bp_tlb_v2 = ["no_bp_hint"] # Shadow TLB-BP on FrameManager — should match bp_tlb semantics
 tlb_victim_cache = [] # Use direct-mapped + 16-entry victim cache instead of 4-way
 tlb_prefetch = [] # Prefetch neighbor page data during range prefill
 pt_counts = []    # Lightweight PT hit/fallback counters without timing detail
@@ -111,8 +114,4 @@ harness = false
 
 [[bench]]
 name = "hash_index_insert"
-harness = false
-
-[[bench]]
-name = "preferred_frames_four"
 harness = false
