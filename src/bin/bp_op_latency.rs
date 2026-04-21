@@ -10,8 +10,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use fbtree::bp::{
-    get_test_bp_clock, get_test_pt, get_test_pt_fp, get_test_pt_fp_two_hash, get_test_pt_two_hash,
-    ContainerKey, MemPool, PageFrameKey,
+    get_test_bp_clock, get_test_pt, get_test_pt_fp, ContainerKey, MemPool, PageFrameKey,
 };
 
 struct BenchResult {
@@ -154,12 +153,5 @@ fn main() {
         let bp = get_test_pt_fp(effective_frames);
         let r = bench(&bp, num_pages, iters);
         print_result("PT-FP (1 hash FP)", &r);
-    }
-
-    // --- PT-FP-Two (2 hashes + fast path) ---
-    {
-        let bp = get_test_pt_fp_two_hash(effective_frames);
-        let r = bench(&bp, num_pages, iters);
-        print_result("PT-FP-Two (2 hash FP)", &r);
     }
 }

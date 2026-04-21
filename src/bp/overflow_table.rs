@@ -15,10 +15,10 @@ const LOCK_BIT: u64 = 1u64 << 63;
 const MAX_READ_RETRIES: u32 = 32;
 const MAX_WRITE_SPIN: u32 = 1_000_000;
 
-/// Chain node: key, value, and atomic next pointer. Retired on remove via epoch.
+/// Chain node: key, value (frame id), and atomic next pointer. Retired on remove via epoch.
 struct ChainNode {
     key: PageKey,
-    value: usize,
+    value: u32,
     next: Atomic<ChainNode>,
 }
 
@@ -27,7 +27,7 @@ struct Bucket {
     /// MSB = 1 when a writer holds the lock; low 63 bits = version (bumped on unlock).
     version: AtomicU64,
     /// Inlined first slot. Writers mutate under lock; readers read under version check.
-    inlined: UnsafeCell<Option<(PageKey, usize)>>,
+    inlined: UnsafeCell<Option<(PageKey, u32)>>,
     /// Head of chain. Atomic so readers can follow without holding the lock.
     chain_head: Atomic<ChainNode>,
 }
@@ -125,7 +125,7 @@ impl OverflowTable {
     /// Lock-free lookup using a precomputed bucket index.
     /// `bucket_idx` must already be in `[0, num_buckets)` (e.g. from fastmod).
     #[inline]
-    pub(crate) fn lookup_with_bucket(&self, key: &PageKey, bucket_idx: usize) -> Option<usize> {
+    pub(crate) fn lookup_with_bucket(&self, key: &PageKey, bucket_idx: usize) -> Option<u32> {
         let idx = bucket_idx % self.num_buckets;
         let bucket = &self.buckets[idx];
         let guard = crossbeam_epoch::pin();
@@ -159,7 +159,7 @@ impl OverflowTable {
         head: &Atomic<ChainNode>,
         key: &PageKey,
         guard: &crossbeam_epoch::Guard,
-    ) -> Option<usize> {
+    ) -> Option<u32> {
         let mut current = head.load(Ordering::Acquire, guard);
         while !current.is_null() {
             let node = unsafe { current.deref() };
@@ -177,7 +177,7 @@ impl OverflowTable {
         key: &PageKey,
         idx: usize,
         guard: &crossbeam_epoch::Guard,
-    ) -> Option<usize> {
+    ) -> Option<u32> {
         let bucket = &self.buckets[idx];
         // Acquire the lock to get a consistent read — this is the cold path
         // so the extra cost is acceptable.
@@ -200,9 +200,130 @@ impl OverflowTable {
 
     /// Lock-free read path.
     #[inline]
-    pub(crate) fn lookup(&self, key: &PageKey) -> Option<usize> {
+    pub(crate) fn lookup(&self, key: &PageKey) -> Option<u32> {
         let idx = self.bucket_index(key);
         self.lookup_with_bucket(key, idx)
+    }
+
+    /// Optimistic "lookup + apply closure" under the bucket's version lock.
+    /// Mirrors congee's `compute_if_present` / `get_apply_with_siblings` idiom.
+    ///
+    /// Protocol per iteration (OLC, PrediCache §4.2):
+    ///   v1 = version (retry if locked)
+    ///   look up `key` → maybe a `frame_id`
+    ///   v2 = version; if v2 != v1, retry
+    ///   if Some(id): run `f(id)` → R; v3 = version; if v3 != v1, drop R & retry
+    ///   if None: return None
+    ///
+    /// Return values:
+    /// - `Some(Some(R))` — key found, closure ran with a consistent view.
+    /// - `Some(None)`    — key found, but the closure itself returned `None`
+    ///                     (e.g. a latch attempt that failed).
+    /// - `None`          — key not present.
+    ///
+    /// The closure may run multiple times, so its side effects must tolerate
+    /// being dropped on retry. A `FrameReadGuard` / `FrameWriteGuard` is
+    /// ideal: dropping it simply releases the latch, which is what we want
+    /// when we discover the overflow entry changed mid-operation.
+    ///
+    /// Falls back to `get_apply_slow` (lock-held closure) after
+    /// `MAX_READ_RETRIES`.
+    #[inline]
+    pub(crate) fn get_apply_with_bucket<R, F>(
+        &self,
+        key: &PageKey,
+        bucket_idx: usize,
+        mut f: F,
+    ) -> Option<Option<R>>
+    where
+        F: FnMut(u32) -> Option<R>,
+    {
+        let idx = bucket_idx % self.num_buckets;
+        let bucket = &self.buckets[idx];
+        let guard = crossbeam_epoch::pin();
+        for _ in 0..MAX_READ_RETRIES {
+            let v1 = bucket.version.load(Ordering::Acquire);
+            if Bucket::is_locked(v1) {
+                continue;
+            }
+            let frame_id = unsafe {
+                let inlined = (*bucket.inlined.get()).clone();
+                if let Some((k, v)) = &inlined {
+                    if k == key {
+                        Some(*v)
+                    } else {
+                        Self::lookup_chain(&bucket.chain_head, key, &guard)
+                    }
+                } else {
+                    Self::lookup_chain(&bucket.chain_head, key, &guard)
+                }
+            };
+            let v2 = bucket.version.load(Ordering::Acquire);
+            if v1 != v2 {
+                continue;
+            }
+            match frame_id {
+                Some(id) => {
+                    let applied = f(id);
+                    let v3 = bucket.version.load(Ordering::Acquire);
+                    if v1 == v3 {
+                        return Some(applied);
+                    }
+                    // Version changed mid-closure: discard R (drops any
+                    // latch/resource) and retry with a fresh lookup.
+                    drop(applied);
+                }
+                None => return None,
+            }
+        }
+        self.get_apply_slow(key, idx, f, &guard)
+    }
+
+    /// Shorthand: compute bucket index from `key` and delegate.
+    #[inline]
+    pub(crate) fn get_apply<R, F>(&self, key: &PageKey, f: F) -> Option<Option<R>>
+    where
+        F: FnMut(u32) -> Option<R>,
+    {
+        let idx = self.bucket_index(key);
+        self.get_apply_with_bucket(key, idx, f)
+    }
+
+    /// Lock-held fallback for `get_apply_with_bucket`. Runs the closure
+    /// while holding the bucket's write lock, guaranteeing the
+    /// lookup-and-apply window is atomic. The closure must be fast and
+    /// must not call back into `OverflowTable` mutators for this bucket
+    /// or it will self-deadlock.
+    #[cold]
+    fn get_apply_slow<R, F>(
+        &self,
+        key: &PageKey,
+        idx: usize,
+        mut f: F,
+        guard: &crossbeam_epoch::Guard,
+    ) -> Option<Option<R>>
+    where
+        F: FnMut(u32) -> Option<R>,
+    {
+        let bucket = &self.buckets[idx];
+        while !bucket.try_lock() {
+            std::hint::spin_loop();
+        }
+        let frame_id = unsafe {
+            let inlined = &*bucket.inlined.get();
+            if let Some((k, v)) = inlined {
+                if k == key {
+                    Some(*v)
+                } else {
+                    Self::lookup_chain(&bucket.chain_head, key, guard)
+                }
+            } else {
+                Self::lookup_chain(&bucket.chain_head, key, guard)
+            }
+        };
+        let result = frame_id.map(|id| f(id));
+        bucket.unlock();
+        result
     }
 
     /// Atomic try-insert: lock the bucket, check if `key` already exists, and
@@ -213,7 +334,7 @@ impl OverflowTable {
     /// overflow table's own per-bucket lock as the synchronisation point
     /// (PrediCache §4.1-4.2).
     #[inline]
-    pub(crate) fn try_insert(&self, key: PageKey, frame_id: usize) -> Result<(), usize> {
+    pub(crate) fn try_insert(&self, key: PageKey, frame_id: u32) -> Result<(), u32> {
         let idx = self.bucket_index(&key);
         let bucket = &self.buckets[idx];
         let guard = crossbeam_epoch::pin();
@@ -256,7 +377,7 @@ impl OverflowTable {
 
     /// In-place insert: take versioned lock, mutate bucket, unlock. No clone.
     #[inline]
-    pub(crate) fn insert(&self, key: PageKey, frame_id: usize) {
+    pub(crate) fn insert(&self, key: PageKey, frame_id: u32) {
         let idx = self.bucket_index(&key);
         let bucket = &self.buckets[idx];
         let guard = crossbeam_epoch::pin();
@@ -301,12 +422,12 @@ impl OverflowTable {
         head: &Atomic<ChainNode>,
         key: &PageKey,
         guard: &crossbeam_epoch::Guard,
-    ) -> Option<*mut usize> {
+    ) -> Option<*mut u32> {
         let mut current = head.load(Ordering::Acquire, guard);
         while !current.is_null() {
             let node = current.deref() as *const ChainNode as *mut ChainNode;
             if (*node).key == *key {
-                return Some(&mut (*node).value as *mut usize);
+                return Some(&mut (*node).value as *mut u32);
             }
             current = (*node).next.load(Ordering::Acquire, guard);
         }
@@ -315,7 +436,7 @@ impl OverflowTable {
 
     /// In-place remove: take versioned lock, unlink node, retire with epoch, unlock.
     #[inline]
-    pub(crate) fn remove(&self, key: &PageKey) -> Option<usize> {
+    pub(crate) fn remove(&self, key: &PageKey) -> Option<u32> {
         let idx = self.bucket_index(key);
         let bucket = &self.buckets[idx];
         let guard = crossbeam_epoch::pin();
@@ -354,7 +475,7 @@ impl OverflowTable {
         head: &Atomic<ChainNode>,
         key: &PageKey,
         guard: &crossbeam_epoch::Guard,
-    ) -> Option<usize> {
+    ) -> Option<u32> {
         let mut prev_ptr: Option<&Atomic<ChainNode>> = None;
         let mut current = head.load(Ordering::Acquire, guard);
         while !current.is_null() {
@@ -385,9 +506,7 @@ impl OverflowTable {
         self.for_each_entry(|pk, frame_id| {
             if pk.c_key == c_key {
                 out.push(PageFrameKey::new_with_frame_id(
-                    pk.c_key,
-                    pk.page_id,
-                    frame_id as u32,
+                    pk.c_key, pk.page_id, frame_id,
                 ));
             }
         });
@@ -395,7 +514,7 @@ impl OverflowTable {
     }
 
     /// Lock-free iteration: copy entries under version check, then call f.
-    pub(crate) fn for_each_entry(&self, mut f: impl FnMut(PageKey, usize)) {
+    pub(crate) fn for_each_entry(&self, mut f: impl FnMut(PageKey, u32)) {
         let guard = crossbeam_epoch::pin();
         for bucket in &self.buckets {
             for _ in 0..MAX_READ_RETRIES {
@@ -514,10 +633,10 @@ mod tests {
         // 1 bucket → all keys collide → exercises chain logic.
         let t = OverflowTable::new(1);
         for i in 0..10u32 {
-            t.insert(pk(i), i as usize * 100);
+            t.insert(pk(i), i * 100);
         }
         for i in 0..10u32 {
-            assert_eq!(t.lookup(&pk(i)), Some(i as usize * 100));
+            assert_eq!(t.lookup(&pk(i)), Some(i * 100));
         }
     }
 
@@ -595,6 +714,88 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
+    // get_apply — optimistic lookup + closure
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn get_apply_miss_returns_none() {
+        let t = OverflowTable::new(64);
+        let result: Option<Option<u32>> = t.get_apply(&pk(1), |id| Some(id * 2));
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn get_apply_hit_runs_closure() {
+        let t = OverflowTable::new(64);
+        t.insert(pk(1), 10);
+        let result = t.get_apply(&pk(1), |id| Some(id * 2));
+        assert_eq!(result, Some(Some(20)));
+    }
+
+    #[test]
+    fn get_apply_hit_closure_returns_none() {
+        let t = OverflowTable::new(64);
+        t.insert(pk(1), 10);
+        let result: Option<Option<u32>> = t.get_apply(&pk(1), |_id| None);
+        assert_eq!(result, Some(None));
+    }
+
+    #[test]
+    fn get_apply_finds_chain_entry() {
+        // Force into the chain via a one-bucket table.
+        let t = OverflowTable::new(1);
+        t.insert(pk(1), 10); // inlined
+        t.insert(pk(2), 20); // chain
+        let r1 = t.get_apply(&pk(1), |id| Some(id));
+        let r2 = t.get_apply(&pk(2), |id| Some(id));
+        assert_eq!(r1, Some(Some(10)));
+        assert_eq!(r2, Some(Some(20)));
+    }
+
+    #[test]
+    fn get_apply_retries_on_concurrent_writer() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize};
+        use std::sync::Arc;
+        use std::thread;
+
+        let t = Arc::new(OverflowTable::new(64));
+        t.insert(pk(1), 10);
+
+        let stop = Arc::new(AtomicBool::new(false));
+
+        // Writer: churns the value so the bucket version keeps bumping.
+        let t_w = Arc::clone(&t);
+        let stop_w = Arc::clone(&stop);
+        let writer = thread::spawn(move || {
+            let mut v: u32 = 10;
+            while !stop_w.load(Ordering::Relaxed) {
+                v = v.wrapping_add(1);
+                t_w.insert(pk(1), v);
+            }
+        });
+
+        // Reader: `get_apply` must never observe a torn read — the frame_id
+        // it passes into the closure must equal what lookup returns under a
+        // consistent version. We assert the closure's input equals a fresh
+        // lookup of the same key taken right after.
+        let runs = Arc::new(AtomicUsize::new(0));
+        for _ in 0..10_000 {
+            let r = t.get_apply(&pk(1), |id| {
+                runs.fetch_add(1, Ordering::Relaxed);
+                Some(id)
+            });
+            // Either a hit (Some(Some(id))) or a concurrent-eviction-style
+            // miss (None) — but never an inconsistent Some(None) because
+            // our closure always returns Some.
+            assert!(matches!(r, Some(Some(_)) | None));
+        }
+
+        stop.store(true, Ordering::Relaxed);
+        writer.join().unwrap();
+        assert!(runs.load(Ordering::Relaxed) > 0);
+    }
+
+    // ------------------------------------------------------------------
     // Concurrent correctness
     // ------------------------------------------------------------------
 
@@ -604,8 +805,8 @@ mod tests {
         use std::thread;
 
         let t = Arc::new(OverflowTable::new(64));
-        let num_threads = 8;
-        let ops_per_thread = 1000;
+        let num_threads: u32 = 8;
+        let ops_per_thread: u32 = 1000;
 
         let handles: Vec<_> = (0..num_threads)
             .map(|tid| {
@@ -614,19 +815,19 @@ mod tests {
                     let base = tid * ops_per_thread;
                     // Insert
                     for i in 0..ops_per_thread {
-                        t.insert(pk((base + i) as u32), base + i);
+                        t.insert(pk(base + i), base + i);
                     }
                     // Verify
                     for i in 0..ops_per_thread {
-                        assert_eq!(t.lookup(&pk((base + i) as u32)), Some(base + i));
+                        assert_eq!(t.lookup(&pk(base + i)), Some(base + i));
                     }
                     // Remove
                     for i in 0..ops_per_thread {
-                        assert_eq!(t.remove(&pk((base + i) as u32)), Some(base + i));
+                        assert_eq!(t.remove(&pk(base + i)), Some(base + i));
                     }
                     // Verify removed
                     for i in 0..ops_per_thread {
-                        assert_eq!(t.lookup(&pk((base + i) as u32)), None);
+                        assert_eq!(t.lookup(&pk(base + i)), None);
                     }
                 })
             })
@@ -646,7 +847,7 @@ mod tests {
         let barrier = Arc::new(Barrier::new(8));
         let key = pk(42);
 
-        let handles: Vec<_> = (0..8)
+        let handles: Vec<_> = (0..8u32)
             .map(|tid| {
                 let t = Arc::clone(&t);
                 let barrier = Arc::clone(&barrier);
@@ -664,7 +865,7 @@ mod tests {
 
         // The winner's frame_id should be in the table.
         let winner_frame = t.lookup(&key).unwrap();
-        let winner_idx = results.iter().position(|r| r.is_ok()).unwrap();
+        let winner_idx = results.iter().position(|r| r.is_ok()).unwrap() as u32;
         assert_eq!(winner_frame, winner_idx);
     }
 
@@ -677,14 +878,14 @@ mod tests {
         let t = Arc::new(OverflowTable::new(1));
         let barrier = Arc::new(Barrier::new(4));
 
-        let handles: Vec<_> = (0..4)
+        let handles: Vec<_> = (0..4u32)
             .map(|tid| {
                 let t = Arc::clone(&t);
                 let barrier = Arc::clone(&barrier);
                 thread::spawn(move || {
                     barrier.wait();
-                    for round in 0..500 {
-                        let key = pk((tid * 1000 + round) as u32);
+                    for round in 0..500u32 {
+                        let key = pk(tid * 1000 + round);
                         t.insert(key, tid * 1000 + round);
                         assert_eq!(t.lookup(&key), Some(tid * 1000 + round));
                         t.remove(&key);

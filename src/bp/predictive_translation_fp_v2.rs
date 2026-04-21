@@ -1,13 +1,8 @@
-//! Fast-path wrapper around `PredictiveTranslationBP`.
+//! Fast-path wrapper around `PredictiveTranslationBPV2` (FrameManager-based PT
+//! shadow). Mirrors `PredictiveTranslationFPBP` but targets the V2 inner.
 //!
-//! `PredictiveTranslationFPBP` ("FP" = fast path) hardcodes the
-//! bucket-validate-first optimisation at compile time: the hot read/write paths
-//! do an inlined metadata check on the preferred frame(s) and return
-//! immediately on hit, with **zero** runtime branches on configuration bools.
-//! On miss it delegates to the slow-path helpers on the inner
-//! `PredictiveTranslationBP`.
-//!
-//! All other `MemPool` methods delegate directly.
+//! Status: shadow — coexists with the original `PredictiveTranslationFPBP` so
+//! we can A/B benchmark `bp_pt_bucket` vs `bp_pt_bucket_v2`.
 
 use std::sync::Arc;
 
@@ -15,7 +10,7 @@ use super::{
     eviction_policy::{ClockEvictionPolicy, EvictionPolicy},
     macro_profile::{scoped as macro_profile_scoped, BpMacroOp},
     mem_pool_trait::{ContainerKey, MemPool, MemPoolStatus, MemoryStats, PageFrameKey},
-    predictive_translation::PredictiveTranslationBP,
+    predictive_translation_v2::PredictiveTranslationBPV2,
     FrameReadGuard, FrameWriteGuard,
 };
 use crate::container::ContainerManager;
@@ -24,42 +19,41 @@ type EvictionPolicyImpl = ClockEvictionPolicy;
 type FRGuard = FrameReadGuard<EvictionPolicyImpl>;
 type FWGuard = FrameWriteGuard<EvictionPolicyImpl>;
 
-/// Predictive-translation buffer pool with a compile-time fast path
-/// (bucket-validate-first always enabled).
+/// V2 PT with bucket-validate-first compile-time fast path.
 #[repr(transparent)]
-pub struct PredictiveTranslationFPBP {
-    inner: PredictiveTranslationBP,
+pub struct PredictiveTranslationFPBPV2 {
+    inner: PredictiveTranslationBPV2,
 }
 
-unsafe impl Sync for PredictiveTranslationFPBP {}
-unsafe impl Send for PredictiveTranslationFPBP {}
+unsafe impl Sync for PredictiveTranslationFPBPV2 {}
+unsafe impl Send for PredictiveTranslationFPBPV2 {}
 
-impl std::ops::Deref for PredictiveTranslationFPBP {
-    type Target = PredictiveTranslationBP;
+impl std::ops::Deref for PredictiveTranslationFPBPV2 {
+    type Target = PredictiveTranslationBPV2;
     #[inline(always)]
     fn deref(&self) -> &Self::Target {
         &self.inner
     }
 }
 
-impl PredictiveTranslationFPBP {
+impl PredictiveTranslationFPBPV2 {
     pub fn new(
         num_frames: usize,
         container_manager: Arc<ContainerManager>,
     ) -> Result<Self, MemPoolStatus> {
         Ok(Self {
-            inner: PredictiveTranslationBP::new(num_frames, container_manager)?,
+            inner: PredictiveTranslationBPV2::new(num_frames, container_manager)?,
         })
     }
 }
 
-impl Drop for PredictiveTranslationFPBP {
+impl Drop for PredictiveTranslationFPBPV2 {
     fn drop(&mut self) {
-        // Drop is handled by the inner PredictiveTranslationBP.
+        // Inner handles flush-on-drop.
     }
 }
 
-impl MemPool for PredictiveTranslationFPBP {
+impl MemPool for PredictiveTranslationFPBPV2 {
     type EP = EvictionPolicyImpl;
 
     // ----- inlined fast paths ------------------------------------------------
@@ -75,11 +69,12 @@ impl MemPool for PredictiveTranslationFPBP {
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         let page_key = key.p_key();
-        let pref = self.preferred_frame(&page_key) as usize;
+        let pref = self.preferred_frame(&page_key);
 
         // Inlined fast path: check preferred frame metadata before slow path.
-        let metas = unsafe { &*self.metas.get() };
-        if metas[pref].key() == Some(page_key) {
+        // V2 routes through `meta(idx)` instead of poking `metas` directly —
+        // FrameManager owns the storage.
+        if self.meta(pref).key() == Some(page_key) {
             if let Some(g) = self.try_get_read_guard(pref) {
                 if g.page_key() == Some(page_key) {
                     g.evict_info().update();
@@ -107,11 +102,9 @@ impl MemPool for PredictiveTranslationFPBP {
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         let page_key = key.p_key();
-        let pref = self.preferred_frame(&page_key) as usize;
+        let pref = self.preferred_frame(&page_key);
 
-        // Inlined fast path.
-        let metas = unsafe { &*self.metas.get() };
-        if metas[pref].key() == Some(page_key) {
+        if self.meta(pref).key() == Some(page_key) {
             if let Some(g) = self.try_get_write_guard(pref, true) {
                 if g.page_key() == Some(page_key) {
                     g.evict_info().update();
@@ -124,11 +117,10 @@ impl MemPool for PredictiveTranslationFPBP {
             }
         }
 
-        // Slow path.
         self.get_page_for_write_slow(page_key, pref)
     }
 
-    // ----- delegated methods (must use self.inner to avoid infinite recursion) --
+    // ----- delegated methods (inner avoids infinite recursion) --------------
 
     fn create_container(&self, c_key: ContainerKey, is_temp: bool) -> Result<(), MemPoolStatus> {
         self.inner.create_container(c_key, is_temp)

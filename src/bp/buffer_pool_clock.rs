@@ -95,7 +95,7 @@ impl ClockFastPathProfile {
     }
 }
 
-pub struct PageToFrame {
+pub(crate) struct PageToFrame {
     map: DashMap<ContainerKey, Arc<DashMap<PageId, usize>>>, // (c_key, page_id) -> frame_index
 }
 
@@ -431,9 +431,11 @@ impl<const EVICTION_BATCH_SIZE: usize> BufferPoolClock<EVICTION_BATCH_SIZE> {
             return;
         }
 
+        // Textbook second-chance: if marked (recently accessed), reset and
+        // skip; if unmarked (no access since prior scan), evict candidate.
         let marked = meta.evict_info.score() > 0;
-        if !marked {
-            meta.evict_info.update();
+        if marked {
+            meta.evict_info.reset();
             return;
         }
 
@@ -656,7 +658,7 @@ impl<const EVICTION_BATCH_SIZE: usize> MemPool for BufferPoolClock<EVICTION_BATC
         victim.set_id(page_key.page_id); // Initialize the page with the page id
         victim.set_page_key(Some(page_key)); // Set the frame key to the new page key
         victim.dirty().store(true, Ordering::Release);
-        victim.evict_info().reset(); // Reset the eviction info
+        victim.evict_info().update(); // Mark fresh page as recently accessed
         self.used_frames.fetch_add(1, Ordering::AcqRel);
 
         Ok(victim)
@@ -732,7 +734,7 @@ impl<const EVICTION_BATCH_SIZE: usize> MemPool for BufferPoolClock<EVICTION_BATC
                 let guard = self.try_get_write_guard(*entry.get(), true);
                 return guard
                     .inspect(|g| {
-                        g.evict_info().reset();
+                        g.evict_info().update();
                     })
                     .ok_or(MemPoolStatus::FrameWriteLatchGrantFailed);
             }
@@ -752,7 +754,7 @@ impl<const EVICTION_BATCH_SIZE: usize> MemPool for BufferPoolClock<EVICTION_BATC
             .read_page(key.p_key().page_id, &mut victim)
             .map(|()| {
                 victim.set_page_key(Some(key.p_key()));
-                victim.evict_info().reset();
+                victim.evict_info().update();
             })?;
         victim.dirty().store(true, Ordering::Release); // Prepare the page for writing.
 
@@ -794,8 +796,8 @@ impl<const EVICTION_BATCH_SIZE: usize> MemPool for BufferPoolClock<EVICTION_BATC
                             if valid {
                                 #[cfg(feature = "pt_profile")]
                                 let evict_start = std::time::Instant::now();
-                                // Update the eviction info
-                                g.evict_info().reset();
+                                // Mark recently accessed (textbook clock).
+                                g.evict_info().update();
                                 #[cfg(feature = "pt_profile")]
                                 {
                                     let evict_ns = evict_start.elapsed().as_nanos() as u64;
@@ -847,7 +849,7 @@ impl<const EVICTION_BATCH_SIZE: usize> MemPool for BufferPoolClock<EVICTION_BATC
                 let guard = self.try_get_read_guard(*entry.get());
                 return guard
                     .inspect(|g| {
-                        g.evict_info().reset();
+                        g.evict_info().update();
                     })
                     .ok_or(MemPoolStatus::FrameReadLatchGrantFailed);
             }
@@ -868,7 +870,7 @@ impl<const EVICTION_BATCH_SIZE: usize> MemPool for BufferPoolClock<EVICTION_BATC
             .read_page(key.p_key().page_id, &mut victim)
             .map(|()| {
                 victim.set_page_key(Some(key.p_key()));
-                victim.evict_info().reset();
+                victim.evict_info().update();
             })?;
         Ok(victim.downgrade())
     }

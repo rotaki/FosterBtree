@@ -62,10 +62,20 @@ fn get_bp(num_frames: usize) -> Arc<impl MemPool> {
         use fbtree::bp::get_test_bp_clock;
         return get_test_bp_clock::<64>(num_frames);
     }
+    #[cfg(feature = "bp_clock_v2")]
+    {
+        use fbtree::bp::get_test_bp_clock_v2;
+        return get_test_bp_clock_v2::<64>(num_frames);
+    }
     #[cfg(feature = "bp_pt_bucket")]
     {
         use fbtree::bp::get_test_pt_bucket_validate;
         return get_test_pt_bucket_validate(num_frames);
+    }
+    #[cfg(feature = "bp_pt_bucket_v2")]
+    {
+        use fbtree::bp::get_test_pt_bucket_validate_v2;
+        return get_test_pt_bucket_validate_v2(num_frames);
     }
     #[cfg(feature = "bp_pt_tlb")]
     {
@@ -87,6 +97,11 @@ fn get_bp(num_frames: usize) -> Arc<impl MemPool> {
         use fbtree::bp::get_test_tlb_bp;
         return get_test_tlb_bp(num_frames);
     }
+    #[cfg(feature = "bp_tlb_v2")]
+    {
+        use fbtree::bp::get_test_tlb_bp_v2;
+        return get_test_tlb_bp_v2(num_frames);
+    }
     #[cfg(feature = "bp_pt")]
     {
         use fbtree::bp::get_test_pt;
@@ -94,11 +109,14 @@ fn get_bp(num_frames: usize) -> Arc<impl MemPool> {
     }
     #[cfg(not(any(
         feature = "bp_clock",
+        feature = "bp_clock_v2",
         feature = "bp_pt_bucket",
+        feature = "bp_pt_bucket_v2",
         feature = "bp_pt_tlb",
         feature = "bp_pt_tlb_only",
         feature = "bp_pt_tlb_only_keys",
         feature = "bp_tlb",
+        feature = "bp_tlb_v2",
         feature = "bp_pt",
     )))]
     {
