@@ -24,7 +24,7 @@
 //! in each BP variant because:
 //! - LIPAH uses `DashMap<PageKey, usize>` (partitioned RwLocks)
 //! - PT uses a custom chained hash table with ArcSwap per bucket
-//! - TLB-BP uses a per-thread TLB + `CongeeRaw` ART tree
+//! - TLB-BP uses a per-thread TLB + `CongeeRawU32` ART tree
 //!
 //! Each translator has distinct concurrency semantics, so the caller owns
 //! lookup / insert / remove. `FrameManager` exposes a hook during eviction

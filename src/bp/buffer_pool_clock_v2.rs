@@ -23,6 +23,8 @@ use super::{
 };
 use crate::{container::ContainerManager, log_debug, page::PageId};
 
+#[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
+use std::sync::atomic::AtomicU64;
 use std::{
     collections::BTreeMap,
     sync::{atomic::Ordering, Arc},
@@ -34,10 +36,38 @@ type EvictionPolicyImpl = ClockEvictionPolicy;
 type FWGuard = FrameWriteGuard<EvictionPolicyImpl>;
 type FRGuard = FrameReadGuard<EvictionPolicyImpl>;
 
+/// Counters to mirror PT's `fast_path_coverage` on LIPAH (`bp_clock_v2`).
+/// Gated by the existing `pt_counts` feature so they add zero overhead by
+/// default. See plan: PT strength/weakness study, Part B1.
+#[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
+struct LipahCoverage {
+    /// Reads + writes where the caller-supplied `frame_id` hint hit.
+    pub hint_hits: AtomicU64,
+    /// Reads + writes that fell through to the DashMap translation.
+    pub hint_misses: AtomicU64,
+    /// Pages evicted — used as a "residency churn" counter to match PT's
+    /// `residency_evictions_from_preferred` concept (LIPAH has no preferred
+    /// frame, so this is just total evictions).
+    pub evictions: AtomicU64,
+}
+
+#[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
+impl LipahCoverage {
+    fn new() -> Self {
+        Self {
+            hint_hits: AtomicU64::new(0),
+            hint_misses: AtomicU64::new(0),
+            evictions: AtomicU64::new(0),
+        }
+    }
+}
+
 pub struct BufferPoolClockV2<const EVICTION_BATCH_SIZE: usize> {
     fm: FrameManager<EvictionPolicyImpl>,
     page_to_frame: PageToFrame,
     stats: BPStats,
+    #[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
+    coverage: LipahCoverage,
 }
 
 impl<const EVICTION_BATCH_SIZE: usize> Drop for BufferPoolClockV2<EVICTION_BATCH_SIZE> {
@@ -62,6 +92,8 @@ impl<const EVICTION_BATCH_SIZE: usize> BufferPoolClockV2<EVICTION_BATCH_SIZE> {
             fm: FrameManager::new(num_frames, container_manager)?,
             page_to_frame: PageToFrame::new(),
             stats: BPStats::new(),
+            #[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
+            coverage: LipahCoverage::new(),
         })
     }
 
@@ -80,6 +112,8 @@ impl<const EVICTION_BATCH_SIZE: usize> BufferPoolClockV2<EVICTION_BATCH_SIZE> {
         if matches {
             cmap.remove(&pk.page_id);
         }
+        #[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
+        self.coverage.evictions.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -161,11 +195,16 @@ impl<const EVICTION_BATCH_SIZE: usize> MemPool for BufferPoolClockV2<EVICTION_BA
                     if g.page_key() == Some(key.p_key()) {
                         g.evict_info().update();
                         g.dirty().store(true, Ordering::Release);
+                        #[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
+                        self.coverage.hint_hits.fetch_add(1, Ordering::Relaxed);
                         return Ok(g);
                     }
                 }
             }
         }
+
+        #[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
+        self.coverage.hint_misses.fetch_add(1, Ordering::Relaxed);
 
         // Slow path.
         self.fm
@@ -220,11 +259,16 @@ impl<const EVICTION_BATCH_SIZE: usize> MemPool for BufferPoolClockV2<EVICTION_BA
                 if let Some(g) = self.fm.try_get_read_guard(frame_id) {
                     if g.page_key() == Some(key.p_key()) {
                         g.evict_info().update();
+                        #[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
+                        self.coverage.hint_hits.fetch_add(1, Ordering::Relaxed);
                         return Ok(g);
                     }
                 }
             }
         }
+
+        #[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
+        self.coverage.hint_misses.fetch_add(1, Ordering::Relaxed);
 
         // Slow path.
         self.fm
@@ -333,6 +377,46 @@ impl<const EVICTION_BATCH_SIZE: usize> MemPool for BufferPoolClockV2<EVICTION_BA
 
     unsafe fn reset_stats(&self) {
         self.stats.clear();
+    }
+
+    #[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
+    fn sample_coverage(&self) -> (u64, u64) {
+        let hits = self.coverage.hint_hits.load(Ordering::Relaxed);
+        let misses = self.coverage.hint_misses.load(Ordering::Relaxed);
+        (hits, hits + misses)
+    }
+
+    fn print_profile(&self) {
+        #[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
+        {
+            let hits = self.coverage.hint_hits.load(Ordering::Relaxed);
+            let misses = self.coverage.hint_misses.load(Ordering::Relaxed);
+            let total = hits + misses;
+            let cov = if total == 0 {
+                0.0
+            } else {
+                hits as f64 / total as f64
+            };
+            println!("\n=== LIPAH-V2 Coverage ===");
+            println!(
+                "Hint hits:   {:>12}  ({:.1}%)",
+                hits,
+                hits as f64 / total.max(1) as f64 * 100.0
+            );
+            println!(
+                "Hint misses: {:>12}  ({:.1}%)",
+                misses,
+                misses as f64 / total.max(1) as f64 * 100.0
+            );
+            println!(
+                "Evictions:   {:>12}",
+                self.coverage.evictions.load(Ordering::Relaxed)
+            );
+            println!(
+                "fast_path_coverage: {:.4}  (hits={}, total={})",
+                cov, hits, total
+            );
+        }
     }
 }
 

@@ -18,6 +18,10 @@
 #[allow(unused_imports)]
 use crate::log;
 
+#[allow(unused_imports)]
+use super::hash::{
+    hash_page_key, hash_page_key_2, hash_page_key_3, hash_page_key_4, hash_page_key_u128,
+};
 #[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
 use super::predictive_translation::PTProfileCounters;
 use super::{
@@ -25,7 +29,6 @@ use super::{
     eviction_policy::{ClockEvictionPolicy, EvictionPolicy},
     frame_guards::{FrameMeta, FrameReadGuard, FrameWriteGuard},
     frame_manager::FrameManager,
-    hash::{hash_page_key, hash_page_key_2, hash_page_key_3, hash_page_key_4, hash_page_key_u128},
     macro_profile::{report as macro_profile_report, scoped as macro_profile_scoped, BpMacroOp},
     mem_pool_trait::{ContainerKey, MemPool, MemPoolStatus, MemoryStats, PageFrameKey, PageKey},
     overflow_table::OverflowTable,
@@ -42,10 +45,40 @@ use rand::RngCore;
 use std::{
     collections::BTreeMap,
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicU32, AtomicU64, Ordering},
         Arc,
     },
 };
+
+// Runtime-tunable promotion probability denominators. See
+// `promote_prob_no_demote` / `promote_prob_demote`. Initialized lazily from
+// the `PT_PROMOTE_PROB_*` env vars on first BP construction.
+static PROMOTE_PROB_NO_DEMOTE_ATOMIC: AtomicU32 =
+    AtomicU32::new(PredictiveTranslationBPV2::PROMOTE_PROB_NO_DEMOTE_DEFAULT);
+static PROMOTE_PROB_DEMOTE_ATOMIC: AtomicU32 =
+    AtomicU32::new(PredictiveTranslationBPV2::PROMOTE_PROB_DEMOTE_DEFAULT);
+static PROMOTE_ENV_LOADED: std::sync::Once = std::sync::Once::new();
+
+fn load_promote_env() {
+    PROMOTE_ENV_LOADED.call_once(|| {
+        if let Ok(v) = std::env::var("PT_PROMOTE_PROB_NO_DEMOTE") {
+            if let Ok(n) = v.parse::<u32>() {
+                PROMOTE_PROB_NO_DEMOTE_ATOMIC.store(n.max(1), Ordering::Relaxed);
+            }
+        }
+        if let Ok(v) = std::env::var("PT_PROMOTE_PROB_DEMOTE") {
+            if let Ok(n) = v.parse::<u32>() {
+                PROMOTE_PROB_DEMOTE_ATOMIC.store(n.max(1), Ordering::Relaxed);
+            }
+        }
+        // Print once so bench logs make clear which denominators were in use.
+        eprintln!(
+            "PT promotion probs: 1/{} (no-demote), 1/{} (demote)",
+            PROMOTE_PROB_NO_DEMOTE_ATOMIC.load(Ordering::Relaxed),
+            PROMOTE_PROB_DEMOTE_ATOMIC.load(Ordering::Relaxed),
+        );
+    });
+}
 
 // ---------------------------------------------------------------------------
 // Type aliases
@@ -128,6 +161,8 @@ impl PredictiveTranslationBPV2 {
             num_frames
         );
 
+        load_promote_env();
+
         Ok(Self {
             fm: FrameManager::new(num_frames, container_manager)?,
             num_frames_u64: num_frames as u64,
@@ -157,6 +192,16 @@ impl PredictiveTranslationBPV2 {
         if self.overflow.lookup(pk) == Some(idx) {
             self.overflow.remove(pk);
         }
+        // Track how often a fast-path owner loses residency (plan: B1).
+        // `preferred_frame` is a pure function of the key, so this is cheap.
+        #[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
+        {
+            if self.preferred_frame(pk) == idx {
+                self.profile
+                    .residency_evictions_from_preferred
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+        }
     }
 
     // ------------------------------------------------------------------
@@ -165,7 +210,22 @@ impl PredictiveTranslationBPV2 {
 
     #[inline]
     pub(crate) fn preferred_frame(&self, key: &PageKey) -> u32 {
-        fastmod(hash_page_key(key), self.num_frames_u64)
+        // When `pt_op_hash` is enabled we use the TLB-style order-preserving
+        // composition: hash the container key and add the raw page id.
+        // Adjacent page ids within the same container map to adjacent slots
+        // (mod `num_frames`), preserving scan locality. Without it we keep
+        // the Stafford-mixed full key — better distribution, zero scan
+        // locality. See plan: PT strength/weakness study, Part A.
+        #[cfg(feature = "pt_op_hash")]
+        {
+            let c_hash = super::hash::hash_u64(key.c_key.as_u32() as u64);
+            let packed = c_hash.wrapping_add(key.page_id as u64);
+            fastmod(packed, self.num_frames_u64)
+        }
+        #[cfg(not(feature = "pt_op_hash"))]
+        {
+            fastmod(hash_page_key(key), self.num_frames_u64)
+        }
     }
 
     // ------------------------------------------------------------------
@@ -274,9 +334,35 @@ impl PredictiveTranslationBPV2 {
     // ------------------------------------------------------------------
     // Promotion / demotion (mirrors original PT::try_promote)
     // ------------------------------------------------------------------
+    //
+    // Probabilities are held in process-global AtomicU32 so benchmarks can
+    // sweep them without recompiling (plan: PT weakness B3). Defaults mirror
+    // the original compile-time constants: 1/50 when preferred is free, 1/512
+    // when it's occupied.
 
-    const PROMOTE_PROB_NO_DEMOTE: u32 = 50;
-    const PROMOTE_PROB_DEMOTE: u32 = 512;
+    /// Default denominator for promotion probability when the preferred slot
+    /// is free. Kept public so callers that want the compile-time default can
+    /// reference it symbolically.
+    pub const PROMOTE_PROB_NO_DEMOTE_DEFAULT: u32 = 50;
+    /// Default denominator for promotion probability when the preferred slot
+    /// is occupied (requires a demotion swap).
+    pub const PROMOTE_PROB_DEMOTE_DEFAULT: u32 = 512;
+
+    /// Read the current promotion-probability denominator for the "preferred
+    /// is free" branch. Can be overridden at process start via the
+    /// `PT_PROMOTE_PROB_NO_DEMOTE` env var (see `load_promote_env`).
+    #[inline]
+    pub fn promote_prob_no_demote() -> u32 {
+        PROMOTE_PROB_NO_DEMOTE_ATOMIC.load(Ordering::Relaxed)
+    }
+
+    /// Read the current promotion-probability denominator for the "preferred
+    /// is occupied / demote swap" branch. Can be overridden at process start
+    /// via the `PT_PROMOTE_PROB_DEMOTE` env var.
+    #[inline]
+    pub fn promote_prob_demote() -> u32 {
+        PROMOTE_PROB_DEMOTE_ATOMIC.load(Ordering::Relaxed)
+    }
 
     fn try_promote(
         &self,
@@ -286,17 +372,25 @@ impl PredictiveTranslationBPV2 {
     ) -> Result<FWGuard, MemPoolStatus> {
         let current_idx = current_guard.frame_id();
         if current_idx == pref {
+            #[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
+            self.profile.promote_noop.fetch_add(1, Ordering::Relaxed);
             return Ok(current_guard);
         }
 
         let mut victim_guard = match self.try_get_write_guard(pref, false) {
             Some(g) => g,
-            None => return Ok(current_guard),
+            None => {
+                #[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
+                self.profile.promote_noop.fetch_add(1, Ordering::Relaxed);
+                return Ok(current_guard);
+            }
         };
         let victim_idx = victim_guard.frame_id();
 
         if victim_guard.page_key().is_none() {
             // Promotion: move page to the free preferred frame.
+            #[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
+            self.profile.promote_free.fetch_add(1, Ordering::Relaxed);
             victim_guard.page_mut().copy(current_guard.page());
             victim_guard.set_page_key(Some(page_key));
             victim_guard.dirty().store(
@@ -317,6 +411,8 @@ impl PredictiveTranslationBPV2 {
         }
 
         // Demotion: swap contents with the occupied preferred frame.
+        #[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
+        self.profile.promote_swap.fetch_add(1, Ordering::Relaxed);
         let other_key = victim_guard.page_key().unwrap();
 
         let mut temp = Page::new_empty();
@@ -390,9 +486,9 @@ impl PredictiveTranslationBPV2 {
                 // rare and the next access will roll again.
                 if idx != pref {
                     let denom = if pref_free_hint {
-                        Self::PROMOTE_PROB_NO_DEMOTE
+                        Self::promote_prob_no_demote()
                     } else {
-                        Self::PROMOTE_PROB_DEMOTE
+                        Self::promote_prob_demote()
                     };
                     #[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
                     self.profile
@@ -461,9 +557,9 @@ impl PredictiveTranslationBPV2 {
 
                 if idx != pref {
                     let denom = if self.frame_is_free(pref) {
-                        Self::PROMOTE_PROB_NO_DEMOTE
+                        Self::promote_prob_no_demote()
                     } else {
-                        Self::PROMOTE_PROB_DEMOTE
+                        Self::promote_prob_demote()
                     };
                     #[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
                     self.profile
@@ -684,6 +780,15 @@ impl MemPool for PredictiveTranslationBPV2 {
         }
         #[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
         self.profile.print();
+    }
+
+    #[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
+    fn sample_coverage(&self) -> (u64, u64) {
+        let hits = self.profile.preferred_frame_hits.load(Ordering::Relaxed);
+        let total = hits
+            + self.profile.overflow_chain_hits.load(Ordering::Relaxed)
+            + self.profile.page_faults.load(Ordering::Relaxed);
+        (hits, total)
     }
 }
 

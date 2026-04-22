@@ -100,6 +100,16 @@ pub struct PTProfileCounters {
     pub total_writes: AtomicU64,
     pub promotions_attempted: AtomicU64,
     pub promotions_fired: AtomicU64,
+    /// `try_promote` calls that took the "preferred frame is free" branch.
+    pub promote_free: AtomicU64,
+    /// `try_promote` calls that took the "preferred frame is occupied → swap" branch.
+    pub promote_swap: AtomicU64,
+    /// `try_promote` calls that bailed early (current == pref, or latch failed).
+    pub promote_noop: AtomicU64,
+    /// Page evicted from a frame that still was its own preferred slot — i.e.
+    /// the fast-path winner lost residency. Used to quantify how much
+    /// fast-path ownership churns (plan: PT weakness B1).
+    pub residency_evictions_from_preferred: AtomicU64,
 }
 
 #[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
@@ -131,6 +141,10 @@ impl PTProfileCounters {
             total_writes: AtomicU64::new(0),
             promotions_attempted: AtomicU64::new(0),
             promotions_fired: AtomicU64::new(0),
+            promote_free: AtomicU64::new(0),
+            promote_swap: AtomicU64::new(0),
+            promote_noop: AtomicU64::new(0),
+            residency_evictions_from_preferred: AtomicU64::new(0),
         }
     }
 
@@ -168,6 +182,40 @@ impl PTProfileCounters {
             r(&self.promotions_attempted)
         );
         println!("Promotions fired:     {:>12}", r(&self.promotions_fired));
+        println!(
+            "  → promote (free):   {:>12}  (preferred frame was empty)",
+            r(&self.promote_free)
+        );
+        println!(
+            "  → demote (swap):    {:>12}  (preferred frame was occupied)",
+            r(&self.promote_swap)
+        );
+        println!(
+            "  → no-op:            {:>12}  (already at preferred / latch failed)",
+            r(&self.promote_noop)
+        );
+        println!(
+            "Residency evictions from preferred: {:>12}  (fast-path owners that got evicted)",
+            r(&self.residency_evictions_from_preferred)
+        );
+
+        // Combined fast-path coverage line — unified across PT, TLB, LIPAH so
+        // bench scripts can grep for a single key.
+        //
+        // For PT/PT(FP) the fast-path hit = preferred_frame_hits; non-hits are
+        // overflow_chain_hits + page_faults. This is what the plan calls
+        // "fast_path_coverage" (B1).
+        let fp_hits = r(&self.preferred_frame_hits);
+        let fp_total = fp_hits + r(&self.overflow_chain_hits) + r(&self.page_faults);
+        let cov = if fp_total == 0 {
+            0.0
+        } else {
+            fp_hits as f64 / fp_total as f64
+        };
+        println!(
+            "fast_path_coverage: {:.4}  (hits={}, total={})",
+            cov, fp_hits, fp_total
+        );
 
         #[cfg(feature = "pt_profile")]
         {
@@ -776,17 +824,25 @@ impl PredictiveTranslationBP {
     ) -> Result<FWGuard, MemPoolStatus> {
         let current_idx = current_guard.frame_id();
         if current_idx as usize == pref {
+            #[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
+            self.profile.promote_noop.fetch_add(1, Ordering::Relaxed);
             return Ok(current_guard);
         }
 
         let mut victim_guard = match self.try_get_write_guard(pref, false) {
             Some(g) => g,
-            None => return Ok(current_guard),
+            None => {
+                #[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
+                self.profile.promote_noop.fetch_add(1, Ordering::Relaxed);
+                return Ok(current_guard);
+            }
         };
         let victim_idx = victim_guard.frame_id();
 
         if victim_guard.page_key().is_none() {
             // Promotion: move page to the free preferred frame.
+            #[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
+            self.profile.promote_free.fetch_add(1, Ordering::Relaxed);
             victim_guard.page_mut().copy(current_guard.page());
             victim_guard.set_page_key(Some(page_key));
             victim_guard.dirty().store(
@@ -808,6 +864,8 @@ impl PredictiveTranslationBP {
         }
 
         // Demotion: swap contents with the occupied preferred frame.
+        #[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
+        self.profile.promote_swap.fetch_add(1, Ordering::Relaxed);
         let other_key = victim_guard.page_key().unwrap();
 
         let mut temp = Page::new_empty();

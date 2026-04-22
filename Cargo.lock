@@ -531,7 +531,7 @@ dependencies = [
 [[package]]
 name = "congee"
 version = "0.4.1"
-source = "git+https://github.com/rotaki/congee.git?branch=main#90c46666d80a4a4d832575f3b4dd4ff41f4ba304"
+source = "git+https://github.com/rotaki/congee.git?branch=main#eea1c0e33669deb5874e04f98367c08a0de78265"
 dependencies = [
  "crossbeam-epoch",
 ]

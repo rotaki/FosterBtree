@@ -29,7 +29,7 @@ use std::{
 };
 
 use concurrent_queue::ConcurrentQueue;
-use congee::CongeeRaw;
+use congee::CongeeRawU32;
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 
 type EvictionPolicyImpl = ClockEvictionPolicy;
@@ -274,8 +274,8 @@ pub struct TlbBP {
     pages: UnsafeCell<Vec<Box<Page>>>,
     #[allow(clippy::vec_box)]
     metas: UnsafeCell<Vec<Box<FMeta>>>,
-    /// Overflow: concurrent ART tree mapping packed PageKey (usize) -> frame_id (usize).
-    overflow: CongeeRaw<usize, usize>,
+    /// Overflow: concurrent ART tree mapping packed PageKey (usize) -> frame_id (u32).
+    overflow: CongeeRawU32<usize>,
     stats: BPStats,
 }
 
@@ -321,7 +321,7 @@ impl TlbBP {
             free_list,
             pages,
             metas,
-            overflow: CongeeRaw::default(),
+            overflow: CongeeRawU32::default(),
             stats: BPStats::new(),
         })
     }
@@ -331,19 +331,19 @@ impl TlbBP {
     // ------------------------------------------------------------------
 
     #[inline]
-    fn overflow_lookup(&self, key: &PageKey) -> Option<usize> {
+    fn overflow_lookup(&self, key: &PageKey) -> Option<u32> {
         let guard = crossbeam_epoch::pin();
         self.overflow.get(&pack_page_key(key), &guard)
     }
 
     #[inline]
-    fn overflow_insert(&self, key: PageKey, frame_id: usize) {
+    fn overflow_insert(&self, key: PageKey, frame_id: u32) {
         let guard = crossbeam_epoch::pin();
         let _ = self.overflow.insert(pack_page_key(&key), frame_id, &guard);
     }
 
     #[inline]
-    fn overflow_remove(&self, key: &PageKey) -> Option<usize> {
+    fn overflow_remove(&self, key: &PageKey) -> Option<u32> {
         let guard = crossbeam_epoch::pin();
         self.overflow.remove(&pack_page_key(key), &guard)
     }
@@ -356,7 +356,7 @@ impl TlbBP {
         let guard = crossbeam_epoch::pin();
         let start = (c_key.as_u32() as usize) << 32;
         let end = start | 0xFFFF_FFFF;
-        let mut buf = vec![(0usize, 0usize); 4096];
+        let mut buf = vec![(0usize, 0u32); 4096];
         let mut out = Vec::new();
         let mut scan_start = start;
         loop {
@@ -367,9 +367,7 @@ impl TlbBP {
             for &(packed, frame_id) in &buf[..count] {
                 let pk = unpack_page_key(packed);
                 out.push(PageFrameKey::new_with_frame_id(
-                    pk.c_key,
-                    pk.page_id,
-                    frame_id as u32,
+                    pk.c_key, pk.page_id, frame_id,
                 ));
             }
             if count < buf.len() {
@@ -530,7 +528,7 @@ impl TlbBP {
         let mut freed = 0;
         for (idx, g) in to_evict.drain(..) {
             if let Some(pk) = g.page_key() {
-                if self.overflow_lookup(&pk) == Some(idx) {
+                if self.overflow_lookup(&pk) == Some(idx as u32) {
                     self.overflow_remove(&pk);
                 }
             }
@@ -568,8 +566,8 @@ impl TlbBP {
         // Atomic insert-if-absent via congee compute_or_insert.
         let guard = crossbeam_epoch::pin();
         let packed = pack_page_key(&page_key);
-        let frame_id = victim.frame_id() as usize;
-        let mut existing_frame: Option<usize> = None;
+        let frame_id: u32 = victim.frame_id();
+        let mut existing_frame: Option<u32> = None;
         let _ = self.overflow.compute_or_insert(
             packed,
             |existing| match existing {
@@ -585,10 +583,10 @@ impl TlbBP {
 
         if let Some(idx) = existing_frame {
             // Another thread already faulted this page. Free our victim, latch theirs.
-            self.enqueue_free_frame(frame_id);
+            self.enqueue_free_frame(frame_id as usize);
             self.used_frames.fetch_sub(1, Ordering::AcqRel);
             return self
-                .try_get_write_guard(idx, true)
+                .try_get_write_guard(idx as usize, true)
                 .ok_or(MemPoolStatus::FrameWriteLatchGrantFailed);
         }
 
@@ -751,14 +749,13 @@ impl MemPool for TlbBP {
             LAST_MISS_KEY = packed;
             packed.wrapping_sub(prev) <= PREFILL_COUNT
         };
-        self.ensure_free_frames()?;
 
         // Atomic lookup + latch + sibling prefill via get_apply_with_siblings.
         let guard = crossbeam_epoch::pin();
         let result = self.overflow.get_apply_with_siblings(
             &packed,
             |frame_id, view| {
-                match self.try_get_read_guard(frame_id) {
+                match self.try_get_read_guard(frame_id as usize) {
                     Some(g) => {
                         // Latch succeeded — write siblings directly into TLB.
                         if use_prefill {
@@ -805,6 +802,7 @@ impl MemPool for TlbBP {
             }
             None => {
                 // Not in overflow — page fault.
+                self.ensure_free_frames()?;
                 let victim = self.handle_page_fault(page_key)?;
                 unsafe {
                     tlb_insert(set, pack_entry(tag, victim.frame_id()));
@@ -892,7 +890,7 @@ impl MemPool for TlbBP {
         let guard = crossbeam_epoch::pin();
         let result = self.overflow.get_apply_with_siblings(
             &packed,
-            |frame_id, view| match self.try_get_write_guard(frame_id, true) {
+            |frame_id, view| match self.try_get_write_guard(frame_id as usize, true) {
                 Some(g) => {
                     if use_prefill {
                         let c_hash = super::hash::hash_u64((packed >> 32) as u64);
@@ -954,7 +952,7 @@ impl MemPool for TlbBP {
 
         debug_assert!(victim.page_key().is_none());
 
-        self.overflow_insert(page_key, victim.frame_id() as usize);
+        self.overflow_insert(page_key, victim.frame_id());
 
         victim.set_id(page_id);
         victim.set_page_key(Some(page_key));
@@ -1030,7 +1028,7 @@ impl MemPool for TlbBP {
             };
             self.write_to_disk_if_dirty_w(&frame).unwrap();
             if let Some(pk) = frame.page_key() {
-                if self.overflow_lookup(&pk) == Some(i) {
+                if self.overflow_lookup(&pk) == Some(i as u32) {
                     self.overflow_remove(&pk);
                 }
             }

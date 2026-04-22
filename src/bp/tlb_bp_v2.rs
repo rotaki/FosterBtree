@@ -3,7 +3,7 @@
 //! **Status: shadow** — coexists with the original `TlbBP`. Intended to be
 //! behaviorally identical; use for A/B testing and migration verification.
 //!
-//! Owns: `CongeeRaw` overflow translator + `BPStats` + thread-local TLB,
+//! Owns: `CongeeRawU32` overflow translator + `BPStats` + thread-local TLB,
 //! victim cache, and per-thread counters. Delegates everything frame-mgmt
 //! (pages, metas, free-frame queue, clock hand, used-frame counter, container
 //! handles, eviction, flush) to [`FrameManager`].
@@ -25,12 +25,27 @@ use super::{
 };
 use crate::{container::ContainerManager, log_debug, page::PageId};
 
+#[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
+use std::sync::atomic::AtomicU64;
 use std::{
     collections::BTreeMap,
     sync::{atomic::Ordering, Arc},
 };
 
-use congee::CongeeRaw;
+/// Global-atomic shadow of the thread-local TLB_HITS / TLB_MISSES /
+/// TLB_FALSE_HITS counters. The thread-local originals are used by the
+/// existing Drop-time print_stderr path. This shadow lets `print_profile()`
+/// aggregate across worker threads from the main thread so benchmarks like
+/// `pt_fastpath_coverage` can emit a consistent coverage ratio. Only updated
+/// when `pt_profile` / `pt_counts` is enabled.
+#[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
+static TLB_HITS_GLOBAL: AtomicU64 = AtomicU64::new(0);
+#[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
+static TLB_MISSES_GLOBAL: AtomicU64 = AtomicU64::new(0);
+#[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
+static TLB_FALSE_HITS_GLOBAL: AtomicU64 = AtomicU64::new(0);
+
+use congee::CongeeRawU32;
 
 type EvictionPolicyImpl = ClockEvictionPolicy;
 type FMeta = FrameMeta<EvictionPolicyImpl>;
@@ -250,8 +265,8 @@ unsafe fn tlb_insert_if_empty(set: usize, entry: u32) -> bool {
 
 pub struct TlbBPV2 {
     pub(crate) fm: FrameManager<EvictionPolicyImpl>,
-    /// Overflow: concurrent ART mapping packed PageKey → frame_id.
-    overflow: CongeeRaw<usize, usize>,
+    /// Overflow: concurrent ART mapping packed PageKey → frame_id (u32).
+    overflow: CongeeRawU32<usize>,
     stats: BPStats,
 }
 
@@ -269,7 +284,7 @@ impl TlbBPV2 {
         log_debug!("TlbBPV2 created: num_frames={}", num_frames);
         Ok(Self {
             fm: FrameManager::new(num_frames, container_manager)?,
-            overflow: CongeeRaw::default(),
+            overflow: CongeeRawU32::default(),
             stats: BPStats::new(),
         })
     }
@@ -282,10 +297,8 @@ impl TlbBPV2 {
     /// Translator hook for `FrameManager` eviction. Removes overflow entry
     /// only if it still points at `idx` — guards against races where a page
     /// got remapped between classify_frame and finalize.
-    fn on_evict(&self, pk: &PageKey, idx: u32) {
-        if self.overflow_lookup(pk) == Some(idx as usize) {
-            self.overflow_remove(pk);
-        }
+    fn on_evict(&self, pk: &PageKey, _idx: u32) {
+        self.overflow_remove(pk);
     }
 
     // ------------------------------------------------------------------
@@ -293,19 +306,19 @@ impl TlbBPV2 {
     // ------------------------------------------------------------------
 
     #[inline]
-    fn overflow_lookup(&self, key: &PageKey) -> Option<usize> {
+    fn overflow_lookup(&self, key: &PageKey) -> Option<u32> {
         let guard = crossbeam_epoch::pin();
         self.overflow.get(&pack_page_key(key), &guard)
     }
 
     #[inline]
-    fn overflow_insert(&self, key: PageKey, frame_id: usize) {
+    fn overflow_insert(&self, key: PageKey, frame_id: u32) {
         let guard = crossbeam_epoch::pin();
         let _ = self.overflow.insert(pack_page_key(&key), frame_id, &guard);
     }
 
     #[inline]
-    fn overflow_remove(&self, key: &PageKey) -> Option<usize> {
+    fn overflow_remove(&self, key: &PageKey) -> Option<u32> {
         let guard = crossbeam_epoch::pin();
         self.overflow.remove(&pack_page_key(key), &guard)
     }
@@ -318,7 +331,7 @@ impl TlbBPV2 {
         let guard = crossbeam_epoch::pin();
         let start = (c_key.as_u32() as usize) << 32;
         let end = start | 0xFFFF_FFFF;
-        let mut buf = vec![(0usize, 0usize); 4096];
+        let mut buf = vec![(0usize, 0u32); 4096];
         let mut out = Vec::new();
         let mut scan_start = start;
         loop {
@@ -329,9 +342,7 @@ impl TlbBPV2 {
             for &(packed, frame_id) in &buf[..count] {
                 let pk = unpack_page_key(packed);
                 out.push(PageFrameKey::new_with_frame_id(
-                    pk.c_key,
-                    pk.page_id,
-                    frame_id as u32,
+                    pk.c_key, pk.page_id, frame_id,
                 ));
             }
             if count < buf.len() {
@@ -398,11 +409,11 @@ impl TlbBPV2 {
         let guard = crossbeam_epoch::pin();
         let packed = pack_page_key(&page_key);
         let frame_id = victim.frame_id();
-        let mut existing_frame: Option<usize> = None;
+        let mut existing_frame: Option<u32> = None;
         let _ = self.overflow.compute_or_insert(
             packed,
             |existing| match existing {
-                None => frame_id as usize,
+                None => frame_id,
                 Some(v) => {
                     existing_frame = Some(v);
                     v
@@ -418,7 +429,7 @@ impl TlbBPV2 {
             self.enqueue_free_frame(frame_id);
             self.fm.decrement_used();
             return self
-                .try_get_write_guard(idx as u32, true)
+                .try_get_write_guard(idx, true)
                 .ok_or(MemPoolStatus::FrameWriteLatchGrantFailed);
         }
 
@@ -496,6 +507,8 @@ impl MemPool for TlbBPV2 {
                             unsafe {
                                 TLB_HITS += 1;
                             }
+                            #[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
+                            TLB_HITS_GLOBAL.fetch_add(1, Ordering::Relaxed);
                             return Ok(g);
                         }
                     }
@@ -503,6 +516,8 @@ impl MemPool for TlbBPV2 {
                 unsafe {
                     TLB_FALSE_HITS += 1;
                 }
+                #[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
+                TLB_FALSE_HITS_GLOBAL.fetch_add(1, Ordering::Relaxed);
             }
         }
         #[cfg(not(feature = "tlb_victim_cache"))]
@@ -525,6 +540,8 @@ impl MemPool for TlbBPV2 {
                             unsafe {
                                 TLB_HITS += 1;
                             }
+                            #[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
+                            TLB_HITS_GLOBAL.fetch_add(1, Ordering::Relaxed);
                             return Ok(g);
                         }
                     }
@@ -534,6 +551,8 @@ impl MemPool for TlbBPV2 {
                 unsafe {
                     TLB_FALSE_HITS += 1;
                 }
+                #[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
+                TLB_FALSE_HITS_GLOBAL.fetch_add(1, Ordering::Relaxed);
             }
         }
 
@@ -541,6 +560,8 @@ impl MemPool for TlbBPV2 {
         unsafe {
             TLB_MISSES += 1;
         }
+        #[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
+        TLB_MISSES_GLOBAL.fetch_add(1, Ordering::Relaxed);
         let packed = pack_page_key(&page_key);
         let use_prefill = unsafe {
             let prev = LAST_MISS_KEY;
@@ -551,7 +572,7 @@ impl MemPool for TlbBPV2 {
         let guard = crossbeam_epoch::pin();
         let result = self.overflow.get_apply_with_siblings(
             &packed,
-            |frame_id, view| match self.try_get_read_guard(frame_id as u32) {
+            |frame_id, view| match self.try_get_read_guard(frame_id) {
                 Some(g) => {
                     if use_prefill {
                         let c_hash = super::hash::hash_u64((packed >> 32) as u64);
@@ -618,6 +639,8 @@ impl MemPool for TlbBPV2 {
                             unsafe {
                                 TLB_HITS += 1;
                             }
+                            #[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
+                            TLB_HITS_GLOBAL.fetch_add(1, Ordering::Relaxed);
                             return Ok(g);
                         }
                     }
@@ -625,6 +648,8 @@ impl MemPool for TlbBPV2 {
                 unsafe {
                     TLB_FALSE_HITS += 1;
                 }
+                #[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
+                TLB_FALSE_HITS_GLOBAL.fetch_add(1, Ordering::Relaxed);
             }
         }
         #[cfg(not(feature = "tlb_victim_cache"))]
@@ -647,6 +672,8 @@ impl MemPool for TlbBPV2 {
                             unsafe {
                                 TLB_HITS += 1;
                             }
+                            #[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
+                            TLB_HITS_GLOBAL.fetch_add(1, Ordering::Relaxed);
                             return Ok(g);
                         }
                     }
@@ -656,12 +683,16 @@ impl MemPool for TlbBPV2 {
                 unsafe {
                     TLB_FALSE_HITS += 1;
                 }
+                #[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
+                TLB_FALSE_HITS_GLOBAL.fetch_add(1, Ordering::Relaxed);
             }
         }
 
         unsafe {
             TLB_MISSES += 1;
         }
+        #[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
+        TLB_MISSES_GLOBAL.fetch_add(1, Ordering::Relaxed);
         let packed = pack_page_key(&page_key);
         let use_prefill = unsafe {
             let prev = LAST_MISS_KEY;
@@ -673,7 +704,7 @@ impl MemPool for TlbBPV2 {
         let guard = crossbeam_epoch::pin();
         let result = self.overflow.get_apply_with_siblings(
             &packed,
-            |frame_id, view| match self.try_get_write_guard(frame_id as u32, true) {
+            |frame_id, view| match self.try_get_write_guard(frame_id, true) {
                 Some(g) => {
                     if use_prefill {
                         let c_hash = super::hash::hash_u64((packed >> 32) as u64);
@@ -734,7 +765,7 @@ impl MemPool for TlbBPV2 {
 
         debug_assert!(victim.page_key().is_none());
 
-        self.overflow_insert(page_key, victim.frame_id() as usize);
+        self.overflow_insert(page_key, victim.frame_id());
 
         victim.set_id(page_id);
         victim.set_page_key(Some(page_key));
@@ -788,7 +819,7 @@ impl MemPool for TlbBPV2 {
 
     fn flush_all_and_reset(&self) -> Result<(), MemPoolStatus> {
         self.fm.flush_all_and_reset(|pk, idx| {
-            if self.overflow_lookup(pk) == Some(idx as usize) {
+            if self.overflow_lookup(pk) == Some(idx) {
                 self.overflow_remove(pk);
             }
         })
@@ -848,6 +879,54 @@ impl MemPool for TlbBPV2 {
 
     unsafe fn reset_stats(&self) {
         self.stats.clear();
+    }
+
+    #[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
+    fn sample_coverage(&self) -> (u64, u64) {
+        let hits = TLB_HITS_GLOBAL.load(Ordering::Relaxed);
+        let misses = TLB_MISSES_GLOBAL.load(Ordering::Relaxed);
+        let false_hits = TLB_FALSE_HITS_GLOBAL.load(Ordering::Relaxed);
+        (hits, hits + misses + false_hits)
+    }
+
+    /// Emit the unified `fast_path_coverage` line that the PT / LIPAH variants
+    /// also emit. For TLB-V2 "fast path" = TLB hit; false_hits are *not*
+    /// counted as hits because they fall through to the overflow path. Reads
+    /// from the global atomic shadows (TLB_HITS_GLOBAL etc.) because the
+    /// thread-local TLB_HITS only reflects the calling thread. See plan: PT
+    /// strength/weakness study, Part B1.
+    fn print_profile(&self) {
+        #[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
+        {
+            let hits = TLB_HITS_GLOBAL.load(Ordering::Relaxed);
+            let misses = TLB_MISSES_GLOBAL.load(Ordering::Relaxed);
+            let false_hits = TLB_FALSE_HITS_GLOBAL.load(Ordering::Relaxed);
+            let total = hits + misses + false_hits;
+            if total == 0 {
+                return;
+            }
+            println!("\n=== TLB-V2 Coverage ===");
+            println!(
+                "TLB hits:       {:>12}  ({:.1}%)",
+                hits,
+                hits as f64 / total as f64 * 100.0
+            );
+            println!(
+                "TLB false_hits: {:>12}  ({:.1}%)",
+                false_hits,
+                false_hits as f64 / total as f64 * 100.0
+            );
+            println!(
+                "TLB misses:     {:>12}  ({:.1}%)",
+                misses,
+                misses as f64 / total as f64 * 100.0
+            );
+            let cov = hits as f64 / total as f64;
+            println!(
+                "fast_path_coverage: {:.4}  (hits={}, total={})",
+                cov, hits, total
+            );
+        }
     }
 }
 

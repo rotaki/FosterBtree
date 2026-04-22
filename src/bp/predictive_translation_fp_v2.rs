@@ -181,4 +181,8 @@ impl MemPool for PredictiveTranslationFPBPV2 {
     fn print_profile(&self) {
         self.inner.print_profile()
     }
+
+    fn sample_coverage(&self) -> (u64, u64) {
+        self.inner.sample_coverage()
+    }
 }

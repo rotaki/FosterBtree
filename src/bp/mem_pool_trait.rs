@@ -477,4 +477,20 @@ pub trait MemPool: Sync + Send {
     /// Print sub-step profile counters (PT-only, feature = "pt_profile").
     /// Default is no-op.
     fn print_profile(&self) {}
+
+    /// Snapshot the unified fast-path coverage counters: `(fast_hits, total)`.
+    ///
+    /// For PT / PT(FP): `fast_hits = preferred_frame_hits`, `total = hits +
+    /// overflow_chain_hits + page_faults`.
+    /// For LIPAH (bp_clock_v2): `fast_hits = hint_hits`, `total = hint_hits +
+    /// hint_misses`.
+    /// For TLB-V2: `fast_hits = TLB_HITS_GLOBAL`, `total = hits + misses +
+    /// false_hits`.
+    ///
+    /// Default returns (0, 0) — variants without coverage counters just
+    /// opt out. Gated so it adds no cost in the hot path (it's only called
+    /// from slow sampling threads). See plan: PT weakness B4.
+    fn sample_coverage(&self) -> (u64, u64) {
+        (0, 0)
+    }
 }

@@ -116,6 +116,32 @@ pub fn get_test_pt_bucket_validate_v2(num_frames: usize) -> Arc<PredictiveTransl
     Arc::new(PredictiveTranslationFPBPV2::new(num_frames, cm).unwrap())
 }
 
+pub fn get_test_pt_v2(num_frames: usize) -> Arc<PredictiveTranslationBPV2> {
+    let base_dir = gen_random_pathname(Some("test_pt_v2_direct"));
+    let cm = Arc::new(ContainerManager::new(base_dir, true, true).unwrap());
+    Arc::new(PredictiveTranslationBPV2::new(num_frames, cm).unwrap())
+}
+
+/// Order-preserving-hash PT V2 (no FP wrapper). Same type as `get_test_pt_v2`
+/// but the `pt_op_hash` feature changes `preferred_frame` to use the TLB-style
+/// hash composition `hash(c_key) + page_id`. Enabled by `bp_pt_v2_ophash`.
+pub fn get_test_pt_v2_ophash(num_frames: usize) -> Arc<PredictiveTranslationBPV2> {
+    let base_dir = gen_random_pathname(Some("test_pt_v2_ophash_direct"));
+    let cm = Arc::new(ContainerManager::new(base_dir, true, true).unwrap());
+    Arc::new(PredictiveTranslationBPV2::new(num_frames, cm).unwrap())
+}
+
+/// Order-preserving-hash PT(FP) V2. Same type as `get_test_pt_bucket_validate_v2`
+/// but the `pt_op_hash` feature changes `preferred_frame`. Enabled by
+/// `bp_pt_bucket_v2_ophash`.
+pub fn get_test_pt_bucket_validate_v2_ophash(
+    num_frames: usize,
+) -> Arc<PredictiveTranslationFPBPV2> {
+    let base_dir = gen_random_pathname(Some("test_pt_bucket_v2_ophash_direct"));
+    let cm = Arc::new(ContainerManager::new(base_dir, true, true).unwrap());
+    Arc::new(PredictiveTranslationFPBPV2::new(num_frames, cm).unwrap())
+}
+
 pub fn get_test_dashmap_bp(num_frames: usize) -> Arc<DashmapBP> {
     let base_dir = gen_random_pathname(Some("test_dashmap_direct"));
     let cm = Arc::new(ContainerManager::new(base_dir, true, true).unwrap());
@@ -131,6 +157,31 @@ pub fn get_test_hashmap_bp(num_frames: usize) -> Arc<HashmapBP> {
 
 pub fn get_in_mem_pool() -> Arc<InMemPool> {
     Arc::new(InMemPool::new())
+}
+
+/// Replica of `PredictiveTranslationBPV2::preferred_frame`, exposed for
+/// benchmarks that need to pick page ids by their target preferred slot
+/// (e.g. deterministic-collision microbenchmarks). The formula is kept in
+/// sync with the `pt_op_hash` feature: when it's enabled we use the
+/// TLB-style order-preserving composition, otherwise the Stafford-mixed
+/// full key. See plan: PT strength/weakness study, Part B2.
+#[inline]
+pub fn pt_preferred_slot(c_key: u32, page_id: u32, num_frames: u64) -> u32 {
+    #[inline(always)]
+    fn fastmod(hash: u64, n: u64) -> u32 {
+        (((hash as u128).wrapping_mul(n as u128)) >> 64) as u32
+    }
+    #[cfg(feature = "pt_op_hash")]
+    {
+        let c_hash = hash::hash_u64(c_key as u64);
+        let packed = c_hash.wrapping_add(page_id as u64);
+        fastmod(packed, num_frames)
+    }
+    #[cfg(not(feature = "pt_op_hash"))]
+    {
+        let packed = (c_key as u64) << 32 | page_id as u64;
+        fastmod(hash::hash_u64(packed), num_frames)
+    }
 }
 pub mod prelude {
     pub use super::get_test_dashmap_bp;
