@@ -136,6 +136,14 @@ struct Args {
     /// overhead, so leave off for pure throughput runs.
     #[arg(long, default_value_t = false)]
     latency: bool,
+
+    /// Refresh frame_id hints after warmup (LIPAH "hot" mode). By default,
+    /// hints are written once at setup and become stale after evictions
+    /// (LIPAH "cold" mode). With this flag, hints are updated to current
+    /// frame positions after warmup, giving LIPAH the best-case fast-path
+    /// hit rate. Only affects chain traversal mode with hint-using BPs.
+    #[arg(long, default_value_t = false)]
+    refresh_hints: bool,
 }
 
 fn get_bp(num_frames: usize) -> Arc<impl MemPool> {
@@ -268,9 +276,10 @@ fn main() {
     // `use_chain` = false when the user opted into zipf, phase-shift, or
     // multi-hotspot mode.
     let use_chain = args.theta == 0.0 && !args.phase_shift && args.hotspots == 0;
+    let mut next_idx: Vec<usize> = Vec::new();  // Keep outside for hint refresh
     if use_chain {
         // Build per-page next-index.
-        let mut next_idx: Vec<usize> = vec![0; num_pages];
+        next_idx = vec![0; num_pages];
         if args.sequential {
             for i in 0..num_pages {
                 next_idx[i] = (i + 1) % num_pages;
@@ -376,6 +385,35 @@ fn main() {
             flag.store(false, Ordering::Relaxed);
         });
         println!("Warmup done");
+    }
+
+    // Refresh hints after warmup if requested (LIPAH "hot" mode).
+    if use_chain && use_frame_hint && args.refresh_hints {
+        println!("Refreshing frame_id hints to current positions...");
+        for i in 0..num_pages {
+            let next = keys[next_idx[i]];
+            // Read current page to get updated next page info
+            let next_key = PageFrameKey::new(c_key, next.p_key().page_id);
+            match bp.get_page_for_read(next_key) {
+                Ok(guard) => {
+                    // Get current frame_id from the guard
+                    if let Some(current_key) = guard.page_frame_key() {
+                        let frame_id_bytes = current_key.frame_id().to_be_bytes();
+                        // Update the hint in the current page
+                        let mut g = bp.get_page_for_write(keys[i]).unwrap();
+                        let page: &mut [u8] = &mut *g;
+                        let len = page.len();
+                        // Update only the frame_id portion (last 4 bytes)
+                        page[len - 4..].copy_from_slice(&frame_id_bytes);
+                    }
+                }
+                Err(_) => {
+                    // Page was evicted, best effort - keep old hint
+                    continue;
+                }
+            }
+        }
+        println!("Hints refreshed");
     }
 
     // Benchmark

@@ -29,11 +29,10 @@ TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 SUMMARY="$OUTDIR/summary_${TIMESTAMP}.txt"
 
 declare -a VARIANTS=(
-    "bp_clock|LIPAH"
-    "bp_pt_bucket|PT-FP-1"
-    "bp_pt_tlb_only|TLB-only"
-    "bp_tlb|TLB-congee"
-    "bp_tlb,tlb_victim_cache|TLB-victim"
+    "bp_clock|LIPAH-cold|--no-frame-hint"
+    "bp_clock|LIPAH-hot|--refresh-hints"
+    "bp_pt_bucket_v2|PT-FP-V2|"
+    "bp_tlb_v2|TLB-V2|"
 )
 
 echo "=== Sequential-scan translation benchmark ===" | tee "$SUMMARY"
@@ -41,27 +40,33 @@ echo "Config: n=$N f=$F t=$T warmup=${W}s exec=${S}s" | tee -a "$SUMMARY"
 echo "Date: $(date)" | tee -a "$SUMMARY"
 echo "" | tee -a "$SUMMARY"
 
-# Build each variant
+# Build unique feature combinations
+declare -A BUILT_FEATURES
 for entry in "${VARIANTS[@]}"; do
-    IFS='|' read -r features label <<< "$entry"
-    tag=$(echo "$label" | tr -d ' -' | tr 'A-Z' 'a-z')
-    echo "Building $label (features: $features)..." | tee -a "$SUMMARY"
-    cargo build --release --bin "$BIN_SRC" --features "$features" 2>&1 | tail -1
-    cp -f "$TARGET/$BIN_SRC" "$TARGET/${BIN_SRC}_${tag}"
+    IFS='|' read -r features label extra_args <<< "$entry"
+    if [ -z "${BUILT_FEATURES[$features]+x}" ]; then
+        tag=$(echo "$label" | tr -d ' -' | tr 'A-Z' 'a-z')
+        echo "Building $label (features: $features)..." | tee -a "$SUMMARY"
+        cargo build --release --bin "$BIN_SRC" --features "$features" 2>&1 | tail -1
+        cp -f "$TARGET/$BIN_SRC" "$TARGET/${BIN_SRC}_${tag}"
+        BUILT_FEATURES[$features]=1
+    fi
 done
 echo "" | tee -a "$SUMMARY"
 
 printf "%-12s %-14s %-14s %-14s\n" "variant" "ops" "Mops/s" "ns/op" | tee -a "$SUMMARY"
 
 for entry in "${VARIANTS[@]}"; do
-    IFS='|' read -r features label <<< "$entry"
+    IFS='|' read -r features label extra_args <<< "$entry"
     tag=$(echo "$label" | tr -d ' -' | tr 'A-Z' 'a-z')
-    BIN="$TARGET/${BIN_SRC}_${tag}"
+    # Map to binary: LIPAH-hot and LIPAH-cold both use lipahcold binary
+    bin_tag=$(echo "$label" | sed 's/-hot$/-cold/' | tr -d ' -' | tr 'A-Z' 'a-z')
+    BIN="$TARGET/${BIN_SRC}_${bin_tag}"
 
     LOGFILE="$OUTDIR/${tag}_${TIMESTAMP}.log"
     echo "Running $label..." | tee -a "$SUMMARY"
 
-    "$BIN" --sequential -n "$N" -f "$F" -t "$T" -s "$S" -w "$W" >"$LOGFILE" 2>&1 || true
+    "$BIN" --sequential -n "$N" -f "$F" -t "$T" -s "$S" -w "$W" $extra_args >"$LOGFILE" 2>&1 || true
 
     ops=$(grep "^Total ops:" "$LOGFILE" | awk '{print $3}' || echo "N/A")
     mops=$(grep "^Throughput:" "$LOGFILE" | grep -oP '\(\K[0-9.]+' || echo "N/A")
