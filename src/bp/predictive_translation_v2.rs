@@ -189,9 +189,7 @@ impl PredictiveTranslationBPV2 {
     /// between when classify_frame chose it and when finalize runs).
     #[inline]
     fn on_evict(&self, pk: &PageKey, idx: u32) {
-        if self.overflow.lookup(pk) == Some(idx) {
-            self.overflow.remove(pk);
-        }
+        self.overflow.remove(pk);
         // Track how often a fast-path owner loses residency (plan: B1).
         // `preferred_frame` is a pure function of the key, so this is cheap.
         #[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
@@ -220,7 +218,10 @@ impl PredictiveTranslationBPV2 {
         {
             let c_hash = super::hash::hash_u64(key.c_key.as_u32() as u64);
             let packed = c_hash.wrapping_add(key.page_id as u64);
-            fastmod(packed, self.num_frames_u64)
+            // Use regular modulo instead of fastmod to preserve order-preserving property.
+            // Fastmod requires large hash values (>2^55 for small num_frames) and would
+            // return 0 for all small page_ids, breaking the sequential mapping.
+            (packed % self.num_frames_u64) as u32
         }
         #[cfg(not(feature = "pt_op_hash"))]
         {
@@ -399,7 +400,8 @@ impl PredictiveTranslationBPV2 {
             );
             victim_guard.evict_info().update();
 
-            self.overflow.insert(page_key, victim_idx);
+            // Insert at the preferred bucket (already promoted to pref frame).
+            self.overflow.insert_at_bucket(page_key, victim_idx, pref as usize);
             current_guard.clear();
             self.enqueue_free_frame(current_idx);
             // Promotion is a swap: net change in real usage is zero
@@ -431,8 +433,11 @@ impl PredictiveTranslationBPV2 {
         victim_guard.evict_info().update();
         current_guard.evict_info().update();
 
-        self.overflow.insert(page_key, victim_idx);
-        self.overflow.insert(other_key, current_idx);
+        // After swap: page_key is now at pref (victim_idx), other_key is at current_idx.
+        // Insert page_key at the preferred bucket; for other_key, use its own preferred frame.
+        self.overflow.insert_at_bucket(page_key, victim_idx, pref as usize);
+        let other_pref = self.preferred_frame(&other_key);
+        self.overflow.insert_at_bucket(other_key, current_idx, other_pref as usize);
 
         drop(current_guard);
         Ok(victim_guard)
@@ -634,7 +639,11 @@ impl MemPool for PredictiveTranslationBPV2 {
         debug_assert!(victim.page_key().is_none());
         debug_assert!(!victim.dirty().load(Ordering::Acquire));
 
-        self.overflow.insert(page_key, victim.frame_id());
+        // Insert into the overflow table at the preferred bucket so future lookups find it.
+        // With pt_op_hash, preferred_frame uses a different hash than the default bucket_index,
+        // so we must explicitly use the preferred slot as the bucket.
+        let pref = self.preferred_frame(&page_key);
+        self.overflow.insert_at_bucket(page_key, victim.frame_id(), pref as usize);
 
         victim.set_id(page_id);
         victim.set_page_key(Some(page_key));

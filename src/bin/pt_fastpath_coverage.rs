@@ -84,6 +84,12 @@ struct Args {
     /// Record per-op latency histogram. Adds ~20ns overhead per op.
     #[arg(long, default_value_t = false)]
     latency: bool,
+
+    /// Number of containers to distribute pages across. With ophash, multiple
+    /// containers create collisions where container ranges overlap in the frame
+    /// space. Default: 1 (single container, no ophash collisions).
+    #[arg(long, default_value_t = 1)]
+    num_containers: usize,
 }
 
 fn get_bp(num_frames: usize) -> Arc<impl MemPool> {
@@ -133,11 +139,10 @@ fn get_bp(num_frames: usize) -> Arc<impl MemPool> {
 
 fn main() {
     let args = Args::parse();
-    let c_key = ContainerKey::new(0, 0);
 
     println!("=== PT Fast-Path Coverage Benchmark ===");
     println!(
-        "num_frames={} num_pages={} k={} hot_sets={} threads={} seconds={} warmup={} no_conflict={}",
+        "num_frames={} num_pages={} k={} hot_sets={} threads={} seconds={} warmup={} no_conflict={} num_containers={}",
         args.num_frames,
         args.num_pages,
         args.collision_width,
@@ -146,26 +151,36 @@ fn main() {
         args.seconds,
         args.warmup,
         args.no_conflict,
+        args.num_containers,
     );
 
     let bp = get_bp(args.num_frames);
 
-    // Create pages. Each create returns the assigned PageFrameKey; page ids are
-    // monotonically assigned by the BP, so `keys[i].p_key().page_id == i` in
-    // practice, but we don't rely on that — we key everything off the actual
-    // returned PageFrameKey.
-    let mut keys: Vec<PageFrameKey> = Vec::with_capacity(args.num_pages);
-    for _ in 0..args.num_pages {
-        let g = bp.create_new_page_for_write(c_key).unwrap();
-        keys.push(g.page_frame_key().unwrap());
+    // Create pages distributed across num_containers. We need to track both the
+    // PageFrameKey and the ContainerKey for each page so we can compute the
+    // correct PT preferred slot.
+    let mut keys: Vec<(ContainerKey, PageFrameKey)> = Vec::with_capacity(args.num_pages);
+    let pages_per_container = args.num_pages / args.num_containers;
+    for c_idx in 0..args.num_containers {
+        let c_key = ContainerKey::new(c_idx as u16, 0);
+        let count = if c_idx == args.num_containers - 1 {
+            // Last container gets any remainder pages
+            args.num_pages - (pages_per_container * (args.num_containers - 1))
+        } else {
+            pages_per_container
+        };
+        for _ in 0..count {
+            let g = bp.create_new_page_for_write(c_key).unwrap();
+            keys.push((c_key, g.page_frame_key().unwrap()));
+        }
     }
-    println!("Created {} pages", keys.len());
+    println!("Created {} pages across {} containers", keys.len(), args.num_containers);
 
     // Bucket page ids by their PT preferred slot.
     let nf64 = args.num_frames as u64;
     let mut by_slot: Vec<Vec<usize>> = vec![Vec::new(); args.num_frames];
-    for (i, k) in keys.iter().enumerate() {
-        let slot = pt_preferred_slot(c_key.as_u32(), k.p_key().page_id, nf64) as usize;
+    for (i, (c_key, pfk)) in keys.iter().enumerate() {
+        let slot = pt_preferred_slot(c_key.as_u32(), pfk.p_key().page_id, nf64) as usize;
         by_slot[slot].push(i);
     }
 
@@ -220,18 +235,14 @@ fn main() {
         out
     };
 
-    // Before warmup, refresh every hot page's stored frame_id so LIPAH's
-    // hint-based fast path has accurate data. Page IDs in `hot_indices` are
-    // stable, but each page may have been evicted/re-placed during the
-    // 40000-page create loop above, so the create-time frame_id is stale.
-    // Reading each hot page once via `PageFrameKey::new` (no hint) forces the
-    // slow path, and the returned guard has the current frame id.
+    // Build the hot_keys vector from the selected hot indices.
+    // For PT, we can use the PageFrameKeys directly - they contain the
+    // (container, page_id) pair which is all PT needs for lookups.
+    // (LIPAH would need frame_id hints refreshed, but PT doesn't use them.)
     let mut hot_keys_vec: Vec<PageFrameKey> = Vec::with_capacity(hot_indices.len());
     for &i in &hot_indices {
-        let pid = keys[i].p_key().page_id;
-        let k = PageFrameKey::new(c_key, pid);
-        let g = bp.get_page_for_read(k).expect("failed to refresh hot page");
-        hot_keys_vec.push(g.page_frame_key().unwrap());
+        let (_c_key, pfk) = keys[i];
+        hot_keys_vec.push(pfk);
     }
     let hot_keys: Arc<Vec<PageFrameKey>> = Arc::new(hot_keys_vec);
 

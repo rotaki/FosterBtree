@@ -175,7 +175,10 @@ pub fn pt_preferred_slot(c_key: u32, page_id: u32, num_frames: u64) -> u32 {
     {
         let c_hash = hash::hash_u64(c_key as u64);
         let packed = c_hash.wrapping_add(page_id as u64);
-        fastmod(packed, num_frames)
+        // Use regular modulo instead of fastmod to preserve order-preserving property.
+        // Fastmod requires large hash values (>2^55 for small num_frames) and would
+        // return 0 for all small page_ids, breaking the sequential mapping.
+        (packed % num_frames) as u32
     }
     #[cfg(not(feature = "pt_op_hash"))]
     {

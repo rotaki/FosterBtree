@@ -379,6 +379,13 @@ impl OverflowTable {
     #[inline]
     pub(crate) fn insert(&self, key: PageKey, frame_id: u32) {
         let idx = self.bucket_index(&key);
+        self.insert_at_bucket(key, frame_id, idx);
+    }
+
+    /// In-place insert at a specific bucket index (used by PT when preferred_frame differs from hash).
+    #[inline]
+    pub(crate) fn insert_at_bucket(&self, key: PageKey, frame_id: u32, bucket_idx: usize) {
+        let idx = bucket_idx % self.num_buckets;
         let bucket = &self.buckets[idx];
         let guard = crossbeam_epoch::pin();
         while !bucket.try_lock() {
