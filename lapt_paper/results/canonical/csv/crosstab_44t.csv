@@ -1,0 +1,13 @@
+variant,access,state,trial,mops,ns_per_op
+LIPAH,sequential,sat,1,130.55,337.0
+LIPAH,sequential,stale,1,33.83,1300.7
+LIPAH,uniform,sat,1,140.08,314.1
+LIPAH,uniform,stale,1,36.00,1222.4
+PrediCache,sequential,sat,1,79.57,552.9
+PrediCache,sequential,stale,1,75.98,579.1
+PrediCache,uniform,sat,1,82.67,532.2
+PrediCache,uniform,stale,1,79.26,555.1
+LAPT,sequential,sat,1,145.67,302.0
+LAPT,sequential,stale,1,137.68,319.6
+LAPT,uniform,sat,1,100.86,436.2
+LAPT,uniform,stale,1,97.97,449.1
