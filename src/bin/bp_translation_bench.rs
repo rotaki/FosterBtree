@@ -47,20 +47,14 @@ use rand::RngCore;
 /// is a no-op.
 #[cfg(any(
     feature = "bp_clock",
-    feature = "bp_clock_v2",
     feature = "vmcache",
-    feature = "bp_dashmap",
-    feature = "bp_hashmap",
     feature = "bp_overflow",
 ))]
 const BP_USES_HINT: bool = true;
 
 #[cfg(not(any(
     feature = "bp_clock",
-    feature = "bp_clock_v2",
     feature = "vmcache",
-    feature = "bp_dashmap",
-    feature = "bp_hashmap",
     feature = "bp_overflow",
 )))]
 const BP_USES_HINT: bool = false;
@@ -144,6 +138,41 @@ struct Args {
     /// hit rate. Only affects chain traversal mode with hint-using BPs.
     #[arg(long, default_value_t = false)]
     refresh_hints: bool,
+
+    /// Number of containers to distribute pages across. With ophash, multiple
+    /// containers create collisions where container ranges overlap in the frame
+    /// space, reducing coverage. Default: 1 (single container, ophash gets 100%).
+    #[arg(long, default_value_t = 1)]
+    num_containers: usize,
+
+    /// Fold the first N bytes of each page into the checksum on every chain
+    /// hop. N=0 (default) preserves the translation-only behavior (1 byte
+    /// from page[0] + the 12-byte tail). Larger N simulates per-page payload
+    /// work like tuple decode or aggregation scans. Bytes are folded
+    /// sequentially from page[0..N] — prefetcher's best case.
+    #[arg(long, default_value_t = 0)]
+    payload_bytes: usize,
+
+    /// Disable the chain-traversal mode. Each access picks a uniformly random
+    /// page index and looks it up via keys[idx], with no dependency between
+    /// successive accesses. Models OLTP point-lookup workloads (each access
+    /// independent, OoO can hide some translation latency).
+    #[arg(long, default_value_t = false)]
+    no_chain: bool,
+
+    /// Physically scramble page→frame placement before the benchmark runs.
+    /// After page creation and chain installation, calls flush_all_and_reset
+    /// then re-faults every page in shuffled order. The new positions are
+    /// uncorrelated with creation order, so:
+    ///   - LIPAH: hints written at creation now point at the wrong frames
+    ///     (LIPAH issues a hint check, misses, falls back to DashMap).
+    ///   - PT/Congee: pages are at random positions wrt their preferred
+    ///     frames, so the FP fast path's meta(pref).key() check misses and
+    ///     every access lands in the overflow slow path.
+    /// This is the proper "stale predictions" workload — measures the cost
+    /// when the predictor is wrong, not when it's been short-circuited.
+    #[arg(long, default_value_t = false)]
+    scramble: bool,
 }
 
 fn get_bp(num_frames: usize) -> Arc<impl MemPool> {
@@ -152,36 +181,17 @@ fn get_bp(num_frames: usize) -> Arc<impl MemPool> {
         use fbtree::bp::get_test_bp_clock;
         return get_test_bp_clock::<64>(num_frames);
     }
-    #[cfg(feature = "bp_clock_v2")]
-    {
-        use fbtree::bp::get_test_bp_clock_v2;
-        return get_test_bp_clock_v2::<64>(num_frames);
-    }
-    #[cfg(feature = "bp_pt_bucket")]
-    {
-        use fbtree::bp::get_test_pt_bucket_validate;
-        return get_test_pt_bucket_validate(num_frames);
-    }
-    // Note: order matters — `bp_pt_bucket_v2_ophash` implies `bp_pt_bucket_v2`,
-    // and `bp_pt_v2_ophash` implies `bp_pt_v2`, so the ophash arms are matched
-    // first. The inner type is identical; only `preferred_frame` changes
-    // (gated by `pt_op_hash` in predictive_translation_v2.rs).
-    #[cfg(feature = "bp_pt_bucket_v2_ophash")]
-    {
-        use fbtree::bp::get_test_pt_bucket_validate_v2_ophash;
-        return get_test_pt_bucket_validate_v2_ophash(num_frames);
-    }
-    #[cfg(all(feature = "bp_pt_bucket_v2", not(feature = "bp_pt_bucket_v2_ophash")))]
+    #[cfg(feature = "bp_pt_bucket_v2")]
     {
         use fbtree::bp::get_test_pt_bucket_validate_v2;
         return get_test_pt_bucket_validate_v2(num_frames);
     }
-    #[cfg(feature = "bp_pt_v2_ophash")]
+    #[cfg(feature = "bp_lapt")]
     {
-        use fbtree::bp::get_test_pt_v2_ophash;
-        return get_test_pt_v2_ophash(num_frames);
+        use fbtree::bp::get_test_lapt;
+        return get_test_lapt(num_frames);
     }
-    #[cfg(all(feature = "bp_pt_v2", not(feature = "bp_pt_v2_ophash")))]
+    #[cfg(feature = "bp_pt_v2")]
     {
         use fbtree::bp::get_test_pt_v2;
         return get_test_pt_v2(num_frames);
@@ -206,30 +216,21 @@ fn get_bp(num_frames: usize) -> Arc<impl MemPool> {
         use fbtree::bp::get_test_tlb_bp;
         return get_test_tlb_bp(num_frames);
     }
-    #[cfg(feature = "bp_tlb_v2")]
+    #[cfg(feature = "bp_predicache")]
     {
-        use fbtree::bp::get_test_tlb_bp_v2;
-        return get_test_tlb_bp_v2(num_frames);
-    }
-    #[cfg(feature = "bp_pt")]
-    {
-        use fbtree::bp::get_test_pt;
-        return get_test_pt(num_frames);
+        use fbtree::bp::get_test_predicache;
+        return get_test_predicache(num_frames);
     }
     #[cfg(not(any(
         feature = "bp_clock",
-        feature = "bp_clock_v2",
-        feature = "bp_pt_bucket",
         feature = "bp_pt_bucket_v2",
-        feature = "bp_pt_bucket_v2_ophash",
+        feature = "bp_lapt",
         feature = "bp_pt_v2",
-        feature = "bp_pt_v2_ophash",
         feature = "bp_pt_tlb",
         feature = "bp_pt_tlb_only",
         feature = "bp_pt_tlb_only_keys",
         feature = "bp_tlb",
-        feature = "bp_tlb_v2",
-        feature = "bp_pt",
+        feature = "bp_predicache",
     )))]
     {
         use fbtree::bp::get_test_bp_clock;
@@ -262,20 +263,38 @@ fn main() {
         args.hotspot_theta,
     );
 
-    // Create BP and pre-populate pages.
+    // Create BP and pre-populate pages across multiple containers.
     let bp = get_bp(args.num_frames);
     let mut keys: Vec<PageFrameKey> = Vec::with_capacity(args.num_pages);
-    for _ in 0..args.num_pages {
-        let g = bp.create_new_page_for_write(c_key).unwrap();
-        keys.push(g.page_frame_key().unwrap());
+    let pages_per_container = args.num_pages / args.num_containers;
+    for c_idx in 0..args.num_containers {
+        let container_key = if args.num_containers == 1 {
+            c_key  // Use default c_key for single container (backward compat)
+        } else {
+            ContainerKey::new(c_idx as u16, 0)
+        };
+        let count = if c_idx == args.num_containers - 1 {
+            // Last container gets remainder
+            args.num_pages - (pages_per_container * (args.num_containers - 1))
+        } else {
+            pages_per_container
+        };
+        for _ in 0..count {
+            let g = bp.create_new_page_for_write(container_key).unwrap();
+            keys.push(g.page_frame_key().unwrap());
+        }
     }
     let num_pages = args.num_pages;
-    println!("Created {} pages", num_pages);
+    if args.num_containers > 1 {
+        println!("Created {} pages across {} containers", num_pages, args.num_containers);
+    } else {
+        println!("Created {} pages", num_pages);
+    }
 
     // Chain traversal (default) — pick which next-pointer each page gets.
     // `use_chain` = false when the user opted into zipf, phase-shift, or
     // multi-hotspot mode.
-    let use_chain = args.theta == 0.0 && !args.phase_shift && args.hotspots == 0;
+    let use_chain = args.theta == 0.0 && !args.phase_shift && args.hotspots == 0 && !args.no_chain;
     let mut next_idx: Vec<usize> = Vec::new();  // Keep outside for hint refresh
     if use_chain {
         // Build per-page next-index.
@@ -299,14 +318,18 @@ fn main() {
             }
         }
 
-        // Write each page's next-link tail: [page_id BE | frame_id BE].
+        // Write each page's next-link tail: [c_key BE | page_id BE | frame_id BE].
+        // c_key encoded so chains crossing containers (--num-containers > 1)
+        // resolve correctly on read.
         for i in 0..num_pages {
             let next = keys[next_idx[i]];
+            let c_key_bytes = next.p_key().c_key.as_u32().to_be_bytes();
             let page_id_bytes = next.p_key().page_id.to_be_bytes();
             let frame_id_bytes = next.frame_id().to_be_bytes();
             let mut g = bp.get_page_for_write(keys[i]).unwrap();
             let page: &mut [u8] = &mut *g;
             let len = page.len();
+            page[len - 12..len - 8].copy_from_slice(&c_key_bytes);
             page[len - 8..len - 4].copy_from_slice(&page_id_bytes);
             page[len - 4..].copy_from_slice(&frame_id_bytes);
         }
@@ -320,6 +343,36 @@ fn main() {
             },
             use_frame_hint,
         );
+    }
+
+    // Scramble: physically randomize page→frame placement so creation-order
+    // assumptions break. flush_all_and_reset returns every frame to the free
+    // queue; re-faulting in a shuffled permutation maps shuffled[i] → next
+    // free frame, decoupling page_id from frame_id.
+    //
+    // After scramble, the chain tail still encodes the OLD frame_ids written
+    // at creation. We deliberately don't rewrite them — that's the whole
+    // point: LIPAH reads the stale hint, attempts the wrong frame, falls
+    // back to DashMap. For PT/Congee the chain frame_id is unread anyway.
+    if args.scramble {
+        println!("Scrambling page→frame placement...");
+        bp.flush_all_and_reset()
+            .expect("flush_all_and_reset failed during scramble");
+        let mut perm: Vec<usize> = (0..num_pages).collect();
+        let mut rng = small_thread_rng();
+        for i in (1..num_pages).rev() {
+            let j = (rng.next_u64() as usize) % (i + 1);
+            perm.swap(i, j);
+        }
+        for &i in &perm {
+            // Re-fault by page_key only (no hint). The BP picks the next
+            // free frame from its queue, which is in eviction order — the
+            // shuffled access order is what randomizes the placement.
+            let pk = keys[i].p_key();
+            let lookup_key = PageFrameKey::new(pk.c_key, pk.page_id);
+            let _ = bp.get_page_for_read(lookup_key).unwrap();
+        }
+        println!("Scramble done ({} pages re-faulted in shuffled order)", num_pages);
     }
 
     let keys = Arc::new(keys);
@@ -358,14 +411,17 @@ fn main() {
                             };
                             let page: &[u8] = &*g;
                             let len = page.len();
+                            let next_c_key = ContainerKey::from_u32(u32::from_be_bytes(
+                                page[len - 12..len - 8].try_into().unwrap(),
+                            ));
                             let page_id =
                                 u32::from_be_bytes(page[len - 8..len - 4].try_into().unwrap());
                             current = if use_frame_hint {
                                 let frame_id =
                                     u32::from_be_bytes(page[len - 4..].try_into().unwrap());
-                                PageFrameKey::new_with_frame_id(c_key, page_id, frame_id)
+                                PageFrameKey::new_with_frame_id(next_c_key, page_id, frame_id)
                             } else {
-                                PageFrameKey::new(c_key, page_id)
+                                PageFrameKey::new(next_c_key, page_id)
                             };
                         } else {
                             let idx = if sequential {
@@ -393,7 +449,7 @@ fn main() {
         for i in 0..num_pages {
             let next = keys[next_idx[i]];
             // Read current page to get updated next page info
-            let next_key = PageFrameKey::new(c_key, next.p_key().page_id);
+            let next_key = PageFrameKey::new(next.p_key().c_key, next.p_key().page_id);
             match bp.get_page_for_read(next_key) {
                 Ok(guard) => {
                     // Get current frame_id from the guard
@@ -440,6 +496,7 @@ fn main() {
             let hotspot_size = args.hotspot_size.min(num_pages);
             let hotspot_theta = args.hotspot_theta;
             let no_page_fold = args.no_page_fold;
+            let payload_bytes = args.payload_bytes;
             let record_latency = args.latency;
             // Per-thread start position so threads don't convoy on the same
             // chain pointer in lock-step.
@@ -507,17 +564,31 @@ fn main() {
                         };
                         let page: &[u8] = &*g;
                         let len = page.len();
+                        let next_c_key = ContainerKey::from_u32(u32::from_be_bytes(
+                            page[len - 12..len - 8].try_into().unwrap(),
+                        ));
                         let page_id =
                             u32::from_be_bytes(page[len - 8..len - 4].try_into().unwrap());
                         let next = if use_frame_hint {
                             let frame_id = u32::from_be_bytes(page[len - 4..].try_into().unwrap());
-                            PageFrameKey::new_with_frame_id(c_key, page_id, frame_id)
+                            PageFrameKey::new_with_frame_id(next_c_key, page_id, frame_id)
                         } else {
-                            PageFrameKey::new(c_key, page_id)
+                            PageFrameKey::new(next_c_key, page_id)
                         };
-                        // Mix one byte into the checksum so the load of the
-                        // non-tail portion of the page isn't DCE'd.
-                        checksum = checksum.wrapping_add(page[0] as u64);
+                        // Payload work: fold the first `payload_bytes` of the
+                        // page into the checksum. Default 0 means just one
+                        // byte (page[0]) — pure translation cost.
+                        if payload_bytes == 0 {
+                            checksum = checksum.wrapping_add(page[0] as u64);
+                        } else {
+                            let n = payload_bytes.min(len);
+                            let payload = std::hint::black_box(&page[..n]);
+                            let mut acc: u64 = 0;
+                            for &b in payload {
+                                acc = acc.wrapping_add(b as u64);
+                            }
+                            checksum ^= acc;
+                        }
                         drop(g);
                         if let (Some(h), Some(t0)) = (hist.as_mut(), t0) {
                             let _ = h.record(t0.elapsed().as_nanos() as u64);

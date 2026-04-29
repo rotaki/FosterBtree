@@ -89,14 +89,14 @@ fn fastmod(hash: u64, n: u64) -> usize {
 }
 
 /// Overflow table: fixed number of buckets, chaining with inlined first slot, in-place updates.
-pub(crate) struct OverflowTable {
+pub struct OptimisticPageMap {
     num_buckets: usize,
     num_buckets_u64: u64,
     buckets: Vec<Bucket>,
 }
 
-impl OverflowTable {
-    pub(crate) fn new(num_buckets: usize) -> Self {
+impl OptimisticPageMap {
+    pub fn new(num_buckets: usize) -> Self {
         let buckets = (0..num_buckets).map(|_| Bucket::new()).collect();
         Self {
             num_buckets,
@@ -106,7 +106,7 @@ impl OverflowTable {
     }
 
     #[inline]
-    pub(crate) fn bucket_index_pub(&self, key: &PageKey) -> usize {
+    pub fn bucket_index_pub(&self, key: &PageKey) -> usize {
         fastmod(hash_page_key(key), self.num_buckets_u64)
     }
 
@@ -125,7 +125,7 @@ impl OverflowTable {
     /// Lock-free lookup using a precomputed bucket index.
     /// `bucket_idx` must already be in `[0, num_buckets)` (e.g. from fastmod).
     #[inline]
-    pub(crate) fn lookup_with_bucket(&self, key: &PageKey, bucket_idx: usize) -> Option<u32> {
+    pub fn lookup_with_bucket(&self, key: &PageKey, bucket_idx: usize) -> Option<u32> {
         let idx = bucket_idx % self.num_buckets;
         let bucket = &self.buckets[idx];
         let guard = crossbeam_epoch::pin();
@@ -292,7 +292,7 @@ impl OverflowTable {
     /// Lock-held fallback for `get_apply_with_bucket`. Runs the closure
     /// while holding the bucket's write lock, guaranteeing the
     /// lookup-and-apply window is atomic. The closure must be fast and
-    /// must not call back into `OverflowTable` mutators for this bucket
+    /// must not call back into `OptimisticPageMap` mutators for this bucket
     /// or it will self-deadlock.
     #[cold]
     fn get_apply_slow<R, F>(
@@ -377,14 +377,14 @@ impl OverflowTable {
 
     /// In-place insert: take versioned lock, mutate bucket, unlock. No clone.
     #[inline]
-    pub(crate) fn insert(&self, key: PageKey, frame_id: u32) {
+    pub fn insert(&self, key: PageKey, frame_id: u32) {
         let idx = self.bucket_index(&key);
         self.insert_at_bucket(key, frame_id, idx);
     }
 
     /// In-place insert at a specific bucket index (used by PT when preferred_frame differs from hash).
     #[inline]
-    pub(crate) fn insert_at_bucket(&self, key: PageKey, frame_id: u32, bucket_idx: usize) {
+    pub fn insert_at_bucket(&self, key: PageKey, frame_id: u32, bucket_idx: usize) {
         let idx = bucket_idx % self.num_buckets;
         let bucket = &self.buckets[idx];
         let guard = crossbeam_epoch::pin();
@@ -567,7 +567,7 @@ mod tests {
 
     #[test]
     fn insert_and_lookup() {
-        let t = OverflowTable::new(64);
+        let t = OptimisticPageMap::new(64);
         t.insert(pk(1), 10);
         assert_eq!(t.lookup(&pk(1)), Some(10));
         assert_eq!(t.lookup(&pk(2)), None);
@@ -575,7 +575,7 @@ mod tests {
 
     #[test]
     fn insert_overwrites() {
-        let t = OverflowTable::new(64);
+        let t = OptimisticPageMap::new(64);
         t.insert(pk(1), 10);
         t.insert(pk(1), 20);
         assert_eq!(t.lookup(&pk(1)), Some(20));
@@ -583,7 +583,7 @@ mod tests {
 
     #[test]
     fn remove_returns_value() {
-        let t = OverflowTable::new(64);
+        let t = OptimisticPageMap::new(64);
         t.insert(pk(1), 10);
         assert_eq!(t.remove(&pk(1)), Some(10));
         assert_eq!(t.lookup(&pk(1)), None);
@@ -591,13 +591,13 @@ mod tests {
 
     #[test]
     fn remove_missing_key() {
-        let t = OverflowTable::new(64);
+        let t = OptimisticPageMap::new(64);
         assert_eq!(t.remove(&pk(42)), None);
     }
 
     #[test]
     fn contains_key_works() {
-        let t = OverflowTable::new(64);
+        let t = OptimisticPageMap::new(64);
         assert!(!t.contains_key(&pk(1)));
         t.insert(pk(1), 10);
         assert!(t.contains_key(&pk(1)));
@@ -607,14 +607,14 @@ mod tests {
 
     #[test]
     fn try_insert_succeeds_when_absent() {
-        let t = OverflowTable::new(64);
+        let t = OptimisticPageMap::new(64);
         assert!(t.try_insert(pk(1), 10).is_ok());
         assert_eq!(t.lookup(&pk(1)), Some(10));
     }
 
     #[test]
     fn try_insert_fails_when_present_inlined() {
-        let t = OverflowTable::new(64);
+        let t = OptimisticPageMap::new(64);
         t.insert(pk(1), 10);
         assert_eq!(t.try_insert(pk(1), 20), Err(10));
         // Original value unchanged.
@@ -624,7 +624,7 @@ mod tests {
     #[test]
     fn try_insert_fails_when_present_in_chain() {
         // Force collisions by using a single bucket.
-        let t = OverflowTable::new(1);
+        let t = OptimisticPageMap::new(1);
         t.insert(pk(1), 10); // goes to inlined
         t.insert(pk(2), 20); // goes to chain
         assert_eq!(t.try_insert(pk(2), 30), Err(20));
@@ -638,7 +638,7 @@ mod tests {
     #[test]
     fn single_bucket_multiple_keys() {
         // 1 bucket → all keys collide → exercises chain logic.
-        let t = OverflowTable::new(1);
+        let t = OptimisticPageMap::new(1);
         for i in 0..10u32 {
             t.insert(pk(i), i * 100);
         }
@@ -649,7 +649,7 @@ mod tests {
 
     #[test]
     fn remove_from_chain_middle() {
-        let t = OverflowTable::new(1);
+        let t = OptimisticPageMap::new(1);
         t.insert(pk(1), 10);
         t.insert(pk(2), 20);
         t.insert(pk(3), 30);
@@ -663,7 +663,7 @@ mod tests {
 
     #[test]
     fn remove_inlined_promotes_chain_head() {
-        let t = OverflowTable::new(1);
+        let t = OptimisticPageMap::new(1);
         t.insert(pk(1), 10); // inlined
         t.insert(pk(2), 20); // chain head
         t.insert(pk(3), 30); // chain node
@@ -677,7 +677,7 @@ mod tests {
 
     #[test]
     fn overwrite_in_chain() {
-        let t = OverflowTable::new(1);
+        let t = OptimisticPageMap::new(1);
         t.insert(pk(1), 10);
         t.insert(pk(2), 20);
         t.insert(pk(2), 99); // overwrite chain entry
@@ -690,7 +690,7 @@ mod tests {
 
     #[test]
     fn for_each_entry_visits_all() {
-        let t = OverflowTable::new(1);
+        let t = OptimisticPageMap::new(1);
         t.insert(pk(1), 10);
         t.insert(pk(2), 20);
         t.insert(pk(3), 30);
@@ -711,7 +711,7 @@ mod tests {
 
     #[test]
     fn lookup_with_bucket_works() {
-        let t = OverflowTable::new(64);
+        let t = OptimisticPageMap::new(64);
         let key = pk(5);
         t.insert(key, 42);
         let bucket_idx = fastmod(hash_page_key(&key), 64);
@@ -726,14 +726,14 @@ mod tests {
 
     #[test]
     fn get_apply_miss_returns_none() {
-        let t = OverflowTable::new(64);
+        let t = OptimisticPageMap::new(64);
         let result: Option<Option<u32>> = t.get_apply(&pk(1), |id| Some(id * 2));
         assert_eq!(result, None);
     }
 
     #[test]
     fn get_apply_hit_runs_closure() {
-        let t = OverflowTable::new(64);
+        let t = OptimisticPageMap::new(64);
         t.insert(pk(1), 10);
         let result = t.get_apply(&pk(1), |id| Some(id * 2));
         assert_eq!(result, Some(Some(20)));
@@ -741,7 +741,7 @@ mod tests {
 
     #[test]
     fn get_apply_hit_closure_returns_none() {
-        let t = OverflowTable::new(64);
+        let t = OptimisticPageMap::new(64);
         t.insert(pk(1), 10);
         let result: Option<Option<u32>> = t.get_apply(&pk(1), |_id| None);
         assert_eq!(result, Some(None));
@@ -750,7 +750,7 @@ mod tests {
     #[test]
     fn get_apply_finds_chain_entry() {
         // Force into the chain via a one-bucket table.
-        let t = OverflowTable::new(1);
+        let t = OptimisticPageMap::new(1);
         t.insert(pk(1), 10); // inlined
         t.insert(pk(2), 20); // chain
         let r1 = t.get_apply(&pk(1), |id| Some(id));
@@ -765,7 +765,7 @@ mod tests {
         use std::sync::Arc;
         use std::thread;
 
-        let t = Arc::new(OverflowTable::new(64));
+        let t = Arc::new(OptimisticPageMap::new(64));
         t.insert(pk(1), 10);
 
         let stop = Arc::new(AtomicBool::new(false));
@@ -811,7 +811,7 @@ mod tests {
         use std::sync::Arc;
         use std::thread;
 
-        let t = Arc::new(OverflowTable::new(64));
+        let t = Arc::new(OptimisticPageMap::new(64));
         let num_threads: u32 = 8;
         let ops_per_thread: u32 = 1000;
 
@@ -850,7 +850,7 @@ mod tests {
         use std::sync::{Arc, Barrier};
         use std::thread;
 
-        let t = Arc::new(OverflowTable::new(64));
+        let t = Arc::new(OptimisticPageMap::new(64));
         let barrier = Arc::new(Barrier::new(8));
         let key = pk(42);
 
@@ -882,7 +882,7 @@ mod tests {
         use std::thread;
 
         // Single bucket = maximum contention.
-        let t = Arc::new(OverflowTable::new(1));
+        let t = Arc::new(OptimisticPageMap::new(1));
         let barrier = Arc::new(Barrier::new(4));
 
         let handles: Vec<_> = (0..4u32)

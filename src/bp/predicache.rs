@@ -1,29 +1,19 @@
-//! Shadow re-implementation of `PredictiveTranslationBP` on top of
-//! `FrameManager`.
+//! Predictive Translation buffer pool (PrediCache).
 //!
-//! **Status: shadow** — coexists with the original `PredictiveTranslationBP`.
-//! Intended to be behaviorally identical; use for A/B testing and migration
-//! verification. After parity is confirmed across PT and TLB-BP, the original
-//! can be deleted and this renamed.
+//! Maps page keys to frames via a Stafford-mixed full-key hash; collisions
+//! land in an `OptimisticPageMap` (chaining hash table with versioned per-bucket
+//! locks). On read, pages found at their preferred frame use the fast path;
+//! displaced pages take the OptimisticPageMap slow path. Probabilistic promotion
+//! migrates pages back toward their preferred frame over time.
 //!
-//! Owns: `OverflowTable` (the translator) + multi-hash constants + per-call
-//! diagnostic counters + optional sub-step profile. Delegates everything
-//! frame-mgmt to `FrameManager`: page/meta storage, free-frame queue, clock
-//! hand, used-frame counter, container handles, eviction, flush.
-//!
-//! Translator hook (`on_evict`) drops an overflow entry only when it still
-//! points at the frame being freed — preserves the original PT's guard against
-//! promotion races during eviction.
+//! Owns: `OptimisticPageMap` (the translator) + per-call diagnostic counters +
+//! optional sub-step profile. Frame storage, free-list, clock hand, eviction,
+//! and flush are delegated to `FrameManager`.
 
 #[allow(unused_imports)]
 use crate::log;
 
-#[allow(unused_imports)]
-use super::hash::{
-    hash_page_key, hash_page_key_2, hash_page_key_3, hash_page_key_4, hash_page_key_u128,
-};
-#[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
-use super::predictive_translation::PTProfileCounters;
+use super::hash::hash_page_key;
 use super::{
     buffer_pool::BPStats,
     eviction_policy::{ClockEvictionPolicy, EvictionPolicy},
@@ -31,8 +21,8 @@ use super::{
     frame_manager::FrameManager,
     macro_profile::{report as macro_profile_report, scoped as macro_profile_scoped, BpMacroOp},
     mem_pool_trait::{ContainerKey, MemPool, MemPoolStatus, MemoryStats, PageFrameKey, PageKey},
-    overflow_table::OverflowTable,
-    predictive_translation::fastmod32,
+    optimistic_page_map::OptimisticPageMap,
+
 };
 use crate::random::small_thread_rng;
 use crate::{
@@ -54,9 +44,9 @@ use std::{
 // `promote_prob_no_demote` / `promote_prob_demote`. Initialized lazily from
 // the `PT_PROMOTE_PROB_*` env vars on first BP construction.
 static PROMOTE_PROB_NO_DEMOTE_ATOMIC: AtomicU32 =
-    AtomicU32::new(PredictiveTranslationBPV2::PROMOTE_PROB_NO_DEMOTE_DEFAULT);
+    AtomicU32::new(PrediCache::PROMOTE_PROB_NO_DEMOTE_DEFAULT);
 static PROMOTE_PROB_DEMOTE_ATOMIC: AtomicU32 =
-    AtomicU32::new(PredictiveTranslationBPV2::PROMOTE_PROB_DEMOTE_DEFAULT);
+    AtomicU32::new(PrediCache::PROMOTE_PROB_DEMOTE_DEFAULT);
 static PROMOTE_ENV_LOADED: std::sync::Once = std::sync::Once::new();
 
 fn load_promote_env() {
@@ -98,14 +88,14 @@ fn fastmod(hash: u64, n: u64) -> u32 {
 }
 
 // ---------------------------------------------------------------------------
-// PredictiveTranslationBPV2
+// PrediCache
 // ---------------------------------------------------------------------------
 
-pub struct PredictiveTranslationBPV2 {
+pub struct PrediCache {
     pub(crate) fm: FrameManager<EvictionPolicyImpl>,
     num_frames_u64: u64,
     num_frames_u32: u32,
-    pub(crate) overflow: OverflowTable,
+    pub(crate) overflow: OptimisticPageMap,
     pub(crate) stats: BPStats,
     #[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
     pub profile: PTProfileCounters,
@@ -115,10 +105,10 @@ pub struct PredictiveTranslationBPV2 {
     pub(crate) create_succeeded: AtomicU64,
 }
 
-unsafe impl Sync for PredictiveTranslationBPV2 {}
-unsafe impl Send for PredictiveTranslationBPV2 {}
+unsafe impl Sync for PrediCache {}
+unsafe impl Send for PrediCache {}
 
-impl Drop for PredictiveTranslationBPV2 {
+impl Drop for PrediCache {
     fn drop(&mut self) {
         let attempts = self.create_attempts.load(Ordering::Relaxed);
         if attempts > 0 {
@@ -126,7 +116,7 @@ impl Drop for PredictiveTranslationBPV2 {
             let fail_ensure = self.create_failed_ensure_free.load(Ordering::Relaxed);
             let fail_victim = self.create_failed_choose_victim.load(Ordering::Relaxed);
             eprintln!(
-                "PT-V2 create_new_page_for_write: attempts={} succeeded={} ({:.1}%) failed_ensure_free={} failed_choose_victim={} (page_id leaks={})",
+                "PT create_new_page_for_write: attempts={} succeeded={} ({:.1}%) failed_ensure_free={} failed_choose_victim={} (page_id leaks={})",
                 attempts,
                 succ,
                 succ as f64 / attempts as f64 * 100.0,
@@ -143,7 +133,7 @@ impl Drop for PredictiveTranslationBPV2 {
     }
 }
 
-impl PredictiveTranslationBPV2 {
+impl PrediCache {
     // ------------------------------------------------------------------
     // Construction
     // ------------------------------------------------------------------
@@ -157,7 +147,7 @@ impl PredictiveTranslationBPV2 {
         container_manager: Arc<ContainerManager>,
     ) -> Result<Self, MemPoolStatus> {
         log_debug!(
-            "PredictiveTranslationBPV2 created: num_frames={}",
+            "PrediCache created: num_frames={}",
             num_frames
         );
 
@@ -167,7 +157,7 @@ impl PredictiveTranslationBPV2 {
             fm: FrameManager::new(num_frames, container_manager)?,
             num_frames_u64: num_frames as u64,
             num_frames_u32: num_frames as u32,
-            overflow: OverflowTable::new(num_frames),
+            overflow: OptimisticPageMap::new(num_frames),
             stats: BPStats::new(),
             #[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
             profile: PTProfileCounters::new(),
@@ -206,27 +196,12 @@ impl PredictiveTranslationBPV2 {
     // Deterministic placement (identical to original PT)
     // ------------------------------------------------------------------
 
+    /// Stafford-mixed full-key hash. Distributes uniformly across frames; no
+    /// scan locality. This is PrediCache's placement function. (Order-preserving
+    /// placement is implemented in `lapt.rs`, not here.)
     #[inline]
     pub(crate) fn preferred_frame(&self, key: &PageKey) -> u32 {
-        // When `pt_op_hash` is enabled we use the TLB-style order-preserving
-        // composition: hash the container key and add the raw page id.
-        // Adjacent page ids within the same container map to adjacent slots
-        // (mod `num_frames`), preserving scan locality. Without it we keep
-        // the Stafford-mixed full key — better distribution, zero scan
-        // locality. See plan: PT strength/weakness study, Part A.
-        #[cfg(feature = "pt_op_hash")]
-        {
-            let c_hash = super::hash::hash_u64(key.c_key.as_u32() as u64);
-            let packed = c_hash.wrapping_add(key.page_id as u64);
-            // Use regular modulo instead of fastmod to preserve order-preserving property.
-            // Fastmod requires large hash values (>2^55 for small num_frames) and would
-            // return 0 for all small page_ids, breaking the sequential mapping.
-            (packed % self.num_frames_u64) as u32
-        }
-        #[cfg(not(feature = "pt_op_hash"))]
-        {
-            fastmod(hash_page_key(key), self.num_frames_u64)
-        }
+        fastmod(hash_page_key(key), self.num_frames_u64)
     }
 
     // ------------------------------------------------------------------
@@ -469,6 +444,7 @@ impl PredictiveTranslationBPV2 {
                 self.try_get_read_guard(idx).map(|g| (idx, g))
             });
 
+
         let pref_free_hint = self.frame_is_free(pref);
 
         match result {
@@ -489,22 +465,30 @@ impl PredictiveTranslationBPV2 {
                 // Promotion on read path (paper §3.2). On upgrade failure,
                 // skip promotion and return the read guard — the roll is
                 // rare and the next access will roll again.
+                //
+                // OPTIMIZATION: Always promote if preferred frame is free (no demotion needed).
+                // Only use probabilistic promotion for expensive swap cases.
                 if idx != pref {
-                    let denom = if pref_free_hint {
-                        Self::promote_prob_no_demote()
+                    let should_promote = if pref_free_hint {
+                        // Preferred frame is FREE - always promote! This is fast and beneficial.
+                        true
                     } else {
-                        Self::promote_prob_demote()
+                        // Preferred frame is OCCUPIED - only promote probabilistically (swap is expensive)
+                        let denom = Self::promote_prob_demote();
+                        Self::promote_roll(denom)
                     };
-                    #[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
-                    self.profile
-                        .promotions_attempted
-                        .fetch_add(1, Ordering::Relaxed);
 
-                    if Self::promote_roll(denom) {
+                    if should_promote {
+                        #[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
+                        self.profile
+                            .promotions_attempted
+                            .fetch_add(1, Ordering::Relaxed);
+
                         #[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
                         self.profile
                             .promotions_fired
                             .fetch_add(1, Ordering::Relaxed);
+
                         match g.try_upgrade(false) {
                             Ok(wg) => {
                                 let wg = self.try_promote(wg, page_key, pref)?;
@@ -545,6 +529,7 @@ impl PredictiveTranslationBPV2 {
                 self.try_get_write_guard(idx, true).map(|g| (idx, g))
             });
 
+
         match result {
             Some(Some((idx, g))) => {
                 g.evict_info().update();
@@ -560,22 +545,30 @@ impl PredictiveTranslationBPV2 {
                         .fetch_add(1, Ordering::Relaxed);
                 }
 
+                // OPTIMIZATION: Always promote if preferred frame is free (no demotion needed).
+                // Only use probabilistic promotion for expensive swap cases.
                 if idx != pref {
-                    let denom = if self.frame_is_free(pref) {
-                        Self::promote_prob_no_demote()
+                    let pref_is_free = self.frame_is_free(pref);
+                    let should_promote = if pref_is_free {
+                        // Preferred frame is FREE - always promote! This is fast and beneficial.
+                        true
                     } else {
-                        Self::promote_prob_demote()
+                        // Preferred frame is OCCUPIED - only promote probabilistically (swap is expensive)
+                        let denom = Self::promote_prob_demote();
+                        Self::promote_roll(denom)
                     };
-                    #[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
-                    self.profile
-                        .promotions_attempted
-                        .fetch_add(1, Ordering::Relaxed);
 
-                    if Self::promote_roll(denom) {
+                    if should_promote {
+                        #[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
+                        self.profile
+                            .promotions_attempted
+                            .fetch_add(1, Ordering::Relaxed);
+
                         #[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
                         self.profile
                             .promotions_fired
                             .fetch_add(1, Ordering::Relaxed);
+
                         return self.try_promote(g, page_key, pref);
                     }
                 }
@@ -602,7 +595,7 @@ impl PredictiveTranslationBPV2 {
 // MemPool trait implementation
 // ===========================================================================
 
-impl MemPool for PredictiveTranslationBPV2 {
+impl MemPool for PrediCache {
     type EP = EvictionPolicyImpl;
 
     fn create_container(&self, _c_key: ContainerKey, _is_temp: bool) -> Result<(), MemPoolStatus> {
@@ -640,7 +633,6 @@ impl MemPool for PredictiveTranslationBPV2 {
         debug_assert!(!victim.dirty().load(Ordering::Acquire));
 
         // Insert into the overflow table at the preferred bucket so future lookups find it.
-        // With pt_op_hash, preferred_frame uses a different hash than the default bucket_index,
         // so we must explicitly use the preferred slot as the bucket.
         let pref = self.preferred_frame(&page_key);
         self.overflow.insert_at_bucket(page_key, victim.frame_id(), pref as usize);
@@ -806,7 +798,7 @@ impl MemPool for PredictiveTranslationBPV2 {
 // ===========================================================================
 
 #[cfg(test)]
-impl PredictiveTranslationBPV2 {
+impl PrediCache {
     /// # Safety
     /// Must not be called while the BP is in use by other threads.
     unsafe fn run_checks(&self) {
@@ -869,17 +861,17 @@ mod tests {
     use crate::{container::ContainerManager, random::gen_random_pathname};
     use std::sync::Arc;
 
-    fn get_test_pt(num_frames: usize) -> Arc<PredictiveTranslationBPV2> {
+    fn get_test_predicache(num_frames: usize) -> Arc<PrediCache> {
         let base_dir = gen_random_pathname(Some("test_pt_v2_direct"));
         let cm = Arc::new(ContainerManager::new(base_dir, true, true).unwrap());
-        Arc::new(PredictiveTranslationBPV2::new(num_frames, cm).unwrap())
+        Arc::new(PrediCache::new(num_frames, cm).unwrap())
     }
 
     #[test]
     fn test_ptv2_create_and_read() {
         let db_id = 0;
         let num_frames = 10;
-        let bp = get_test_pt(num_frames);
+        let bp = get_test_predicache(num_frames);
         let c_key = ContainerKey::new(db_id, 0);
 
         let mut keys = Vec::new();
@@ -901,7 +893,7 @@ mod tests {
     fn test_ptv2_write_back() {
         let db_id = 0;
         let num_frames = 2;
-        let bp = get_test_pt(num_frames);
+        let bp = get_test_predicache(num_frames);
         let c_key = ContainerKey::new(db_id, 0);
 
         let mut keys = Vec::new();
@@ -923,7 +915,7 @@ mod tests {
     fn test_ptv2_flush_and_reset() {
         let db_id = 0;
         let num_frames = 10;
-        let bp = get_test_pt(num_frames);
+        let bp = get_test_predicache(num_frames);
         let c_key = ContainerKey::new(db_id, 0);
 
         let mut keys = Vec::new();
@@ -952,7 +944,7 @@ mod tests {
     fn test_ptv2_used_frames_accounting_under_promotion() {
         let db_id = 0;
         let num_frames = 64;
-        let bp = get_test_pt(num_frames);
+        let bp = get_test_predicache(num_frames);
         let c_key = ContainerKey::new(db_id, 0);
 
         let num_pages = 32;
@@ -977,7 +969,7 @@ mod tests {
     fn test_ptv2_concurrent_latch() {
         let db_id = 0;
         let num_frames = 10;
-        let bp = get_test_pt(num_frames);
+        let bp = get_test_predicache(num_frames);
         let c_key = ContainerKey::new(db_id, 0);
 
         let frame = bp.create_new_page_for_write(c_key).unwrap();
@@ -1005,3 +997,262 @@ mod tests {
         assert_eq!(guard[0], num_threads * num_iters);
     }
 }
+
+// ===========================================================================
+// Profile counters + fastmod (inlined from former predictive_translation.rs)
+// ===========================================================================
+
+pub struct PTProfileCounters {
+    // -- timing (cumulative ns) --
+    #[cfg(feature = "pt_profile")]
+    pub ensure_free_ns: AtomicU64,
+    #[cfg(feature = "pt_profile")]
+    pub hash_preferred_ns: AtomicU64,
+    #[cfg(feature = "pt_profile")]
+    pub overflow_lookup_ns: AtomicU64,
+    #[cfg(feature = "pt_profile")]
+    pub latch_ns: AtomicU64,
+    #[cfg(feature = "pt_profile")]
+    pub promotion_check_ns: AtomicU64,
+    #[cfg(feature = "pt_profile")]
+    pub fault_ns: AtomicU64,
+    // -- counts --
+    pub preferred_frame_hits: AtomicU64,
+    pub fast_return_read_hits: AtomicU64,
+    pub fast_return_read_ns: AtomicU64,
+    pub fast_return_meta_check_ns: AtomicU64,
+    pub fast_return_latch_ns: AtomicU64,
+    pub fast_return_revalidate_ns: AtomicU64,
+    pub fast_return_evict_update_ns: AtomicU64,
+    pub overflow_chain_hits: AtomicU64,
+    pub page_faults: AtomicU64,
+    pub total_reads: AtomicU64,
+    pub total_writes: AtomicU64,
+    pub promotions_attempted: AtomicU64,
+    pub promotions_fired: AtomicU64,
+    /// `try_promote` calls that took the "preferred frame is free" branch.
+    pub promote_free: AtomicU64,
+    /// `try_promote` calls that took the "preferred frame is occupied → swap" branch.
+    pub promote_swap: AtomicU64,
+    /// `try_promote` calls that bailed early (current == pref, or latch failed).
+    pub promote_noop: AtomicU64,
+    /// Page evicted from a frame that still was its own preferred slot — i.e.
+    /// the fast-path winner lost residency. Used to quantify how much
+    /// fast-path ownership churns (plan: PT weakness B1).
+    pub residency_evictions_from_preferred: AtomicU64,
+}
+
+impl PTProfileCounters {
+    pub fn new() -> Self {
+        Self {
+            #[cfg(feature = "pt_profile")]
+            ensure_free_ns: AtomicU64::new(0),
+            #[cfg(feature = "pt_profile")]
+            hash_preferred_ns: AtomicU64::new(0),
+            #[cfg(feature = "pt_profile")]
+            overflow_lookup_ns: AtomicU64::new(0),
+            #[cfg(feature = "pt_profile")]
+            latch_ns: AtomicU64::new(0),
+            #[cfg(feature = "pt_profile")]
+            promotion_check_ns: AtomicU64::new(0),
+            #[cfg(feature = "pt_profile")]
+            fault_ns: AtomicU64::new(0),
+            preferred_frame_hits: AtomicU64::new(0),
+            fast_return_read_hits: AtomicU64::new(0),
+            fast_return_read_ns: AtomicU64::new(0),
+            fast_return_meta_check_ns: AtomicU64::new(0),
+            fast_return_latch_ns: AtomicU64::new(0),
+            fast_return_revalidate_ns: AtomicU64::new(0),
+            fast_return_evict_update_ns: AtomicU64::new(0),
+            overflow_chain_hits: AtomicU64::new(0),
+            page_faults: AtomicU64::new(0),
+            total_reads: AtomicU64::new(0),
+            total_writes: AtomicU64::new(0),
+            promotions_attempted: AtomicU64::new(0),
+            promotions_fired: AtomicU64::new(0),
+            promote_free: AtomicU64::new(0),
+            promote_swap: AtomicU64::new(0),
+            promote_noop: AtomicU64::new(0),
+            residency_evictions_from_preferred: AtomicU64::new(0),
+        }
+    }
+
+    pub fn print(&self) {
+        let r = |a: &AtomicU64| a.load(Ordering::Relaxed);
+        let total_accesses = r(&self.total_reads) + r(&self.total_writes);
+        println!("\n=== PT Access Profile ===");
+        println!(
+            "Total accesses:       {:>12}  (reads: {}, writes: {})",
+            total_accesses,
+            r(&self.total_reads),
+            r(&self.total_writes)
+        );
+        println!(
+            "Preferred frame hits: {:>12}  ({:.1}%)",
+            r(&self.preferred_frame_hits),
+            r(&self.preferred_frame_hits) as f64 / total_accesses.max(1) as f64 * 100.0
+        );
+        println!(
+            "Fast-return read hits:{:>12}",
+            r(&self.fast_return_read_hits)
+        );
+        println!(
+            "Overflow chain hits:  {:>12}  ({:.1}%)",
+            r(&self.overflow_chain_hits),
+            r(&self.overflow_chain_hits) as f64 / total_accesses.max(1) as f64 * 100.0
+        );
+        println!(
+            "Page faults:          {:>12}  ({:.1}%)",
+            r(&self.page_faults),
+            r(&self.page_faults) as f64 / total_accesses.max(1) as f64 * 100.0
+        );
+        println!(
+            "Promotions attempted: {:>12}",
+            r(&self.promotions_attempted)
+        );
+        println!("Promotions fired:     {:>12}", r(&self.promotions_fired));
+        println!(
+            "  → promote (free):   {:>12}  (preferred frame was empty)",
+            r(&self.promote_free)
+        );
+        println!(
+            "  → demote (swap):    {:>12}  (preferred frame was occupied)",
+            r(&self.promote_swap)
+        );
+        println!(
+            "  → no-op:            {:>12}  (already at preferred / latch failed)",
+            r(&self.promote_noop)
+        );
+        println!(
+            "Residency evictions from preferred: {:>12}  (fast-path owners that got evicted)",
+            r(&self.residency_evictions_from_preferred)
+        );
+
+        // Combined fast-path coverage line — unified across PT, TLB, LIPAH so
+        // bench scripts can grep for a single key.
+        //
+        // For PT/PT(FP) the fast-path hit = preferred_frame_hits; non-hits are
+        // overflow_chain_hits + page_faults. This is what the plan calls
+        // "fast_path_coverage" (B1).
+        let fp_hits = r(&self.preferred_frame_hits);
+        let fp_total = fp_hits + r(&self.overflow_chain_hits) + r(&self.page_faults);
+        let cov = if fp_total == 0 {
+            0.0
+        } else {
+            fp_hits as f64 / fp_total as f64
+        };
+        println!(
+            "fast_path_coverage: {:.4}  (hits={}, total={})",
+            cov, fp_hits, fp_total
+        );
+
+        #[cfg(feature = "pt_profile")]
+        {
+            let total_timed_ns = r(&self.ensure_free_ns)
+                + r(&self.hash_preferred_ns)
+                + r(&self.overflow_lookup_ns)
+                + r(&self.latch_ns)
+                + r(&self.promotion_check_ns)
+                + r(&self.fault_ns);
+            let fmt = |ns: u64, count: u64| -> String {
+                if count == 0 {
+                    return "N/A".to_string();
+                }
+                let avg = ns as f64 / count as f64;
+                if avg >= 1000.0 {
+                    format!(
+                        "{:>8.2} us  ({:>5.1}%)",
+                        avg / 1000.0,
+                        ns as f64 / total_timed_ns as f64 * 100.0
+                    )
+                } else {
+                    format!(
+                        "{:>8.1} ns  ({:>5.1}%)",
+                        avg,
+                        ns as f64 / total_timed_ns as f64 * 100.0
+                    )
+                }
+            };
+
+            println!();
+            println!("Per-access avg latency breakdown (cumulative / total_accesses):");
+            println!(
+                "  ensure_free_frames: {}",
+                fmt(r(&self.ensure_free_ns), total_accesses)
+            );
+            println!(
+                "  hash + preferred:   {}",
+                fmt(r(&self.hash_preferred_ns), total_accesses)
+            );
+            println!(
+                "  overflow lookup:    {}",
+                fmt(r(&self.overflow_lookup_ns), total_accesses)
+            );
+            println!(
+                "  latch acquire:      {}",
+                fmt(r(&self.latch_ns), total_accesses)
+            );
+            println!(
+                "  promotion check:    {}",
+                fmt(r(&self.promotion_check_ns), total_accesses)
+            );
+            println!(
+                "  page fault:         {}",
+                fmt(r(&self.fault_ns), r(&self.page_faults))
+            );
+            println!("  ---");
+            println!(
+                "  total timed:        {}",
+                fmt(total_timed_ns, total_accesses)
+            );
+        }
+        println!("=====================\n");
+
+        let fast_return_hits = r(&self.fast_return_read_hits);
+        if fast_return_hits > 0 {
+            let avg = r(&self.fast_return_read_ns) as f64 / fast_return_hits as f64;
+            if avg >= 1000.0 {
+                println!(
+                    "Fast-return read hit avg: {:.2} us over {} hits",
+                    avg / 1000.0,
+                    fast_return_hits
+                );
+            } else {
+                println!(
+                    "Fast-return read hit avg: {:.1} ns over {} hits",
+                    avg, fast_return_hits
+                );
+            }
+            let fmt_stage = |ns: u64| -> String {
+                let avg = ns as f64 / fast_return_hits as f64;
+                if avg >= 1000.0 {
+                    format!("{:.2} us", avg / 1000.0)
+                } else {
+                    format!("{:.1} ns", avg)
+                }
+            };
+            println!(
+                "  meta check:         {}",
+                fmt_stage(r(&self.fast_return_meta_check_ns))
+            );
+            println!(
+                "  latch acquire:      {}",
+                fmt_stage(r(&self.fast_return_latch_ns))
+            );
+            println!(
+                "  post-latch verify:  {}",
+                fmt_stage(r(&self.fast_return_revalidate_ns))
+            );
+            println!(
+                "  evict update:       {}",
+                fmt_stage(r(&self.fast_return_evict_update_ns))
+            );
+            println!();
+        }
+    }
+}
+
+pub(crate) fn fastmod32(hash: u32, n: u32) -> u32 {
+    (((hash as u64).wrapping_mul(n as u64)) >> 32) as u32
+}
+

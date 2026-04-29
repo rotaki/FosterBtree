@@ -1784,7 +1784,7 @@ impl<M: MemPool> TxnStorageTrait for NoWaitTxnStorage<M> {
 #[cfg(test)]
 mod tests {
     use crate::{
-        bp::{get_test_bp, get_test_pt},
+        bp::{get_test_bp, get_test_predicache},
         prelude::{ContainerDS, ContainerOptions, DBOptions, TxnOptions},
     };
 
@@ -1836,7 +1836,7 @@ mod tests {
     /// Same as test_insert_and_read_back but with PredictiveTranslation BP (e2e hook-in check).
     #[test]
     fn test_insert_and_read_back_pt() {
-        let bp = get_test_pt(10);
+        let bp = get_test_predicache(10);
         let storage = NoWaitTxnStorage::new(&bp);
 
         let db_id = storage.open_db(DBOptions::new("testdb")).unwrap();

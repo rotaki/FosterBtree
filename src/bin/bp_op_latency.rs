@@ -1,7 +1,7 @@
 //! Micro-benchmark: per-operation latency for Clock vs PT vs PT-FP buffer pools.
 //!
 //! Measures create_new_page_for_write, get_page_for_read, and get_page_for_write
-//! on BufferPoolClock (LIPAH), PredictiveTranslationBP, and PredictiveTranslationFPBP.
+//! on BufferPoolClock (LIPAH), PrediCache.
 //!
 //! Usage:
 //!   cargo run --release --bin bp_op_latency [-- --num-pages <N> --num-frames <F> --iters <I>]
@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use fbtree::bp::{
-    get_test_bp_clock, get_test_pt, get_test_pt_fp, ContainerKey, MemPool, PageFrameKey,
+    get_test_bp_clock, get_test_predicache, ContainerKey, MemPool, PageFrameKey,
 };
 
 struct BenchResult {
@@ -147,11 +147,4 @@ fn main() {
         print_result("Clock (LIPAH)", &r);
     }
 
-    // --- PT-FP (1 hash + fast path) ---
-    // Note: base PT and PT-Two omitted (slow path disk I/O issue in benchmark)
-    {
-        let bp = get_test_pt_fp(effective_frames);
-        let r = bench(&bp, num_pages, iters);
-        print_result("PT-FP (1 hash FP)", &r);
-    }
 }

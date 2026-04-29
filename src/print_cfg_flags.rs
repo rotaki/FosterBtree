@@ -23,17 +23,13 @@ pub fn print_cfg_flags() {
     {
         println!("Using BufferPool with clock replacement policy");
     }
-    #[cfg(feature = "bp_pt")]
+    #[cfg(feature = "bp_predicache")]
     {
         println!("Using Predictive Translation (PT) buffer pool");
     }
     #[cfg(feature = "bp_pt2")]
     {
         println!("Using Predictive Translation (PT) buffer pool with two hashes");
-    }
-    #[cfg(feature = "bp_pt_bucket")]
-    {
-        println!("Using Predictive Translation (PT) bucket-validate-first buffer pool");
     }
     #[cfg(feature = "bp_pt2_bucket")]
     {
@@ -63,22 +59,13 @@ pub fn print_cfg_flags() {
     }
     #[cfg(feature = "bp_overflow")]
     {
-        println!("Using OverflowTable (custom HT) buffer pool");
-    }
-    #[cfg(feature = "bp_dashmap")]
-    {
-        println!("Using DashMap baseline buffer pool");
-    }
-    #[cfg(feature = "bp_hashmap")]
-    {
-        println!("Using HashMap baseline buffer pool");
+        println!("Using OptimisticPageMap (custom HT) buffer pool");
     }
     #[cfg(not(any(
         feature = "vmcache",
         feature = "bp_clock",
-        feature = "bp_pt",
+        feature = "bp_predicache",
         feature = "bp_pt2",
-        feature = "bp_pt_bucket",
         feature = "bp_pt2_bucket",
         feature = "bp_pt4_bucket",
         feature = "bp_pt_tlb",
@@ -86,8 +73,6 @@ pub fn print_cfg_flags() {
         feature = "bp_pt_tlb_only_keys",
         feature = "bp_tlb",
         feature = "bp_overflow",
-        feature = "bp_dashmap",
-        feature = "bp_hashmap"
     )))]
     {
         println!("Using BufferPool with LRU replacement policy");

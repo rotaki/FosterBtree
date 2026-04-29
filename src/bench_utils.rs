@@ -16,10 +16,8 @@ use crate::{
 #[cfg(feature = "bp_clock")]
 use crate::bp::{get_test_bp_clock, BufferPoolClock};
 
-#[cfg(feature = "bp_pt")]
-use crate::bp::get_test_pt;
-#[cfg(feature = "bp_pt_bucket")]
-use crate::bp::get_test_pt_bucket_validate;
+#[cfg(feature = "bp_predicache")]
+use crate::bp::get_test_predicache;
 #[cfg(feature = "bp_pt_tlb_only_keys")]
 use crate::bp::get_test_pt_tlb_only_keys;
 #[cfg(feature = "bp_pt2")]
@@ -146,9 +144,16 @@ pub fn gen_foster_btree_on_disk(bp_size: usize) -> Arc<FosterBtree<impl MemPool>
         let btree = FosterBtree::new(c_key, get_test_pt_two_hash(bp_size));
         return Arc::new(btree);
     }
-    #[cfg(feature = "bp_pt_bucket")]
+    #[cfg(feature = "bp_lapt")]
     {
-        let btree = FosterBtree::new(c_key, get_test_pt_bucket_validate(bp_size));
+        use crate::bp::get_test_lapt;
+        let btree = FosterBtree::new(c_key, get_test_lapt(bp_size));
+        return Arc::new(btree);
+    }
+    #[cfg(feature = "bp_pt_v2")]
+    {
+        use crate::bp::get_test_pt_v2;
+        let btree = FosterBtree::new(c_key, get_test_pt_v2(bp_size));
         return Arc::new(btree);
     }
     #[cfg(feature = "bp_pt2_bucket")]
@@ -156,9 +161,9 @@ pub fn gen_foster_btree_on_disk(bp_size: usize) -> Arc<FosterBtree<impl MemPool>
         let btree = FosterBtree::new(c_key, get_test_pt_two_hash_bucket_validate(bp_size));
         return Arc::new(btree);
     }
-    #[cfg(feature = "bp_pt")]
+    #[cfg(feature = "bp_predicache")]
     {
-        let btree = FosterBtree::new(c_key, get_test_pt(bp_size));
+        let btree = FosterBtree::new(c_key, get_test_predicache(bp_size));
         return Arc::new(btree);
     }
     #[cfg(feature = "bp_pt_tlb_only_keys")]
@@ -168,11 +173,12 @@ pub fn gen_foster_btree_on_disk(bp_size: usize) -> Arc<FosterBtree<impl MemPool>
     }
     #[cfg(not(any(
         feature = "bp_clock",
-        feature = "bp_pt",
+        feature = "bp_predicache",
         feature = "bp_pt2",
-        feature = "bp_pt_bucket",
         feature = "bp_pt2_bucket",
-        feature = "bp_pt_tlb_only_keys"
+        feature = "bp_pt_tlb_only_keys",
+        feature = "bp_pt_v2",
+        feature = "bp_lapt",
     )))]
     {
         let btree = FosterBtree::new(c_key, get_test_bp(bp_size));
@@ -216,6 +222,8 @@ pub fn run_bench<M: MemPool>(
     btree: Arc<FosterBtree<M>>,
 ) {
     let ops_ratio = bench_params.parse_ops_ratio();
+    let total_ops: usize = kvs.iter().map(|p| p.len()).sum();
+    let start = std::time::Instant::now();
     thread::scope(|s| {
         for partition in kvs.iter() {
             let btree = btree.clone();
@@ -234,13 +242,26 @@ pub fn run_bench<M: MemPool>(
                             let _ = btree.delete(k);
                         }
                         TreeOperation::Get => {
-                            let _ = btree.get(k);
+                            // No-copy GET: read the first byte of the value
+                            // under the leaf latch. Avoids the per-op
+                            // Vec<u8> allocation that `btree.get(k)` does.
+                            let _ = btree.get_with(k, |v| {
+                                std::hint::black_box(v.first().copied().unwrap_or(0))
+                            });
                         }
                     };
                 }
             });
         }
-    })
+    });
+    let elapsed = start.elapsed();
+    let elapsed_s = elapsed.as_secs_f64();
+    let throughput = total_ops as f64 / elapsed_s;
+    let ns_per_op = elapsed.as_nanos() as f64 / (total_ops as f64 / bench_params.num_threads as f64);
+    println!(
+        "BENCH_RESULT total_ops={} elapsed_s={:.3} throughput={:.0} ops/s ({:.2} Mops/s) ns_per_op={:.1} ratio={}",
+        total_ops, elapsed_s, throughput, throughput / 1_000_000.0, ns_per_op, bench_params.ops_ratio
+    );
 }
 
 pub fn run_bench_for_paged_hash_map<M: MemPool>(

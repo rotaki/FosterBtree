@@ -2180,6 +2180,25 @@ impl<T: MemPool> FosterBtree<T> {
         }
     }
 
+    /// No-copy GET: invoke `f` with a borrow of the value bytes while the leaf
+    /// latch is still held. Avoids the `Vec<u8>` allocation that `get`/`get_kv`
+    /// pay per call. The closure must not retain the slice past return — the
+    /// page guard is released as `leaf_page` falls out of scope after `f`.
+    pub fn get_with<F, R>(&self, key: &[u8], f: F) -> Result<R, AccessMethodError>
+    where
+        F: FnOnce(&[u8]) -> R,
+    {
+        let leaf_page = self.traverse_to_leaf_for_read(key);
+        let slot_id = leaf_page.upper_bound_slot_id(&BTreeKey::new(key)) - 1;
+        if slot_id == 0 {
+            Err(AccessMethodError::KeyNotFound)
+        } else if leaf_page.get_raw_key(slot_id) == key {
+            Ok(f(leaf_page.get_val(slot_id)))
+        } else {
+            Err(AccessMethodError::KeyNotFound)
+        }
+    }
+
     pub fn insert_kv(
         &self,
         key: &[u8],
@@ -3650,7 +3669,6 @@ mod tests {
 
     use crate::access_method::fbt::foster_btree::FosterBtreeCursor;
     use crate::access_method::fbt::foster_btree::{deserialize_page_id, InnerVal};
-    use crate::bp::get_test_dashmap_bp;
     use crate::bp::{get_test_bp_clock, get_test_vmcache};
     #[allow(unused_imports)]
     use crate::log;
@@ -3665,7 +3683,7 @@ mod tests {
             should_root_descend, AccessMethodError, OrderedUniqueKeyIndex, UniqueKeyIndex,
             MIN_BYTES_USED,
         },
-        bp::{get_in_mem_pool, get_test_bp, get_test_pt},
+        bp::{get_in_mem_pool, get_test_bp, get_test_predicache},
         random::RandomKVs,
     };
 
@@ -3688,8 +3706,7 @@ mod tests {
     #[case::bp(get_test_bp(1))]
     #[case::bp_clock(get_test_bp_clock::<1>(1))]
     #[case::in_mem(get_in_mem_pool())]
-    #[case::pt(get_test_pt(1))]
-    #[case::dashmap(get_test_dashmap_bp(1))]
+    #[case::pt(get_test_predicache(1))]
     #[case::vmc(get_test_vmcache::<true, 1>(1))]
     fn test_page_setup<T: MemPool>(#[case] mp: Arc<T>) {
         let c_key = ContainerKey::new(0, 0);
@@ -3793,8 +3810,7 @@ mod tests {
     #[case::bp(get_test_bp(2))]
     #[case::bp_clock(get_test_bp_clock::<1>(2))]
     #[case::in_mem(get_in_mem_pool())]
-    #[case::pt(get_test_pt(2))]
-    #[case::dashmap(get_test_dashmap_bp(2))]
+    #[case::pt(get_test_predicache(2))]
     #[case::vmc(get_test_vmcache::<true, 1>(2))]
     fn test_page_merge<T: MemPool>(#[case] bp: Arc<T>) {
         test_page_merge_detail(bp.clone(), 10, 20, 30, vec![], vec![]);
@@ -3905,8 +3921,7 @@ mod tests {
     #[case::bp(get_test_bp(2))]
     #[case::bp_clock(get_test_bp_clock::<1>(2))]
     #[case::in_mem(get_in_mem_pool())]
-    #[case::pt(get_test_pt(2))]
-    #[case::dashmap(get_test_dashmap_bp(2))]
+    #[case::pt(get_test_predicache(2))]
     #[case::vmc(get_test_vmcache::<true, 1>(2))]
     fn test_page_balance<T: MemPool>(#[case] bp: Arc<T>) {
         test_page_balance_detail(bp.clone(), 10, 20, 30, vec![], vec![]);
@@ -4042,8 +4057,7 @@ mod tests {
     #[case::bp(get_test_bp(3))]
     #[case::bp_clock(get_test_bp_clock::<1>(3))]
     #[case::in_mem(get_in_mem_pool())]
-    #[case::pt(get_test_pt(3))]
-    #[case::dashmap(get_test_dashmap_bp(3))]
+    #[case::pt(get_test_predicache(3))]
     #[case::vmc(get_test_vmcache::<true, 1>(3))]
     fn test_page_adopt<T: MemPool>(#[case] bp: Arc<T>) {
         test_page_adopt_detail(bp.clone(), 10, 20, 30, vec![], vec![]);
@@ -4168,8 +4182,7 @@ mod tests {
     #[case::bp(get_test_bp(3))]
     #[case::bp_clock(get_test_bp_clock::<1>(3))]
     #[case::in_mem(get_in_mem_pool())]
-    #[case::pt(get_test_pt(3))]
-    #[case::dashmap(get_test_dashmap_bp(3))]
+    #[case::pt(get_test_predicache(3))]
     #[case::vmc(get_test_vmcache::<true, 1>(3))]
     fn test_page_anti_adopt<T: MemPool>(#[case] bp: Arc<T>) {
         test_page_anti_adopt_detail(bp.clone(), 10, 20, 30, vec![], vec![]);
@@ -4182,8 +4195,7 @@ mod tests {
     #[case::bp(get_test_bp(3))]
     #[case::bp_clock(get_test_bp_clock::<1>(3))]
     #[case::in_mem(get_in_mem_pool())]
-    #[case::pt(get_test_pt(3))]
-    #[case::dashmap(get_test_dashmap_bp(3))]
+    #[case::pt(get_test_predicache(3))]
     #[case::vmc(get_test_vmcache::<true, 1>(3))]
     fn test_root_page_ascend<T: MemPool>(#[case] bp: Arc<T>) {
         let (db_id, c_id) = (0, 0);
@@ -4271,8 +4283,7 @@ mod tests {
     #[case::bp(get_test_bp(3))]
     #[case::bp_clock(get_test_bp_clock::<1>(3))]
     #[case::in_mem(get_in_mem_pool())]
-    #[case::pt(get_test_pt(3))]
-    #[case::dashmap(get_test_dashmap_bp(3))]
+    #[case::pt(get_test_predicache(3))]
     #[case::vmc(get_test_vmcache::<true, 1>(3))]
     fn test_root_page_descend<T: MemPool>(#[case] bp: Arc<T>) {
         let (db_id, c_id) = (0, 0);
@@ -4406,8 +4417,7 @@ mod tests {
     #[case::bp(get_test_bp(3))]
     #[case::bp_clock(get_test_bp_clock::<1>(3))]
     #[case::in_mem(get_in_mem_pool())]
-    #[case::pt(get_test_pt(3))]
-    #[case::dashmap(get_test_dashmap_bp(3))]
+    #[case::pt(get_test_predicache(3))]
     #[case::vmc(get_test_vmcache::<true, 1>(3))]
     fn test_foster_relationship_structure_modification_criteria<T: MemPool>(#[case] bp: Arc<T>) {
         {
@@ -4697,8 +4707,7 @@ mod tests {
     #[case::bp(get_test_bp(3))]
     #[case::bp_clock(get_test_bp_clock::<1>(3))]
     #[case::in_mem(get_in_mem_pool())]
-    #[case::pt(get_test_pt(3))]
-    #[case::dashmap(get_test_dashmap_bp(3))]
+    #[case::pt(get_test_predicache(3))]
     #[case::vmc(get_test_vmcache::<true, 1>(3))]
     fn test_parent_child_relationship_structure_modification_criteria<T: MemPool>(
         #[case] bp: Arc<T>,
@@ -4790,8 +4799,7 @@ mod tests {
     #[case::bp(get_test_bp(3))]
     #[case::bp_clock(get_test_bp_clock::<1>(3))]
     #[case::in_mem(get_in_mem_pool())]
-    #[case::pt(get_test_pt(3))]
-    #[case::dashmap(get_test_dashmap_bp(3))]
+    #[case::pt(get_test_predicache(3))]
     #[case::vmc(get_test_vmcache::<true, 1>(3))]
     fn test_sorted_insertion<T: MemPool>(#[case] bp: Arc<T>) {
         let btree = setup_btree_empty(bp.clone());
@@ -4820,8 +4828,7 @@ mod tests {
     #[case::bp(get_test_bp(3))]
     #[case::bp_clock(get_test_bp_clock::<1>(3))]
     #[case::in_mem(get_in_mem_pool())]
-    #[case::pt(get_test_pt(3))]
-    #[case::dashmap(get_test_dashmap_bp(3))]
+    #[case::pt(get_test_predicache(3))]
     #[case::vmc(get_test_vmcache::<true, 1>(3))]
     fn test_random_insertion<T: MemPool>(#[case] bp: Arc<T>) {
         let btree = setup_btree_empty(bp.clone());
@@ -4851,8 +4858,7 @@ mod tests {
     #[case::bp(get_test_bp(3))]
     #[case::bp_clock(get_test_bp_clock::<1>(3))]
     #[case::in_mem(get_in_mem_pool())]
-    #[case::pt(get_test_pt(3))]
-    #[case::dashmap(get_test_dashmap_bp(3))]
+    #[case::pt(get_test_predicache(3))]
     #[case::vmc(get_test_vmcache::<true, 1>(3))]
     fn test_ghost_insertion<T: MemPool>(#[case] bp: Arc<T>) {
         let btree = setup_btree_empty(bp.clone());
@@ -4949,8 +4955,7 @@ mod tests {
     #[case::bp(get_test_bp(3))]
     #[case::bp_clock(get_test_bp_clock::<1>(3))]
     #[case::in_mem(get_in_mem_pool())]
-    #[case::pt(get_test_pt(3))]
-    #[case::dashmap(get_test_dashmap_bp(3))]
+    #[case::pt(get_test_predicache(3))]
     #[case::vmc(get_test_vmcache::<true, 1>(3))]
     fn test_random_updates<T: MemPool>(#[case] bp: Arc<T>) {
         let btree = setup_btree_empty(bp.clone());
@@ -5007,8 +5012,7 @@ mod tests {
     #[case::bp(get_test_bp(3))]
     #[case::bp_clock(get_test_bp_clock::<1>(3))]
     #[case::in_mem(get_in_mem_pool())]
-    #[case::pt(get_test_pt(3))]
-    #[case::dashmap(get_test_dashmap_bp(3))]
+    #[case::pt(get_test_predicache(3))]
     #[case::vmc(get_test_vmcache::<true, 1>(3))]
     fn test_random_deletion<T: MemPool>(#[case] bp: Arc<T>) {
         let btree = setup_btree_empty(bp.clone());
@@ -5046,8 +5050,7 @@ mod tests {
     #[case::bp(get_test_bp(3))]
     #[case::bp_clock(get_test_bp_clock::<1>(3))]
     #[case::in_mem(get_in_mem_pool())]
-    #[case::pt(get_test_pt(3))]
-    #[case::dashmap(get_test_dashmap_bp(3))]
+    #[case::pt(get_test_predicache(3))]
     #[case::vmc(get_test_vmcache::<true, 1>(3))]
     fn test_random_upserts<T: MemPool>(#[case] bp: Arc<T>) {
         let btree = setup_btree_empty(bp.clone());
@@ -5113,8 +5116,7 @@ mod tests {
     #[case::bp(get_test_bp(3))]
     #[case::bp_clock(get_test_bp_clock::<1>(3))]
     #[case::in_mem(get_in_mem_pool())]
-    #[case::pt(get_test_pt(3))]
-    #[case::dashmap(get_test_dashmap_bp(3))]
+    #[case::pt(get_test_predicache(3))]
     #[case::vmc(get_test_vmcache::<true, 1>(3))]
     fn test_upsert_with_merge<T: MemPool>(#[case] bp: Arc<T>) {
         let btree = setup_btree_empty(bp.clone());
@@ -5145,8 +5147,7 @@ mod tests {
     #[case::bp(get_test_bp(5))]
     #[case::bp_clock(get_test_bp_clock::<2>(5))]
     #[case::in_mem(get_in_mem_pool())]
-    #[case::pt(get_test_pt(5))]
-    #[case::dashmap(get_test_dashmap_bp(5))]
+    #[case::pt(get_test_predicache(5))]
     #[case::vmc(get_test_vmcache::<true, 2>(5))]
     fn test_scan<T: MemPool>(#[case] bp: Arc<T>) {
         let btree = Arc::new(setup_btree_empty(bp.clone()));
@@ -5224,8 +5225,7 @@ mod tests {
     #[case::bp(get_test_bp(5))]
     #[case::bp_clock(get_test_bp_clock::<2>(5))]
     #[case::in_mem(get_in_mem_pool())]
-    #[case::pt(get_test_pt(5))]
-    #[case::dashmap(get_test_dashmap_bp(5))]
+    #[case::pt(get_test_predicache(5))]
     #[case::vmc(get_test_vmcache::<true, 2>(5))]
     fn test_cursor<T: MemPool>(#[case] bp: Arc<T>) {
         let btree = Arc::new(setup_btree_empty(bp.clone()));
@@ -5395,8 +5395,7 @@ mod tests {
     #[case::bp(get_test_bp(5))]
     #[case::bp_clock(get_test_bp_clock::<2>(5))]
     #[case::in_mem(get_in_mem_pool())]
-    #[case::pt(get_test_pt(5))]
-    #[case::dashmap(get_test_dashmap_bp(5))]
+    #[case::pt(get_test_predicache(5))]
     #[case::vmc(get_test_vmcache::<true, 2>(5))]
     fn test_scan_with_filter<T: MemPool>(#[case] bp: Arc<T>) {
         let btree = Arc::new(setup_btree_empty(bp.clone()));
@@ -5454,8 +5453,7 @@ mod tests {
     #[case::bp(get_test_bp(100))]
     #[case::bp_clock(get_test_bp_clock::<10>(100))]
     #[case::in_mem(get_in_mem_pool())]
-    #[case::pt(get_test_pt(100))]
-    #[case::dashmap(get_test_dashmap_bp(100))]
+    #[case::pt(get_test_predicache(100))]
     #[case::vmc(get_test_vmcache::<true, 10>(100))]
     fn test_insertion_stress<T: MemPool>(#[case] bp: Arc<T>) {
         let num_keys = 10000;
@@ -5536,8 +5534,7 @@ mod tests {
     #[case::bp(get_test_bp(100))]
     #[case::bp_clock(get_test_bp_clock::<10>(100))]
     #[case::in_mem(get_in_mem_pool())]
-    #[case::pt(get_test_pt(100))]
-    #[case::dashmap(get_test_dashmap_bp(100))]
+    #[case::pt(get_test_predicache(100))]
     #[case::vmc(get_test_vmcache::<true, 10>(100))]
     #[ignore]
     fn replay_stress<T: MemPool>(#[case] bp: Arc<T>) {
@@ -5635,8 +5632,7 @@ mod tests {
     #[case::bp(get_test_bp(100))]
     #[case::bp_clock(get_test_bp_clock::<10>(100))]
     #[case::in_mem(get_in_mem_pool())]
-    #[case::pt(get_test_pt(100))]
-    #[case::dashmap(get_test_dashmap_bp(100))]
+    #[case::pt(get_test_predicache(100))]
     // #[case::vmc(get_test_vmcache::<false, 10>(100))]
     fn test_bulk_insert_create<T: MemPool>(#[case] bp: Arc<T>) {
         let num_keys = 100000;
@@ -5676,8 +5672,7 @@ mod tests {
     #[case::bp(get_test_bp(100))]
     #[case::bp_clock(get_test_bp_clock::<10>(100))]
     #[case::in_mem(get_in_mem_pool())]
-    #[case::pt(get_test_pt(100))]
-    #[case::dashmap(get_test_dashmap_bp(100))]
+    #[case::pt(get_test_predicache(100))]
     // #[case::vmc(get_test_vmcache::<false, 10>(100))]
     fn test_parallel_insertion<T: MemPool>(#[case] bp: Arc<T>) {
         // init_test_logger();
@@ -5731,8 +5726,7 @@ mod tests {
     #[case::bp(get_test_bp(100))]
     #[case::bp_clock(get_test_bp_clock::<10>(100))]
     #[case::in_mem(get_in_mem_pool())]
-    #[case::pt(get_test_pt(100))]
-    #[case::dashmap(get_test_dashmap_bp(100))]
+    #[case::pt(get_test_predicache(100))]
     #[case::vmc(get_test_vmcache::<false, 10>(100))]
     #[ignore]
     fn test_page_split_triple<T: MemPool>(#[case] bp: Arc<T>) {
@@ -5775,8 +5769,7 @@ mod tests {
     #[case::bp(get_test_bp(5))]
     #[case::bp_clock(get_test_bp_clock::<2>(5))]
     #[case::in_mem(get_in_mem_pool())]
-    #[case::pt(get_test_pt(5))]
-    #[case::dashmap(get_test_dashmap_bp(5))]
+    #[case::pt(get_test_predicache(5))]
     #[case::vmc(get_test_vmcache::<true, 2>(5))]
     fn test_append<T: MemPool>(#[case] bp: Arc<T>) {
         let btree = Arc::new(setup_btree_append_only_empty(bp.clone()));
@@ -5806,8 +5799,7 @@ mod tests {
     #[case::bp(get_test_bp(5))]
     #[case::bp_clock(get_test_bp_clock::<2>(5))]
     #[case::in_mem(get_in_mem_pool())]
-    #[case::pt(get_test_pt(5))]
-    #[case::dashmap(get_test_dashmap_bp(5))]
+    #[case::pt(get_test_predicache(5))]
     #[case::vmc(get_test_vmcache::<true, 2>(5))]
     fn test_append_large<T: MemPool>(#[case] bp: Arc<T>) {
         let btree = Arc::new(setup_btree_append_only_empty(bp.clone()));
@@ -5838,8 +5830,7 @@ mod tests {
     #[case::bp(get_test_bp(5))]
     #[case::bp_clock(get_test_bp_clock::<2>(5))]
     #[case::in_mem(get_in_mem_pool())]
-    #[case::pt(get_test_pt(5))]
-    #[case::dashmap(get_test_dashmap_bp(5))]
+    #[case::pt(get_test_predicache(5))]
     #[case::vmc(get_test_vmcache::<true, 2>(5))]
     fn test_concurrent_append<T: MemPool>(#[case] bp: Arc<T>) {
         let btree = Arc::new(setup_btree_append_only_empty(bp.clone()));

@@ -1,8 +1,17 @@
-//! Standalone TLB + overflow buffer pool.
+//! Shadow re-implementation of `TlbBP` on top of `FrameManager`.
 //!
-//! TLB: 4-way set-associative, 1024 sets, 5-bit tag pre-filter (16 KB).
-//! Overflow: Congee (concurrent ART tree) — ordered by PageKey, enabling
-//! future range-prefill of TLB entries for sequential scans.
+//! **Status: shadow** — coexists with the original `TlbBP`. Intended to be
+//! behaviorally identical; use for A/B testing and migration verification.
+//!
+//! Owns: `CongeeRawU32` overflow translator + `BPStats` + thread-local TLB,
+//! victim cache, and per-thread counters. Delegates everything frame-mgmt
+//! (pages, metas, free-frame queue, clock hand, used-frame counter, container
+//! handles, eviction, flush) to [`FrameManager`].
+//!
+//! Translator hook (`on_evict`) drops an overflow entry only when it still
+//! points at the frame being freed — preserves the original TlbBP's guard
+//! against race where a page got remapped between candidate selection and
+//! finalize.
 
 #[allow(unused_imports)]
 use crate::log;
@@ -10,27 +19,33 @@ use crate::log;
 use super::{
     buffer_pool::BPStats,
     eviction_policy::{ClockEvictionPolicy, EvictionPolicy},
-    frame_guards::{box_as_mut_ptr, FrameMeta, FrameReadGuard, FrameWriteGuard},
+    frame_guards::{FrameMeta, FrameReadGuard, FrameWriteGuard},
+    frame_manager::FrameManager,
     mem_pool_trait::{ContainerKey, MemPool, MemPoolStatus, MemoryStats, PageFrameKey, PageKey},
 };
-use crate::{
-    container::ContainerManager,
-    log_debug, log_warn,
-    page::{Page, PageId},
-};
+use crate::{container::ContainerManager, log_debug, page::PageId};
 
+#[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
+use std::sync::atomic::AtomicU64;
 use std::{
-    cell::UnsafeCell,
     collections::BTreeMap,
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc,
-    },
+    sync::{atomic::Ordering, Arc},
 };
 
-use concurrent_queue::ConcurrentQueue;
+/// Global-atomic shadow of the thread-local TLB_HITS / TLB_MISSES /
+/// TLB_FALSE_HITS counters. The thread-local originals are used by the
+/// existing Drop-time print_stderr path. This shadow lets `print_profile()`
+/// aggregate across worker threads from the main thread so benchmarks like
+/// `pt_fastpath_coverage` can emit a consistent coverage ratio. Only updated
+/// when `pt_profile` / `pt_counts` is enabled.
+#[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
+static TLB_HITS_GLOBAL: AtomicU64 = AtomicU64::new(0);
+#[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
+static TLB_MISSES_GLOBAL: AtomicU64 = AtomicU64::new(0);
+#[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
+static TLB_FALSE_HITS_GLOBAL: AtomicU64 = AtomicU64::new(0);
+
 use congee::CongeeRawU32;
-use rayon::iter::{IntoParallelIterator, ParallelIterator};
 
 type EvictionPolicyImpl = ClockEvictionPolicy;
 type FMeta = FrameMeta<EvictionPolicyImpl>;
@@ -38,12 +53,9 @@ type FRGuard = FrameReadGuard<EvictionPolicyImpl>;
 type FWGuard = FrameWriteGuard<EvictionPolicyImpl>;
 
 // ===========================================================================
-// PageKey <-> u64 packing
+// PageKey <-> u64 packing (mirrors tlb_bp.rs)
 // ===========================================================================
 
-/// Pack PageKey into a usize for use as congee key.
-/// Layout: [c_key: 32 bits | page_id: 32 bits]
-/// This preserves ordering: pages within the same container are adjacent.
 #[inline(always)]
 fn pack_page_key(key: &PageKey) -> usize {
     ((key.c_key.as_u32() as usize) << 32) | key.page_id as usize
@@ -86,16 +98,15 @@ impl HashedKey {
 }
 
 // ===========================================================================
-// TLB constants and helpers
+// TLB layout + thread-local state
 // ===========================================================================
 
-// --- TLB layout: direct-mapped + victim cache, or 4-way set-associative ---
 #[cfg(feature = "tlb_victim_cache")]
-const TLB_ENTRIES: usize = 4096; // direct-mapped primary
+const TLB_ENTRIES: usize = 4096;
 #[cfg(feature = "tlb_victim_cache")]
 const TLB_SET_MASK: usize = TLB_ENTRIES - 1;
 #[cfg(feature = "tlb_victim_cache")]
-const VICTIM_SIZE: usize = 16; // fully-associative victim cache
+const VICTIM_SIZE: usize = 16;
 
 #[cfg(not(feature = "tlb_victim_cache"))]
 const TLB_SETS: usize = 1024;
@@ -107,8 +118,7 @@ const TLB_SET_MASK: usize = TLB_SETS - 1;
 const FRAME_BITS: u32 = 27;
 const FRAME_MASK: u32 = (1 << FRAME_BITS) - 1;
 const TAG_SHIFT: u32 = FRAME_BITS;
-
-const PREFILL_COUNT: usize = 8; // target + 7 forward neighbors
+const PREFILL_COUNT: usize = 8;
 
 #[inline(always)]
 fn pack_entry(tag: u32, frame_id: u32) -> u32 {
@@ -121,11 +131,14 @@ fn entry_tag(entry: u32) -> u32 {
 }
 
 #[inline(always)]
-fn entry_frame(entry: u32) -> usize {
-    (entry & FRAME_MASK) as usize
+fn entry_frame(entry: u32) -> u32 {
+    entry & FRAME_MASK
 }
 
-// --- Direct-mapped + victim cache ---
+// Separate thread-local state for the V2 shadow so its counters don't
+// collide with the original TlbBP's when both are linked into the same
+// binary (e.g. by tests).
+
 #[cfg(feature = "tlb_victim_cache")]
 #[thread_local]
 static mut TLB: [u32; TLB_ENTRIES] = [0; TLB_ENTRIES];
@@ -134,12 +147,11 @@ static mut TLB: [u32; TLB_ENTRIES] = [0; TLB_ENTRIES];
 static mut VICTIM: [u32; VICTIM_SIZE] = [0; VICTIM_SIZE];
 #[cfg(feature = "tlb_victim_cache")]
 #[thread_local]
-static mut VICTIM_SETS: [u16; VICTIM_SIZE] = [0; VICTIM_SIZE]; // store set index for each victim entry
+static mut VICTIM_SETS: [u16; VICTIM_SIZE] = [0; VICTIM_SIZE];
 #[cfg(feature = "tlb_victim_cache")]
 #[thread_local]
-static mut VICTIM_HEAD: usize = 0; // FIFO insertion pointer
+static mut VICTIM_HEAD: usize = 0;
 
-// --- 4-way set-associative ---
 #[cfg(not(feature = "tlb_victim_cache"))]
 #[thread_local]
 static mut TLB: [[u32; TLB_WAYS]; TLB_SETS] = [[0; TLB_WAYS]; TLB_SETS];
@@ -150,7 +162,6 @@ static mut TLB_HITS: u64 = 0;
 static mut TLB_MISSES: u64 = 0;
 #[thread_local]
 static mut TLB_PREFILLS: u64 = 0;
-/// Last missed packed PageKey — detect sequential access for sibling prefill.
 #[thread_local]
 static mut LAST_MISS_KEY: usize = 0;
 #[thread_local]
@@ -160,26 +171,18 @@ static mut PAGE_FAULTS: u64 = 0;
 #[thread_local]
 static mut TLB_FALSE_HITS: u64 = 0;
 
-// ===========================================================================
-// TLB operations (abstracted over layout)
-// ===========================================================================
-
-/// Probe the TLB for a matching entry. Returns Some(frame_id) if found.
 #[inline(always)]
-unsafe fn tlb_probe(set: usize, tag: u32) -> Option<usize> {
+unsafe fn tlb_probe(set: usize, tag: u32) -> Option<u32> {
     #[cfg(feature = "tlb_victim_cache")]
     {
-        // 1. Check direct-mapped primary
         let entry = *TLB.get_unchecked(set);
         if entry_tag(entry) == tag {
             return Some(entry_frame(entry));
         }
-        // 2. Check victim cache (fully associative)
         for v in 0..VICTIM_SIZE {
             if VICTIM_SETS[v] == set as u16 && entry_tag(VICTIM[v]) == tag {
-                // Promote: swap victim entry into primary, evicted primary goes to victim slot
                 let victim_entry = VICTIM[v];
-                VICTIM[v] = entry; // old primary (possibly 0) goes to this victim slot
+                VICTIM[v] = entry;
                 VICTIM_SETS[v] = set as u16;
                 *TLB.get_unchecked_mut(set) = victim_entry;
                 return Some(entry_frame(victim_entry));
@@ -203,12 +206,10 @@ unsafe fn tlb_probe(set: usize, tag: u32) -> Option<usize> {
     }
 }
 
-/// Insert an entry into the TLB (shift-down / evict as needed).
 #[inline(always)]
 unsafe fn tlb_insert(set: usize, entry: u32) {
     #[cfg(feature = "tlb_victim_cache")]
     {
-        // Evict current primary to victim cache (FIFO), then write new entry
         let old = *TLB.get_unchecked(set);
         if old != 0 {
             let head = VICTIM_HEAD;
@@ -228,7 +229,6 @@ unsafe fn tlb_insert(set: usize, entry: u32) {
     }
 }
 
-/// Insert an entry only if there's space (for prefill — less aggressive).
 #[inline(always)]
 unsafe fn tlb_insert_if_empty(set: usize, entry: u32) -> bool {
     #[cfg(feature = "tlb_victim_cache")]
@@ -237,7 +237,6 @@ unsafe fn tlb_insert_if_empty(set: usize, entry: u32) -> bool {
             *TLB.get_unchecked_mut(set) = entry;
             return true;
         }
-        // Check if any victim slot is empty
         for v in 0..VICTIM_SIZE {
             if VICTIM[v] == 0 {
                 VICTIM[v] = entry;
@@ -261,20 +260,12 @@ unsafe fn tlb_insert_if_empty(set: usize, entry: u32) -> bool {
 }
 
 // ===========================================================================
-// Buffer pool
+// TlbBP
 // ===========================================================================
 
 pub struct TlbBP {
-    num_frames: usize,
-    used_frames: AtomicUsize,
-    clock_hand: AtomicUsize,
-    container_manager: Arc<ContainerManager>,
-    free_list: ConcurrentQueue<usize>,
-    #[allow(clippy::vec_box)]
-    pages: UnsafeCell<Vec<Box<Page>>>,
-    #[allow(clippy::vec_box)]
-    metas: UnsafeCell<Vec<Box<FMeta>>>,
-    /// Overflow: concurrent ART tree mapping packed PageKey (usize) -> frame_id (u32).
+    pub(crate) fm: FrameManager<EvictionPolicyImpl>,
+    /// Overflow: concurrent ART mapping packed PageKey → frame_id (u32).
     overflow: CongeeRawU32<usize>,
     stats: BPStats,
 }
@@ -283,47 +274,31 @@ unsafe impl Sync for TlbBP {}
 unsafe impl Send for TlbBP {}
 
 impl TlbBP {
+    /// Eviction batch size — matches original TlbBP.
+    const EVICT_BATCH: usize = 64;
+
     pub fn new(
         num_frames: usize,
         container_manager: Arc<ContainerManager>,
     ) -> Result<Self, MemPoolStatus> {
         log_debug!("TlbBP created: num_frames={}", num_frames);
-
-        let free_list = ConcurrentQueue::bounded(num_frames);
-        for i in 0..num_frames {
-            free_list.push(i).unwrap();
-        }
-
-        let pages: UnsafeCell<Vec<Box<Page>>> = UnsafeCell::new(
-            (0..num_frames)
-                .into_par_iter()
-                .map(|_| Box::new(Page::new_empty()))
-                .collect(),
-        );
-
-        let metas: UnsafeCell<Vec<Box<FMeta>>> = UnsafeCell::new(
-            (0..num_frames)
-                .into_par_iter()
-                .map(|i| Box::new(FMeta::new(i as u32)))
-                .collect(),
-        );
-
-        debug_assert!(
-            num_frames <= u32::MAX as usize,
-            "num_frames must fit in u32"
-        );
-
         Ok(Self {
-            num_frames,
-            used_frames: AtomicUsize::new(0),
-            clock_hand: AtomicUsize::new(0),
-            container_manager,
-            free_list,
-            pages,
-            metas,
+            fm: FrameManager::new(num_frames, container_manager)?,
             overflow: CongeeRawU32::default(),
             stats: BPStats::new(),
         })
+    }
+
+    #[inline]
+    pub(crate) fn num_frames(&self) -> usize {
+        self.fm.num_frames()
+    }
+
+    /// Translator hook for `FrameManager` eviction. Removes overflow entry
+    /// only if it still points at `idx` — guards against races where a page
+    /// got remapped between classify_frame and finalize.
+    fn on_evict(&self, pk: &PageKey, _idx: u32) {
+        self.overflow_remove(pk);
     }
 
     // ------------------------------------------------------------------
@@ -379,184 +354,51 @@ impl TlbBP {
     }
 
     // ------------------------------------------------------------------
-    // Frame access
+    // Frame access / eviction — delegate to FrameManager
     // ------------------------------------------------------------------
 
     #[inline]
-    fn try_get_read_guard(&self, index: usize) -> Option<FRGuard> {
-        let metas = unsafe { &mut *self.metas.get() };
-        let pages = unsafe { &mut *self.pages.get() };
-        FRGuard::try_new(
-            box_as_mut_ptr(&mut metas[index]),
-            box_as_mut_ptr(&mut pages[index]),
-        )
+    fn try_get_read_guard(&self, index: u32) -> Option<FRGuard> {
+        self.fm.try_get_read_guard(index)
     }
 
     #[inline]
-    fn try_get_write_guard(&self, index: usize, make_dirty: bool) -> Option<FWGuard> {
-        let metas = unsafe { &mut *self.metas.get() };
-        let pages = unsafe { &mut *self.pages.get() };
-        FWGuard::try_new(
-            box_as_mut_ptr(&mut metas[index]),
-            box_as_mut_ptr(&mut pages[index]),
-            make_dirty,
-        )
+    fn try_get_write_guard(&self, index: u32, make_dirty: bool) -> Option<FWGuard> {
+        self.fm.try_get_write_guard(index, make_dirty)
     }
-
-    // ------------------------------------------------------------------
-    // Eviction
-    // ------------------------------------------------------------------
 
     #[inline]
-    fn enqueue_free_frame(&self, idx: usize) {
-        self.free_list.push(idx).ok();
+    fn meta(&self, index: u32) -> &FMeta {
+        self.fm.meta(index)
     }
 
+    #[inline]
+    fn enqueue_free_frame(&self, idx: u32) {
+        self.fm.enqueue_free_frame(idx);
+    }
+
+    #[inline]
     fn choose_victim(&self) -> Option<FWGuard> {
-        while let Ok(idx) = self.free_list.pop() {
-            if let Some(guard) = self.try_get_write_guard(idx, false) {
-                if guard.page_key().is_none() {
-                    return Some(guard);
-                }
-            }
-        }
-        None
+        self.fm.choose_victim()
     }
 
+    #[inline]
     fn ensure_free_frames(&self) -> Result<(), MemPoolStatus> {
-        let used = self.used_frames.load(Ordering::Acquire);
-        let ratio = used as f64 / self.num_frames as f64;
-        if ratio > 0.95 {
-            log_warn!(
-                "[TLB-EVICT] Used frames: {}/{} ({:.1}%). Evicting...",
-                used,
-                self.num_frames,
-                ratio * 100.0,
-            );
-            self.evict_batch()
-        } else {
-            Ok(())
-        }
-    }
-
-    fn fetch_add_clock_hand(&self, increment: usize) -> usize {
-        self.clock_hand
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |cur| {
-                Some((cur + increment) % self.num_frames)
-            })
-            .expect("clock hand update should not fail")
-    }
-
-    fn evict_batch(&self) -> Result<(), MemPoolStatus> {
-        let batch = std::cmp::min(self.num_frames, 64);
-        let max_iter = 2 * self.num_frames / batch;
-
-        // Scratch space for multi-stage eviction.
-        let mut clean_pages: Vec<(usize, *mut FMeta)> = Vec::new();
-        let mut dirty_pages: Vec<(usize, FRGuard)> = Vec::new();
-        let mut to_evict: Vec<(usize, FWGuard)> = Vec::new();
-
-        // ─── 1. Collect candidates via clock scan ────────────────────
-        let mut iters = 0;
-        while clean_pages.len() + dirty_pages.len() < batch {
-            if iters > max_iter {
-                if clean_pages.is_empty() && dirty_pages.is_empty() {
-                    return Err(MemPoolStatus::CannotEvictPage);
-                }
-                break;
-            }
-            let start = self.fetch_add_clock_hand(batch);
-            for offset in 0..batch {
-                let idx = (start + offset) % self.num_frames;
-                let meta = &mut unsafe { &mut *self.metas.get() }[idx];
-
-                if meta.key().is_none() || meta.latch.is_locked() {
-                    continue;
-                }
-
-                // Clock: if marked, clear mark and skip. If unmarked, candidate.
-                if meta.evict_info.score() > 0 {
-                    meta.evict_info.reset();
-                    continue;
-                }
-
-                let is_dirty = meta.is_dirty.load(Ordering::Acquire);
-                if is_dirty {
-                    if let Some(g) = FRGuard::try_new(
-                        box_as_mut_ptr(meta),
-                        box_as_mut_ptr(&mut unsafe { &mut *self.pages.get() }[idx]),
-                    ) {
-                        if g.page_key().is_some() {
-                            dirty_pages.push((idx, g));
-                        }
-                    }
-                } else {
-                    clean_pages.push((idx, box_as_mut_ptr(meta)));
-                }
-            }
-            iters += 1;
-        }
-
-        // ─── 2. Flush dirty pages under read latch ───────────────────
-        for (_, g) in &dirty_pages {
-            self.write_to_disk_if_dirty_r(g).unwrap();
-        }
-
-        // ─── 3. Latch clean pages for eviction ──────────────────────
-        for (idx, meta) in clean_pages.drain(..) {
-            if let Some(g) = FWGuard::try_new(
-                meta,
-                box_as_mut_ptr(&mut unsafe { &mut *self.pages.get() }[idx]),
-                false,
-            ) {
-                if g.page_key().is_none() {
-                    continue;
-                }
-                self.write_to_disk_if_dirty_w(&g).unwrap();
-                to_evict.push((idx, g));
-            }
-        }
-
-        // ─── 4. Upgrade dirty page latches (read → write) ───────────
-        for (idx, g) in dirty_pages.drain(..) {
-            if let Ok(gw) = g.try_upgrade(false) {
-                to_evict.push((idx, gw));
-            }
-        }
-
-        // ─── 5. Remove from overflow and finalize ───────────────────
-        let mut freed = 0;
-        for (idx, g) in to_evict.drain(..) {
-            if let Some(pk) = g.page_key() {
-                if self.overflow_lookup(&pk) == Some(idx as u32) {
-                    self.overflow_remove(&pk);
-                }
-            }
-            g.set_page_key(None);
-            g.evict_info().reset();
-            self.enqueue_free_frame(idx);
-            freed += 1;
-        }
-
-        if freed > 0 {
-            self.used_frames.fetch_sub(freed, Ordering::AcqRel);
-            Ok(())
-        } else {
-            Err(MemPoolStatus::CannotEvictPage)
-        }
+        self.fm
+            .ensure_free_frames(Self::EVICT_BATCH, |pk, idx| self.on_evict(pk, idx))
     }
 
     // ------------------------------------------------------------------
-    // Page fault
+    // Page fault (mirrors original TlbBP::handle_page_fault)
     // ------------------------------------------------------------------
 
     fn handle_page_fault(&self, page_key: PageKey) -> Result<FWGuard, MemPoolStatus> {
-        self.used_frames.fetch_add(1, Ordering::AcqRel);
+        self.fm.increment_used();
 
         let mut victim = match self.choose_victim() {
             Some(v) => v,
             None => {
-                self.used_frames.fetch_sub(1, Ordering::AcqRel);
+                self.fm.decrement_used();
                 return Err(MemPoolStatus::CannotEvictPage);
             }
         };
@@ -566,7 +408,7 @@ impl TlbBP {
         // Atomic insert-if-absent via congee compute_or_insert.
         let guard = crossbeam_epoch::pin();
         let packed = pack_page_key(&page_key);
-        let frame_id: u32 = victim.frame_id();
+        let frame_id = victim.frame_id();
         let mut existing_frame: Option<u32> = None;
         let _ = self.overflow.compute_or_insert(
             packed,
@@ -582,65 +424,33 @@ impl TlbBP {
         drop(guard);
 
         if let Some(idx) = existing_frame {
-            // Another thread already faulted this page. Free our victim, latch theirs.
-            self.enqueue_free_frame(frame_id as usize);
-            self.used_frames.fetch_sub(1, Ordering::AcqRel);
+            // Race: another thread faulted the same page first. Free our
+            // victim, latch theirs.
+            self.enqueue_free_frame(frame_id);
+            self.fm.decrement_used();
             return self
-                .try_get_write_guard(idx as usize, true)
+                .try_get_write_guard(idx, true)
                 .ok_or(MemPoolStatus::FrameWriteLatchGrantFailed);
         }
 
         victim.set_page_key(Some(page_key));
 
         if let Err(e) = self
-            .container_manager
+            .fm
+            .container_manager()
             .get_container(page_key.c_key)
             .read_page(page_key.page_id, &mut victim)
         {
             victim.set_page_key(None);
             self.overflow_remove(&page_key);
-            self.enqueue_free_frame(victim.frame_id() as usize);
-            self.used_frames.fetch_sub(1, Ordering::AcqRel);
+            self.enqueue_free_frame(victim.frame_id());
+            self.fm.decrement_used();
             return Err(MemPoolStatus::FileManagerError(e.to_string()));
         }
 
         victim.evict_info().reset();
-        // Don't mark dirty here — read faults should stay clean.
-        // The write path marks dirty via the write guard.
-
+        // Read faults stay clean; write path marks dirty via the write guard.
         Ok(victim)
-    }
-
-    // ------------------------------------------------------------------
-    // Disk I/O
-    // ------------------------------------------------------------------
-
-    fn write_to_disk_if_dirty_w(&self, guard: &FWGuard) -> Result<(), MemPoolStatus> {
-        if let Some(key) = guard.page_key() {
-            if guard
-                .dirty()
-                .compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok()
-            {
-                let container = self.container_manager.get_container(key.c_key);
-                container.write_page(key.page_id, guard)?;
-            }
-        }
-        Ok(())
-    }
-
-    fn write_to_disk_if_dirty_r(&self, guard: &FRGuard) -> Result<(), MemPoolStatus> {
-        if let Some(key) = guard.page_key() {
-            if guard
-                .dirty()
-                .compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok()
-            {
-                let container = self.container_manager.get_container(key.c_key);
-                container.write_page(key.page_id, guard)?;
-            }
-        }
-        Ok(())
     }
 }
 
@@ -655,14 +465,14 @@ impl Drop for TlbBP {
         let total = hits + misses + false_hits;
         if total > 0 {
             eprintln!(
-                "TLB stats: hits={}, false_hits={}, misses={}, total={}, hit_rate={:.2}%, prefills={}, overflow_hits={}, page_faults={}",
+                "TLB-V2 stats: hits={}, false_hits={}, misses={}, total={}, hit_rate={:.2}%, prefills={}, overflow_hits={}, page_faults={}",
                 hits, false_hits, misses, total,
                 hits as f64 / total as f64 * 100.0,
                 prefills, overflow_hits, page_faults
             );
         }
 
-        if self.container_manager.remove_dir_on_drop() {
+        if self.fm.container_manager().remove_dir_on_drop() {
             // Test mode — directory will be cleaned up by ContainerManager.
         } else {
             self.flush_all_and_reset().unwrap();
@@ -686,18 +496,19 @@ impl MemPool for TlbBP {
         let hk = HashedKey::new(&page_key);
         let set = hk.tlb_set();
         let tag = hk.tlb_tag();
-        let metas = unsafe { &*self.metas.get() };
 
         #[cfg(feature = "tlb_victim_cache")]
         {
             if let Some(frame_id) = unsafe { tlb_probe(set, tag) } {
-                if metas[frame_id].key() == Some(page_key) {
+                if self.meta(frame_id).key() == Some(page_key) {
                     if let Some(g) = self.try_get_read_guard(frame_id) {
                         if g.page_key() == Some(page_key) {
                             g.evict_info().update();
                             unsafe {
                                 TLB_HITS += 1;
                             }
+                            #[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
+                            TLB_HITS_GLOBAL.fetch_add(1, Ordering::Relaxed);
                             return Ok(g);
                         }
                     }
@@ -705,6 +516,8 @@ impl MemPool for TlbBP {
                 unsafe {
                     TLB_FALSE_HITS += 1;
                 }
+                #[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
+                TLB_FALSE_HITS_GLOBAL.fetch_add(1, Ordering::Relaxed);
             }
         }
         #[cfg(not(feature = "tlb_victim_cache"))]
@@ -717,7 +530,7 @@ impl MemPool for TlbBP {
                 }
                 had_tag_match = true;
                 let frame_id = entry_frame(ways[w]);
-                if metas[frame_id].key() == Some(page_key) {
+                if self.meta(frame_id).key() == Some(page_key) {
                     if let Some(g) = self.try_get_read_guard(frame_id) {
                         if g.page_key() == Some(page_key) {
                             g.evict_info().update();
@@ -727,6 +540,8 @@ impl MemPool for TlbBP {
                             unsafe {
                                 TLB_HITS += 1;
                             }
+                            #[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
+                            TLB_HITS_GLOBAL.fetch_add(1, Ordering::Relaxed);
                             return Ok(g);
                         }
                     }
@@ -736,6 +551,8 @@ impl MemPool for TlbBP {
                 unsafe {
                     TLB_FALSE_HITS += 1;
                 }
+                #[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
+                TLB_FALSE_HITS_GLOBAL.fetch_add(1, Ordering::Relaxed);
             }
         }
 
@@ -743,6 +560,8 @@ impl MemPool for TlbBP {
         unsafe {
             TLB_MISSES += 1;
         }
+        #[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
+        TLB_MISSES_GLOBAL.fetch_add(1, Ordering::Relaxed);
         let packed = pack_page_key(&page_key);
         let use_prefill = unsafe {
             let prev = LAST_MISS_KEY;
@@ -750,45 +569,36 @@ impl MemPool for TlbBP {
             packed.wrapping_sub(prev) <= PREFILL_COUNT
         };
 
-        // Atomic lookup + latch + sibling prefill via get_apply_with_siblings.
         let guard = crossbeam_epoch::pin();
         let result = self.overflow.get_apply_with_siblings(
             &packed,
-            |frame_id, view| {
-                match self.try_get_read_guard(frame_id as usize) {
-                    Some(g) => {
-                        // Latch succeeded — write siblings directly into TLB.
-                        if use_prefill {
-                            // All siblings share the same c_key; hoist hash.
-                            let c_hash = super::hash::hash_u64((packed >> 32) as u64);
-                            let pid_prefix = (packed as u32) & !0xFFu32;
-                            unsafe {
-                                for (byte, sibling_frame) in
-                                    view.siblings_after().take(PREFILL_COUNT)
-                                {
-                                    let val =
-                                        c_hash.wrapping_add((pid_prefix | byte as u32) as u64);
-                                    let s_set = (val as usize) & TLB_SET_MASK;
-                                    let s_entry = (((val >> 10) as u32 & 0x1F) | 1) << TAG_SHIFT
-                                        | (sibling_frame as u32 & FRAME_MASK);
-                                    if !tlb_insert_if_empty(s_set, s_entry) {
-                                        tlb_insert(s_set, s_entry);
-                                    }
-                                    TLB_PREFILLS += 1;
+            |frame_id, view| match self.try_get_read_guard(frame_id) {
+                Some(g) => {
+                    if use_prefill {
+                        let c_hash = super::hash::hash_u64((packed >> 32) as u64);
+                        let pid_prefix = (packed as u32) & !0xFFu32;
+                        unsafe {
+                            for (byte, sibling_frame) in view.siblings_after().take(PREFILL_COUNT) {
+                                let val = c_hash.wrapping_add((pid_prefix | byte as u32) as u64);
+                                let s_set = (val as usize) & TLB_SET_MASK;
+                                let s_entry = (((val >> 10) as u32 & 0x1F) | 1) << TAG_SHIFT
+                                    | (sibling_frame as u32 & FRAME_MASK);
+                                if !tlb_insert_if_empty(s_set, s_entry) {
+                                    tlb_insert(s_set, s_entry);
                                 }
+                                TLB_PREFILLS += 1;
                             }
                         }
-                        Some(g)
                     }
-                    None => None, // latch failed, skip siblings
+                    Some(g)
                 }
+                None => None,
             },
             &guard,
         );
 
         match result {
             Some(Some(g)) => {
-                // Overflow hit + latch succeeded.
                 g.evict_info().update();
                 unsafe {
                     tlb_insert(set, pack_entry(tag, g.frame_id()));
@@ -796,12 +606,8 @@ impl MemPool for TlbBP {
                 }
                 Ok(g)
             }
-            Some(None) => {
-                // Page was in overflow but latch failed.
-                Err(MemPoolStatus::FrameReadLatchGrantFailed)
-            }
+            Some(None) => Err(MemPoolStatus::FrameReadLatchGrantFailed),
             None => {
-                // Not in overflow — page fault.
                 self.ensure_free_frames()?;
                 let victim = self.handle_page_fault(page_key)?;
                 unsafe {
@@ -822,18 +628,19 @@ impl MemPool for TlbBP {
         let hk = HashedKey::new(&page_key);
         let set = hk.tlb_set();
         let tag = hk.tlb_tag();
-        let metas = unsafe { &*self.metas.get() };
 
         #[cfg(feature = "tlb_victim_cache")]
         {
             if let Some(frame_id) = unsafe { tlb_probe(set, tag) } {
-                if metas[frame_id].key() == Some(page_key) {
+                if self.meta(frame_id).key() == Some(page_key) {
                     if let Some(g) = self.try_get_write_guard(frame_id, true) {
                         if g.page_key() == Some(page_key) {
                             g.evict_info().update();
                             unsafe {
                                 TLB_HITS += 1;
                             }
+                            #[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
+                            TLB_HITS_GLOBAL.fetch_add(1, Ordering::Relaxed);
                             return Ok(g);
                         }
                     }
@@ -841,6 +648,8 @@ impl MemPool for TlbBP {
                 unsafe {
                     TLB_FALSE_HITS += 1;
                 }
+                #[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
+                TLB_FALSE_HITS_GLOBAL.fetch_add(1, Ordering::Relaxed);
             }
         }
         #[cfg(not(feature = "tlb_victim_cache"))]
@@ -853,7 +662,7 @@ impl MemPool for TlbBP {
                 }
                 had_tag_match = true;
                 let frame_id = entry_frame(ways[w]);
-                if metas[frame_id].key() == Some(page_key) {
+                if self.meta(frame_id).key() == Some(page_key) {
                     if let Some(g) = self.try_get_write_guard(frame_id, true) {
                         if g.page_key() == Some(page_key) {
                             g.evict_info().update();
@@ -863,6 +672,8 @@ impl MemPool for TlbBP {
                             unsafe {
                                 TLB_HITS += 1;
                             }
+                            #[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
+                            TLB_HITS_GLOBAL.fetch_add(1, Ordering::Relaxed);
                             return Ok(g);
                         }
                     }
@@ -872,12 +683,16 @@ impl MemPool for TlbBP {
                 unsafe {
                     TLB_FALSE_HITS += 1;
                 }
+                #[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
+                TLB_FALSE_HITS_GLOBAL.fetch_add(1, Ordering::Relaxed);
             }
         }
 
         unsafe {
             TLB_MISSES += 1;
         }
+        #[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
+        TLB_MISSES_GLOBAL.fetch_add(1, Ordering::Relaxed);
         let packed = pack_page_key(&page_key);
         let use_prefill = unsafe {
             let prev = LAST_MISS_KEY;
@@ -886,11 +701,10 @@ impl MemPool for TlbBP {
         };
         self.ensure_free_frames()?;
 
-        // Atomic lookup + latch + sibling prefill via get_apply_with_siblings.
         let guard = crossbeam_epoch::pin();
         let result = self.overflow.get_apply_with_siblings(
             &packed,
-            |frame_id, view| match self.try_get_write_guard(frame_id as usize, true) {
+            |frame_id, view| match self.try_get_write_guard(frame_id, true) {
                 Some(g) => {
                     if use_prefill {
                         let c_hash = super::hash::hash_u64((packed >> 32) as u64);
@@ -926,7 +740,6 @@ impl MemPool for TlbBP {
             }
             Some(None) => Err(MemPoolStatus::FrameWriteLatchGrantFailed),
             None => {
-                // Not in overflow — page fault.
                 let g = self.handle_page_fault(page_key)?;
                 g.dirty().store(true, Ordering::Release);
                 unsafe {
@@ -944,7 +757,7 @@ impl MemPool for TlbBP {
         self.stats.inc_new_page();
         self.ensure_free_frames()?;
 
-        let container = self.container_manager.get_container(c_key);
+        let container = self.fm.container_manager().get_container(c_key);
         let page_id = container.inc_page_count(1) as PageId;
         let page_key = PageKey::new(c_key, page_id);
 
@@ -958,7 +771,7 @@ impl MemPool for TlbBP {
         victim.set_page_key(Some(page_key));
         victim.dirty().store(true, Ordering::Release);
         victim.evict_info().reset();
-        self.used_frames.fetch_add(1, Ordering::AcqRel);
+        self.fm.increment_used();
 
         Ok(victim)
     }
@@ -978,7 +791,7 @@ impl MemPool for TlbBP {
         Ok(guards)
     }
 
-    // ----- container ops ----------------------------------------------------
+    // ----- container ops / misc ---------------------------------------------
 
     fn create_container(&self, _c_key: ContainerKey, _is_temp: bool) -> Result<(), MemPoolStatus> {
         Ok(())
@@ -988,8 +801,6 @@ impl MemPool for TlbBP {
         Ok(())
     }
 
-    // ----- page presence ----------------------------------------------------
-
     fn is_in_mem(&self, key: PageFrameKey) -> bool {
         self.overflow_contains_key(&key.p_key())
     }
@@ -998,61 +809,24 @@ impl MemPool for TlbBP {
         self.overflow_get_page_keys(c_key)
     }
 
-    // ----- misc -------------------------------------------------------------
-
     fn prefetch_page(&self, _key: PageFrameKey) -> Result<(), MemPoolStatus> {
         Ok(())
     }
 
     fn flush_all(&self) -> Result<(), MemPoolStatus> {
-        (0..self.num_frames).into_par_iter().for_each(|i| {
-            let frame = loop {
-                if let Some(g) = self.try_get_read_guard(i) {
-                    break g;
-                }
-                std::hint::spin_loop();
-            };
-            self.write_to_disk_if_dirty_r(&frame).unwrap();
-        });
-        self.container_manager.flush_all()?;
-        Ok(())
+        self.fm.flush_all()
     }
 
     fn flush_all_and_reset(&self) -> Result<(), MemPoolStatus> {
-        (0..self.num_frames).into_par_iter().for_each(|i| {
-            let mut frame = loop {
-                if let Some(g) = self.try_get_write_guard(i, false) {
-                    break g;
-                }
-                std::hint::spin_loop();
-            };
-            self.write_to_disk_if_dirty_w(&frame).unwrap();
-            if let Some(pk) = frame.page_key() {
-                if self.overflow_lookup(&pk) == Some(i as u32) {
-                    self.overflow_remove(&pk);
-                }
+        self.fm.flush_all_and_reset(|pk, idx| {
+            if self.overflow_lookup(pk) == Some(idx) {
+                self.overflow_remove(pk);
             }
-            frame.clear();
-        });
-
-        self.container_manager.flush_all()?;
-
-        while self.free_list.pop().is_ok() {}
-        for i in 0..self.num_frames {
-            self.free_list.push(i).unwrap();
-        }
-        self.used_frames.store(0, Ordering::Release);
-
-        Ok(())
+        })
     }
 
     fn clear_dirty_flags(&self) -> Result<(), MemPoolStatus> {
-        (0..self.num_frames).into_par_iter().for_each(|i| {
-            let meta = &mut unsafe { &mut *self.metas.get() }[i];
-            meta.is_dirty.store(false, Ordering::Release);
-        });
-        self.container_manager.flush_all()?;
-        Ok(())
+        self.fm.clear_dirty_flags()
     }
 
     fn fast_evict(&self, _frame_id: u32) -> Result<(), MemPoolStatus> {
@@ -1066,15 +840,14 @@ impl MemPool for TlbBP {
         let write_count = self.stats.write_count();
 
         let mut num_frames_per_container = BTreeMap::new();
-        let metas = &*self.metas.get();
-        for i in 0..self.num_frames {
-            if let Some(key) = metas[i].key() {
+        for i in 0..self.num_frames() {
+            if let Some(key) = self.fm.meta(i as u32).key() {
                 *num_frames_per_container.entry(key.c_key).or_insert(0) += 1;
             }
         }
 
         let mut disk_io_per_container = BTreeMap::new();
-        for (c_key, (count, file_stats)) in &self.container_manager.get_stats() {
+        for (c_key, (count, file_stats)) in &self.fm.container_manager().get_stats() {
             disk_io_per_container.insert(
                 *c_key,
                 (
@@ -1091,7 +864,7 @@ impl MemPool for TlbBP {
             });
 
         MemoryStats {
-            bp_num_frames_in_mem: self.num_frames,
+            bp_num_frames_in_mem: self.num_frames(),
             bp_new_page: new_page,
             bp_read_frame: read_count,
             bp_read_frame_wait: read_count_waiting,
@@ -1106,5 +879,150 @@ impl MemPool for TlbBP {
 
     unsafe fn reset_stats(&self) {
         self.stats.clear();
+    }
+
+    #[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
+    fn sample_coverage(&self) -> (u64, u64) {
+        let hits = TLB_HITS_GLOBAL.load(Ordering::Relaxed);
+        let misses = TLB_MISSES_GLOBAL.load(Ordering::Relaxed);
+        let false_hits = TLB_FALSE_HITS_GLOBAL.load(Ordering::Relaxed);
+        (hits, hits + misses + false_hits)
+    }
+
+    /// Emit the unified `fast_path_coverage` line that the PT / LIPAH variants
+    /// also emit. For TLB-V2 "fast path" = TLB hit; false_hits are *not*
+    /// counted as hits because they fall through to the overflow path. Reads
+    /// from the global atomic shadows (TLB_HITS_GLOBAL etc.) because the
+    /// thread-local TLB_HITS only reflects the calling thread. See plan: PT
+    /// strength/weakness study, Part B1.
+    fn print_profile(&self) {
+        #[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
+        {
+            let hits = TLB_HITS_GLOBAL.load(Ordering::Relaxed);
+            let misses = TLB_MISSES_GLOBAL.load(Ordering::Relaxed);
+            let false_hits = TLB_FALSE_HITS_GLOBAL.load(Ordering::Relaxed);
+            let total = hits + misses + false_hits;
+            if total == 0 {
+                return;
+            }
+            println!("\n=== TLB-V2 Coverage ===");
+            println!(
+                "TLB hits:       {:>12}  ({:.1}%)",
+                hits,
+                hits as f64 / total as f64 * 100.0
+            );
+            println!(
+                "TLB false_hits: {:>12}  ({:.1}%)",
+                false_hits,
+                false_hits as f64 / total as f64 * 100.0
+            );
+            println!(
+                "TLB misses:     {:>12}  ({:.1}%)",
+                misses,
+                misses as f64 / total as f64 * 100.0
+            );
+            let cov = hits as f64 / total as f64;
+            println!(
+                "fast_path_coverage: {:.4}  (hits={}, total={})",
+                cov, hits, total
+            );
+        }
+    }
+}
+
+// ===========================================================================
+// Tests (original TlbBP has none; add basic parity-oriented cases here)
+// ===========================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{container::ContainerManager, random::gen_random_pathname};
+    use std::sync::Arc;
+
+    fn get_test_bp(num_frames: usize) -> Arc<TlbBP> {
+        let base_dir = gen_random_pathname(Some("test_tlb_bp_v2_direct"));
+        let cm = Arc::new(ContainerManager::new(base_dir, true, true).unwrap());
+        Arc::new(TlbBP::new(num_frames, cm).unwrap())
+    }
+
+    #[test]
+    fn test_tlbv2_create_and_read() {
+        let num_frames = 10;
+        let bp = get_test_bp(num_frames);
+        let c_key = ContainerKey::new(0, 0);
+        let mut keys = Vec::new();
+        for i in 0..num_frames {
+            let mut g = bp.create_new_page_for_write(c_key).unwrap();
+            g[0] = i as u8;
+            keys.push(g.page_frame_key().unwrap());
+        }
+        for (i, k) in keys.iter().enumerate() {
+            let g = bp.get_page_for_read(*k).unwrap();
+            assert_eq!(g[0], i as u8);
+        }
+    }
+
+    #[test]
+    fn test_tlbv2_write_back() {
+        // 2 frames, many pages → force eviction + disk I/O.
+        let bp = get_test_bp(2);
+        let c_key = ContainerKey::new(0, 0);
+        let mut keys = Vec::new();
+        for i in 0..50u8 {
+            let mut g = bp.create_new_page_for_write(c_key).unwrap();
+            g[0] = i;
+            keys.push(g.page_frame_key().unwrap());
+        }
+        for (i, k) in keys.iter().enumerate() {
+            let g = bp.get_page_for_read(*k).unwrap();
+            assert_eq!(g[0], i as u8);
+        }
+    }
+
+    #[test]
+    fn test_tlbv2_flush_and_reset() {
+        let bp = get_test_bp(8);
+        let c_key = ContainerKey::new(0, 0);
+        let mut keys = Vec::new();
+        for i in 0..16 {
+            let mut g = bp.create_new_page_for_write(c_key).unwrap();
+            g[0] = i as u8;
+            keys.push(g.page_frame_key().unwrap());
+        }
+        bp.flush_all_and_reset().unwrap();
+        for (i, k) in keys.iter().enumerate() {
+            let g = bp.get_page_for_read(*k).unwrap();
+            assert_eq!(g[0], i as u8);
+        }
+    }
+
+    #[test]
+    fn test_tlbv2_concurrent_write() {
+        let bp = get_test_bp(10);
+        let c_key = ContainerKey::new(0, 0);
+        let mut g = bp.create_new_page_for_write(c_key).unwrap();
+        g[0] = 0;
+        let pk = g.page_frame_key().unwrap();
+        drop(g);
+
+        let num_threads = 3;
+        let num_iters = 50u8;
+        std::thread::scope(|s| {
+            for _ in 0..num_threads {
+                s.spawn(|| {
+                    for _ in 0..num_iters {
+                        loop {
+                            if let Ok(mut g) = bp.get_page_for_write(pk) {
+                                g[0] = g[0].wrapping_add(1);
+                                break;
+                            }
+                        }
+                    }
+                });
+            }
+        });
+        let g = bp.get_page_for_read(pk).unwrap();
+        assert_eq!(g[0], num_threads * num_iters);
     }
 }

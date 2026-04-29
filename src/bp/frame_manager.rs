@@ -1,7 +1,7 @@
 //! Shared frame-management core for buffer-pool variants.
 //!
 //! **Status: shadow implementation** — not yet wired into any BP. The existing
-//! `BufferPoolClock`, `PredictiveTranslationBP`, and `TlbBP` continue to own
+//! `BufferPoolClock`, `PrediCache`, and `TlbBP` continue to own
 //! their own frame-management code. This module exists so we can migrate one
 //! BP at a time and verify behavioral parity.
 //!

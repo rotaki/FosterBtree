@@ -5,7 +5,6 @@
 ///
 /// Usage:
 ///   cargo run --release --bin tpcc_profile_payment --features bp_clock -- -w 2 -t 4
-///   cargo run --release --bin tpcc_profile_payment --features bp_dashmap -- -w 2 -t 4
 ///   cargo run --release --bin tpcc_profile_payment --features bp_pt -- -w 2 -t 4
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -429,11 +428,6 @@ pub fn get_bp(num_frames: usize) -> Arc<impl MemPool> {
         use fbtree::bp::get_test_pt_two_hash;
         get_test_pt_two_hash(num_frames)
     }
-    #[cfg(feature = "bp_pt_bucket")]
-    {
-        use fbtree::bp::get_test_pt_bucket_validate;
-        get_test_pt_bucket_validate(num_frames)
-    }
     #[cfg(feature = "bp_pt2_bucket")]
     {
         use fbtree::bp::get_test_pt_two_hash_bucket_validate;
@@ -444,37 +438,24 @@ pub fn get_bp(num_frames: usize) -> Arc<impl MemPool> {
         use fbtree::bp::get_test_pt_fp_four_hash;
         return get_test_pt_fp_four_hash(num_frames);
     }
-    #[cfg(feature = "bp_pt")]
+    #[cfg(feature = "bp_predicache")]
     {
-        use fbtree::bp::get_test_pt;
-        get_test_pt(num_frames)
+        use fbtree::bp::get_test_predicache;
+        get_test_predicache(num_frames)
     }
     #[cfg(feature = "bp_overflow")]
     {
         use fbtree::bp::get_test_overflow_bp;
         get_test_overflow_bp(num_frames)
     }
-    #[cfg(feature = "bp_dashmap")]
-    {
-        use fbtree::bp::get_test_dashmap_bp;
-        get_test_dashmap_bp(num_frames)
-    }
-    #[cfg(feature = "bp_hashmap")]
-    {
-        use fbtree::bp::get_test_hashmap_bp;
-        get_test_hashmap_bp(num_frames)
-    }
     #[cfg(not(any(
         feature = "vmcache",
         feature = "bp_clock",
-        feature = "bp_pt",
+        feature = "bp_predicache",
         feature = "bp_pt2",
-        feature = "bp_pt_bucket",
         feature = "bp_pt2_bucket",
         feature = "bp_pt4_bucket",
         feature = "bp_overflow",
-        feature = "bp_dashmap",
-        feature = "bp_hashmap"
     )))]
     {
         use fbtree::bp::get_test_bp;
