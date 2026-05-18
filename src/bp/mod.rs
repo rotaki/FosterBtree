@@ -5,6 +5,7 @@ mod frame_guards;
 pub(crate) mod frame_manager;
 pub(crate) mod hash;
 mod in_mem_pool;
+pub(crate) mod mmap_array;
 mod macro_profile;
 pub mod mem_pool_trait;
 pub mod optimistic_page_map;

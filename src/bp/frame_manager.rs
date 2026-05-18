@@ -35,21 +35,45 @@ use crate::log;
 
 use super::{
     eviction_policy::EvictionPolicy,
-    frame_guards::{box_as_mut_ptr, FrameMeta, FrameReadGuard, FrameWriteGuard},
+    frame_guards::{FrameMeta, FrameReadGuard, FrameWriteGuard},
     mem_pool_trait::{MemPoolStatus, PageKey},
+    mmap_array::{co_located_chunk_elements, HugepageRequest, MmapArray, MmapOptions, NumaPolicy},
 };
 use crate::{container::ContainerManager, log_debug, log_warn, page::Page};
 
-use std::{
-    cell::UnsafeCell,
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc,
-    },
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
 };
 
 use concurrent_queue::ConcurrentQueue;
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
+
+// ---------------------------------------------------------------------------
+// FrameManagerOptions
+// ---------------------------------------------------------------------------
+
+/// Shared mmap policy for the page and meta arrays.
+///
+/// `FrameManager` always uses striped NUMA placement: it computes one shared
+/// frame-index chunk size and applies it to both arrays, so `page[i]` and
+/// `meta[i]` live on the same NUMA node. Callers can tune hugepage mode and
+/// prefaulting, but not accidentally split the arrays differently.
+#[derive(Clone, Copy, Debug)]
+pub struct FrameManagerOptions {
+    pub hugepages: HugepageRequest,
+    pub prefault: bool,
+}
+
+impl Default for FrameManagerOptions {
+    fn default() -> Self {
+        Self {
+            hugepages: HugepageRequest::Transparent,
+            prefault: true,
+        }
+    }
+}
+
 
 // ---------------------------------------------------------------------------
 // FrameManager
@@ -66,13 +90,13 @@ pub struct FrameManager<E: EvictionPolicy> {
     /// such as promotion). `choose_victim` skips those.
     free_list: ConcurrentQueue<u32>,
 
-    /// The actual page data for each frame.
-    #[allow(clippy::vec_box)]
-    pages: UnsafeCell<Vec<Box<Page>>>,
+    /// The actual page data for each frame. Single mmap region; zero-filled
+    /// at construction (MAP_ANONYMOUS gives zero pages).
+    pages: MmapArray<Page>,
 
-    /// Per-frame metadata (latch, dirty bit, eviction info, page key).
-    #[allow(clippy::vec_box)]
-    metas: UnsafeCell<Vec<Box<FrameMeta<E>>>>,
+    /// Per-frame metadata (latch, dirty bit, eviction info, page key). Single
+    /// mmap region; constructed in place from `FrameMeta::new(i)`.
+    metas: MmapArray<FrameMeta<E>>,
 
     container_manager: Arc<ContainerManager>,
 }
@@ -90,7 +114,20 @@ impl<E: EvictionPolicy> FrameManager<E> {
         num_frames: usize,
         container_manager: Arc<ContainerManager>,
     ) -> Result<Self, MemPoolStatus> {
-        log_debug!("FrameManager created: num_frames={}", num_frames);
+        Self::new_with_opts(num_frames, container_manager, FrameManagerOptions::default())
+    }
+
+    pub fn new_with_opts(
+        num_frames: usize,
+        container_manager: Arc<ContainerManager>,
+        opts: FrameManagerOptions,
+    ) -> Result<Self, MemPoolStatus> {
+        log_debug!(
+            "FrameManager created: num_frames={}, hugepages={:?}, prefault={}",
+            num_frames,
+            opts.hugepages,
+            opts.prefault,
+        );
 
         debug_assert!(
             num_frames <= u32::MAX as usize,
@@ -102,19 +139,26 @@ impl<E: EvictionPolicy> FrameManager<E> {
             free_list.push(i as u32).unwrap();
         }
 
-        let pages: UnsafeCell<Vec<Box<Page>>> = UnsafeCell::new(
-            (0..num_frames)
-                .into_par_iter()
-                .map(|_| Box::new(Page::new_empty()))
-                .collect(),
+        let epc = co_located_chunk_elements(
+            num_frames,
+            &[
+                std::mem::size_of::<Page>(),
+                std::mem::size_of::<FrameMeta<E>>(),
+            ],
         );
+        let numa = NumaPolicy::Striped {
+            elements_per_chunk: epc,
+        };
+        let mmap_opts = MmapOptions {
+            hugepages: opts.hugepages,
+            numa,
+            prefault: opts.prefault,
+        };
 
-        let metas: UnsafeCell<Vec<Box<FrameMeta<E>>>> = UnsafeCell::new(
-            (0..num_frames)
-                .into_par_iter()
-                .map(|i| Box::new(FrameMeta::new(i as u32)))
-                .collect(),
-        );
+        let pages = MmapArray::<Page>::zeroed(num_frames, mmap_opts)?;
+        let metas = MmapArray::<FrameMeta<E>>::new_with(num_frames, mmap_opts, |i| {
+            FrameMeta::new(i as u32)
+        })?;
 
         Ok(Self {
             num_frames,
@@ -150,7 +194,7 @@ impl<E: EvictionPolicy> FrameManager<E> {
     /// the returned reference is not synchronised with frame mutations.
     #[inline]
     pub fn meta(&self, idx: u32) -> &FrameMeta<E> {
-        unsafe { &(&*self.metas.get())[idx as usize] }
+        unsafe { &*self.metas.get_ptr(idx as usize) }
     }
 
     /// Issue CPU cache prefetch hints for a frame's meta + page. Best-effort:
@@ -161,11 +205,9 @@ impl<E: EvictionPolicy> FrameManager<E> {
         if idx >= self.num_frames {
             return;
         }
+        let meta_ptr = self.metas.get_ptr(idx) as *const u8;
+        let page_ptr = self.pages.get_ptr(idx) as *const u8;
         unsafe {
-            let metas = &*self.metas.get();
-            let pages = &*self.pages.get();
-            let meta_ptr = metas[idx].as_ref() as *const _ as *const u8;
-            let page_ptr = pages[idx].as_ref() as *const Page as *const u8;
             #[cfg(target_arch = "x86_64")]
             {
                 std::arch::x86_64::_mm_prefetch(
@@ -192,22 +234,15 @@ impl<E: EvictionPolicy> FrameManager<E> {
     #[inline]
     pub fn try_get_read_guard(&self, idx: u32) -> Option<FrameReadGuard<E>> {
         let idx = idx as usize;
-        let metas = unsafe { &mut *self.metas.get() };
-        let pages = unsafe { &mut *self.pages.get() };
-        FrameReadGuard::try_new(
-            box_as_mut_ptr(&mut metas[idx]),
-            box_as_mut_ptr(&mut pages[idx]),
-        )
+        FrameReadGuard::try_new(self.metas.get_ptr(idx), self.pages.get_ptr(idx))
     }
 
     #[inline]
     pub fn try_get_write_guard(&self, idx: u32, make_dirty: bool) -> Option<FrameWriteGuard<E>> {
         let idx = idx as usize;
-        let metas = unsafe { &mut *self.metas.get() };
-        let pages = unsafe { &mut *self.pages.get() };
         FrameWriteGuard::try_new(
-            box_as_mut_ptr(&mut metas[idx]),
-            box_as_mut_ptr(&mut pages[idx]),
+            self.metas.get_ptr(idx),
+            self.pages.get_ptr(idx),
             make_dirty,
         )
     }
@@ -339,7 +374,7 @@ impl<E: EvictionPolicy> FrameManager<E> {
         for (idx, meta) in clean_pages.drain(..) {
             if let Some(g) = FrameWriteGuard::try_new(
                 meta,
-                box_as_mut_ptr(&mut unsafe { &mut *self.pages.get() }[idx as usize]),
+                self.pages.get_ptr(idx as usize),
                 false,
             ) {
                 if g.page_key().is_none() {
@@ -387,7 +422,8 @@ impl<E: EvictionPolicy> FrameManager<E> {
         dirty: &mut Vec<(u32, FrameReadGuard<E>)>,
     ) {
         let idx = index as usize;
-        let meta = &mut unsafe { &mut *self.metas.get() }[idx];
+        let meta_ptr = self.metas.get_ptr(idx);
+        let meta: &mut FrameMeta<E> = unsafe { &mut *meta_ptr };
 
         // Skip empty or latched frames immediately.
         if meta.key().is_none() || meta.latch.is_locked() {
@@ -402,16 +438,13 @@ impl<E: EvictionPolicy> FrameManager<E> {
 
         let is_dirty = meta.is_dirty.load(Ordering::Acquire);
         if is_dirty {
-            if let Some(g) = FrameReadGuard::try_new(
-                box_as_mut_ptr(meta),
-                box_as_mut_ptr(&mut unsafe { &mut *self.pages.get() }[idx]),
-            ) {
+            if let Some(g) = FrameReadGuard::try_new(meta_ptr, self.pages.get_ptr(idx)) {
                 if g.page_key().is_some() {
                     dirty.push((index, g));
                 }
             }
         } else {
-            clean.push((index, box_as_mut_ptr(meta)));
+            clean.push((index, meta_ptr));
         }
     }
 
@@ -510,7 +543,7 @@ impl<E: EvictionPolicy> FrameManager<E> {
     /// workload switches.
     pub fn clear_dirty_flags(&self) -> Result<(), MemPoolStatus> {
         (0..self.num_frames).into_par_iter().for_each(|i| {
-            let meta = &mut unsafe { &mut *self.metas.get() }[i];
+            let meta = unsafe { &*self.metas.get_ptr(i) };
             meta.is_dirty.store(false, Ordering::Release);
         });
         self.container_manager.flush_all()?;

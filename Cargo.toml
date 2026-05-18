@@ -14,18 +14,16 @@ log_error = []
 stat = []
 timer = []
 
-# Page sizes. If page sizes are larger than 256k, pages will be heap allocated to avoid stack overflow.
-# Default is 16KB (defined in page.rs)
+# Page sizes. Pages are always inline `[u8; PAGE_SIZE]` so the buffer pool can
+# place them contiguously in an mmap region (and use hugepages). Ceiling is
+# 128 KiB: anything larger risks stack overflow at `Page::new_empty()` call
+# sites (e.g. rayon worker stacks default to ~2 MiB). Default is 16 KiB.
 4k_page = []
 8k_page = []
 16k_page = []
 32k_page = []
 64k_page = []
 128k_page = []
-256k_page = ["heap_allocated_page"]
-512k_page = ["heap_allocated_page"]
-1m_page = ["heap_allocated_page"]
-heap_allocated_page = []
 
 # Hints
 no_tree_hint = []

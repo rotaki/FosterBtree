@@ -267,6 +267,7 @@ fn main() {
     let bp = get_bp(args.num_frames);
     let mut keys: Vec<PageFrameKey> = Vec::with_capacity(args.num_pages);
     let pages_per_container = args.num_pages / args.num_containers;
+
     for c_idx in 0..args.num_containers {
         let container_key = if args.num_containers == 1 {
             c_key  // Use default c_key for single container (backward compat)

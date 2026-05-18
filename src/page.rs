@@ -15,12 +15,6 @@ pub const PAGE_SIZE: usize = 32768;
 pub const PAGE_SIZE: usize = 65536;
 #[cfg(feature = "128k_page")]
 pub const PAGE_SIZE: usize = 131072;
-#[cfg(feature = "256k_page")]
-pub const PAGE_SIZE: usize = 262144;
-#[cfg(feature = "512k_page")]
-pub const PAGE_SIZE: usize = 524288;
-#[cfg(feature = "1m_page")]
-pub const PAGE_SIZE: usize = 1048576;
 // If nothing is specified, use 16K page
 #[cfg(not(any(
     feature = "4k_page",
@@ -29,9 +23,6 @@ pub const PAGE_SIZE: usize = 1048576;
     feature = "32k_page",
     feature = "64k_page",
     feature = "128k_page",
-    feature = "256k_page",
-    feature = "512k_page",
-    feature = "1m_page"
 )))]
 pub const PAGE_SIZE: usize = 16384;
 
@@ -39,10 +30,6 @@ pub type PageId = u32;
 const BASE_PAGE_HEADER_SIZE: usize = 4 + LSN_SIZE;
 pub const AVAILABLE_PAGE_SIZE: usize = PAGE_SIZE - BASE_PAGE_HEADER_SIZE;
 
-#[cfg(feature = "heap_allocated_page")]
-#[repr(C, align(4096))]
-pub struct Page(Vec<u8>); // A page with large size must be heap allocated. Otherwise, it will cause stack overflow during the test.
-#[cfg(not(feature = "heap_allocated_page"))]
 #[repr(C, align(4096))] // Align to 4K. If we don't align to 4K, it might break O_DIRECT writes.
 pub struct Page([u8; PAGE_SIZE]);
 
@@ -51,9 +38,6 @@ unsafe impl Send for Page {}
 
 impl Page {
     pub fn new(page_id: PageId) -> Self {
-        #[cfg(feature = "heap_allocated_page")]
-        let mut page = Page(vec![0; PAGE_SIZE]);
-        #[cfg(not(feature = "heap_allocated_page"))]
         let mut page = Page([0; PAGE_SIZE]);
         page.set_id(page_id);
         page.set_lsn(Lsn::new(0, 0));
@@ -61,10 +45,7 @@ impl Page {
     }
 
     pub fn new_empty() -> Self {
-        #[cfg(feature = "heap_allocated_page")]
-        return Page(vec![0; PAGE_SIZE]);
-        #[cfg(not(feature = "heap_allocated_page"))]
-        return Page([0; PAGE_SIZE]);
+        Page([0; PAGE_SIZE])
     }
 
     pub fn copy(&mut self, other: &Page) {

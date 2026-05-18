@@ -684,6 +684,7 @@ impl MemPool for PrediCache {
         self.get_page_for_write_slow(page_key, pref)
     }
 
+    #[inline]
     fn get_page_for_read(&self, key: PageFrameKey) -> Result<FRGuard, MemPoolStatus> {
         let _macro_timer = macro_profile_scoped(BpMacroOp::GetPageRead);
         self.stats.inc_read_count();
