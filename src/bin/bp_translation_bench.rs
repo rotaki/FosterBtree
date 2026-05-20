@@ -173,6 +173,33 @@ struct Args {
     /// when the predictor is wrong, not when it's been short-circuited.
     #[arg(long, default_value_t = false)]
     scramble: bool,
+
+    /// Use the callback read path (`read_page_with`) instead of the
+    /// guard-returning `get_page_for_read`. For PrediCache this exercises
+    /// the speculative try-latch-at-pref path, which bypasses the
+    /// OptimisticPageMap on hits. Other BPs fall back to the default
+    /// trait impl, which is just a guard + callback wrapper.
+    #[arg(long, default_value_t = false)]
+    callback_path: bool,
+
+    /// Control experiment: with probability F sample from pages currently at
+    /// their preferred frame, else from displaced pages. Negative = disabled
+    /// (default). Forces uniform-random access (implies `--no-chain`) since
+    /// the classification only makes sense for independent point lookups.
+    /// Requires the BP to implement `preferred_frame_for` (currently
+    /// PrediCache only). After classification we also force-set the
+    /// promotion probabilities to `u32::MAX` so the classified sets don't
+    /// drift mid-run.
+    #[arg(long, default_value_t = -1.0)]
+    prefer_prob: f64,
+
+    /// Balance the preferred / displaced sets to exactly this many pages each
+    /// (working_set = 2 * prefer_cap). Default 10000 keeps the working set
+    /// small enough to fit in L3 at moderate payload, so cache footprint
+    /// doesn't confound the bypass-vs-always-probe comparison. Set to 0 to
+    /// use `min(|preferred|, |displaced|)` instead (no fixed cap).
+    #[arg(long, default_value_t = 10000)]
+    prefer_cap: usize,
 }
 
 fn get_bp(num_frames: usize) -> Arc<impl MemPool> {
@@ -190,6 +217,16 @@ fn get_bp(num_frames: usize) -> Arc<impl MemPool> {
     {
         use fbtree::bp::get_test_lapt;
         return get_test_lapt(num_frames);
+    }
+    #[cfg(feature = "bp_lapt2")]
+    {
+        use fbtree::bp::get_test_lapt2;
+        return get_test_lapt2(num_frames);
+    }
+    #[cfg(feature = "bp_lapt3")]
+    {
+        use fbtree::bp::get_test_lapt3;
+        return get_test_lapt3(num_frames);
     }
     #[cfg(feature = "bp_pt_v2")]
     {
@@ -225,6 +262,8 @@ fn get_bp(num_frames: usize) -> Arc<impl MemPool> {
         feature = "bp_clock",
         feature = "bp_pt_bucket_v2",
         feature = "bp_lapt",
+        feature = "bp_lapt2",
+        feature = "bp_lapt3",
         feature = "bp_pt_v2",
         feature = "bp_pt_tlb",
         feature = "bp_pt_tlb_only",
@@ -248,7 +287,7 @@ fn main() {
 
     println!("=== BP Translation Micro-Benchmark ===");
     println!(
-        "pages={} frames={} threads={} seconds={} theta={} warmup={} sequential={} phase_shift={} frame_hint={} hotspots={} hotspot_size={} hotspot_theta={}",
+        "pages={} frames={} threads={} seconds={} theta={} warmup={} sequential={} phase_shift={} frame_hint={} hotspots={} hotspot_size={} hotspot_theta={} callback_path={}",
         args.num_pages,
         args.num_frames,
         args.threads,
@@ -261,6 +300,7 @@ fn main() {
         args.hotspots,
         args.hotspot_size,
         args.hotspot_theta,
+        args.callback_path,
     );
 
     // Create BP and pre-populate pages across multiple containers.
@@ -295,7 +335,13 @@ fn main() {
     // Chain traversal (default) — pick which next-pointer each page gets.
     // `use_chain` = false when the user opted into zipf, phase-shift, or
     // multi-hotspot mode.
-    let use_chain = args.theta == 0.0 && !args.phase_shift && args.hotspots == 0 && !args.no_chain;
+    // --prefer-prob implies random access (no chain) because the
+    // classification only makes sense for independent point lookups.
+    let use_chain = args.theta == 0.0
+        && !args.phase_shift
+        && args.hotspots == 0
+        && !args.no_chain
+        && args.prefer_prob < 0.0;
     let mut next_idx: Vec<usize> = Vec::new();  // Keep outside for hint refresh
     if use_chain {
         // Build per-page next-index.
@@ -473,6 +519,88 @@ fn main() {
         println!("Hints refreshed");
     }
 
+    // --prefer-prob: classify pages into preferred-at vs displaced sets.
+    // Done after warmup so the BP has stabilized. The Arc<Vec<usize>>s are
+    // empty when --prefer-prob is disabled and the workload loop falls back
+    // to the existing uniform random index pick.
+    let prefer_enabled = args.prefer_prob >= 0.0;
+    let (preferred_indices, displaced_indices): (Vec<usize>, Vec<usize>) = if prefer_enabled {
+        let mut pref = Vec::new();
+        let mut displ = Vec::new();
+        let mut unsupported = false;
+        for i in 0..num_pages {
+            let k = keys[i];
+            let pref_frame = match bp.preferred_frame_for(k.p_key()) {
+                Some(p) => p,
+                None => {
+                    unsupported = true;
+                    break;
+                }
+            };
+            let g = match bp.get_page_for_read(k) {
+                Ok(g) => g,
+                Err(_) => continue,
+            };
+            let cur_frame = g.page_frame_key().map(|pfk| pfk.frame_id()).unwrap_or(u32::MAX);
+            drop(g);
+            if cur_frame == pref_frame {
+                pref.push(i);
+            } else {
+                displ.push(i);
+            }
+        }
+        if unsupported {
+            eprintln!(
+                "--prefer-prob: BP does not implement preferred_frame_for; \
+                 disabling the control experiment"
+            );
+            (Vec::new(), Vec::new())
+        } else {
+            let observed = pref.len() as f64 / num_pages as f64;
+            let n_pref_full = pref.len();
+            let n_displ_full = displ.len();
+            // Balance both sets to the same fixed cap so working-set footprint
+            // is identical regardless of prefer_prob (otherwise the smaller
+            // set wins on cache footprint and confounds the lookup-cost
+            // comparison). Default 10000 each (configurable via
+            // `--prefer-cap`). Set cap to 0 to use min(|pref|,|displ|).
+            let cap = if args.prefer_cap == 0 {
+                n_pref_full.min(n_displ_full)
+            } else {
+                args.prefer_cap.min(n_pref_full).min(n_displ_full)
+            };
+            let mut rng = small_thread_rng();
+            for v in [&mut pref, &mut displ].iter_mut() {
+                for i in (1..v.len()).rev() {
+                    let j = (rng.next_u64() as usize) % (i + 1);
+                    v.swap(i, j);
+                }
+                v.truncate(cap);
+            }
+            println!(
+                "--prefer-prob classification: natural_hit_rate = {:.3} \
+                 ({} preferred, {} displaced); balanced to {} each \
+                 (working_set = {} pages)",
+                observed, n_pref_full, n_displ_full, cap, cap * 2,
+            );
+            println!(
+                "  target prefer_prob = {:.3}",
+                args.prefer_prob,
+            );
+            // Lock placement: turn off promotion so the classified sets don't
+            // drift during the timed window.
+            std::env::set_var("PT_PROMOTE_PROB_NO_DEMOTE", u32::MAX.to_string());
+            std::env::set_var("PT_PROMOTE_PROB_DEMOTE", u32::MAX.to_string());
+            (pref, displ)
+        }
+    } else {
+        (Vec::new(), Vec::new())
+    };
+    let preferred_indices = Arc::new(preferred_indices);
+    let displaced_indices = Arc::new(displaced_indices);
+    let prefer_active =
+        prefer_enabled && !preferred_indices.is_empty() && !displaced_indices.is_empty();
+
     // Benchmark
     let flag = Arc::new(AtomicBool::new(true));
     // Phase: 0 = first half of pages, 1 = second half. Only used with --phase-shift.
@@ -499,6 +627,11 @@ fn main() {
             let no_page_fold = args.no_page_fold;
             let payload_bytes = args.payload_bytes;
             let record_latency = args.latency;
+            let callback_path = args.callback_path;
+            let prefer_active = prefer_active;
+            let prefer_prob = args.prefer_prob;
+            let preferred_indices = preferred_indices.clone();
+            let displaced_indices = displaced_indices.clone();
             // Per-thread start position so threads don't convoy on the same
             // chain pointer in lock-step.
             let start_idx = tid * num_pages / args.threads.max(1);
@@ -556,6 +689,60 @@ fn main() {
                         } else {
                             None
                         };
+                        if callback_path {
+                            // Closure does the same work as the guard arm; the
+                            // BP releases the latch on return. PrediCache's
+                            // override of `read_page_with` runs this body
+                            // under its speculative latch-at-pref path.
+                            let outcome = bp.read_page_with(current, |page| {
+                                let bytes: &[u8] = page;
+                                let len = bytes.len();
+                                let next_c_key = ContainerKey::from_u32(u32::from_be_bytes(
+                                    bytes[len - 12..len - 8].try_into().unwrap(),
+                                ));
+                                let page_id = u32::from_be_bytes(
+                                    bytes[len - 8..len - 4].try_into().unwrap(),
+                                );
+                                let next = if use_frame_hint {
+                                    let frame_id = u32::from_be_bytes(
+                                        bytes[len - 4..].try_into().unwrap(),
+                                    );
+                                    PageFrameKey::new_with_frame_id(next_c_key, page_id, frame_id)
+                                } else {
+                                    PageFrameKey::new(next_c_key, page_id)
+                                };
+                                let cs_delta: u64 = if payload_bytes == 0 {
+                                    bytes[0] as u64
+                                } else {
+                                    let n = payload_bytes.min(len);
+                                    let payload = std::hint::black_box(&bytes[..n]);
+                                    let mut acc: u64 = 0;
+                                    for &b in payload {
+                                        acc = acc.wrapping_add(b as u64);
+                                    }
+                                    acc
+                                };
+                                (next, cs_delta)
+                            });
+                            let (next, cs_delta) = match outcome {
+                                Ok(v) => v,
+                                Err(_) => {
+                                    current = keys[start_idx];
+                                    continue;
+                                }
+                            };
+                            if payload_bytes == 0 {
+                                checksum = checksum.wrapping_add(cs_delta);
+                            } else {
+                                checksum ^= cs_delta;
+                            }
+                            if let (Some(h), Some(t0)) = (hist.as_mut(), t0) {
+                                let _ = h.record(t0.elapsed().as_nanos() as u64);
+                            }
+                            current = next;
+                            ops += 1;
+                            continue;
+                        }
                         let g = match bp.get_page_for_read(current) {
                             Ok(g) => g,
                             Err(_) => {
@@ -599,7 +786,23 @@ fn main() {
                         continue;
                     }
 
-                    let idx = if num_hotspots > 0 {
+                    let idx = if prefer_active {
+                        // --prefer-prob: with probability `prefer_prob` sample
+                        // from pages currently at their preferred frame, else
+                        // from displaced pages. Two cached vector loads + one
+                        // rng call — same per-access bookkeeping as a uniform
+                        // pick over `keys[]`.
+                        let r = (uniform_rng.next_u64() as f64) / (u64::MAX as f64);
+                        if r < prefer_prob {
+                            let pos = (uniform_rng.next_u64() as usize)
+                                % preferred_indices.len();
+                            preferred_indices[pos]
+                        } else {
+                            let pos = (uniform_rng.next_u64() as usize)
+                                % displaced_indices.len();
+                            displaced_indices[pos]
+                        }
+                    } else if num_hotspots > 0 {
                         // Multi-hotspot: pick a hotspot uniformly, then
                         // sample within it (zipf or uniform). Hotspots are
                         // placed contiguously at the start of the page
@@ -635,6 +838,36 @@ fn main() {
                     } else {
                         None
                     };
+                    if callback_path {
+                        let outcome = bp.read_page_with(keys[idx], |page| {
+                            let bytes: &[u8] = page;
+                            if no_page_fold {
+                                (true, bytes[0] as u64)
+                            } else {
+                                let page = std::hint::black_box(bytes);
+                                let mut acc: u64 = 0;
+                                for &b in page {
+                                    acc = acc.wrapping_add(b as u64);
+                                }
+                                (false, acc)
+                            }
+                        });
+                        match outcome {
+                            Ok((is_byte, v)) => {
+                                if is_byte {
+                                    checksum = checksum.wrapping_add(v);
+                                } else {
+                                    checksum ^= v;
+                                }
+                            }
+                            Err(_) => continue,
+                        }
+                        if let (Some(h), Some(t0)) = (hist.as_mut(), t0) {
+                            let _ = h.record(t0.elapsed().as_nanos() as u64);
+                        }
+                        ops += 1;
+                        continue;
+                    }
                     let g = match bp.get_page_for_read(keys[idx]) {
                         Ok(g) => g,
                         Err(_) => continue, // retry on eviction failure / latch contention

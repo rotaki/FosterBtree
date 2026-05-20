@@ -1,0 +1,13 @@
+[Thu May  7 12:59:06 PM CDT 2026] starting LIPAH crosstab seq×sat re-run, 10 trials
+  N=100000 F=200000 C=500 T=44 S=15 W=5 --no-page-fold --refresh-hints
+  t=1   107.88 Mops/s  407.9 ns/op
+  t=2   69.45 Mops/s  633.6 ns/op
+  t=3   105.70 Mops/s  416.3 ns/op
+  t=4   133.10 Mops/s  330.6 ns/op
+  t=5   143.47 Mops/s  306.7 ns/op
+  t=6   98.68 Mops/s  445.9 ns/op
+  t=7   126.32 Mops/s  348.3 ns/op
+  t=8   156.66 Mops/s  280.9 ns/op
+  t=9   122.48 Mops/s  359.2 ns/op
+  t=10  162.52 Mops/s  270.7 ns/op
+[Thu May  7 01:04:03 PM CDT 2026] done. csv: /mnt/nvme1/rotaki/LIPAH/lapt_paper/results/lipah_crosstab_seqsat_20260507_125906/crosstab_seqsat_lipah.csv

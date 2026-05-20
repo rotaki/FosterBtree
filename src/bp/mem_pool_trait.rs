@@ -9,7 +9,7 @@ use super::{
     frame_guards::{FrameReadGuard, FrameWriteGuard},
 };
 
-use crate::page::PageId;
+use crate::page::{Page, PageId};
 
 pub type DatabaseId = u16;
 pub type ContainerId = u16;
@@ -433,6 +433,23 @@ pub trait MemPool: Sync + Send {
         key: PageFrameKey,
     ) -> Result<FrameReadGuard<Self::EP>, MemPoolStatus>;
 
+    /// Read a page and run `f` on it. The closure runs while the read latch
+    /// is held; the guard is released as soon as `f` returns.
+    ///
+    /// Default impl simply calls `get_page_for_read` and invokes `f` on the
+    /// returned guard's page. BPs that can do speculative reads (e.g. try the
+    /// predicted frame before paying for the hash lookup) should override
+    /// this so the speculation is invisible to the caller.
+    #[inline]
+    fn read_page_with<F, R>(&self, key: PageFrameKey, f: F) -> Result<R, MemPoolStatus>
+    where
+        F: FnOnce(&Page) -> R,
+        Self: Sized,
+    {
+        let g = self.get_page_for_read(key)?;
+        Ok(f(g.page()))
+    }
+
     /// Prefetch page
     /// Load the page into memory so that read access will be faster.
     fn prefetch_page(&self, key: PageFrameKey) -> Result<(), MemPoolStatus>;
@@ -477,6 +494,13 @@ pub trait MemPool: Sync + Send {
     /// Print sub-step profile counters (PT-only, feature = "pt_profile").
     /// Default is no-op.
     fn print_profile(&self) {}
+
+    /// Return the preferred frame index for a given page key, if this BP
+    /// has a notion of "preferred placement". Used by benchmarks that
+    /// classify pages as at-preferred vs displaced (e.g. the
+    /// `--prefer-prob` control experiment). Default `None` for BPs that
+    /// don't have a placement function.
+    fn preferred_frame_for(&self, _key: PageKey) -> Option<u32> { None }
 
     /// Snapshot the unified fast-path coverage counters: `(fast_hits, total)`.
     ///

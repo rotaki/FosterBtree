@@ -150,6 +150,12 @@ pub fn gen_foster_btree_on_disk(bp_size: usize) -> Arc<FosterBtree<impl MemPool>
         let btree = FosterBtree::new(c_key, get_test_lapt(bp_size));
         return Arc::new(btree);
     }
+    #[cfg(feature = "bp_lapt3")]
+    {
+        use crate::bp::get_test_lapt3;
+        let btree = FosterBtree::new(c_key, get_test_lapt3(bp_size));
+        return Arc::new(btree);
+    }
     #[cfg(feature = "bp_pt_v2")]
     {
         use crate::bp::get_test_pt_v2;
@@ -179,6 +185,7 @@ pub fn gen_foster_btree_on_disk(bp_size: usize) -> Arc<FosterBtree<impl MemPool>
         feature = "bp_pt_tlb_only_keys",
         feature = "bp_pt_v2",
         feature = "bp_lapt",
+        feature = "bp_lapt3",
     )))]
     {
         let btree = FosterBtree::new(c_key, get_test_bp(bp_size));

@@ -20,7 +20,7 @@ use super::{
     macro_profile::{scoped as macro_profile_scoped, BpMacroOp},
     mem_pool_trait::{ContainerKey, MemPool, MemPoolStatus, MemoryStats, PageFrameKey, PageKey},
 };
-use crate::{container::ContainerManager, log_debug, page::PageId};
+use crate::{container::ContainerManager, log_debug, page::{Page, PageId}};
 
 #[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
 use std::sync::atomic::AtomicU64;
@@ -218,6 +218,46 @@ impl<const EVICTION_BATCH_SIZE: usize> BufferPoolClock<EVICTION_BATCH_SIZE> {
         #[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
         self.coverage.evictions.fetch_add(1, Ordering::Relaxed);
     }
+
+    /// Slow path body shared by `get_page_for_read` and `read_page_with`.
+    /// The hint-check fast path is inlined at the call site so this is
+    /// invoked only after a confirmed hint miss.
+    fn read_slow_path_guard(&self, key: PageFrameKey) -> Result<FRGuard, MemPoolStatus> {
+        self.fm
+            .ensure_free_frames(EVICTION_BATCH_SIZE, |pk, idx| self.on_evict(pk, idx))?;
+
+        let cmap = self.page_to_frame.get_cmap(&key.p_key().c_key);
+        let mut victim = match cmap.entry(key.p_key().page_id) {
+            entry::Entry::Occupied(entry) => {
+                let guard = self.fm.try_get_read_guard(*entry.get() as u32);
+                return guard
+                    .inspect(|g| {
+                        g.evict_info().update();
+                    })
+                    .ok_or(MemPoolStatus::FrameReadLatchGrantFailed);
+            }
+            entry::Entry::Vacant(entry) => {
+                self.fm.increment_used();
+                let victim = self
+                    .fm
+                    .choose_victim()
+                    .ok_or(MemPoolStatus::CannotEvictPage)?;
+                entry.insert(victim.frame_id() as usize);
+                victim
+            }
+        };
+        assert!(victim.page_key().is_none());
+        assert!(!victim.dirty().load(Ordering::Acquire));
+
+        let container = self.fm.container_manager().get_container(key.p_key().c_key);
+        container
+            .read_page(key.p_key().page_id, &mut victim)
+            .map(|()| {
+                victim.set_page_key(Some(key.p_key()));
+                victim.evict_info().update();
+            })?;
+        Ok(victim.downgrade())
+    }
 }
 
 impl<const EVICTION_BATCH_SIZE: usize> MemPool for BufferPoolClock<EVICTION_BATCH_SIZE> {
@@ -373,41 +413,47 @@ impl<const EVICTION_BATCH_SIZE: usize> MemPool for BufferPoolClock<EVICTION_BATC
         #[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
         self.coverage.hint_misses.fetch_add(1, Ordering::Relaxed);
 
-        // Slow path.
-        self.fm
-            .ensure_free_frames(EVICTION_BATCH_SIZE, |pk, idx| self.on_evict(pk, idx))?;
+        self.read_slow_path_guard(key)
+    }
 
-        let cmap = self.page_to_frame.get_cmap(&key.p_key().c_key);
-        let mut victim = match cmap.entry(key.p_key().page_id) {
-            entry::Entry::Occupied(entry) => {
-                let guard = self.fm.try_get_read_guard(*entry.get() as u32);
-                return guard
-                    .inspect(|g| {
-                        g.evict_info().update();
-                    })
-                    .ok_or(MemPoolStatus::FrameReadLatchGrantFailed);
-            }
-            entry::Entry::Vacant(entry) => {
-                self.fm.increment_used();
-                let victim = self
-                    .fm
-                    .choose_victim()
-                    .ok_or(MemPoolStatus::CannotEvictPage)?;
-                entry.insert(victim.frame_id() as usize);
-                victim
-            }
-        };
-        assert!(victim.page_key().is_none());
-        assert!(!victim.dirty().load(Ordering::Acquire));
+    /// Callback read mirroring PrediCache/LAPT's `read_page_with`. The fast
+    /// path uses the caller-supplied `frame_id` hint embedded in
+    /// `PageFrameKey`. Meta/page pointers are hoisted next to the hint check
+    /// so the compiler can surface the loads early — the page payload starts
+    /// arriving in cache while the meta-key compare resolves.
+    #[inline]
+    fn read_page_with<F, R>(&self, key: PageFrameKey, f: F) -> Result<R, MemPoolStatus>
+    where
+        F: FnOnce(&Page) -> R,
+        Self: Sized,
+    {
+        let _macro_timer = macro_profile_scoped(BpMacroOp::GetPageRead);
+        log_debug!("Page read: {}", key);
+        self.stats.inc_read_count();
 
-        let container = self.fm.container_manager().get_container(key.p_key().c_key);
-        container
-            .read_page(key.p_key().page_id, &mut victim)
-            .map(|()| {
-                victim.set_page_key(Some(key.p_key()));
-                victim.evict_info().update();
-            })?;
-        Ok(victim.downgrade())
+        // Fast path: use hint from caller.
+        #[cfg(not(feature = "no_bp_hint"))]
+        {
+            let frame_id = key.frame_id();
+            if (frame_id as usize) < self.fm.num_frames() {
+                if self.fm.meta(frame_id).key() == Some(key.p_key()) {
+                    if let Some(g) = self.fm.try_get_read_guard(frame_id) {
+                        if g.page_key() == Some(key.p_key()) {
+                            g.evict_info().update();
+                            #[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
+                            self.coverage.hint_hits.fetch_add(1, Ordering::Relaxed);
+                            return Ok(f(g.page()));
+                        }
+                    }
+                }
+            }
+        }
+
+        #[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
+        self.coverage.hint_misses.fetch_add(1, Ordering::Relaxed);
+
+        let g = self.read_slow_path_guard(key)?;
+        Ok(f(g.page()))
     }
 
     fn prefetch_page(&self, _key: PageFrameKey) -> Result<(), MemPoolStatus> {

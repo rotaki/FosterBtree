@@ -1,0 +1,19 @@
+[Sun May 17 11:40:29 AM CDT 2026] starting NUMA patch verification
+=== interleave_on  (extra='') ===
+  t=1    151.65 Mops/s    290.1 ns/op
+  t=2    118.46 Mops/s    371.4 ns/op
+  t=3    135.60 Mops/s    324.5 ns/op
+  t=4    161.09 Mops/s    273.1 ns/op
+  t=5    143.90 Mops/s    305.8 ns/op
+=== interleave_off  (extra='--no-numa-interleave') ===
+  t=1    123.92 Mops/s    355.1 ns/op
+  t=2    152.52 Mops/s    288.5 ns/op
+  t=3    176.59 Mops/s    249.2 ns/op
+  t=4    159.19 Mops/s    276.4 ns/op
+  t=5    165.78 Mops/s    265.4 ns/op
+
+=== summary ===
+mode                n     min     max  median    mean  stdev   cv%
+interleave_on       5  118.46  161.09  143.90  142.14  16.25 11.4%
+interleave_off      5  123.92  176.59  159.19  155.60  19.81 12.7%
+[Sun May 17 11:45:49 AM CDT 2026] done. csv: /mnt/nvme1/rotaki/LIPAH/lapt_paper/results/numa_patch_20260517_114029/numa_patch.csv

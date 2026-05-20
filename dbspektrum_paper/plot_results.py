@@ -35,14 +35,47 @@ if _STYLE.exists():
 # axes.prop_cycle so all plots stay color-consistent with the rest of the
 # paper. Hatches let bars distinguish in B/W print.
 #
-# Display names use PrediCache* to flag that our PrediCache implementation
-# is a faithful re-build, not the original codebase. CSV column values use
-# the un-asterisked name; CSV_NAMES maps display → CSV.
-VARIANTS = ["LIPAH", "PrediCache*", "LAPT"]
-CSV_NAMES = {"LIPAH": "LIPAH", "PrediCache*": "PrediCache", "LAPT": "LAPT"}
-COLORS = {"LIPAH": "#0C5DA5", "PrediCache*": "#00B945", "LAPT": "#FF9500"}
-MARKERS = {"LIPAH": "o", "PrediCache*": "s", "LAPT": "^"}
-HATCHES = {"LIPAH": "", "PrediCache*": "//", "LAPT": "xx"}
+# Full registry. Display name → CSV column / style. `--variants` selects
+# which subset to render (default: all that appear in the CSV).
+#
+# 2×2 study labels match the bench's CSV-column values one-to-one:
+#   LIPAH      — hint-based reference line (different abstraction)
+#   PrediCache — (uniform, always-probe) — vanilla PrediCache
+#   prefix     — (prefix,  always-probe) — placement only
+#   bypass     — (uniform, bypass)       — bypass only
+#   both       — (prefix,  bypass)       — combined
+ALL_VARIANTS = ["LIPAH", "PrediCache", "prefix", "bypass", "both"]
+CSV_NAMES = {
+    "LIPAH": "LIPAH",
+    "PrediCache": "PrediCache",
+    "prefix": "prefix",
+    "bypass": "bypass",
+    "both": "both",
+}
+COLORS = {
+    "LIPAH": "#0C5DA5",
+    "PrediCache": "#00B945",
+    "prefix": "#845B97",
+    "bypass": "#FF9500",
+    "both": "#FF2C00",
+}
+MARKERS = {
+    "LIPAH": "o",
+    "PrediCache": "s",
+    "prefix": "v",
+    "bypass": "^",
+    "both": "D",
+}
+HATCHES = {
+    "LIPAH": "",
+    "PrediCache": "//",
+    "prefix": "\\\\",
+    "bypass": "xx",
+    "both": "..",
+}
+
+# Active set, mutated in main() based on --variants.
+VARIANTS = list(ALL_VARIANTS)
 
 
 def median(series):
@@ -94,7 +127,9 @@ def plot_crosstab_44t(indir, outdir):
                  ("uniform", "sat", "Preferred"),
                  ("uniform", "stale", "Not preferred")]
     fig, ax = plt.subplots(figsize=(3.4, 1.9))
-    bar_w = 0.27
+    n_var = len(VARIANTS)
+    bar_w = 0.8 / n_var
+    center_shift = (n_var - 1) / 2.0
     xs = list(range(len(scenarios)))
     for i, v in enumerate(VARIANTS):
         ys, errs_lo, errs_hi = [], [], []
@@ -109,7 +144,7 @@ def plot_crosstab_44t(indir, outdir):
                 ys.append(m)
                 errs_lo.append(m - lo)
                 errs_hi.append(hi - m)
-        offsets = [x + (i - 1) * bar_w for x in xs]
+        offsets = [x + (i - center_shift) * bar_w for x in xs]
         ax.bar(offsets, ys, bar_w, label=v, color=COLORS[v],
                yerr=[errs_lo, errs_hi], capsize=1.5,
                edgecolor="black", linewidth=0.4,
@@ -144,9 +179,9 @@ def plot_crosstab_44t(indir, outdir):
 
     # Headroom no longer needed for legend (it lives above the axis)
     ax.set_ylim(0, ymax * 1.1)
-    ax.legend(loc="lower center", ncol=3, bbox_to_anchor=(0.5, 1.02),
-              fontsize=7, handlelength=1.5, handletextpad=0.4,
-              borderpad=0.3, columnspacing=0.8)
+    ax.legend(loc="lower center", ncol=n_var, bbox_to_anchor=(0.5, 1.02),
+              fontsize=6, handlelength=1.2, handletextpad=0.3,
+              borderpad=0.3, columnspacing=0.6)
     fig.subplots_adjust(left=0.11, right=0.99, top=0.86, bottom=0.22)
     fig.savefig(outdir / "crosstab_44t.png")
     fig.savefig(outdir / "crosstab_44t.pdf")
@@ -210,10 +245,25 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--indir", required=True, help="directory with CSVs")
     p.add_argument("--outdir", required=True, help="directory to write PNGs")
+    p.add_argument(
+        "--variants",
+        default=None,
+        help="comma-separated display names to render (subset of "
+        f"{ALL_VARIANTS}). Default: all.",
+    )
     args = p.parse_args()
     indir = Path(args.indir)
     outdir = Path(args.outdir)
     outdir.mkdir(parents=True, exist_ok=True)
+
+    global VARIANTS
+    if args.variants:
+        wanted = [v.strip() for v in args.variants.split(",") if v.strip()]
+        unknown = [v for v in wanted if v not in ALL_VARIANTS]
+        if unknown:
+            print(f"  unknown variants: {unknown}", file=sys.stderr)
+            sys.exit(2)
+        VARIANTS = wanted
 
     plots = [
         ("seq_payload_sat.csv",      plot_seq_payload),

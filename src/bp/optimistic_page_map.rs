@@ -5,13 +5,16 @@
 //! readers read version → data → re-read version (no lock, no copy). Chain
 //! nodes are allocated and retired via crossbeam_epoch for safe reclamation.
 
+#[cfg(not(feature = "pc_prefix_hash"))]
 use super::hash::hash_page_key;
+#[cfg(feature = "pc_prefix_hash")]
+use super::hash::hash_u64;
 use super::mem_pool_trait::{ContainerKey, PageFrameKey, PageKey};
 use crossbeam_epoch::{Atomic, Owned};
 use std::cell::UnsafeCell;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-const LOCK_BIT: u64 = 1u64 << 63;
+pub(crate) const LOCK_BIT: u64 = 1u64 << 63;
 const MAX_READ_RETRIES: u32 = 32;
 const MAX_WRITE_SPIN: u32 = 1_000_000;
 
@@ -23,11 +26,16 @@ struct ChainNode {
 }
 
 /// Per-bucket: versioned lock (MSB = locked) and in-place data.
-struct Bucket {
+///
+/// Exposed as `pub(crate)` so the BP can `bucket_ptr(pref)` + cast to
+/// `*const Bucket` and OLC-read the inlined slot inline (skipping the
+/// closure indirection of `get_apply_with_bucket`) on the displaced
+/// fast-path probe.
+pub(crate) struct Bucket {
     /// MSB = 1 when a writer holds the lock; low 63 bits = version (bumped on unlock).
-    version: AtomicU64,
+    pub(crate) version: AtomicU64,
     /// Inlined first slot. Writers mutate under lock; readers read under version check.
-    inlined: UnsafeCell<Option<(PageKey, u32)>>,
+    pub(crate) inlined: UnsafeCell<Option<(PageKey, u32)>>,
     /// Head of chain. Atomic so readers can follow without holding the lock.
     chain_head: Atomic<ChainNode>,
 }
@@ -82,16 +90,9 @@ impl Bucket {
     }
 }
 
-/// Map a 64-bit hash uniformly to `[0, n)` without division.
-#[inline(always)]
-fn fastmod(hash: u64, n: u64) -> usize {
-    ((hash as u128 * n as u128) >> 64) as usize
-}
-
 /// Overflow table: fixed number of buckets, chaining with inlined first slot, in-place updates.
 pub struct OptimisticPageMap {
     num_buckets: usize,
-    num_buckets_u64: u64,
     buckets: Vec<Bucket>,
 }
 
@@ -100,30 +101,48 @@ impl OptimisticPageMap {
         let buckets = (0..num_buckets).map(|_| Bucket::new()).collect();
         Self {
             num_buckets,
-            num_buckets_u64: num_buckets as u64,
             buckets,
         }
     }
 
+    /// Bucket index for `key`. Must match `PrediCache::preferred_frame` so
+    /// that inserts via `try_insert` / `remove` / etc. land in the same
+    /// bucket as inserts via `*_at_bucket(pref)`. The cfg here mirrors
+    /// `predicache.rs`:
+    ///   default            — uniform Stafford-mixed full-key hash
+    ///   `pc_prefix_hash`   — prefix-hash + suffix-offset
     #[inline]
     pub fn bucket_index_pub(&self, key: &PageKey) -> usize {
-        fastmod(hash_page_key(key), self.num_buckets_u64)
+        self.bucket_index(key)
     }
 
     #[inline]
     fn bucket_index(&self, key: &PageKey) -> usize {
-        fastmod(hash_page_key(key), self.num_buckets_u64)
+        #[cfg(feature = "pc_prefix_hash")]
+        {
+            let c_hash = hash_u64(key.c_key.as_u32() as u64);
+            let packed = c_hash.wrapping_add(key.page_id as u64);
+            (packed as usize) % self.num_buckets
+        }
+        #[cfg(not(feature = "pc_prefix_hash"))]
+        {
+            (hash_page_key(key) as usize) % self.num_buckets
+        }
     }
 
-    /// Return a raw pointer to the bucket for a given index, for prefetching.
+    /// Return a raw pointer to the bucket for a given index — for
+    /// prefetching and for the caller to OLC-peek the inlined slot inline.
+    /// Cast to `*const i8` for `_mm_prefetch`.
     #[inline(always)]
-    pub(crate) fn bucket_ptr(&self, bucket_idx: usize) -> *const u8 {
+    pub(crate) fn bucket_ptr(&self, bucket_idx: usize) -> *const Bucket {
         let idx = bucket_idx % self.num_buckets;
-        &self.buckets[idx] as *const Bucket as *const u8
+        &self.buckets[idx] as *const Bucket
     }
 
     /// Lock-free lookup using a precomputed bucket index.
-    /// `bucket_idx` must already be in `[0, num_buckets)` (e.g. from fastmod).
+    /// `bucket_idx` must already be in `[0, num_buckets)` (typically the
+    /// caller's preferred-frame index, which by construction equals
+    /// `bucket_index(key)`).
     #[inline]
     pub fn lookup_with_bucket(&self, key: &PageKey, bucket_idx: usize) -> Option<u32> {
         let idx = bucket_idx % self.num_buckets;
@@ -336,6 +355,20 @@ impl OptimisticPageMap {
     #[inline]
     pub(crate) fn try_insert(&self, key: PageKey, frame_id: u32) -> Result<(), u32> {
         let idx = self.bucket_index(&key);
+        self.try_insert_at_bucket(key, frame_id, idx)
+    }
+
+    /// `try_insert` variant that places the entry in a caller-chosen bucket
+    /// (so it matches a separately-computed preferred-frame index instead of
+    /// OPM's internal hash). Used by translators whose placement function
+    /// differs from `bucket_index`.
+    pub(crate) fn try_insert_at_bucket(
+        &self,
+        key: PageKey,
+        frame_id: u32,
+        bucket_idx: usize,
+    ) -> Result<(), u32> {
+        let idx = bucket_idx % self.num_buckets;
         let bucket = &self.buckets[idx];
         let guard = crossbeam_epoch::pin();
         while !bucket.try_lock() {
@@ -445,6 +478,14 @@ impl OptimisticPageMap {
     #[inline]
     pub(crate) fn remove(&self, key: &PageKey) -> Option<u32> {
         let idx = self.bucket_index(key);
+        self.remove_at_bucket(key, idx)
+    }
+
+    /// `remove` variant keyed by caller-supplied bucket — pairs with
+    /// `insert_at_bucket` / `try_insert_at_bucket` when the translator's
+    /// placement differs from OPM's internal hash.
+    pub(crate) fn remove_at_bucket(&self, key: &PageKey, bucket_idx: usize) -> Option<u32> {
+        let idx = bucket_idx % self.num_buckets;
         let bucket = &self.buckets[idx];
         let guard = crossbeam_epoch::pin();
         while !bucket.try_lock() {
@@ -714,7 +755,7 @@ mod tests {
         let t = OptimisticPageMap::new(64);
         let key = pk(5);
         t.insert(key, 42);
-        let bucket_idx = fastmod(hash_page_key(&key), 64);
+        let bucket_idx = t.bucket_index_pub(&key);
         assert_eq!(t.lookup_with_bucket(&key, bucket_idx), Some(42));
         // Wrong bucket should miss (unless hash collision, unlikely).
         // Just verify correct bucket works.

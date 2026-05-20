@@ -1,0 +1,26 @@
+[Sun May 17 11:24:01 AM CDT 2026] starting NUMA hypothesis test (taskset-based)
+=== baseline_44t  (threads=44, prefix='') ===
+  t=1    191.12 Mops/s    230.2 ns/op
+  t=2    142.09 Mops/s    309.7 ns/op
+  t=3    117.21 Mops/s    375.4 ns/op
+  t=4    126.39 Mops/s    348.1 ns/op
+  t=5    137.24 Mops/s    320.6 ns/op
+=== node0_pinned_24t  (threads=24, prefix='taskset -c 0-11,24-35') ===
+  t=1     63.41 Mops/s    378.5 ns/op
+  t=2     62.00 Mops/s    387.1 ns/op
+  t=3     62.61 Mops/s    383.3 ns/op
+  t=4     64.31 Mops/s    373.2 ns/op
+  t=5     63.25 Mops/s    379.4 ns/op
+=== node1_pinned_24t  (threads=24, prefix='taskset -c 12-23,36-47') ===
+  t=1    125.32 Mops/s    191.5 ns/op
+  t=2    125.86 Mops/s    190.7 ns/op
+  t=3    126.72 Mops/s    189.4 ns/op
+  t=4    125.38 Mops/s    191.4 ns/op
+  t=5    127.46 Mops/s    188.3 ns/op
+
+=== summary ===
+mode                    n     min     max  median    mean  stdev   cv%
+baseline_44t            5  117.21  191.12  137.24  142.81  28.68 20.1%
+node0_pinned_24t        5   62.00   64.31   63.25   63.12   0.87  1.4%
+node1_pinned_24t        5  125.32  127.46  125.86  126.15   0.92  0.7%
+[Sun May 17 11:31:09 AM CDT 2026] done. csv: /mnt/nvme1/rotaki/LIPAH/lapt_paper/results/numa_test_20260517_112401/numa_test.csv

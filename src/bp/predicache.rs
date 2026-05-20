@@ -79,15 +79,6 @@ type FWGuard = FrameWriteGuard<EvictionPolicyImpl>;
 type FRGuard = FrameReadGuard<EvictionPolicyImpl>;
 
 // ---------------------------------------------------------------------------
-// fastmod (private re-implementation; original lives in predictive_translation)
-// ---------------------------------------------------------------------------
-
-#[inline(always)]
-fn fastmod(hash: u64, n: u64) -> u32 {
-    (((hash as u128).wrapping_mul(n as u128)) >> 64) as u32
-}
-
-// ---------------------------------------------------------------------------
 // PrediCache
 // ---------------------------------------------------------------------------
 
@@ -193,15 +184,30 @@ impl PrediCache {
     }
 
     // ------------------------------------------------------------------
-    // Deterministic placement (identical to original PT)
+    // Placement (2×2 axis 1 — toggled by `pc_prefix_hash` feature)
     // ------------------------------------------------------------------
 
-    /// Stafford-mixed full-key hash. Distributes uniformly across frames; no
-    /// scan locality. This is PrediCache's placement function. (Order-preserving
-    /// placement is implemented in `lapt.rs`, not here.)
+    /// Preferred frame for a page key.
+    ///
+    /// Default (vanilla PrediCache): Stafford-mixed full-key hash. Uniform
+    /// spread across the frame array; no scan locality.
+    ///
+    /// With `pc_prefix_hash` feature: prefix-hash + suffix-offset placement,
+    /// `(hash(c_key) + page_id) mod F`. Sequential page_ids within a
+    /// container land in adjacent preferred frames (HW-prefetcher-friendly).
+    /// Container hash prefix disambiguates tenants.
     #[inline]
-    pub(crate) fn preferred_frame(&self, key: &PageKey) -> u32 {
-        fastmod(hash_page_key(key), self.num_frames_u64)
+    pub fn preferred_frame(&self, key: &PageKey) -> u32 {
+        #[cfg(feature = "pc_prefix_hash")]
+        {
+            let c_hash = super::hash::hash_u64(key.c_key.as_u32() as u64);
+            let packed = c_hash.wrapping_add(key.page_id as u64);
+            (packed % self.num_frames_u64) as u32
+        }
+        #[cfg(not(feature = "pc_prefix_hash"))]
+        {
+            (hash_page_key(key) % self.num_frames_u64) as u32
+        }
     }
 
     // ------------------------------------------------------------------
@@ -699,6 +705,120 @@ impl MemPool for PrediCache {
         self.get_page_for_read_slow(page_key, pref)
     }
 
+    /// Callback read mirroring the PrediCache paper's Listing 3.
+    ///
+    /// 1. `predictFrame(pid)` — compute `pref` and issue an HW prefetch for
+    ///    `pages[pref]`'s meta + payload cachelines. This kicks the page
+    ///    payload load early so it can overlap with the bucket lookup; we
+    ///    *don't* take the read latch up front, which would otherwise burn
+    ///    a CAS per slow-path access.
+    /// 2. `ht.find(pid)` — single OLC lookup in the OptimisticPageMap.
+    /// 3. Fast path — only if the lookup says the page is at `pref` do we
+    ///    try the read latch on `pages[pref]`. The branch on the lookup
+    ///    result is the one branch prediction speculates on; the prefetched
+    ///    page payload arrives in time for the callback. Slow-path accesses
+    ///    pay zero extra CAS.
+    /// 4. Page fault — lookup miss → fall back to `get_page_for_read_slow`.
+    /// 5. Slow path — page is in the BP at a non-predicted frame. Defer to
+    ///    `get_page_for_read_slow`, which also runs probabilistic promotion.
+    #[inline]
+    fn read_page_with<F, R>(&self, key: PageFrameKey, f: F) -> Result<R, MemPoolStatus>
+    where
+        F: FnOnce(&Page) -> R,
+        Self: Sized,
+    {
+        let _macro_timer = macro_profile_scoped(BpMacroOp::GetPageRead);
+        self.stats.inc_read_count();
+        #[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
+        self.profile.total_reads.fetch_add(1, Ordering::Relaxed);
+
+        let page_key = key.p_key();
+        let pref = self.preferred_frame(&page_key);
+
+        // 2×2 axis 2: hot-path bypass. Default (no `pc_bypass`) runs the
+        // PrediCache always-probe-with-overlap path; `pc_bypass` runs the
+        // LIPAH-inspired speculative-latch-then-skip-OPM-on-hit path.
+        #[cfg(not(feature = "pc_bypass"))]
+        {
+            // (1) predictFrame: prefetch meta + page-payload cachelines for pref.
+            // No latch yet — that would cost a CAS even when the slow path runs.
+            let idx = pref as usize;
+            let meta = self.fm.metas.get_ptr(idx);
+            let page = self.fm.pages.get_ptr(idx);
+
+            // (2) ht.find(pid) — single OLC lookup, feeds both fast and slow paths.
+            let frame_id_opt = self.overflow.lookup_with_bucket(&page_key, pref as usize);
+
+            // (3) Fast path: lookup says the page is at pref. Use the pre-computed
+            //     `meta`/`page` pointers (fixed values) so the latch CAS / payload
+            //     load can issue speculatively while the lookup result is still in
+            //     flight.
+            if frame_id_opt == Some(pref) {
+                if let Some(g) = FrameReadGuard::try_new(meta, page) {
+                    if g.page_key() == Some(page_key) {
+                        g.evict_info().update();
+                        #[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
+                        self.profile
+                            .preferred_frame_hits
+                            .fetch_add(1, Ordering::Relaxed);
+                        return Ok(f(g.page()));
+                    }
+                    // Key flipped under us; drop guard and try the non-pref path.
+                }
+            }
+
+            // (3b) Direct-latch on the looked-up (non-predicted) frame. We have
+            //      `frame_id` in hand from the OLC lookup, so skip the second
+            //      OptimisticPageMap traversal that `get_page_for_read_slow` would
+            //      otherwise do. Only fall through to the real slow path if the
+            //      latch fails or the page key flipped (rare, concurrent
+            //      eviction/promotion).
+            if let Some(frame_id) = frame_id_opt {
+                let i = frame_id as usize;
+                let other_meta = self.fm.metas.get_ptr(i);
+                let other_page = self.fm.pages.get_ptr(i);
+                if let Some(g) = FrameReadGuard::try_new(other_meta, other_page) {
+                    if g.page_key() == Some(page_key) {
+                        g.evict_info().update();
+                        #[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
+                        self.profile
+                            .overflow_chain_hits
+                            .fetch_add(1, Ordering::Relaxed);
+                        return Ok(f(g.page()));
+                    }
+                }
+            }
+        }
+
+        #[cfg(feature = "pc_bypass")]
+        {
+            // Bypass path: speculatively try-latch at pref, validating via
+            // `meta(pref).key() == page_key` before issuing any OPM lookup.
+            // On hit, return without touching the OPM hash table. On miss,
+            // fall through to the regular slow path (which does its own
+            // OPM lookup). Mirrors LIPAH's bypass mechanism but driven off
+            // the metadata array rather than in-page hints.
+            if self.fm.meta(pref).key() == Some(page_key) {
+                if let Some(g) = self.fm.try_get_read_guard(pref) {
+                    if g.page_key() == Some(page_key) {
+                        g.evict_info().update();
+                        #[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
+                        self.profile
+                            .preferred_frame_hits
+                            .fetch_add(1, Ordering::Relaxed);
+                        return Ok(f(g.page()));
+                    }
+                    // Key flipped under us; drop and fall through to slow path.
+                }
+            }
+        }
+
+        // (4)+(5) Real slow path / page fault — does its own OLC lookup with
+        //     retry, handles eviction races, and runs probabilistic promotion.
+        let g = self.get_page_for_read_slow(page_key, pref)?;
+        Ok(f(g.page()))
+    }
+
     fn prefetch_page(&self, _key: PageFrameKey) -> Result<(), MemPoolStatus> {
         Ok(())
     }
@@ -774,6 +894,10 @@ impl MemPool for PrediCache {
 
     unsafe fn reset_stats(&self) {
         self.stats.clear();
+    }
+
+    fn preferred_frame_for(&self, key: PageKey) -> Option<u32> {
+        Some(self.preferred_frame(&key))
     }
 
     fn print_profile(&self) {
@@ -1000,7 +1124,7 @@ mod tests {
 }
 
 // ===========================================================================
-// Profile counters + fastmod (inlined from former predictive_translation.rs)
+// Profile counters (inlined from former predictive_translation.rs)
 // ===========================================================================
 
 pub struct PTProfileCounters {
@@ -1253,7 +1377,4 @@ impl PTProfileCounters {
     }
 }
 
-pub(crate) fn fastmod32(hash: u32, n: u32) -> u32 {
-    (((hash as u64).wrapping_mul(n as u64)) >> 32) as u32
-}
 

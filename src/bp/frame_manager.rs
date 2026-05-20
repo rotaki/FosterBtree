@@ -92,11 +92,11 @@ pub struct FrameManager<E: EvictionPolicy> {
 
     /// The actual page data for each frame. Single mmap region; zero-filled
     /// at construction (MAP_ANONYMOUS gives zero pages).
-    pages: MmapArray<Page>,
+    pub pages: MmapArray<Page>,
 
     /// Per-frame metadata (latch, dirty bit, eviction info, page key). Single
     /// mmap region; constructed in place from `FrameMeta::new(i)`.
-    metas: MmapArray<FrameMeta<E>>,
+    pub metas: MmapArray<FrameMeta<E>>,
 
     container_manager: Arc<ContainerManager>,
 }

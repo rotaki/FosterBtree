@@ -34,8 +34,19 @@ bp_overflow = []  # overflow_bp module: custom chaining HT (OverflowTable) + clo
 bp_open_addressing = ["no_bp_hint"] # open_addressing_bp: frame array IS the hash table, linear probing
 bp_clock = []
 bp_predicache = ["no_bp_hint"]
+
+# PrediCache 2×2 ablation axes — each one is an *independent* knob that
+# changes the behavior of `predicache.rs`. Used alongside `bp_predicache`:
+#   default (no axis flag) = (uniform, always-probe) = vanilla PrediCache
+#   pc_prefix_hash         = (prefix, always-probe)
+#   pc_bypass              = (uniform, bypass)
+#   pc_prefix_hash + pc_bypass = (prefix, bypass)
+pc_prefix_hash = []   # placement: (hash(c_key) + page_id) mod F
+pc_bypass      = []   # read_page_with: skip OPM lookup on meta(pref) hit
 bp_pt2 = ["no_bp_hint"]       # predictive_translation_two module: PT with two hash predictions
 bp_lapt = ["no_bp_hint"] # LAPT: PT-FP-V2 + congee/ART overflow + ophash
+bp_lapt2 = ["no_bp_hint"] # LAPT2: as bp_lapt, with PrediCache-style prefetch + overflow-direct read_page_with
+bp_lapt3 = ["no_bp_hint"] # LAPT3: as bp_lapt, but overflow translator is OptimisticPageMap (hash) instead of Congee ART
 bp_pt2_bucket = ["no_bp_hint"] # PT variant: two hashes + metadata verify-and-fast-return
 bp_pt4_bucket = ["no_bp_hint"] # PT variant: four hashes + metadata verify-and-fast-return
 bp_pt_tlb = ["no_bp_hint"]    # PT variant: per-thread L1-resident translation cache

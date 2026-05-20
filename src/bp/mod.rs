@@ -90,22 +90,6 @@ pub fn get_in_mem_pool() -> Arc<InMemPool> {
     Arc::new(InMemPool::new())
 }
 
-/// Replica of `PrediCache::preferred_frame`, exposed for
-/// benchmarks that need to pick page ids by their target preferred slot
-/// (e.g. deterministic-collision microbenchmarks). The formula is kept in
-/// TLB-style order-preserving composition, otherwise the Stafford-mixed
-/// full key. See plan: PT strength/weakness study, Part B2.
-#[inline]
-pub fn pt_preferred_slot(c_key: u32, page_id: u32, num_frames: u64) -> u32 {
-    #[inline(always)]
-    fn fastmod(hash: u64, n: u64) -> u32 {
-        (((hash as u128).wrapping_mul(n as u128)) >> 64) as u32
-    }
-    {
-        let packed = (c_key as u64) << 32 | page_id as u64;
-        fastmod(hash::hash_u64(packed), num_frames)
-    }
-}
 pub mod prelude {
     pub use super::{
         get_in_mem_pool, get_test_bp, get_test_predicache, BufferPool, ContainerId, ContainerKey,

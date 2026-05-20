@@ -1,39 +1,32 @@
 #!/usr/bin/env bash
-# Master benchmark runner: builds every variant binary once, runs all four
-# workloads with the parameters described in BENCHMARK_RESULTS.md, and emits
-# CSVs + plots into bench_run_<timestamp>/.
+# Focused run for an advisor discussion: 4 variants (LIPAH, PrediCache,
+# LAPT, PrediCache2) × 2 workloads (sequential payload sweep + 44-thread
+# crosstab). Renders TWO plot sets from the same CSVs:
+#   plots_3way/  — LIPAH, PrediCache*, LAPT (original translation micro)
+#   plots_4way/  — LIPAH, PrediCache*, PrediCache2, LAPT (with placement variant)
+#
+# Skips both B-tree workloads and LAPT3 — those aren't part of the
+# advisor narrative for this run.
 #
 # Knobs (env vars):
 #   N=100000  F=200000  C=500
-#   T=44  S=15  W_SAT=5  TRIALS=3
-#   NUM_KEYS=2000000  KEY_SIZE=100  SCAN_SIZE=1000  EXEC_SECS=15
-#   SKIP_BUILD=1   reuse existing variant binaries
+#   T=44  S=15  W_SAT=5  TRIALS=3  S_PAYLOAD=10
+#   SKIP_BUILD=1   reuse existing tagged binaries
 #   SKIP_PLOTS=1   skip plot generation
-set -euo pipefail
+set -uo pipefail
 
-# --- self-locating header (added when packaged into lapt_paper/) ---
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$PROJECT_ROOT"
-# -------------------------------------------------------------------
 
-
-# ----- params -----
 N=${N:-100000}
 F=${F:-200000}
 C=${C:-500}
 T=${T:-44}
 S=${S:-15}
 W_SAT=${W_SAT:-5}
-S_PAYLOAD=${S_PAYLOAD:-10}     # shorter exec for payload sweep (5×variants×payloads cells)
+S_PAYLOAD=${S_PAYLOAD:-10}
 TRIALS=${TRIALS:-3}
-TRIALS_BTREE_GET=${TRIALS_BTREE_GET:-5}
-NUM_KEYS=${NUM_KEYS:-2000000}
-KEY_SIZE=${KEY_SIZE:-100}
-VAL_MIN=${VAL_MIN:-50}
-VAL_MAX=${VAL_MAX:-100}
-SCAN_SIZE=${SCAN_SIZE:-1000}
-EXEC_SECS=${EXEC_SECS:-15}
 SKIP_BUILD=${SKIP_BUILD:-0}
 SKIP_PLOTS=${SKIP_PLOTS:-0}
 
@@ -41,48 +34,46 @@ PAYLOADS=(0 256 1024 4096 16384)
 
 TARGET="./target/release"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-OUTDIR="$SCRIPT_DIR/results/run_${TIMESTAMP}"
+OUTDIR="$SCRIPT_DIR/results/advisor_${TIMESTAMP}"
 RAW="$OUTDIR/raw"
 CSV="$OUTDIR/csv"
-PLOTS="$OUTDIR/plots"
-mkdir -p "$RAW" "$CSV" "$PLOTS"
+PLOTS_3="$OUTDIR/plots_3way"
+PLOTS_4="$OUTDIR/plots_4way"
+mkdir -p "$RAW" "$CSV" "$PLOTS_3" "$PLOTS_4"
 
 log() { echo "[$(date +%H:%M:%S)] $*" | tee -a "$OUTDIR/run.log"; }
 
-# Variants: features|label
+# Variants: features|label. Order matters for the 4-way plot (left→right
+# in grouped bars). No `pt_counts`/`pt_profile` — those would add atomic
+# fetch_adds to the hot path.
 declare -a VARIANTS=(
     "bp_clock|LIPAH"
     "bp_predicache|PrediCache"
+    "bp_predicache2|PrediCache2"
     "bp_lapt|LAPT"
 )
 
-# ----- record config -----
 cat > "$OUTDIR/config.txt" <<EOF
 date              : $(date)
 host              : $(hostname)
 N (pages)         : $N
 F (frames)        : $F
 C (containers)    : $C
-T (threads)        : $T
-
+T (threads)       : $T
 S (exec sec)      : $S
 S_PAYLOAD         : $S_PAYLOAD
 W_SAT (warmup)    : $W_SAT
 TRIALS            : $TRIALS
-TRIALS_BTREE_GET  : $TRIALS_BTREE_GET
-NUM_KEYS          : $NUM_KEYS
-KEY_SIZE          : $KEY_SIZE
-VAL               : [$VAL_MIN,$VAL_MAX]
-SCAN_SIZE         : $SCAN_SIZE
-EXEC_SECS         : $EXEC_SECS
 PAYLOADS          : ${PAYLOADS[*]}
+VARIANTS          : LIPAH, PrediCache, PrediCache2, LAPT
 EOF
 log "Config written to $OUTDIR/config.txt"
 
-# ----- build variant binaries -----
+# ----- build only bp_translation_bench (no btree binaries needed) -----
 build_variant() {
-    local features=$1 label=$2 bin=$3
+    local features=$1 label=$2
     local tag=$(echo "$label" | tr -d ' -' | tr 'A-Z' 'a-z')
+    local bin="bp_translation_bench"
     if [ "$SKIP_BUILD" = "1" ] && [ -x "$TARGET/${bin}_${tag}" ]; then
         log "Skip build: $TARGET/${bin}_${tag} already exists"
         return
@@ -95,28 +86,19 @@ build_variant() {
 
 for entry in "${VARIANTS[@]}"; do
     IFS='|' read -r features label <<< "$entry"
-    for bin in bp_translation_bench fbt_on_disk_get fbt_on_disk_scan; do
-        build_variant "$features" "$label" "$bin"
-    done
+    build_variant "$features" "$label"
 done
 
-# ----- helpers to extract metrics -----
 get_translation_throughput() {
     grep "^Throughput:" "$1" | grep -oP '\(\K[0-9.]+' | head -1 || echo "NaN"
 }
 get_translation_nsop() {
     grep "^Avg latency:" "$1" | grep -oP '[0-9.]+' | head -1 || echo "NaN"
 }
-get_btree_get_mops() {
-    grep "ratio=0:0:0:1" "$1" | tail -1 | grep -oP '\(\K[0-9.]+(?= Mops/s)' || echo "NaN"
-}
-get_scan_mkvs() {
-    grep "BENCH_SCAN_RESULT" "$1" | tail -1 | grep -oP '\(\K[0-9.]+(?= M kvs/s)' || echo "NaN"
-}
 
 # ----- workload 1: sequential payload sweep -----
 run_payload_sweep() {
-    local state=$1                # "sat" or "stale"
+    local state=$1
     local out_csv="$CSV/seq_payload_${state}.csv"
     echo "variant,state,payload_bytes,trial,mops" > "$out_csv"
 
@@ -143,6 +125,7 @@ run_payload_sweep() {
                     export PT_PROMOTE_PROB_NO_DEMOTE=4294967295
                     export PT_PROMOTE_PROB_DEMOTE=4294967295
                 fi
+                extra="$extra --callback-path"
 
                 "$bin" --sequential -n "$N" -f "$F" -t "$T" -s "$S_PAYLOAD" -w "$W" \
                     --num-containers "$C" --payload-bytes "$p" $extra \
@@ -160,7 +143,7 @@ run_crosstab_44t() {
     local out_csv="$CSV/crosstab_44t.csv"
     echo "variant,access,state,trial,mops,ns_per_op" > "$out_csv"
 
-    log "=== Workload 2: 44-thread crosstab (sequential×saturated, sequential×stale, uniform×saturated, uniform×stale) ==="
+    log "=== Workload 2: 44-thread crosstab (sequential/uniform × sat/stale) ==="
 
     declare -a SCENARIOS=(
         "seq-sat|--sequential|sat"
@@ -189,6 +172,7 @@ run_crosstab_44t() {
                     export PT_PROMOTE_PROB_NO_DEMOTE=4294967295
                     export PT_PROMOTE_PROB_DEMOTE=4294967295
                 fi
+                extra="$extra --callback-path"
 
                 "$bin" $access -n "$N" -f "$F" -t "$T" -s "$S" -w "$W" \
                     --num-containers "$C" --no-page-fold $extra \
@@ -203,81 +187,31 @@ run_crosstab_44t() {
     done
 }
 
-# ----- workload 3: B-tree GET -----
-run_btree_get() {
-    local out_csv="$CSV/btree_get.csv"
-    echo "variant,trial,mops" > "$out_csv"
-
-    log "=== Workload 3: B-tree random GET (T=$T, $NUM_KEYS keys, no-copy) ==="
-
-    unset PT_PROMOTE_PROB_NO_DEMOTE PT_PROMOTE_PROB_DEMOTE
-    for entry in "${VARIANTS[@]}"; do
-        IFS='|' read -r features label <<< "$entry"
-        local tag=$(echo "$label" | tr -d ' -' | tr 'A-Z' 'a-z')
-        local bin="$TARGET/fbt_on_disk_get_${tag}"
-
-        for trial in $(seq 1 "$TRIALS_BTREE_GET"); do
-            local logf="$RAW/btree_get_${tag}_t${trial}.log"
-            "$bin" --num_keys "$NUM_KEYS" --key_size "$KEY_SIZE" \
-                --val_min_size "$VAL_MIN" --val_max_size "$VAL_MAX" \
-                --num_threads "$T" --bp_size "$F" --unique_keys \
-                >"$logf" 2>&1 || log "  [btree-get/$label/t=$trial] non-zero exit"
-            local mops=$(get_btree_get_mops "$logf")
-            echo "$label,$trial,$mops" >> "$out_csv"
-            printf "  %-12s t=%d  %s Mops/s\n" "$label" "$trial" "$mops"
-        done
-    done
-}
-
-# ----- workload 4: B-tree range scan -----
-run_btree_scan() {
-    local out_csv="$CSV/btree_range_scan.csv"
-    echo "variant,trial,mkvs_per_s" > "$out_csv"
-
-    log "=== Workload 4: B-tree random-start range scan (T=$T, scan_size=$SCAN_SIZE) ==="
-
-    unset PT_PROMOTE_PROB_NO_DEMOTE PT_PROMOTE_PROB_DEMOTE
-    for entry in "${VARIANTS[@]}"; do
-        IFS='|' read -r features label <<< "$entry"
-        local tag=$(echo "$label" | tr -d ' -' | tr 'A-Z' 'a-z')
-        local bin="$TARGET/fbt_on_disk_scan_${tag}"
-
-        for trial in $(seq 1 "$TRIALS"); do
-            local logf="$RAW/btree_scan_${tag}_t${trial}.log"
-            SCAN_SIZE="$SCAN_SIZE" EXEC_SECS="$EXEC_SECS" \
-                "$bin" --num_keys "$NUM_KEYS" --key_size "$KEY_SIZE" \
-                --val_min_size "$VAL_MIN" --val_max_size "$VAL_MAX" \
-                --num_threads "$T" --bp_size "$F" --unique_keys \
-                >"$logf" 2>&1 || log "  [btree-scan/$label/t=$trial] non-zero exit"
-            local mkvs=$(get_scan_mkvs "$logf")
-            echo "$label,$trial,$mkvs" >> "$out_csv"
-            printf "  %-12s t=%d  %s M kvs/s\n" "$label" "$trial" "$mkvs"
-        done
-    done
-}
-
-# ----- run everything -----
 run_payload_sweep "sat"
 run_payload_sweep "stale"
 run_crosstab_44t
-run_btree_get
-run_btree_scan
 
-# ----- plots -----
-if [ "$SKIP_PLOTS" != "1" ]; then
-    if command -v python3 >/dev/null 2>&1; then
-        log "=== Generating plots ==="
-        python3 "$SCRIPT_DIR/plot_results.py" --indir "$CSV" --outdir "$PLOTS" 2>&1 | tee -a "$OUTDIR/run.log" || \
-            log "  plot generation failed (check python deps: matplotlib, pandas)"
-    else
-        log "  python3 not found, skipping plots"
-    fi
+# ----- plots: render two subsets from the same CSVs -----
+if [ "$SKIP_PLOTS" != "1" ] && command -v python3 >/dev/null 2>&1; then
+    log "=== Generating plots (3-way: LIPAH, PrediCache*, LAPT) ==="
+    python3 "$SCRIPT_DIR/plot_results.py" \
+        --indir "$CSV" --outdir "$PLOTS_3" \
+        --variants "LIPAH,PrediCache*,LAPT" \
+        2>&1 | tee -a "$OUTDIR/run.log" \
+        || log "  3-way plot generation failed"
+
+    log "=== Generating plots (4-way: LIPAH, PrediCache*, PrediCache2, LAPT) ==="
+    python3 "$SCRIPT_DIR/plot_results.py" \
+        --indir "$CSV" --outdir "$PLOTS_4" \
+        --variants "LIPAH,PrediCache*,PrediCache2,LAPT" \
+        2>&1 | tee -a "$OUTDIR/run.log" \
+        || log "  4-way plot generation failed"
 fi
 
 log "=== Done ==="
-log "Results: $OUTDIR/"
-log "  config       : $OUTDIR/config.txt"
-log "  raw logs     : $RAW/"
-log "  csvs         : $CSV/"
-log "  plots        : $PLOTS/"
-echo "$OUTDIR" > .last_bench_run
+log "Results:        $OUTDIR/"
+log "  config        : $OUTDIR/config.txt"
+log "  csvs          : $CSV/"
+log "  3-way plots   : $PLOTS_3/   (seq_payload.pdf, crosstab_44t.pdf)"
+log "  4-way plots   : $PLOTS_4/   (seq_payload.pdf, crosstab_44t.pdf)"
+echo "$OUTDIR" > .last_advisor_run

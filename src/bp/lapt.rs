@@ -47,6 +47,29 @@ use std::{
     sync::{atomic::Ordering, Arc},
 };
 
+#[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
+use std::sync::atomic::AtomicU64;
+
+/// Minimal fast-path coverage counters, gated by `pt_counts`. Sums:
+/// `preferred_hits + overflow_hits + page_faults == total accesses`.
+#[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
+pub struct LaptCounters {
+    pub preferred_frame_hits: AtomicU64,
+    pub overflow_chain_hits: AtomicU64,
+    pub page_faults: AtomicU64,
+}
+
+#[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
+impl LaptCounters {
+    pub fn new() -> Self {
+        Self {
+            preferred_frame_hits: AtomicU64::new(0),
+            overflow_chain_hits: AtomicU64::new(0),
+            page_faults: AtomicU64::new(0),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Type aliases
 // ---------------------------------------------------------------------------
@@ -84,6 +107,8 @@ pub struct Lapt {
     num_frames_u64: u64,
     pub(crate) overflow: CongeeRawU32<usize>,
     pub(crate) stats: BPStats,
+    #[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
+    pub(crate) counters: LaptCounters,
 }
 
 unsafe impl Sync for Lapt {}
@@ -116,6 +141,8 @@ impl Lapt {
             num_frames_u64: num_frames as u64,
             overflow: CongeeRawU32::default(),
             stats: BPStats::new(),
+            #[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
+            counters: LaptCounters::new(),
         })
     }
 
@@ -415,8 +442,11 @@ impl Lapt {
 
     // ------------------------------------------------------------------
     // Slow paths invoked when the inlined FP check in `MemPool::get_page_for_*`
-    // misses. Same shape as PT-V2 but uses congee.get(packed) directly — no
-    // bucket-index trickery.
+    // misses. Mirrors `PrediCache::get_page_for_{read,write}_slow`: a single
+    // Congee `get_apply` does the lookup AND latch attempt under the ART
+    // node's OLC version check, so an eviction/remap between lookup and latch
+    // is detected via Congee's internal retry (the latched guard is dropped
+    // and the closure re-runs).
     // ------------------------------------------------------------------
 
     #[inline(always)]
@@ -425,47 +455,48 @@ impl Lapt {
         page_key: PageKey,
         pref: u32,
     ) -> Result<FRGuard, MemPoolStatus> {
-        let frame_id_opt = self.overflow_lookup(&page_key);
+        let guard = crossbeam_epoch::pin();
+        let packed = pack_page_key(&page_key);
+        let result = self.overflow.get_apply(
+            &packed,
+            |idx| self.try_get_read_guard(idx).map(|g| (idx, g)),
+            &guard,
+        );
 
-        match frame_id_opt {
-            Some(idx) => match self.try_get_read_guard(idx) {
-                Some(g) => {
-                    if g.page_key() != Some(page_key) {
-                        // Stale overflow entry (concurrent eviction/remap).
-                        // Treat as miss → re-fault.
-                        drop(g);
-                        self.ensure_free_frames()?;
-                        return self
-                            .handle_page_fault_write(page_key)
-                            .map(|v| v.downgrade());
-                    }
-                    g.evict_info().update();
+        let pref_free_hint = self.frame_is_free(pref);
 
-                    let pref_free_hint = self.frame_is_free(pref);
+        match result {
+            Some(Some((idx, g))) => {
+                g.evict_info().update();
 
-                    if idx != pref {
-                        let should_promote = if pref_free_hint {
-                            true
-                        } else {
-                            let denom = Self::promote_prob_demote();
-                            Self::promote_roll(denom)
-                        };
+                #[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
+                self.counters.overflow_chain_hits.fetch_add(1, Ordering::Relaxed);
 
-                        if should_promote {
-                            match g.try_upgrade(false) {
-                                Ok(wg) => {
-                                    let wg = self.try_promote(wg, page_key, pref)?;
-                                    return Ok(wg.downgrade());
-                                }
-                                Err(g) => return Ok(g),
+                if idx != pref {
+                    let should_promote = if pref_free_hint {
+                        true
+                    } else {
+                        let denom = Self::promote_prob_demote();
+                        Self::promote_roll(denom)
+                    };
+
+                    if should_promote {
+                        match g.try_upgrade(false) {
+                            Ok(wg) => {
+                                let wg = self.try_promote(wg, page_key, pref)?;
+                                return Ok(wg.downgrade());
                             }
+                            Err(g) => return Ok(g),
                         }
                     }
-                    Ok(g)
                 }
-                None => Err(MemPoolStatus::FrameReadLatchGrantFailed),
-            },
+                Ok(g)
+            }
+            Some(None) => Err(MemPoolStatus::FrameReadLatchGrantFailed),
             None => {
+                #[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
+                self.counters.page_faults.fetch_add(1, Ordering::Relaxed);
+
                 self.ensure_free_frames()?;
                 self.handle_page_fault_write(page_key).map(|v| v.downgrade())
             }
@@ -478,39 +509,41 @@ impl Lapt {
         page_key: PageKey,
         pref: u32,
     ) -> Result<FWGuard, MemPoolStatus> {
-        let frame_id_opt = self.overflow_lookup(&page_key);
+        let guard = crossbeam_epoch::pin();
+        let packed = pack_page_key(&page_key);
+        let result = self.overflow.get_apply(
+            &packed,
+            |idx| self.try_get_write_guard(idx, true).map(|g| (idx, g)),
+            &guard,
+        );
 
-        match frame_id_opt {
-            Some(idx) => match self.try_get_write_guard(idx, true) {
-                Some(g) => {
-                    if g.page_key() != Some(page_key) {
-                        drop(g);
-                        self.ensure_free_frames()?;
-                        return self.handle_page_fault_write(page_key).map(|mut v| {
-                            v.dirty().store(true, Ordering::Release);
-                            v
-                        });
+        match result {
+            Some(Some((idx, g))) => {
+                g.evict_info().update();
+
+                #[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
+                self.counters.overflow_chain_hits.fetch_add(1, Ordering::Relaxed);
+
+                if idx != pref {
+                    let pref_is_free = self.frame_is_free(pref);
+                    let should_promote = if pref_is_free {
+                        true
+                    } else {
+                        let denom = Self::promote_prob_demote();
+                        Self::promote_roll(denom)
+                    };
+
+                    if should_promote {
+                        return self.try_promote(g, page_key, pref);
                     }
-                    g.evict_info().update();
-
-                    if idx != pref {
-                        let pref_is_free = self.frame_is_free(pref);
-                        let should_promote = if pref_is_free {
-                            true
-                        } else {
-                            let denom = Self::promote_prob_demote();
-                            Self::promote_roll(denom)
-                        };
-
-                        if should_promote {
-                            return self.try_promote(g, page_key, pref);
-                        }
-                    }
-                    Ok(g)
                 }
-                None => Err(MemPoolStatus::FrameWriteLatchGrantFailed),
-            },
+                Ok(g)
+            }
+            Some(None) => Err(MemPoolStatus::FrameWriteLatchGrantFailed),
             None => {
+                #[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
+                self.counters.page_faults.fetch_add(1, Ordering::Relaxed);
+
                 self.ensure_free_frames()?;
                 match self.handle_page_fault_write(page_key) {
                     Ok(g) => {
@@ -606,6 +639,8 @@ impl MemPool for Lapt {
             if let Some(g) = self.try_get_write_guard(pref, true) {
                 if g.page_key() == Some(page_key) {
                     g.evict_info().update();
+                    #[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
+                    self.counters.preferred_frame_hits.fetch_add(1, Ordering::Relaxed);
                     return Ok(g);
                 }
             }
@@ -626,12 +661,49 @@ impl MemPool for Lapt {
             if let Some(g) = self.try_get_read_guard(pref) {
                 if g.page_key() == Some(page_key) {
                     g.evict_info().update();
+                    #[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
+                    self.counters.preferred_frame_hits.fetch_add(1, Ordering::Relaxed);
                     return Ok(g);
                 }
             }
         }
 
         self.get_page_for_read_slow(page_key, pref)
+    }
+
+    /// Callback read mirroring PrediCache's `read_page_with`. The LAPT fast
+    /// path already has the "is page at pref?" check via `meta(pref).key()`,
+    /// so we just hoist the meta/page pointer prep next to the lookup so the
+    /// CPU can overlap loads, then run the callback under the latch (fast
+    /// path) or on the slow-path guard.
+    #[inline]
+    fn read_page_with<F, R>(&self, key: PageFrameKey, f: F) -> Result<R, MemPoolStatus>
+    where
+        F: FnOnce(&Page) -> R,
+        Self: Sized,
+    {
+        let _macro_timer = macro_profile_scoped(BpMacroOp::GetPageRead);
+        self.stats.inc_read_count();
+
+        let page_key = key.p_key();
+        let pref = self.preferred_frame(&page_key);
+
+        // Fast path: page is at its preferred frame.
+        if self.fm.meta(pref).key() == Some(page_key) {
+            if let Some(g) = self.fm.try_get_read_guard(pref) {
+                if g.page_key() == Some(page_key) {
+                    g.evict_info().update();
+                    #[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
+                    self.counters.preferred_frame_hits.fetch_add(1, Ordering::Relaxed);
+                    return Ok(f(g.page()));
+                }
+                // Key flipped under us; drop guard and fall through.
+            }
+        }
+
+        // Slow path / fault — reuse the existing guard-returning path.
+        let g = self.get_page_for_read_slow(page_key, pref)?;
+        Ok(f(g.page()))
     }
 
     fn prefetch_page(&self, _key: PageFrameKey) -> Result<(), MemPoolStatus> {
@@ -709,6 +781,20 @@ impl MemPool for Lapt {
     fn print_profile(&self) {
         if let Some(report) = macro_profile_report() {
             println!("\n{}", report);
+        }
+
+        #[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
+        {
+            let hits = self.counters.preferred_frame_hits.load(Ordering::Relaxed);
+            let chain = self.counters.overflow_chain_hits.load(Ordering::Relaxed);
+            let faults = self.counters.page_faults.load(Ordering::Relaxed);
+            let total = hits + chain + faults;
+            let cov = if total == 0 { 0.0 } else { hits as f64 / total as f64 };
+            println!("\n=== LAPT Access Profile ===");
+            println!("Preferred frame hits: {:>12}", hits);
+            println!("Overflow chain hits:  {:>12}", chain);
+            println!("Page faults:          {:>12}", faults);
+            println!("fast_path_coverage: {:.4}  (hits={}, total={})", cov, hits, total);
         }
     }
 }
