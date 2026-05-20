@@ -70,6 +70,24 @@ fn load_promote_env() {
     });
 }
 
+/// Runtime override for the promotion-probability denominators, bypassing
+/// the `Once`-gated `PT_PROMOTE_PROB_*` env-var read. Use this when the
+/// bench needs to disable / re-enable promotion *after* `PrediCache::new()`
+/// has already run (e.g. the `--prefer-prob` control experiment, which
+/// classifies pages into preferred / displaced sets and must keep them
+/// stable through the timed window).
+///
+/// Pass `u32::MAX` to effectively disable promotion.
+pub fn set_promote_probs(no_demote: u32, demote: u32) {
+    PROMOTE_PROB_NO_DEMOTE_ATOMIC.store(no_demote.max(1), Ordering::Relaxed);
+    PROMOTE_PROB_DEMOTE_ATOMIC.store(demote.max(1), Ordering::Relaxed);
+    eprintln!(
+        "PT promotion probs (runtime override): 1/{} (no-demote), 1/{} (demote)",
+        PROMOTE_PROB_NO_DEMOTE_ATOMIC.load(Ordering::Relaxed),
+        PROMOTE_PROB_DEMOTE_ATOMIC.load(Ordering::Relaxed),
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Type aliases
 // ---------------------------------------------------------------------------
@@ -470,19 +488,20 @@ impl PrediCache {
 
                 // Promotion on read path (paper §3.2). On upgrade failure,
                 // skip promotion and return the read guard — the roll is
-                // rare and the next access will roll again.
-                //
-                // OPTIMIZATION: Always promote if preferred frame is free (no demotion needed).
-                // Only use probabilistic promotion for expensive swap cases.
+                // rare and the next access will roll again. Both branches
+                // roll against the matching atomic (`pt_set_promote_probs`
+                // / `PT_PROMOTE_PROB_*`); the no-demote knob defaults to
+                // a tight 1/N so promotion is cheap-and-frequent when the
+                // preferred frame is free, the demote knob is wider so
+                // swap-promotions are rare. Setting either to `u32::MAX`
+                // effectively disables that branch.
                 if idx != pref {
-                    let should_promote = if pref_free_hint {
-                        // Preferred frame is FREE - always promote! This is fast and beneficial.
-                        true
+                    let denom = if pref_free_hint {
+                        Self::promote_prob_no_demote()
                     } else {
-                        // Preferred frame is OCCUPIED - only promote probabilistically (swap is expensive)
-                        let denom = Self::promote_prob_demote();
-                        Self::promote_roll(denom)
+                        Self::promote_prob_demote()
                     };
+                    let should_promote = Self::promote_roll(denom);
 
                     if should_promote {
                         #[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
@@ -551,18 +570,16 @@ impl PrediCache {
                         .fetch_add(1, Ordering::Relaxed);
                 }
 
-                // OPTIMIZATION: Always promote if preferred frame is free (no demotion needed).
-                // Only use probabilistic promotion for expensive swap cases.
+                // See read-path comment above for the promotion knob model;
+                // same rolls here (`pt_set_promote_probs` / env vars).
                 if idx != pref {
                     let pref_is_free = self.frame_is_free(pref);
-                    let should_promote = if pref_is_free {
-                        // Preferred frame is FREE - always promote! This is fast and beneficial.
-                        true
+                    let denom = if pref_is_free {
+                        Self::promote_prob_no_demote()
                     } else {
-                        // Preferred frame is OCCUPIED - only promote probabilistically (swap is expensive)
-                        let denom = Self::promote_prob_demote();
-                        Self::promote_roll(denom)
+                        Self::promote_prob_demote()
                     };
+                    let should_promote = Self::promote_roll(denom);
 
                     if should_promote {
                         #[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
@@ -894,6 +911,8 @@ impl MemPool for PrediCache {
 
     unsafe fn reset_stats(&self) {
         self.stats.clear();
+        #[cfg(any(feature = "pt_profile", feature = "pt_counts"))]
+        self.profile.clear();
     }
 
     fn preferred_frame_for(&self, key: PageKey) -> Option<u32> {
@@ -1200,6 +1219,39 @@ impl PTProfileCounters {
             promote_noop: AtomicU64::new(0),
             residency_evictions_from_preferred: AtomicU64::new(0),
         }
+    }
+
+    /// Zero every counter. Used by `MemPool::reset_stats` so a bench can
+    /// run a separate "warmup + classification" phase, reset the counters,
+    /// and report `fast_path_coverage` for just the timed window.
+    pub fn clear(&self) {
+        let zero = |a: &AtomicU64| a.store(0, Ordering::Relaxed);
+        #[cfg(feature = "pt_profile")]
+        {
+            zero(&self.ensure_free_ns);
+            zero(&self.hash_preferred_ns);
+            zero(&self.overflow_lookup_ns);
+            zero(&self.latch_ns);
+            zero(&self.promotion_check_ns);
+            zero(&self.fault_ns);
+        }
+        zero(&self.preferred_frame_hits);
+        zero(&self.fast_return_read_hits);
+        zero(&self.fast_return_read_ns);
+        zero(&self.fast_return_meta_check_ns);
+        zero(&self.fast_return_latch_ns);
+        zero(&self.fast_return_revalidate_ns);
+        zero(&self.fast_return_evict_update_ns);
+        zero(&self.overflow_chain_hits);
+        zero(&self.page_faults);
+        zero(&self.total_reads);
+        zero(&self.total_writes);
+        zero(&self.promotions_attempted);
+        zero(&self.promotions_fired);
+        zero(&self.promote_free);
+        zero(&self.promote_swap);
+        zero(&self.promote_noop);
+        zero(&self.residency_evictions_from_preferred);
     }
 
     pub fn print(&self) {

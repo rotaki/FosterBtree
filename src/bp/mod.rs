@@ -26,7 +26,7 @@ pub use macro_profile::reset as reset_macro_profile;
 pub use mem_pool_trait::{
     ContainerId, ContainerKey, DatabaseId, MemPool, MemPoolStatus, PageFrameKey,
 };
-pub use predicache::PrediCache;
+pub use predicache::{set_promote_probs as pt_set_promote_probs, PrediCache};
 pub use lapt::Lapt;
 pub use tlb_bp::TlbBP;
 pub use vmcache::VMCachePool;

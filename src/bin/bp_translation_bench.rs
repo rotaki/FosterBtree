@@ -525,6 +525,15 @@ fn main() {
     // to the existing uniform random index pick.
     let prefer_enabled = args.prefer_prob >= 0.0;
     let (preferred_indices, displaced_indices): (Vec<usize>, Vec<usize>) = if prefer_enabled {
+        // Lock both promotion knobs to u32::MAX *before* the classification
+        // loop. Each `get_page_for_read` we issue below would otherwise be
+        // a chance to trigger probabilistic promotion (1/50 default on
+        // no-demote, 1/512 on demote), which swaps pages between preferred
+        // and displaced frames mid-classification and invalidates earlier
+        // entries in our sets.
+        #[cfg(feature = "bp_predicache")]
+        fbtree::bp::pt_set_promote_probs(u32::MAX, u32::MAX);
+
         let mut pref = Vec::new();
         let mut displ = Vec::new();
         let mut unsupported = false;
@@ -587,10 +596,9 @@ fn main() {
                 "  target prefer_prob = {:.3}",
                 args.prefer_prob,
             );
-            // Lock placement: turn off promotion so the classified sets don't
-            // drift during the timed window.
-            std::env::set_var("PT_PROMOTE_PROB_NO_DEMOTE", u32::MAX.to_string());
-            std::env::set_var("PT_PROMOTE_PROB_DEMOTE", u32::MAX.to_string());
+            // Promotion was already locked before the classification loop
+            // (see above), so the classified sets are stable through the
+            // timed window. Nothing more to do here.
             (pref, displ)
         }
     } else {
@@ -600,6 +608,15 @@ fn main() {
     let displaced_indices = Arc::new(displaced_indices);
     let prefer_active =
         prefer_enabled && !preferred_indices.is_empty() && !displaced_indices.is_empty();
+
+    // For the --prefer-prob control experiment, zero out the BP's profile
+    // counters so `fast_path_coverage` reflects ONLY the timed window
+    // (otherwise warmup + classification reads dilute it toward the
+    // natural hit rate). Safe to call unconditionally — non-pt_counts
+    // builds have an empty profile so `clear()` is effectively a no-op.
+    if prefer_active {
+        unsafe { bp.reset_stats() };
+    }
 
     // Benchmark
     let flag = Arc::new(AtomicBool::new(true));
@@ -839,14 +856,27 @@ fn main() {
                         None
                     };
                     if callback_path {
+                        // Respect `--payload-bytes` on the random-access path
+                        // too — was previously only honored on the chain path,
+                        // so `--no-chain --payload-bytes 1024` was silently
+                        // reading the full page (e.g. 16 KiB).
                         let outcome = bp.read_page_with(keys[idx], |page| {
                             let bytes: &[u8] = page;
+                            let len = bytes.len();
                             if no_page_fold {
                                 (true, bytes[0] as u64)
-                            } else {
+                            } else if payload_bytes == 0 {
                                 let page = std::hint::black_box(bytes);
                                 let mut acc: u64 = 0;
                                 for &b in page {
+                                    acc = acc.wrapping_add(b as u64);
+                                }
+                                (false, acc)
+                            } else {
+                                let n = payload_bytes.min(len);
+                                let payload = std::hint::black_box(&bytes[..n]);
+                                let mut acc: u64 = 0;
+                                for &b in payload {
                                     acc = acc.wrapping_add(b as u64);
                                 }
                                 (false, acc)
@@ -878,11 +908,21 @@ fn main() {
                         // translation / swap cost from page-size-dependent
                         // memory bandwidth.
                         checksum = checksum.wrapping_add(page[0] as u64);
-                    } else {
+                    } else if payload_bytes == 0 {
                         // Fold every byte of the page (Page derefs to &[u8]).
                         let page = std::hint::black_box(page);
                         let mut acc: u64 = 0;
                         for &b in page {
+                            acc = acc.wrapping_add(b as u64);
+                        }
+                        checksum ^= acc;
+                    } else {
+                        // Honor `--payload-bytes` on the guard random-access
+                        // path too (parallels the callback path above).
+                        let n = payload_bytes.min(page.len());
+                        let payload = std::hint::black_box(&page[..n]);
+                        let mut acc: u64 = 0;
+                        for &b in payload {
                             acc = acc.wrapping_add(b as u64);
                         }
                         checksum ^= acc;

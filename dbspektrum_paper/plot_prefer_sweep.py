@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Plot the bypass-vs-always-probe Pareto sweep.
 
-Reads CSV with columns: variant,payload,prefer_prob,observed_hit_rate,mops
-Emits a 2x2 panel grid (one per payload) of throughput vs prefer_prob, with
-two lines per panel (always-probe vs bypass). Output: prefer_sweep.{png,pdf}
-in --outdir.
+Reads CSV with columns: variant,payload,prefer_prob,natural_hit_rate,mops
+Emits a grid (one panel per payload, auto-sized to N panels) of throughput
+vs prefer_prob, with two lines per panel (always-probe vs bypass). Output:
+prefer_sweep.{png,pdf} in --outdir.
 """
 import argparse
 import sys
@@ -49,12 +49,19 @@ def main():
             .mops.agg(["median", "min", "max"])
             .reset_index())
 
+    # Auto-size the grid: aim for ~3 columns, as many rows as needed.
     n_payload = len(payloads)
-    fig, axes = plt.subplots(2, 2, figsize=(6.8, 4.5), sharex=True)
-    axes = axes.flatten()
-    if n_payload < 4:
-        for ax in axes[n_payload:]:
-            ax.axis("off")
+    ncols = min(3, n_payload)
+    nrows = (n_payload + ncols - 1) // ncols
+    fig, axes = plt.subplots(
+        nrows, ncols,
+        figsize=(2.4 * ncols, 1.9 * nrows),
+        sharex=True,
+    )
+    axes = [axes] if n_payload == 1 else (axes.flatten() if hasattr(axes, "flatten") else list(axes))
+    # Hide any unused panels.
+    for ax in axes[n_payload:]:
+        ax.axis("off")
 
     for i, payload in enumerate(payloads):
         ax = axes[i]
@@ -67,9 +74,14 @@ def main():
                     markersize=4, linewidth=1.0)
             ax.fill_between(sub.prefer_prob, sub["min"], sub["max"],
                             color=COLORS[v], alpha=0.15, linewidth=0)
-        ax.set_title(f"payload = {payload} B", fontsize=9)
-        ax.set_xlabel("prefer_prob (fraction of accesses hitting preferred)",
-                      fontsize=7)
+        if payload == 0:
+            title = "payload = 0 B (translation-only)"
+        elif payload >= 1024:
+            title = f"payload = {payload // 1024} KiB"
+        else:
+            title = f"payload = {payload} B"
+        ax.set_title(title, fontsize=8)
+        ax.set_xlabel("prefer_prob", fontsize=7)
         ax.set_ylabel("Mops/s", fontsize=7)
         ax.grid(True, alpha=0.3)
         ax.tick_params(labelsize=7)
@@ -80,8 +92,8 @@ def main():
                loc="upper center", ncol=2,
                bbox_to_anchor=(0.5, 0.99),
                fontsize=8, frameon=False)
-    fig.subplots_adjust(top=0.88, hspace=0.42, wspace=0.30,
-                        left=0.10, right=0.98, bottom=0.10)
+    fig.subplots_adjust(top=1.0 - 0.13 / nrows, hspace=0.50, wspace=0.32,
+                        left=0.09, right=0.98, bottom=0.12 / nrows)
 
     outdir = Path(args.outdir)
     fig.savefig(outdir / "prefer_sweep.png", dpi=160)

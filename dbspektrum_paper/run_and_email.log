@@ -1,452 +1,292 @@
-[Mon May 18 10:01:00 PM CDT 2026] starting
-[22:01:00] Config written to /mnt/nvme1/rotaki/LIPAH/lapt_paper/results/run_20260518_220100/config.txt
-[22:01:00] Building bp_translation_bench [bp_clock] -> bp_translation_bench_lipah
-    Finished `release` profile [optimized] target(s) in 23.92s
-[22:01:24] Building fbt_on_disk_get [bp_clock] -> fbt_on_disk_get_lipah
-    Finished `release` profile [optimized] target(s) in 11.85s
-[22:01:36] Building fbt_on_disk_scan [bp_clock] -> fbt_on_disk_scan_lipah
-    Finished `release` profile [optimized] target(s) in 11.70s
-[22:01:48] Building bp_translation_bench [bp_predicache] -> bp_translation_bench_predicache
-    Finished `release` profile [optimized] target(s) in 23.10s
-[22:02:11] Building fbt_on_disk_get [bp_predicache] -> fbt_on_disk_get_predicache
-    Finished `release` profile [optimized] target(s) in 11.17s
-[22:02:22] Building fbt_on_disk_scan [bp_predicache] -> fbt_on_disk_scan_predicache
+[Wed May 20 01:02:23 PM CDT 2026] starting
+[13:02:23] Config written to /mnt/nvme1/rotaki/LIPAH/dbspektrum_paper/results/run_20260520_130223/config.txt
+[13:02:23] Building bp_translation_bench [bp_clock] -> bp_translation_bench_lipah
+    Finished `release` profile [optimized] target(s) in 24.12s
+[13:02:47] Building fbt_on_disk_get [bp_clock] -> fbt_on_disk_get_lipah
+    Finished `release` profile [optimized] target(s) in 11.69s
+[13:02:59] Building fbt_on_disk_scan [bp_clock] -> fbt_on_disk_scan_lipah
+    Finished `release` profile [optimized] target(s) in 11.58s
+[13:03:11] Building bp_translation_bench [bp_predicache] -> bp_translation_bench_predicache
+    Finished `release` profile [optimized] target(s) in 0.12s
+[13:03:11] Building fbt_on_disk_get [bp_predicache] -> fbt_on_disk_get_predicache
+    Finished `release` profile [optimized] target(s) in 11.05s
+[13:03:22] Building fbt_on_disk_scan [bp_predicache] -> fbt_on_disk_scan_predicache
+    Finished `release` profile [optimized] target(s) in 11.28s
+[13:03:33] Building bp_translation_bench [bp_predicache,pc_prefix_hash] -> bp_translation_bench_prefix
+    Finished `release` profile [optimized] target(s) in 22.73s
+[13:03:56] Building fbt_on_disk_get [bp_predicache,pc_prefix_hash] -> fbt_on_disk_get_prefix
+    Finished `release` profile [optimized] target(s) in 11.20s
+[13:04:07] Building fbt_on_disk_scan [bp_predicache,pc_prefix_hash] -> fbt_on_disk_scan_prefix
     Finished `release` profile [optimized] target(s) in 11.29s
-[22:02:33] Building bp_translation_bench [bp_predicache2] -> bp_translation_bench_predicache2
-    Finished `release` profile [optimized] target(s) in 0.13s
-[22:02:34] Building fbt_on_disk_get [bp_predicache2] -> fbt_on_disk_get_predicache2
-    Finished `release` profile [optimized] target(s) in 0.11s
-[22:02:34] Building fbt_on_disk_scan [bp_predicache2] -> fbt_on_disk_scan_predicache2
+[13:04:19] Building bp_translation_bench [bp_predicache,pc_bypass] -> bp_translation_bench_bypass
     Finished `release` profile [optimized] target(s) in 0.14s
-[22:02:34] Building bp_translation_bench [bp_lapt] -> bp_translation_bench_lapt
-    Finished `release` profile [optimized] target(s) in 23.43s
-[22:02:57] Building fbt_on_disk_get [bp_lapt] -> fbt_on_disk_get_lapt
-    Finished `release` profile [optimized] target(s) in 11.42s
-[22:03:09] Building fbt_on_disk_scan [bp_lapt] -> fbt_on_disk_scan_lapt
-    Finished `release` profile [optimized] target(s) in 11.39s
-[22:03:20] Building bp_translation_bench [bp_lapt3] -> bp_translation_bench_lapt3
-    Finished `release` profile [optimized] target(s) in 0.14s
-[22:03:21] Building fbt_on_disk_get [bp_lapt3] -> fbt_on_disk_get_lapt3
-    Finished `release` profile [optimized] target(s) in 0.13s
-[22:03:21] Building fbt_on_disk_scan [bp_lapt3] -> fbt_on_disk_scan_lapt3
-    Finished `release` profile [optimized] target(s) in 0.11s
-[22:03:21] === Workload 1: sequential payload sweep (sat) ===
-  LIPAH        sat    p=0     t=1  220.30 Mops/s
-  LIPAH        sat    p=0     t=2  220.81 Mops/s
-  LIPAH        sat    p=0     t=3  212.19 Mops/s
-  LIPAH        sat    p=0     t=4  209.45 Mops/s
-  LIPAH        sat    p=0     t=5  212.51 Mops/s
-  LIPAH        sat    p=256   t=1  98.31 Mops/s
-  LIPAH        sat    p=256   t=2  99.14 Mops/s
-  LIPAH        sat    p=256   t=3  100.41 Mops/s
-  LIPAH        sat    p=256   t=4  97.12 Mops/s
-  LIPAH        sat    p=256   t=5  96.00 Mops/s
-  LIPAH        sat    p=1024  t=1  50.78 Mops/s
-  LIPAH        sat    p=1024  t=2  49.03 Mops/s
-  LIPAH        sat    p=1024  t=3  47.77 Mops/s
-  LIPAH        sat    p=1024  t=4  49.92 Mops/s
-  LIPAH        sat    p=1024  t=5  51.06 Mops/s
-  LIPAH        sat    p=4096  t=1  19.56 Mops/s
-  LIPAH        sat    p=4096  t=2  20.02 Mops/s
-  LIPAH        sat    p=4096  t=3  19.68 Mops/s
-  LIPAH        sat    p=4096  t=4  20.00 Mops/s
-  LIPAH        sat    p=4096  t=5  19.96 Mops/s
-  LIPAH        sat    p=16384 t=1  5.39 Mops/s
-  LIPAH        sat    p=16384 t=2  5.39 Mops/s
-  LIPAH        sat    p=16384 t=3  5.32 Mops/s
-  LIPAH        sat    p=16384 t=4  5.31 Mops/s
-  LIPAH        sat    p=16384 t=5  5.43 Mops/s
-  PrediCache   sat    p=0     t=1  113.22 Mops/s
-  PrediCache   sat    p=0     t=2  112.40 Mops/s
-  PrediCache   sat    p=0     t=3  112.84 Mops/s
-  PrediCache   sat    p=0     t=4  113.60 Mops/s
-  PrediCache   sat    p=0     t=5  112.23 Mops/s
-  PrediCache   sat    p=256   t=1  76.67 Mops/s
-  PrediCache   sat    p=256   t=2  76.21 Mops/s
-  PrediCache   sat    p=256   t=3  75.77 Mops/s
-  PrediCache   sat    p=256   t=4  74.86 Mops/s
-  PrediCache   sat    p=256   t=5  73.58 Mops/s
-  PrediCache   sat    p=1024  t=1  45.44 Mops/s
-  PrediCache   sat    p=1024  t=2  43.66 Mops/s
-  PrediCache   sat    p=1024  t=3  42.97 Mops/s
-  PrediCache   sat    p=1024  t=4  44.50 Mops/s
-  PrediCache   sat    p=1024  t=5  43.36 Mops/s
-  PrediCache   sat    p=4096  t=1  18.43 Mops/s
-  PrediCache   sat    p=4096  t=2  18.51 Mops/s
-  PrediCache   sat    p=4096  t=3  18.38 Mops/s
-  PrediCache   sat    p=4096  t=4  18.30 Mops/s
-  PrediCache   sat    p=4096  t=5  18.85 Mops/s
-  PrediCache   sat    p=16384 t=1  4.95 Mops/s
-  PrediCache   sat    p=16384 t=2  4.95 Mops/s
-  PrediCache   sat    p=16384 t=3  5.07 Mops/s
-  PrediCache   sat    p=16384 t=4  5.00 Mops/s
-  PrediCache   sat    p=16384 t=5  4.96 Mops/s
-  PrediCache2  sat    p=0     t=1  125.09 Mops/s
-  PrediCache2  sat    p=0     t=2  123.83 Mops/s
-  PrediCache2  sat    p=0     t=3  125.55 Mops/s
-  PrediCache2  sat    p=0     t=4  125.79 Mops/s
-  PrediCache2  sat    p=0     t=5  124.99 Mops/s
-  PrediCache2  sat    p=256   t=1  74.63 Mops/s
-  PrediCache2  sat    p=256   t=2  74.38 Mops/s
-  PrediCache2  sat    p=256   t=3  73.20 Mops/s
-  PrediCache2  sat    p=256   t=4  75.01 Mops/s
-  PrediCache2  sat    p=256   t=5  72.94 Mops/s
-  PrediCache2  sat    p=1024  t=1  44.79 Mops/s
-  PrediCache2  sat    p=1024  t=2  45.46 Mops/s
-  PrediCache2  sat    p=1024  t=3  45.78 Mops/s
-  PrediCache2  sat    p=1024  t=4  46.81 Mops/s
-  PrediCache2  sat    p=1024  t=5  45.20 Mops/s
-  PrediCache2  sat    p=4096  t=1  19.28 Mops/s
-  PrediCache2  sat    p=4096  t=2  18.95 Mops/s
-  PrediCache2  sat    p=4096  t=3  18.98 Mops/s
-  PrediCache2  sat    p=4096  t=4  19.30 Mops/s
-  PrediCache2  sat    p=4096  t=5  18.74 Mops/s
-  PrediCache2  sat    p=16384 t=1  5.18 Mops/s
-  PrediCache2  sat    p=16384 t=2  5.28 Mops/s
-  PrediCache2  sat    p=16384 t=3  5.33 Mops/s
-  PrediCache2  sat    p=16384 t=4  5.11 Mops/s
-  PrediCache2  sat    p=16384 t=5  5.10 Mops/s
-  LAPT         sat    p=0     t=1  162.73 Mops/s
-  LAPT         sat    p=0     t=2  160.99 Mops/s
-  LAPT         sat    p=0     t=3  161.44 Mops/s
-  LAPT         sat    p=0     t=4  162.43 Mops/s
-  LAPT         sat    p=0     t=5  162.05 Mops/s
-  LAPT         sat    p=256   t=1  84.41 Mops/s
-  LAPT         sat    p=256   t=2  84.16 Mops/s
-  LAPT         sat    p=256   t=3  84.57 Mops/s
-  LAPT         sat    p=256   t=4  84.77 Mops/s
-  LAPT         sat    p=256   t=5  85.05 Mops/s
-  LAPT         sat    p=1024  t=1  35.30 Mops/s
-  LAPT         sat    p=1024  t=2  35.25 Mops/s
-  LAPT         sat    p=1024  t=3  34.77 Mops/s
-  LAPT         sat    p=1024  t=4  35.41 Mops/s
-  LAPT         sat    p=1024  t=5  35.11 Mops/s
-  LAPT         sat    p=4096  t=1  14.28 Mops/s
-  LAPT         sat    p=4096  t=2  13.98 Mops/s
-  LAPT         sat    p=4096  t=3  13.99 Mops/s
-  LAPT         sat    p=4096  t=4  14.13 Mops/s
-  LAPT         sat    p=4096  t=5  14.03 Mops/s
-  LAPT         sat    p=16384 t=1  4.28 Mops/s
-  LAPT         sat    p=16384 t=2  4.27 Mops/s
-  LAPT         sat    p=16384 t=3  4.38 Mops/s
-  LAPT         sat    p=16384 t=4  4.37 Mops/s
-  LAPT         sat    p=16384 t=5  4.40 Mops/s
-  LAPT3        sat    p=0     t=1  170.12 Mops/s
-  LAPT3        sat    p=0     t=2  166.88 Mops/s
-  LAPT3        sat    p=0     t=3  169.47 Mops/s
-  LAPT3        sat    p=0     t=4  166.72 Mops/s
-  LAPT3        sat    p=0     t=5  167.90 Mops/s
-  LAPT3        sat    p=256   t=1  85.14 Mops/s
-  LAPT3        sat    p=256   t=2  85.99 Mops/s
-  LAPT3        sat    p=256   t=3  85.33 Mops/s
-  LAPT3        sat    p=256   t=4  85.52 Mops/s
-  LAPT3        sat    p=256   t=5  85.31 Mops/s
-  LAPT3        sat    p=1024  t=1  34.77 Mops/s
-  LAPT3        sat    p=1024  t=2  35.25 Mops/s
-  LAPT3        sat    p=1024  t=3  35.00 Mops/s
-  LAPT3        sat    p=1024  t=4  34.85 Mops/s
-  LAPT3        sat    p=1024  t=5  34.27 Mops/s
-  LAPT3        sat    p=4096  t=1  14.03 Mops/s
-  LAPT3        sat    p=4096  t=2  14.30 Mops/s
-  LAPT3        sat    p=4096  t=3  14.26 Mops/s
-  LAPT3        sat    p=4096  t=4  13.87 Mops/s
-  LAPT3        sat    p=4096  t=5  14.03 Mops/s
-  LAPT3        sat    p=16384 t=1  4.29 Mops/s
-  LAPT3        sat    p=16384 t=2  4.36 Mops/s
-  LAPT3        sat    p=16384 t=3  4.29 Mops/s
-  LAPT3        sat    p=16384 t=4  4.31 Mops/s
-  LAPT3        sat    p=16384 t=5  4.24 Mops/s
-[22:35:48] === Workload 1: sequential payload sweep (stale) ===
-  LIPAH        stale  p=0     t=1  53.14 Mops/s
-  LIPAH        stale  p=0     t=2  52.85 Mops/s
-  LIPAH        stale  p=0     t=3  54.23 Mops/s
-  LIPAH        stale  p=0     t=4  53.22 Mops/s
-  LIPAH        stale  p=0     t=5  54.80 Mops/s
-  LIPAH        stale  p=256   t=1  38.79 Mops/s
-  LIPAH        stale  p=256   t=2  39.18 Mops/s
-  LIPAH        stale  p=256   t=3  40.24 Mops/s
-  LIPAH        stale  p=256   t=4  39.91 Mops/s
-  LIPAH        stale  p=256   t=5  39.38 Mops/s
-  LIPAH        stale  p=1024  t=1  25.91 Mops/s
-  LIPAH        stale  p=1024  t=2  26.18 Mops/s
-  LIPAH        stale  p=1024  t=3  26.25 Mops/s
-  LIPAH        stale  p=1024  t=4  25.63 Mops/s
-  LIPAH        stale  p=1024  t=5  25.57 Mops/s
-  LIPAH        stale  p=4096  t=1  17.13 Mops/s
-  LIPAH        stale  p=4096  t=2  16.96 Mops/s
-  LIPAH        stale  p=4096  t=3  16.96 Mops/s
-  LIPAH        stale  p=4096  t=4  16.92 Mops/s
-  LIPAH        stale  p=4096  t=5  16.94 Mops/s
-  LIPAH        stale  p=16384 t=1  5.06 Mops/s
-  LIPAH        stale  p=16384 t=2  5.13 Mops/s
-  LIPAH        stale  p=16384 t=3  4.82 Mops/s
-  LIPAH        stale  p=16384 t=4  4.98 Mops/s
-  LIPAH        stale  p=16384 t=5  5.03 Mops/s
-  PrediCache   stale  p=0     t=1  73.98 Mops/s
-  PrediCache   stale  p=0     t=2  78.61 Mops/s
-  PrediCache   stale  p=0     t=3  72.36 Mops/s
-  PrediCache   stale  p=0     t=4  75.10 Mops/s
-  PrediCache   stale  p=0     t=5  79.12 Mops/s
-  PrediCache   stale  p=256   t=1  63.04 Mops/s
-  PrediCache   stale  p=256   t=2  61.31 Mops/s
-  PrediCache   stale  p=256   t=3  60.78 Mops/s
-  PrediCache   stale  p=256   t=4  63.05 Mops/s
-  PrediCache   stale  p=256   t=5  64.10 Mops/s
-  PrediCache   stale  p=1024  t=1  45.10 Mops/s
-  PrediCache   stale  p=1024  t=2  44.43 Mops/s
-  PrediCache   stale  p=1024  t=3  43.83 Mops/s
-  PrediCache   stale  p=1024  t=4  37.33 Mops/s
-  PrediCache   stale  p=1024  t=5  43.91 Mops/s
-  PrediCache   stale  p=4096  t=1  20.12 Mops/s
-  PrediCache   stale  p=4096  t=2  20.29 Mops/s
-  PrediCache   stale  p=4096  t=3  17.17 Mops/s
-  PrediCache   stale  p=4096  t=4  20.26 Mops/s
-  PrediCache   stale  p=4096  t=5  19.91 Mops/s
-  PrediCache   stale  p=16384 t=1  5.84 Mops/s
-  PrediCache   stale  p=16384 t=2  5.90 Mops/s
-  PrediCache   stale  p=16384 t=3  5.82 Mops/s
-  PrediCache   stale  p=16384 t=4  5.89 Mops/s
-  PrediCache   stale  p=16384 t=5  5.88 Mops/s
-  PrediCache2  stale  p=0     t=1  93.21 Mops/s
-  PrediCache2  stale  p=0     t=2  95.53 Mops/s
-  PrediCache2  stale  p=0     t=3  89.54 Mops/s
-  PrediCache2  stale  p=0     t=4  95.20 Mops/s
-  PrediCache2  stale  p=0     t=5  84.27 Mops/s
-  PrediCache2  stale  p=256   t=1  67.87 Mops/s
-  PrediCache2  stale  p=256   t=2  70.53 Mops/s
-  PrediCache2  stale  p=256   t=3  69.00 Mops/s
-  PrediCache2  stale  p=256   t=4  67.64 Mops/s
-  PrediCache2  stale  p=256   t=5  69.58 Mops/s
-  PrediCache2  stale  p=1024  t=1  45.59 Mops/s
-  PrediCache2  stale  p=1024  t=2  45.00 Mops/s
-  PrediCache2  stale  p=1024  t=3  44.16 Mops/s
-  PrediCache2  stale  p=1024  t=4  45.59 Mops/s
-  PrediCache2  stale  p=1024  t=5  39.27 Mops/s
-  PrediCache2  stale  p=4096  t=1  20.11 Mops/s
-  PrediCache2  stale  p=4096  t=2  20.14 Mops/s
-  PrediCache2  stale  p=4096  t=3  19.58 Mops/s
-  PrediCache2  stale  p=4096  t=4  19.66 Mops/s
-  PrediCache2  stale  p=4096  t=5  19.84 Mops/s
-  PrediCache2  stale  p=16384 t=1  5.80 Mops/s
-  PrediCache2  stale  p=16384 t=2  5.72 Mops/s
-  PrediCache2  stale  p=16384 t=3  5.76 Mops/s
-  PrediCache2  stale  p=16384 t=4  5.67 Mops/s
-  PrediCache2  stale  p=16384 t=5  5.76 Mops/s
-  LAPT         stale  p=0     t=1  162.09 Mops/s
-  LAPT         stale  p=0     t=2  154.63 Mops/s
-  LAPT         stale  p=0     t=3  156.13 Mops/s
-  LAPT         stale  p=0     t=4  159.97 Mops/s
-  LAPT         stale  p=0     t=5  165.90 Mops/s
-  LAPT         stale  p=256   t=1  83.35 Mops/s
-  LAPT         stale  p=256   t=2  82.75 Mops/s
-  LAPT         stale  p=256   t=3  82.55 Mops/s
-  LAPT         stale  p=256   t=4  83.08 Mops/s
-  LAPT         stale  p=256   t=5  83.57 Mops/s
-  LAPT         stale  p=1024  t=1  34.05 Mops/s
-  LAPT         stale  p=1024  t=2  34.25 Mops/s
-  LAPT         stale  p=1024  t=3  33.63 Mops/s
-  LAPT         stale  p=1024  t=4  34.06 Mops/s
-  LAPT         stale  p=1024  t=5  34.10 Mops/s
-  LAPT         stale  p=4096  t=1  13.59 Mops/s
-  LAPT         stale  p=4096  t=2  14.00 Mops/s
-  LAPT         stale  p=4096  t=3  13.84 Mops/s
-  LAPT         stale  p=4096  t=4  13.78 Mops/s
-  LAPT         stale  p=4096  t=5  13.93 Mops/s
-  LAPT         stale  p=16384 t=1  4.20 Mops/s
-  LAPT         stale  p=16384 t=2  4.25 Mops/s
-  LAPT         stale  p=16384 t=3  4.12 Mops/s
-  LAPT         stale  p=16384 t=4  4.17 Mops/s
-  LAPT         stale  p=16384 t=5  4.22 Mops/s
-  LAPT3        stale  p=0     t=1  159.73 Mops/s
-  LAPT3        stale  p=0     t=2  161.26 Mops/s
-  LAPT3        stale  p=0     t=3  158.14 Mops/s
-  LAPT3        stale  p=0     t=4  156.36 Mops/s
-  LAPT3        stale  p=0     t=5  156.18 Mops/s
-  LAPT3        stale  p=256   t=1  82.17 Mops/s
-  LAPT3        stale  p=256   t=2  84.01 Mops/s
-  LAPT3        stale  p=256   t=3  82.05 Mops/s
-  LAPT3        stale  p=256   t=4  83.33 Mops/s
-  LAPT3        stale  p=256   t=5  82.38 Mops/s
-  LAPT3        stale  p=1024  t=1  34.15 Mops/s
-  LAPT3        stale  p=1024  t=2  33.79 Mops/s
-  LAPT3        stale  p=1024  t=3  33.80 Mops/s
-  LAPT3        stale  p=1024  t=4  34.00 Mops/s
-  LAPT3        stale  p=1024  t=5  34.28 Mops/s
-  LAPT3        stale  p=4096  t=1  14.02 Mops/s
-  LAPT3        stale  p=4096  t=2  13.90 Mops/s
-  LAPT3        stale  p=4096  t=3  13.83 Mops/s
-  LAPT3        stale  p=4096  t=4  14.18 Mops/s
-  LAPT3        stale  p=4096  t=5  13.65 Mops/s
-  LAPT3        stale  p=16384 t=1  4.20 Mops/s
-  LAPT3        stale  p=16384 t=2  4.14 Mops/s
-  LAPT3        stale  p=16384 t=3  4.18 Mops/s
-  LAPT3        stale  p=16384 t=4  4.17 Mops/s
-  LAPT3        stale  p=16384 t=5  4.33 Mops/s
-[23:16:31] === Workload 2: 44-thread crosstab (sequential×saturated, sequential×stale, uniform×saturated, uniform×stale) ===
-  LIPAH        seq-sat         t=1  214.61 Mops/s  205.0 ns/op
-  LIPAH        seq-sat         t=2  213.38 Mops/s  206.2 ns/op
-  LIPAH        seq-sat         t=3  226.89 Mops/s  193.9 ns/op
-  LIPAH        seq-sat         t=4  211.22 Mops/s  208.3 ns/op
-  LIPAH        seq-sat         t=5  214.45 Mops/s  205.2 ns/op
-  PrediCache   seq-sat         t=1  114.29 Mops/s  385.0 ns/op
-  PrediCache   seq-sat         t=2  111.77 Mops/s  393.7 ns/op
-  PrediCache   seq-sat         t=3  111.03 Mops/s  396.3 ns/op
-  PrediCache   seq-sat         t=4  112.57 Mops/s  390.9 ns/op
-  PrediCache   seq-sat         t=5  110.83 Mops/s  397.0 ns/op
-  PrediCache2  seq-sat         t=1  124.89 Mops/s  352.3 ns/op
-  PrediCache2  seq-sat         t=2  121.86 Mops/s  361.1 ns/op
-  PrediCache2  seq-sat         t=3  126.36 Mops/s  348.2 ns/op
-  PrediCache2  seq-sat         t=4  120.85 Mops/s  364.1 ns/op
-  PrediCache2  seq-sat         t=5  124.62 Mops/s  353.1 ns/op
-  LAPT         seq-sat         t=1  170.45 Mops/s  258.1 ns/op
-  LAPT         seq-sat         t=2  162.48 Mops/s  270.8 ns/op
-  LAPT         seq-sat         t=3  164.33 Mops/s  267.8 ns/op
-  LAPT         seq-sat         t=4  161.97 Mops/s  271.7 ns/op
-  LAPT         seq-sat         t=5  158.90 Mops/s  276.9 ns/op
-  LAPT3        seq-sat         t=1  171.45 Mops/s  256.6 ns/op
-  LAPT3        seq-sat         t=2  163.66 Mops/s  268.8 ns/op
-  LAPT3        seq-sat         t=3  166.19 Mops/s  264.8 ns/op
-  LAPT3        seq-sat         t=4  161.41 Mops/s  272.6 ns/op
-  LAPT3        seq-sat         t=5  169.59 Mops/s  259.4 ns/op
-  LIPAH        seq-stale       t=1  53.54 Mops/s  821.8 ns/op
-  LIPAH        seq-stale       t=2  53.40 Mops/s  824.0 ns/op
-  LIPAH        seq-stale       t=3  53.14 Mops/s  828.0 ns/op
-  LIPAH        seq-stale       t=4  53.59 Mops/s  821.0 ns/op
-  LIPAH        seq-stale       t=5  52.99 Mops/s  830.3 ns/op
-  PrediCache   seq-stale       t=1  81.34 Mops/s  540.9 ns/op
-  PrediCache   seq-stale       t=2  71.80 Mops/s  612.8 ns/op
-  PrediCache   seq-stale       t=3  62.76 Mops/s  701.0 ns/op
-  PrediCache   seq-stale       t=4  71.39 Mops/s  616.3 ns/op
-  PrediCache   seq-stale       t=5  74.98 Mops/s  586.9 ns/op
-  PrediCache2  seq-stale       t=1  86.74 Mops/s  507.3 ns/op
-  PrediCache2  seq-stale       t=2  95.94 Mops/s  458.6 ns/op
-  PrediCache2  seq-stale       t=3  92.71 Mops/s  474.6 ns/op
-  PrediCache2  seq-stale       t=4  95.11 Mops/s  462.6 ns/op
-  PrediCache2  seq-stale       t=5  63.64 Mops/s  691.4 ns/op
-  LAPT         seq-stale       t=1  159.36 Mops/s  276.1 ns/op
-  LAPT         seq-stale       t=2  156.17 Mops/s  281.7 ns/op
-  LAPT         seq-stale       t=3  160.83 Mops/s  273.6 ns/op
-  LAPT         seq-stale       t=4  161.36 Mops/s  272.7 ns/op
-  LAPT         seq-stale       t=5  157.38 Mops/s  279.6 ns/op
-  LAPT3        seq-stale       t=1  162.06 Mops/s  271.5 ns/op
-  LAPT3        seq-stale       t=2  161.12 Mops/s  273.1 ns/op
-  LAPT3        seq-stale       t=3  169.19 Mops/s  260.1 ns/op
-  LAPT3        seq-stale       t=4  161.70 Mops/s  272.1 ns/op
-  LAPT3        seq-stale       t=5  158.90 Mops/s  276.9 ns/op
-  LIPAH        uniform-sat     t=1  159.60 Mops/s  275.7 ns/op
-  LIPAH        uniform-sat     t=2  159.95 Mops/s  275.1 ns/op
-  LIPAH        uniform-sat     t=3  156.44 Mops/s  281.3 ns/op
-  LIPAH        uniform-sat     t=4  158.81 Mops/s  277.1 ns/op
-  LIPAH        uniform-sat     t=5  159.47 Mops/s  275.9 ns/op
-  PrediCache   uniform-sat     t=1  101.99 Mops/s  431.4 ns/op
-  PrediCache   uniform-sat     t=2  100.69 Mops/s  437.0 ns/op
-  PrediCache   uniform-sat     t=3  101.21 Mops/s  434.8 ns/op
-  PrediCache   uniform-sat     t=4  101.31 Mops/s  434.3 ns/op
-  PrediCache   uniform-sat     t=5  100.38 Mops/s  438.3 ns/op
-  PrediCache2  uniform-sat     t=1  101.95 Mops/s  431.6 ns/op
-  PrediCache2  uniform-sat     t=2  101.80 Mops/s  432.2 ns/op
-  PrediCache2  uniform-sat     t=3  101.22 Mops/s  434.7 ns/op
-  PrediCache2  uniform-sat     t=4  101.31 Mops/s  434.3 ns/op
-  PrediCache2  uniform-sat     t=5  101.36 Mops/s  434.1 ns/op
-  LAPT         uniform-sat     t=1  119.01 Mops/s  369.7 ns/op
-  LAPT         uniform-sat     t=2  116.89 Mops/s  376.4 ns/op
-  LAPT         uniform-sat     t=3  117.99 Mops/s  372.9 ns/op
-  LAPT         uniform-sat     t=4  118.35 Mops/s  371.8 ns/op
-  LAPT         uniform-sat     t=5  117.04 Mops/s  375.9 ns/op
-  LAPT3        uniform-sat     t=1  121.04 Mops/s  363.5 ns/op
-  LAPT3        uniform-sat     t=2  121.08 Mops/s  363.4 ns/op
-  LAPT3        uniform-sat     t=3  120.40 Mops/s  365.5 ns/op
-  LAPT3        uniform-sat     t=4  120.31 Mops/s  365.7 ns/op
-  LAPT3        uniform-sat     t=5  121.76 Mops/s  361.4 ns/op
-  LIPAH        uniform-stale   t=1  41.65 Mops/s  1056.5 ns/op
-  LIPAH        uniform-stale   t=2  41.47 Mops/s  1061.0 ns/op
-  LIPAH        uniform-stale   t=3  41.49 Mops/s  1060.5 ns/op
-  LIPAH        uniform-stale   t=4  41.45 Mops/s  1061.5 ns/op
-  LIPAH        uniform-stale   t=5  41.36 Mops/s  1063.9 ns/op
-  PrediCache   uniform-stale   t=1  86.51 Mops/s  508.6 ns/op
-  PrediCache   uniform-stale   t=2  87.10 Mops/s  505.1 ns/op
-  PrediCache   uniform-stale   t=3  86.30 Mops/s  509.8 ns/op
-  PrediCache   uniform-stale   t=4  85.44 Mops/s  515.0 ns/op
-  PrediCache   uniform-stale   t=5  86.97 Mops/s  505.9 ns/op
-  PrediCache2  uniform-stale   t=1  84.39 Mops/s  521.4 ns/op
-  PrediCache2  uniform-stale   t=2  84.52 Mops/s  520.6 ns/op
-  PrediCache2  uniform-stale   t=3  84.91 Mops/s  518.2 ns/op
-  PrediCache2  uniform-stale   t=4  85.90 Mops/s  512.2 ns/op
-  PrediCache2  uniform-stale   t=5  84.69 Mops/s  519.6 ns/op
-  LAPT         uniform-stale   t=1  116.52 Mops/s  377.6 ns/op
-  LAPT         uniform-stale   t=2  116.65 Mops/s  377.2 ns/op
-  LAPT         uniform-stale   t=3  115.88 Mops/s  379.7 ns/op
-  LAPT         uniform-stale   t=4  116.49 Mops/s  377.7 ns/op
-  LAPT         uniform-stale   t=5  116.66 Mops/s  377.2 ns/op
-  LAPT3        uniform-stale   t=1  120.87 Mops/s  364.0 ns/op
-  LAPT3        uniform-stale   t=2  120.69 Mops/s  364.6 ns/op
-  LAPT3        uniform-stale   t=3  116.30 Mops/s  378.3 ns/op
-  LAPT3        uniform-stale   t=4  118.82 Mops/s  370.3 ns/op
-  LAPT3        uniform-stale   t=5  120.38 Mops/s  365.5 ns/op
-[23:53:54] === Workload 3: B-tree random GET (T=44, 2000000 keys, no-copy) ===
-  LIPAH        t=1  3.52 Mops/s
-  LIPAH        t=2  3.32 Mops/s
-  LIPAH        t=3  3.01 Mops/s
-  LIPAH        t=4  3.41 Mops/s
-  LIPAH        t=5  3.28 Mops/s
-  PrediCache   t=1  3.06 Mops/s
-  PrediCache   t=2  3.19 Mops/s
-  PrediCache   t=3  3.12 Mops/s
-  PrediCache   t=4  3.38 Mops/s
-  PrediCache   t=5  3.05 Mops/s
-  PrediCache2  t=1  3.37 Mops/s
-  PrediCache2  t=2  3.33 Mops/s
-  PrediCache2  t=3  3.40 Mops/s
-  PrediCache2  t=4  3.39 Mops/s
-  PrediCache2  t=5  3.31 Mops/s
-  LAPT         t=1  3.29 Mops/s
-  LAPT         t=2  3.34 Mops/s
-  LAPT         t=3  3.22 Mops/s
-  LAPT         t=4  3.06 Mops/s
-  LAPT         t=5  3.45 Mops/s
-  LAPT3        t=1  3.43 Mops/s
-  LAPT3        t=2  3.35 Mops/s
-  LAPT3        t=3  3.17 Mops/s
-  LAPT3        t=4  2.98 Mops/s
-  LAPT3        t=5  3.29 Mops/s
-[23:57:59] === Workload 4: B-tree random-start range scan (T=44, scan_size=1000) ===
-  LIPAH        t=1  438.60 M kvs/s
-  LIPAH        t=2  438.57 M kvs/s
-  LIPAH        t=3  416.90 M kvs/s
-  LIPAH        t=4  387.39 M kvs/s
-  LIPAH        t=5  408.66 M kvs/s
-  PrediCache   t=1  452.54 M kvs/s
-  PrediCache   t=2  442.06 M kvs/s
-  PrediCache   t=3  457.94 M kvs/s
-  PrediCache   t=4  452.81 M kvs/s
-  PrediCache   t=5  459.23 M kvs/s
-  PrediCache2  t=1  474.30 M kvs/s
-  PrediCache2  t=2  466.43 M kvs/s
-  PrediCache2  t=3  478.69 M kvs/s
-  PrediCache2  t=4  479.72 M kvs/s
-  PrediCache2  t=5  490.27 M kvs/s
-  LAPT         t=1  419.33 M kvs/s
-  LAPT         t=2  411.90 M kvs/s
-  LAPT         t=3  423.70 M kvs/s
-  LAPT         t=4  417.28 M kvs/s
-  LAPT         t=5  442.49 M kvs/s
-  LAPT3        t=1  439.38 M kvs/s
-  LAPT3        t=2  396.62 M kvs/s
-  LAPT3        t=3  459.37 M kvs/s
-  LAPT3        t=4  415.19 M kvs/s
-  LAPT3        t=5  444.00 M kvs/s
-[00:07:33] === Generating plots ===
-  wrote /mnt/nvme1/rotaki/LIPAH/lapt_paper/results/run_20260518_220100/plots/seq_payload.png and .pdf
-  wrote /mnt/nvme1/rotaki/LIPAH/lapt_paper/results/run_20260518_220100/plots/crosstab_44t.png and .pdf
-  wrote /mnt/nvme1/rotaki/LIPAH/lapt_paper/results/run_20260518_220100/plots/btree_get.png
-  wrote /mnt/nvme1/rotaki/LIPAH/lapt_paper/results/run_20260518_220100/plots/btree_range_scan.png
-[00:07:37] === Done ===
-[00:07:37] Results: /mnt/nvme1/rotaki/LIPAH/lapt_paper/results/run_20260518_220100/
-[00:07:37]   config       : /mnt/nvme1/rotaki/LIPAH/lapt_paper/results/run_20260518_220100/config.txt
-[00:07:37]   raw logs     : /mnt/nvme1/rotaki/LIPAH/lapt_paper/results/run_20260518_220100/raw/
-[00:07:37]   csvs         : /mnt/nvme1/rotaki/LIPAH/lapt_paper/results/run_20260518_220100/csv/
-[00:07:37]   plots        : /mnt/nvme1/rotaki/LIPAH/lapt_paper/results/run_20260518_220100/plots/
-[Tue May 19 12:07:37 AM CDT 2026] bench exit code: 0
-[Tue May 19 12:07:37 AM CDT 2026] LATEST_DIR=/mnt/nvme1/rotaki/LIPAH/lapt_paper/results/run_20260518_220100
-[Tue May 19 12:07:37 AM CDT 2026] mailx exit: 0
-[Tue May 19 12:07:37 AM CDT 2026] done
+[13:04:19] Building fbt_on_disk_get [bp_predicache,pc_bypass] -> fbt_on_disk_get_bypass
+    Finished `release` profile [optimized] target(s) in 11.16s
+[13:04:30] Building fbt_on_disk_scan [bp_predicache,pc_bypass] -> fbt_on_disk_scan_bypass
+    Finished `release` profile [optimized] target(s) in 11.12s
+[13:04:41] Building bp_translation_bench [bp_predicache,pc_prefix_hash,pc_bypass] -> bp_translation_bench_both
+    Finished `release` profile [optimized] target(s) in 22.86s
+[13:05:04] Building fbt_on_disk_get [bp_predicache,pc_prefix_hash,pc_bypass] -> fbt_on_disk_get_both
+    Finished `release` profile [optimized] target(s) in 11.91s
+[13:05:16] Building fbt_on_disk_scan [bp_predicache,pc_prefix_hash,pc_bypass] -> fbt_on_disk_scan_both
+    Finished `release` profile [optimized] target(s) in 11.25s
+[13:05:27] === Workload 1: sequential payload sweep (sat) ===
+  LIPAH        sat    p=0     t=1  221.34 Mops/s
+  LIPAH        sat    p=0     t=2  224.38 Mops/s
+  LIPAH        sat    p=0     t=3  232.52 Mops/s
+  LIPAH        sat    p=256   t=1  98.95 Mops/s
+  LIPAH        sat    p=256   t=2  97.34 Mops/s
+  LIPAH        sat    p=256   t=3  95.78 Mops/s
+  LIPAH        sat    p=1024  t=1  50.81 Mops/s
+  LIPAH        sat    p=1024  t=2  50.84 Mops/s
+  LIPAH        sat    p=1024  t=3  50.84 Mops/s
+  LIPAH        sat    p=4096  t=1  20.11 Mops/s
+  LIPAH        sat    p=4096  t=2  20.01 Mops/s
+  LIPAH        sat    p=4096  t=3  19.70 Mops/s
+  LIPAH        sat    p=16384 t=1  4.92 Mops/s
+  LIPAH        sat    p=16384 t=2  5.37 Mops/s
+  LIPAH        sat    p=16384 t=3  5.47 Mops/s
+  PrediCache   sat    p=0     t=1  110.50 Mops/s
+  PrediCache   sat    p=0     t=2  111.85 Mops/s
+  PrediCache   sat    p=0     t=3  116.30 Mops/s
+  PrediCache   sat    p=256   t=1  72.92 Mops/s
+  PrediCache   sat    p=256   t=2  72.91 Mops/s
+  PrediCache   sat    p=256   t=3  72.05 Mops/s
+  PrediCache   sat    p=1024  t=1  41.50 Mops/s
+  PrediCache   sat    p=1024  t=2  41.46 Mops/s
+  PrediCache   sat    p=1024  t=3  41.69 Mops/s
+  PrediCache   sat    p=4096  t=1  18.26 Mops/s
+  PrediCache   sat    p=4096  t=2  18.63 Mops/s
+  PrediCache   sat    p=4096  t=3  18.24 Mops/s
+  PrediCache   sat    p=16384 t=1  4.96 Mops/s
+  PrediCache   sat    p=16384 t=2  4.79 Mops/s
+  PrediCache   sat    p=16384 t=3  4.89 Mops/s
+  prefix       sat    p=0     t=1  126.53 Mops/s
+  prefix       sat    p=0     t=2  126.14 Mops/s
+  prefix       sat    p=0     t=3  123.88 Mops/s
+  prefix       sat    p=256   t=1  75.05 Mops/s
+  prefix       sat    p=256   t=2  76.68 Mops/s
+  prefix       sat    p=256   t=3  77.28 Mops/s
+  prefix       sat    p=1024  t=1  44.72 Mops/s
+  prefix       sat    p=1024  t=2  45.28 Mops/s
+  prefix       sat    p=1024  t=3  45.05 Mops/s
+  prefix       sat    p=4096  t=1  18.62 Mops/s
+  prefix       sat    p=4096  t=2  18.72 Mops/s
+  prefix       sat    p=4096  t=3  18.80 Mops/s
+  prefix       sat    p=16384 t=1  5.19 Mops/s
+  prefix       sat    p=16384 t=2  5.17 Mops/s
+  prefix       sat    p=16384 t=3  5.17 Mops/s
+  bypass       sat    p=0     t=1  125.53 Mops/s
+  bypass       sat    p=0     t=2  125.77 Mops/s
+  bypass       sat    p=0     t=3  127.92 Mops/s
+  bypass       sat    p=256   t=1  72.65 Mops/s
+  bypass       sat    p=256   t=2  69.35 Mops/s
+  bypass       sat    p=256   t=3  71.09 Mops/s
+  bypass       sat    p=1024  t=1  33.56 Mops/s
+  bypass       sat    p=1024  t=2  33.50 Mops/s
+  bypass       sat    p=1024  t=3  33.37 Mops/s
+  bypass       sat    p=4096  t=1  13.74 Mops/s
+  bypass       sat    p=4096  t=2  13.85 Mops/s
+  bypass       sat    p=4096  t=3  13.88 Mops/s
+  bypass       sat    p=16384 t=1  4.03 Mops/s
+  bypass       sat    p=16384 t=2  4.05 Mops/s
+  bypass       sat    p=16384 t=3  4.17 Mops/s
+  both         sat    p=0     t=1  162.70 Mops/s
+  both         sat    p=0     t=2  161.95 Mops/s
+  both         sat    p=0     t=3  165.37 Mops/s
+  both         sat    p=256   t=1  85.92 Mops/s
+  both         sat    p=256   t=2  87.08 Mops/s
+  both         sat    p=256   t=3  87.25 Mops/s
+  both         sat    p=1024  t=1  34.78 Mops/s
+  both         sat    p=1024  t=2  34.53 Mops/s
+  both         sat    p=1024  t=3  35.14 Mops/s
+  both         sat    p=4096  t=1  13.86 Mops/s
+  both         sat    p=4096  t=2  14.16 Mops/s
+  both         sat    p=4096  t=3  13.82 Mops/s
+  both         sat    p=16384 t=1  4.32 Mops/s
+  both         sat    p=16384 t=2  4.41 Mops/s
+  both         sat    p=16384 t=3  4.29 Mops/s
+[13:31:12] === Workload 1: sequential payload sweep (stale) ===
+  LIPAH        stale  p=0     t=1  49.31 Mops/s
+  LIPAH        stale  p=0     t=2  47.68 Mops/s
+  LIPAH        stale  p=0     t=3  49.04 Mops/s
+  LIPAH        stale  p=256   t=1  37.99 Mops/s
+  LIPAH        stale  p=256   t=2  37.26 Mops/s
+  LIPAH        stale  p=256   t=3  37.44 Mops/s
+  LIPAH        stale  p=1024  t=1  24.79 Mops/s
+  LIPAH        stale  p=1024  t=2  25.07 Mops/s
+  LIPAH        stale  p=1024  t=3  25.12 Mops/s
+  LIPAH        stale  p=4096  t=1  16.83 Mops/s
+  LIPAH        stale  p=4096  t=2  16.65 Mops/s
+  LIPAH        stale  p=4096  t=3  16.91 Mops/s
+  LIPAH        stale  p=16384 t=1  5.04 Mops/s
+  LIPAH        stale  p=16384 t=2  5.12 Mops/s
+  LIPAH        stale  p=16384 t=3  4.95 Mops/s
+  PrediCache   stale  p=0     t=1  106.14 Mops/s
+  PrediCache   stale  p=0     t=2  104.25 Mops/s
+  PrediCache   stale  p=0     t=3  105.40 Mops/s
+  PrediCache   stale  p=256   t=1  72.97 Mops/s
+  PrediCache   stale  p=256   t=2  73.56 Mops/s
+  PrediCache   stale  p=256   t=3  74.37 Mops/s
+  PrediCache   stale  p=1024  t=1  43.05 Mops/s
+  PrediCache   stale  p=1024  t=2  43.65 Mops/s
+  PrediCache   stale  p=1024  t=3  43.01 Mops/s
+  PrediCache   stale  p=4096  t=1  18.44 Mops/s
+  PrediCache   stale  p=4096  t=2  18.78 Mops/s
+  PrediCache   stale  p=4096  t=3  18.45 Mops/s
+  PrediCache   stale  p=16384 t=1  4.99 Mops/s
+  PrediCache   stale  p=16384 t=2  4.97 Mops/s
+  PrediCache   stale  p=16384 t=3  4.95 Mops/s
+  prefix       stale  p=0     t=1  108.68 Mops/s
+  prefix       stale  p=0     t=2  107.17 Mops/s
+  prefix       stale  p=0     t=3  107.70 Mops/s
+  prefix       stale  p=256   t=1  71.52 Mops/s
+  prefix       stale  p=256   t=2  74.25 Mops/s
+  prefix       stale  p=256   t=3  74.04 Mops/s
+  prefix       stale  p=1024  t=1  42.30 Mops/s
+  prefix       stale  p=1024  t=2  42.74 Mops/s
+  prefix       stale  p=1024  t=3  44.44 Mops/s
+  prefix       stale  p=4096  t=1  19.13 Mops/s
+  prefix       stale  p=4096  t=2  19.23 Mops/s
+  prefix       stale  p=4096  t=3  19.03 Mops/s
+  prefix       stale  p=16384 t=1  5.03 Mops/s
+  prefix       stale  p=16384 t=2  4.97 Mops/s
+  prefix       stale  p=16384 t=3  5.03 Mops/s
+  bypass       stale  p=0     t=1  133.66 Mops/s
+  bypass       stale  p=0     t=2  136.28 Mops/s
+  bypass       stale  p=0     t=3  138.63 Mops/s
+  bypass       stale  p=256   t=1  83.47 Mops/s
+  bypass       stale  p=256   t=2  80.90 Mops/s
+  bypass       stale  p=256   t=3  85.23 Mops/s
+  bypass       stale  p=1024  t=1  44.47 Mops/s
+  bypass       stale  p=1024  t=2  45.92 Mops/s
+  bypass       stale  p=1024  t=3  44.55 Mops/s
+  bypass       stale  p=4096  t=1  18.46 Mops/s
+  bypass       stale  p=4096  t=2  18.15 Mops/s
+  bypass       stale  p=4096  t=3  18.17 Mops/s
+  bypass       stale  p=16384 t=1  4.98 Mops/s
+  bypass       stale  p=16384 t=2  4.86 Mops/s
+  bypass       stale  p=16384 t=3  4.96 Mops/s
+  both         stale  p=0     t=1  158.01 Mops/s
+  both         stale  p=0     t=2  153.37 Mops/s
+  both         stale  p=0     t=3  156.67 Mops/s
+  both         stale  p=256   t=1  88.69 Mops/s
+  both         stale  p=256   t=2  86.91 Mops/s
+  both         stale  p=256   t=3  87.88 Mops/s
+  both         stale  p=1024  t=1  46.58 Mops/s
+  both         stale  p=1024  t=2  46.46 Mops/s
+  both         stale  p=1024  t=3  44.94 Mops/s
+  both         stale  p=4096  t=1  19.37 Mops/s
+  both         stale  p=4096  t=2  19.40 Mops/s
+  both         stale  p=4096  t=3  19.38 Mops/s
+  both         stale  p=16384 t=1  5.04 Mops/s
+  both         stale  p=16384 t=2  5.29 Mops/s
+  both         stale  p=16384 t=3  5.02 Mops/s
+[14:00:11] === Workload 2: 44-thread crosstab (sequential×saturated, sequential×stale, uniform×saturated, uniform×stale) ===
+  LIPAH        seq-sat         t=1  216.43 Mops/s  203.3 ns/op
+  LIPAH        seq-sat         t=2  203.03 Mops/s  216.7 ns/op
+  LIPAH        seq-sat         t=3  223.11 Mops/s  197.2 ns/op
+  PrediCache   seq-sat         t=1  111.67 Mops/s  394.0 ns/op
+  PrediCache   seq-sat         t=2  112.59 Mops/s  390.8 ns/op
+  PrediCache   seq-sat         t=3  111.53 Mops/s  394.5 ns/op
+  prefix       seq-sat         t=1  125.78 Mops/s  349.8 ns/op
+  prefix       seq-sat         t=2  123.52 Mops/s  356.2 ns/op
+  prefix       seq-sat         t=3  125.54 Mops/s  350.5 ns/op
+  bypass       seq-sat         t=1  125.95 Mops/s  349.3 ns/op
+  bypass       seq-sat         t=2  124.24 Mops/s  354.1 ns/op
+  bypass       seq-sat         t=3  123.40 Mops/s  356.6 ns/op
+  both         seq-sat         t=1  163.22 Mops/s  269.6 ns/op
+  both         seq-sat         t=2  164.22 Mops/s  267.9 ns/op
+  both         seq-sat         t=3  167.96 Mops/s  262.0 ns/op
+  LIPAH        seq-stale       t=1  49.29 Mops/s  892.6 ns/op
+  LIPAH        seq-stale       t=2  48.98 Mops/s  898.4 ns/op
+  LIPAH        seq-stale       t=3  49.53 Mops/s  888.3 ns/op
+  PrediCache   seq-stale       t=1  103.86 Mops/s  423.6 ns/op
+  PrediCache   seq-stale       t=2  103.08 Mops/s  426.9 ns/op
+  PrediCache   seq-stale       t=3  104.85 Mops/s  419.6 ns/op
+  prefix       seq-stale       t=1  107.01 Mops/s  411.2 ns/op
+  prefix       seq-stale       t=2  107.43 Mops/s  409.6 ns/op
+  prefix       seq-stale       t=3  107.62 Mops/s  408.9 ns/op
+  bypass       seq-stale       t=1  138.06 Mops/s  318.7 ns/op
+  bypass       seq-stale       t=2  135.08 Mops/s  325.7 ns/op
+  bypass       seq-stale       t=3  135.85 Mops/s  323.9 ns/op
+  both         seq-stale       t=1  155.05 Mops/s  283.8 ns/op
+  both         seq-stale       t=2  159.24 Mops/s  276.3 ns/op
+  both         seq-stale       t=3  155.70 Mops/s  282.6 ns/op
+  LIPAH        uniform-sat     t=1  159.05 Mops/s  276.6 ns/op
+  LIPAH        uniform-sat     t=2  157.35 Mops/s  279.6 ns/op
+  LIPAH        uniform-sat     t=3  154.67 Mops/s  284.5 ns/op
+  PrediCache   uniform-sat     t=1  100.59 Mops/s  437.4 ns/op
+  PrediCache   uniform-sat     t=2  102.22 Mops/s  430.4 ns/op
+  PrediCache   uniform-sat     t=3  102.57 Mops/s  429.0 ns/op
+  prefix       uniform-sat     t=1  100.46 Mops/s  438.0 ns/op
+  prefix       uniform-sat     t=2  99.21 Mops/s  443.5 ns/op
+  prefix       uniform-sat     t=3  101.71 Mops/s  432.6 ns/op
+  bypass       uniform-sat     t=1  119.67 Mops/s  367.7 ns/op
+  bypass       uniform-sat     t=2  119.39 Mops/s  368.5 ns/op
+  bypass       uniform-sat     t=3  118.64 Mops/s  370.9 ns/op
+  both         uniform-sat     t=1  117.68 Mops/s  373.9 ns/op
+  both         uniform-sat     t=2  115.36 Mops/s  381.4 ns/op
+  both         uniform-sat     t=3  117.82 Mops/s  373.4 ns/op
+  LIPAH        uniform-stale   t=1  41.14 Mops/s  1069.5 ns/op
+  LIPAH        uniform-stale   t=2  41.21 Mops/s  1067.6 ns/op
+  LIPAH        uniform-stale   t=3  41.23 Mops/s  1067.2 ns/op
+  PrediCache   uniform-stale   t=1  96.78 Mops/s  454.6 ns/op
+  PrediCache   uniform-stale   t=2  97.04 Mops/s  453.4 ns/op
+  PrediCache   uniform-stale   t=3  95.90 Mops/s  458.8 ns/op
+  prefix       uniform-stale   t=1  95.05 Mops/s  462.9 ns/op
+  prefix       uniform-stale   t=2  95.59 Mops/s  460.3 ns/op
+  prefix       uniform-stale   t=3  96.40 Mops/s  456.4 ns/op
+  bypass       uniform-stale   t=1  107.14 Mops/s  410.7 ns/op
+  bypass       uniform-stale   t=2  108.71 Mops/s  404.7 ns/op
+  bypass       uniform-stale   t=3  107.61 Mops/s  408.9 ns/op
+  both         uniform-stale   t=1  108.51 Mops/s  405.5 ns/op
+  both         uniform-stale   t=2  107.56 Mops/s  409.1 ns/op
+  both         uniform-stale   t=3  108.55 Mops/s  405.4 ns/op
+[14:26:54] === Workload 3: B-tree random GET (T=44, 2000000 keys, no-copy) ===
+  LIPAH        t=1  3.50 Mops/s
+  LIPAH        t=2  3.66 Mops/s
+  LIPAH        t=3  3.63 Mops/s
+  PrediCache   t=1  3.25 Mops/s
+  PrediCache   t=2  3.38 Mops/s
+  PrediCache   t=3  3.17 Mops/s
+  prefix       t=1  3.35 Mops/s
+  prefix       t=2  3.42 Mops/s
+  prefix       t=3  3.38 Mops/s
+  bypass       t=1  3.07 Mops/s
+  bypass       t=2  2.87 Mops/s
+  bypass       t=3  3.42 Mops/s
+  both         t=1  3.53 Mops/s
+  both         t=2  3.56 Mops/s
+  both         t=3  3.40 Mops/s
+[14:28:50] === Workload 4: B-tree random-start range scan (T=44, scan_size=1000) ===
+  LIPAH        t=1  544.74 M kvs/s
+  LIPAH        t=2  560.32 M kvs/s
+  LIPAH        t=3  565.06 M kvs/s
+  PrediCache   t=1  547.51 M kvs/s
+  PrediCache   t=2  548.82 M kvs/s
+  PrediCache   t=3  542.75 M kvs/s
+  prefix       t=1  542.08 M kvs/s
+  prefix       t=2  498.90 M kvs/s
+  prefix       t=3  604.51 M kvs/s
+  bypass       t=1  550.12 M kvs/s
+  bypass       t=2  547.56 M kvs/s
+  bypass       t=3  547.43 M kvs/s
+  both         t=1  599.56 M kvs/s
+  both         t=2  569.23 M kvs/s
+  both         t=3  579.17 M kvs/s
+[14:34:06] === Generating plots ===
+  wrote /mnt/nvme1/rotaki/LIPAH/dbspektrum_paper/results/run_20260520_130223/plots/seq_payload.png and .pdf
+  wrote /mnt/nvme1/rotaki/LIPAH/dbspektrum_paper/results/run_20260520_130223/plots/crosstab_44t.png and .pdf
+  wrote /mnt/nvme1/rotaki/LIPAH/dbspektrum_paper/results/run_20260520_130223/plots/btree_get.png
+  wrote /mnt/nvme1/rotaki/LIPAH/dbspektrum_paper/results/run_20260520_130223/plots/btree_range_scan.png
+[14:34:12] === Done ===
+[14:34:12] Results: /mnt/nvme1/rotaki/LIPAH/dbspektrum_paper/results/run_20260520_130223/
+[14:34:12]   config       : /mnt/nvme1/rotaki/LIPAH/dbspektrum_paper/results/run_20260520_130223/config.txt
+[14:34:12]   raw logs     : /mnt/nvme1/rotaki/LIPAH/dbspektrum_paper/results/run_20260520_130223/raw/
+[14:34:12]   csvs         : /mnt/nvme1/rotaki/LIPAH/dbspektrum_paper/results/run_20260520_130223/csv/
+[14:34:12]   plots        : /mnt/nvme1/rotaki/LIPAH/dbspektrum_paper/results/run_20260520_130223/plots/
+[Wed May 20 02:34:12 PM CDT 2026] bench exit code: 0
+[Wed May 20 02:34:12 PM CDT 2026] LATEST_DIR=/mnt/nvme1/rotaki/LIPAH/dbspektrum_paper/results/run_20260520_130223
+[Wed May 20 02:34:13 PM CDT 2026] mailx exit: 0
+[Wed May 20 02:34:13 PM CDT 2026] done
