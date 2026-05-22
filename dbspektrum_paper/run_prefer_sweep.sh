@@ -42,13 +42,17 @@ TRIALS=${TRIALS:-3}
 PREFER_CAP=${PREFER_CAP:-10000}
 SKIP_BUILD=${SKIP_BUILD:-0}
 
-# 6 F-values, denser near the top where the crossover lives at small payload.
-PREFER_PROBS=(0.0 0.25 0.5 0.75 0.9 1.0)
-# 7 payload sizes from "translation-only" up through "full page" (16 KiB =
-# default page size). The bench now respects --payload-bytes on the random-
-# access path (was a bug, fixed), so 1024 actually reads 1024 bytes, not the
-# full 16 KiB page; 16384 explicitly tests the full-page case.
-PAYLOADS=(0 128 512 2048 4096 8192 16384)
+# Defaults — overridable via env vars (space-separated lists), e.g.:
+#   PAYLOADS="0"                ./run_prefer_sweep.sh    # only payload=0
+#   PAYLOADS="0 1024 4096" PREFER_PROBS="0.0 0.5 1.0"  ./run_prefer_sweep.sh
+#
+# PREFER_PROBS: 6 F-values, denser near the top where the crossover lives.
+# PAYLOADS:     7 sizes from "translation-only" (0) up through "full page"
+#               (16384 = default page size). The bench now respects
+#               --payload-bytes (was a bug, fixed); payload_bytes==0 means
+#               1 byte (translation-only), not full-page fold.
+read -r -a PREFER_PROBS <<< "${PREFER_PROBS:-0.0 0.25 0.5 0.75 0.9 1.0}"
+read -r -a PAYLOADS     <<< "${PAYLOADS:-0 128 512 1024 2048 4096 8192 16384}"
 
 TARGET="./target/release"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)

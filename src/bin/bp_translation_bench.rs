@@ -193,11 +193,13 @@ struct Args {
     #[arg(long, default_value_t = -1.0)]
     prefer_prob: f64,
 
-    /// Balance the preferred / displaced sets to exactly this many pages each
-    /// (working_set = 2 * prefer_cap). Default 10000 keeps the working set
-    /// small enough to fit in L3 at moderate payload, so cache footprint
-    /// doesn't confound the bypass-vs-always-probe comparison. Set to 0 to
-    /// use `min(|preferred|, |displaced|)` instead (no fixed cap).
+    /// **Total** working-set size for the `--prefer-prob` control experiment.
+    /// The bench builds a single mixed pool of exactly `prefer_cap` distinct
+    /// page indices, of which `prefer_prob × prefer_cap` are at their
+    /// preferred frame and the rest are displaced; the workload picks
+    /// uniformly from that pool. So the working set is constant across
+    /// `prefer_prob` values — pp=0.0, pp=0.5, and pp=1.0 all touch the
+    /// same `prefer_cap` distinct pages. Default 10000.
     #[arg(long, default_value_t = 10000)]
     prefer_cap: usize,
 }
@@ -524,7 +526,13 @@ fn main() {
     // empty when --prefer-prob is disabled and the workload loop falls back
     // to the existing uniform random index pick.
     let prefer_enabled = args.prefer_prob >= 0.0;
-    let (preferred_indices, displaced_indices): (Vec<usize>, Vec<usize>) = if prefer_enabled {
+    // Build a single mixed pool of exactly `prefer_cap` distinct page
+    // indices, where `prefer_prob × prefer_cap` are at their preferred
+    // frame and the rest are displaced. Workload picks uniformly from
+    // this pool, so the working set size is constant across prefer_prob
+    // (was a confound in the previous design: pp=0.0/1.0 touched
+    // `cap` pages but pp=0.5 touched `2*cap`).
+    let workload_pool: Vec<usize> = if prefer_enabled {
         // Lock both promotion knobs to u32::MAX *before* the classification
         // loop. Each `get_page_for_read` we issue below would otherwise be
         // a chance to trigger probabilistic promotion (1/50 default on
@@ -534,8 +542,8 @@ fn main() {
         #[cfg(feature = "bp_predicache")]
         fbtree::bp::pt_set_promote_probs(u32::MAX, u32::MAX);
 
-        let mut pref = Vec::new();
-        let mut displ = Vec::new();
+        let mut pref: Vec<usize> = Vec::new();
+        let mut displ: Vec<usize> = Vec::new();
         let mut unsupported = false;
         for i in 0..num_pages {
             let k = keys[i];
@@ -558,56 +566,86 @@ fn main() {
                 displ.push(i);
             }
         }
+
         if unsupported {
             eprintln!(
                 "--prefer-prob: BP does not implement preferred_frame_for; \
                  disabling the control experiment"
             );
-            (Vec::new(), Vec::new())
+            Vec::new()
         } else {
             let observed = pref.len() as f64 / num_pages as f64;
             let n_pref_full = pref.len();
             let n_displ_full = displ.len();
-            // Balance both sets to the same fixed cap so working-set footprint
-            // is identical regardless of prefer_prob (otherwise the smaller
-            // set wins on cache footprint and confounds the lookup-cost
-            // comparison). Default 10000 each (configurable via
-            // `--prefer-cap`). Set cap to 0 to use min(|pref|,|displ|).
-            let cap = if args.prefer_cap == 0 {
-                n_pref_full.min(n_displ_full)
+
+            // Total working-set size. Default = args.prefer_cap; if either
+            // set is too small to honor the requested mix, shrink the
+            // working set so we get exactly the right ratio.
+            let cap_request = if args.prefer_cap == 0 {
+                num_pages
             } else {
-                args.prefer_cap.min(n_pref_full).min(n_displ_full)
+                args.prefer_cap
             };
+            // Largest cap such that we have enough pref AND enough displ
+            // to fill the requested fractions.
+            let want_pref_frac = args.prefer_prob;
+            let want_displ_frac = 1.0 - args.prefer_prob;
+            let cap_pref_bound = if want_pref_frac > 0.0 {
+                (n_pref_full as f64 / want_pref_frac) as usize
+            } else {
+                usize::MAX
+            };
+            let cap_displ_bound = if want_displ_frac > 0.0 {
+                (n_displ_full as f64 / want_displ_frac) as usize
+            } else {
+                usize::MAX
+            };
+            let cap = cap_request.min(cap_pref_bound).min(cap_displ_bound);
+            let n_pref = (args.prefer_prob * cap as f64).round() as usize;
+            let n_displ = cap.saturating_sub(n_pref);
+
             let mut rng = small_thread_rng();
+            // Fisher-Yates on each, then take the prefix.
             for v in [&mut pref, &mut displ].iter_mut() {
                 for i in (1..v.len()).rev() {
                     let j = (rng.next_u64() as usize) % (i + 1);
                     v.swap(i, j);
                 }
-                v.truncate(cap);
             }
+            let mut pool: Vec<usize> = Vec::with_capacity(cap);
+            pool.extend(pref.iter().take(n_pref).copied());
+            pool.extend(displ.iter().take(n_displ).copied());
+            // Shuffle the combined pool so adjacent pool indices have no
+            // pref/displ pattern.
+            for i in (1..pool.len()).rev() {
+                let j = (rng.next_u64() as usize) % (i + 1);
+                pool.swap(i, j);
+            }
+
             println!(
                 "--prefer-prob classification: natural_hit_rate = {:.3} \
-                 ({} preferred, {} displaced); balanced to {} each \
-                 (working_set = {} pages)",
-                observed, n_pref_full, n_displ_full, cap, cap * 2,
+                 (available {} preferred, {} displaced)",
+                observed, n_pref_full, n_displ_full,
             );
             println!(
-                "  target prefer_prob = {:.3}",
-                args.prefer_prob,
+                "  target prefer_prob = {:.3}; workload pool = {} pages \
+                 ({} preferred + {} displaced)",
+                args.prefer_prob, pool.len(), n_pref, n_displ,
             );
-            // Promotion was already locked before the classification loop
-            // (see above), so the classified sets are stable through the
-            // timed window. Nothing more to do here.
-            (pref, displ)
+            if cap < cap_request {
+                println!(
+                    "  note: cap clamped from {} to {} so the mix is exactly the \
+                     requested ratio (limited by available {} preferred / {} displaced)",
+                    cap_request, cap, n_pref_full, n_displ_full,
+                );
+            }
+            pool
         }
     } else {
-        (Vec::new(), Vec::new())
+        Vec::new()
     };
-    let preferred_indices = Arc::new(preferred_indices);
-    let displaced_indices = Arc::new(displaced_indices);
-    let prefer_active =
-        prefer_enabled && !preferred_indices.is_empty() && !displaced_indices.is_empty();
+    let workload_pool = Arc::new(workload_pool);
+    let prefer_active = prefer_enabled && !workload_pool.is_empty();
 
     // For the --prefer-prob control experiment, zero out the BP's profile
     // counters so `fast_path_coverage` reflects ONLY the timed window
@@ -646,9 +684,7 @@ fn main() {
             let record_latency = args.latency;
             let callback_path = args.callback_path;
             let prefer_active = prefer_active;
-            let prefer_prob = args.prefer_prob;
-            let preferred_indices = preferred_indices.clone();
-            let displaced_indices = displaced_indices.clone();
+            let workload_pool = workload_pool.clone();
             // Per-thread start position so threads don't convoy on the same
             // chain pointer in lock-step.
             let start_idx = tid * num_pages / args.threads.max(1);
@@ -804,21 +840,14 @@ fn main() {
                     }
 
                     let idx = if prefer_active {
-                        // --prefer-prob: with probability `prefer_prob` sample
-                        // from pages currently at their preferred frame, else
-                        // from displaced pages. Two cached vector loads + one
-                        // rng call — same per-access bookkeeping as a uniform
-                        // pick over `keys[]`.
-                        let r = (uniform_rng.next_u64() as f64) / (u64::MAX as f64);
-                        if r < prefer_prob {
-                            let pos = (uniform_rng.next_u64() as usize)
-                                % preferred_indices.len();
-                            preferred_indices[pos]
-                        } else {
-                            let pos = (uniform_rng.next_u64() as usize)
-                                % displaced_indices.len();
-                            displaced_indices[pos]
-                        }
+                        // --prefer-prob: pick uniformly from the pre-built
+                        // mixed pool. The pool contains exactly
+                        // `prefer_prob * cap` preferred indices and the rest
+                        // displaced, so by construction the achieved hit
+                        // rate equals prefer_prob and the working-set size
+                        // is constant (= cap) across all prefer_prob values.
+                        let pos = (uniform_rng.next_u64() as usize) % workload_pool.len();
+                        workload_pool[pos]
                     } else if num_hotspots > 0 {
                         // Multi-hotspot: pick a hotspot uniformly, then
                         // sample within it (zipf or uniform). Hotspots are
@@ -856,22 +885,18 @@ fn main() {
                         None
                     };
                     if callback_path {
-                        // Respect `--payload-bytes` on the random-access path
-                        // too — was previously only honored on the chain path,
-                        // so `--no-chain --payload-bytes 1024` was silently
-                        // reading the full page (e.g. 16 KiB).
+                        // Random-access callback. Matches the chain path's
+                        // semantics: `payload_bytes == 0` means "translation
+                        // only" (1 byte to prevent DCE), `payload_bytes > 0`
+                        // folds the first N bytes. `--no-page-fold` is an
+                        // explicit override forcing the 1-byte path even
+                        // when payload_bytes > 0 (kept for backward compat
+                        // with the existing crosstab).
                         let outcome = bp.read_page_with(keys[idx], |page| {
                             let bytes: &[u8] = page;
                             let len = bytes.len();
-                            if no_page_fold {
+                            if no_page_fold || payload_bytes == 0 {
                                 (true, bytes[0] as u64)
-                            } else if payload_bytes == 0 {
-                                let page = std::hint::black_box(bytes);
-                                let mut acc: u64 = 0;
-                                for &b in page {
-                                    acc = acc.wrapping_add(b as u64);
-                                }
-                                (false, acc)
                             } else {
                                 let n = payload_bytes.min(len);
                                 let payload = std::hint::black_box(&bytes[..n]);
@@ -903,22 +928,14 @@ fn main() {
                         Err(_) => continue, // retry on eviction failure / latch contention
                     };
                     let page: &[u8] = &*g;
-                    if no_page_fold {
-                        // Minimal touch: one byte, prevents DCE. Isolates
-                        // translation / swap cost from page-size-dependent
-                        // memory bandwidth.
+                    if no_page_fold || payload_bytes == 0 {
+                        // Translation-only: one byte, prevents DCE. Same
+                        // semantics as the chain path and the callback
+                        // branch above (`payload_bytes == 0` ⇒ no payload
+                        // work; `--no-page-fold` is an explicit override
+                        // for the `payload_bytes > 0` case).
                         checksum = checksum.wrapping_add(page[0] as u64);
-                    } else if payload_bytes == 0 {
-                        // Fold every byte of the page (Page derefs to &[u8]).
-                        let page = std::hint::black_box(page);
-                        let mut acc: u64 = 0;
-                        for &b in page {
-                            acc = acc.wrapping_add(b as u64);
-                        }
-                        checksum ^= acc;
                     } else {
-                        // Honor `--payload-bytes` on the guard random-access
-                        // path too (parallels the callback path above).
                         let n = payload_bytes.min(page.len());
                         let payload = std::hint::black_box(&page[..n]);
                         let mut acc: u64 = 0;
