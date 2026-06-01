@@ -529,14 +529,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "congee"
-version = "0.4.1"
-source = "git+https://github.com/rotaki/congee.git?branch=main#eea1c0e33669deb5874e04f98367c08a0de78265"
-dependencies = [
- "crossbeam-epoch",
-]
-
-[[package]]
 name = "const-random"
 version = "0.1.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -728,7 +720,6 @@ dependencies = [
  "chrono",
  "clap",
  "concurrent-queue",
- "congee",
  "criterion",
  "crossbeam-epoch",
  "dashmap",
